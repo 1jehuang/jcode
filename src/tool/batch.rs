@@ -3,16 +3,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 const MAX_PARALLEL: usize = 10;
 
 pub struct BatchTool {
-    registry: Arc<Registry>,
+    registry: Registry,
 }
 
 impl BatchTool {
-    pub fn new(registry: Arc<Registry>) -> Self {
+    pub fn new(registry: Registry) -> Self {
         Self { registry }
     }
 }
@@ -22,7 +21,7 @@ struct BatchInput {
     tool_calls: Vec<ToolCallInput>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct ToolCallInput {
     tool: String,
     parameters: Value,
@@ -95,10 +94,11 @@ impl Tool for BatchTool {
             .into_iter()
             .enumerate()
             .map(|(i, tc)| {
-                let registry = Arc::clone(&self.registry);
+                let registry = self.registry.clone();
+                let tool_name = tc.tool.clone();
                 async move {
                     let result = registry.execute(&tc.tool, tc.parameters).await;
-                    (i, tc.tool, result)
+                    (i, tool_name, result)
                 }
             })
             .collect();

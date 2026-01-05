@@ -8,7 +8,7 @@ A Rust coding agent that uses your existing **Claude Max** or **ChatGPT Pro** su
 - **Dual provider support** - Works with both Anthropic Claude and OpenAI
 - **Streaming responses** - Real-time output as the model generates
 - **Server/Client architecture** - Run as daemon, connect from multiple clients
-- **11 built-in tools** - File ops, search, web, and shell commands
+- **12 built-in tools** - File ops, search, web, shell, and parallel execution
 
 ## Prerequisites
 
@@ -66,6 +66,7 @@ jcode -C /path/to/project
 | `ls` | List directory contents |
 | `webfetch` | Fetch URL content |
 | `websearch` | Search the web (DuckDuckGo) |
+| `batch` | Execute up to 10 tools in parallel |
 
 ## Architecture
 

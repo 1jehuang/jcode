@@ -94,7 +94,7 @@ impl Agent {
     /// Run turns until no more tool calls
     async fn run_turn(&mut self) -> Result<()> {
         loop {
-            let tools = self.registry.definitions();
+            let tools = self.registry.definitions().await;
             let mut stream = self
                 .provider
                 .complete(&self.messages, &tools, SYSTEM_PROMPT)

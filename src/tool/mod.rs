@@ -1,4 +1,5 @@
 mod bash;
+mod batch;
 mod edit;
 mod glob;
 mod grep;
@@ -15,6 +16,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// A tool that can be executed by the agent
 #[async_trait]
@@ -41,54 +44,76 @@ pub trait Tool: Send + Sync {
     }
 }
 
-/// Registry of available tools
+/// Registry of available tools (Arc-wrapped for sharing)
+#[derive(Clone)]
 pub struct Registry {
-    tools: HashMap<String, Box<dyn Tool>>,
+    tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
 }
 
 impl Registry {
     pub fn new() -> Self {
-        let mut registry = Self {
-            tools: HashMap::new(),
+        let registry = Self {
+            tools: Arc::new(RwLock::new(HashMap::new())),
         };
 
+        // We need to register tools in a blocking context for initialization
+        // Use a sync block to set up initial tools
+        let tools = registry.tools.clone();
+
+        // Create a temporary runtime-less registration
+        let mut tools_map = HashMap::new();
+
         // File operations
-        registry.register(Box::new(read::ReadTool::new()));
-        registry.register(Box::new(write::WriteTool::new()));
-        registry.register(Box::new(edit::EditTool::new()));
-        registry.register(Box::new(multiedit::MultiEditTool::new()));
-        registry.register(Box::new(patch::PatchTool::new()));
+        tools_map.insert("read".to_string(), Arc::new(read::ReadTool::new()) as Arc<dyn Tool>);
+        tools_map.insert("write".to_string(), Arc::new(write::WriteTool::new()) as Arc<dyn Tool>);
+        tools_map.insert("edit".to_string(), Arc::new(edit::EditTool::new()) as Arc<dyn Tool>);
+        tools_map.insert("multiedit".to_string(), Arc::new(multiedit::MultiEditTool::new()) as Arc<dyn Tool>);
+        tools_map.insert("patch".to_string(), Arc::new(patch::PatchTool::new()) as Arc<dyn Tool>);
 
         // Search and navigation
-        registry.register(Box::new(glob::GlobTool::new()));
-        registry.register(Box::new(grep::GrepTool::new()));
-        registry.register(Box::new(ls::LsTool::new()));
+        tools_map.insert("glob".to_string(), Arc::new(glob::GlobTool::new()) as Arc<dyn Tool>);
+        tools_map.insert("grep".to_string(), Arc::new(grep::GrepTool::new()) as Arc<dyn Tool>);
+        tools_map.insert("ls".to_string(), Arc::new(ls::LsTool::new()) as Arc<dyn Tool>);
 
         // Execution
-        registry.register(Box::new(bash::BashTool::new()));
+        tools_map.insert("bash".to_string(), Arc::new(bash::BashTool::new()) as Arc<dyn Tool>);
 
         // Web
-        registry.register(Box::new(webfetch::WebFetchTool::new()));
-        registry.register(Box::new(websearch::WebSearchTool::new()));
+        tools_map.insert("webfetch".to_string(), Arc::new(webfetch::WebFetchTool::new()) as Arc<dyn Tool>);
+        tools_map.insert("websearch".to_string(), Arc::new(websearch::WebSearchTool::new()) as Arc<dyn Tool>);
+
+        // Now add batch with a reference to the registry
+        let batch_tool = batch::BatchTool::new(registry.clone());
+        tools_map.insert("batch".to_string(), Arc::new(batch_tool) as Arc<dyn Tool>);
+
+        // Replace the empty map with our populated one
+        *tools.blocking_write() = tools_map;
 
         registry
     }
 
-    fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools.insert(tool.name().to_string(), tool);
+    /// Get all tool definitions for the API
+    pub async fn definitions(&self) -> Vec<ToolDefinition> {
+        let tools = self.tools.read().await;
+        tools.values().map(|t| t.to_definition()).collect()
     }
 
-    /// Get all tool definitions for the API
-    pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.values().map(|t| t.to_definition()).collect()
+    /// Get all tool definitions (blocking version for sync contexts)
+    pub fn definitions_sync(&self) -> Vec<ToolDefinition> {
+        let tools = self.tools.blocking_read();
+        tools.values().map(|t| t.to_definition()).collect()
     }
 
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value) -> Result<String> {
-        let tool = self
-            .tools
+        let tools = self.tools.read().await;
+        let tool = tools
             .get(name)
-            .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", name))?;
+            .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", name))?
+            .clone();
+
+        // Drop the lock before executing
+        drop(tools);
 
         tool.execute(input).await
     }
