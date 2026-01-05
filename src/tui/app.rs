@@ -74,6 +74,8 @@ pub struct App {
     // Current status
     status: ProcessingStatus,
     processing_started: Option<Instant>,
+    // Pending turn to process (allows UI to redraw before processing starts)
+    pending_turn: bool,
 }
 
 impl App {
@@ -99,20 +101,27 @@ impl App {
             streaming_output_tokens: 0,
             status: ProcessingStatus::default(),
             processing_started: None,
+            pending_turn: false,
         }
     }
 
     /// Run the TUI application
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         loop {
-            // Draw UI
+            // Draw UI first - this ensures user sees their message before processing starts
             terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
+
+            // Process pending turn after UI redraw
+            if self.pending_turn {
+                self.pending_turn = false;
+                self.process_turn().await;
+            }
 
             // Handle input (non-blocking)
             if event::poll(Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
-                        self.handle_key(key.code, key.modifiers).await?;
+                        self.handle_key(key.code, key.modifiers)?;
                     }
                 }
             }
@@ -125,7 +134,7 @@ impl App {
         Ok(())
     }
 
-    async fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+    fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
         // Handle ctrl combos regardless of processing state
         if modifiers.contains(KeyModifiers::CONTROL) {
             match code {
@@ -164,7 +173,7 @@ impl App {
                         // Queue the message instead of blocking
                         self.queue_message();
                     } else {
-                        self.submit_input().await?;
+                        self.submit_input();
                     }
                 }
             }
@@ -246,7 +255,8 @@ impl App {
         }
     }
 
-    async fn submit_input(&mut self) -> Result<()> {
+    /// Submit input - just sets up message and flags, processing happens in next loop iteration
+    fn submit_input(&mut self) {
         let input = std::mem::take(&mut self.input);
         self.cursor_pos = 0;
 
@@ -266,10 +276,10 @@ impl App {
                     tool_calls: vec![],
                 });
             }
-            return Ok(());
+            return;
         }
 
-        // Add user message
+        // Add user message to display immediately
         self.display_messages.push(DisplayMessage {
             role: "user".to_string(),
             content: input.clone(),
@@ -277,13 +287,17 @@ impl App {
         });
         self.messages.push(Message::user(&input));
 
-        // Process with LLM
+        // Set up processing state - actual processing happens after UI redraws
         self.is_processing = true;
         self.streaming_text.clear();
         self.streaming_input_tokens = 0;
         self.streaming_output_tokens = 0;
         self.processing_started = Some(Instant::now());
+        self.pending_turn = true;
+    }
 
+    /// Process the pending turn (called from main loop after UI redraw)
+    async fn process_turn(&mut self) {
         if let Err(e) = self.run_turn().await {
             self.display_messages.push(DisplayMessage {
                 role: "error".to_string(),
@@ -298,7 +312,6 @@ impl App {
         self.is_processing = false;
         self.status = ProcessingStatus::Idle;
         self.processing_started = None;
-        Ok(())
     }
 
     /// Process messages queued for after completion
