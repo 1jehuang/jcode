@@ -1,5 +1,6 @@
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall};
 use crate::provider::Provider;
+use crate::skill::SkillRegistry;
 use crate::tool::Registry;
 use anyhow::Result;
 use futures::StreamExt;
@@ -29,15 +30,20 @@ When you need to make changes, use the tools directly. Don't just describe what 
 pub struct Agent {
     provider: Box<dyn Provider>,
     registry: Registry,
+    skills: SkillRegistry,
     messages: Vec<Message>,
+    active_skill: Option<String>,
 }
 
 impl Agent {
     pub fn new(provider: Box<dyn Provider>, registry: Registry) -> Self {
+        let skills = SkillRegistry::load().unwrap_or_default();
         Self {
             provider,
             registry,
+            skills,
             messages: Vec::new(),
+            active_skill: None,
         }
     }
 
@@ -55,7 +61,15 @@ impl Agent {
     /// Start an interactive REPL
     pub async fn repl(&mut self) -> Result<()> {
         println!("J-Code - Coding Agent");
-        println!("Type your message, or 'quit' to exit.\n");
+        println!("Type your message, or 'quit' to exit.");
+
+        // Show available skills
+        let skill_list = self.skills.list();
+        if !skill_list.is_empty() {
+            println!("Available skills: {}",
+                skill_list.iter().map(|s| format!("/{}", s.name)).collect::<Vec<_>>().join(", "));
+        }
+        println!();
 
         loop {
             print!("> ");
@@ -75,8 +89,24 @@ impl Agent {
 
             if input == "clear" {
                 self.messages.clear();
+                self.active_skill = None;
                 println!("Conversation cleared.");
                 continue;
+            }
+
+            // Check for skill invocation
+            if let Some(skill_name) = SkillRegistry::parse_invocation(input) {
+                if let Some(skill) = self.skills.get(skill_name) {
+                    println!("Activating skill: {}", skill.name);
+                    println!("{}\n", skill.description);
+                    self.active_skill = Some(skill_name.to_string());
+                    continue;
+                } else {
+                    println!("Unknown skill: /{}", skill_name);
+                    println!("Available: {}",
+                        self.skills.list().iter().map(|s| format!("/{}", s.name)).collect::<Vec<_>>().join(", "));
+                    continue;
+                }
             }
 
             self.messages.push(Message::user(input));
@@ -95,15 +125,29 @@ impl Agent {
     async fn run_turn(&mut self) -> Result<()> {
         loop {
             let tools = self.registry.definitions().await;
+
+            // Build system prompt with active skill
+            let system_prompt = if let Some(ref skill_name) = self.active_skill {
+                if let Some(skill) = self.skills.get(skill_name) {
+                    format!("{}\n\n{}", SYSTEM_PROMPT, skill.get_prompt())
+                } else {
+                    SYSTEM_PROMPT.to_string()
+                }
+            } else {
+                SYSTEM_PROMPT.to_string()
+            };
+
             let mut stream = self
                 .provider
-                .complete(&self.messages, &tools, SYSTEM_PROMPT)
+                .complete(&self.messages, &tools, &system_prompt)
                 .await?;
 
             let mut text_content = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut current_tool: Option<ToolCall> = None;
             let mut current_tool_input = String::new();
+            let mut usage_input: Option<u64> = None;
+            let mut usage_output: Option<u64> = None;
 
             while let Some(event) = stream.next().await {
                 match event? {
@@ -138,6 +182,17 @@ impl Agent {
                             current_tool_input.clear();
                         }
                     }
+                    StreamEvent::TokenUsage {
+                        input_tokens,
+                        output_tokens,
+                    } => {
+                        if let Some(input) = input_tokens {
+                            usage_input = Some(input);
+                        }
+                        if let Some(output) = output_tokens {
+                            usage_output = Some(output);
+                        }
+                    }
                     StreamEvent::MessageEnd { .. } => {
                         break;
                     }
@@ -145,6 +200,13 @@ impl Agent {
                         return Err(anyhow::anyhow!("Stream error: {}", e));
                     }
                 }
+            }
+
+            if usage_input.is_some() || usage_output.is_some() {
+                let input = usage_input.unwrap_or(0);
+                let output = usage_output.unwrap_or(0);
+                print!("\n[Tokens] upload: {} download: {}\n", input, output);
+                io::stdout().flush()?;
             }
 
             // Add assistant message to history

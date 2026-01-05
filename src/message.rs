@@ -95,6 +95,11 @@ pub enum StreamEvent {
     ToolUseEnd,
     /// Message complete (may have stop reason)
     MessageEnd { stop_reason: Option<String> },
+    /// Token usage update
+    TokenUsage {
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+    },
     /// Error occurred
     Error(String),
 }

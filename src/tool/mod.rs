@@ -1,4 +1,5 @@
 mod bash;
+mod apply_patch;
 mod batch;
 mod edit;
 mod glob;
@@ -51,16 +52,11 @@ pub struct Registry {
 }
 
 impl Registry {
-    pub fn new() -> Self {
+    pub async fn new() -> Self {
         let registry = Self {
             tools: Arc::new(RwLock::new(HashMap::new())),
         };
 
-        // We need to register tools in a blocking context for initialization
-        // Use a sync block to set up initial tools
-        let tools = registry.tools.clone();
-
-        // Create a temporary runtime-less registration
         let mut tools_map = HashMap::new();
 
         // File operations
@@ -69,6 +65,10 @@ impl Registry {
         tools_map.insert("edit".to_string(), Arc::new(edit::EditTool::new()) as Arc<dyn Tool>);
         tools_map.insert("multiedit".to_string(), Arc::new(multiedit::MultiEditTool::new()) as Arc<dyn Tool>);
         tools_map.insert("patch".to_string(), Arc::new(patch::PatchTool::new()) as Arc<dyn Tool>);
+        tools_map.insert(
+            "apply_patch".to_string(),
+            Arc::new(apply_patch::ApplyPatchTool::new()) as Arc<dyn Tool>,
+        );
 
         // Search and navigation
         tools_map.insert("glob".to_string(), Arc::new(glob::GlobTool::new()) as Arc<dyn Tool>);
@@ -82,12 +82,12 @@ impl Registry {
         tools_map.insert("webfetch".to_string(), Arc::new(webfetch::WebFetchTool::new()) as Arc<dyn Tool>);
         tools_map.insert("websearch".to_string(), Arc::new(websearch::WebSearchTool::new()) as Arc<dyn Tool>);
 
-        // Now add batch with a reference to the registry
+        // Add batch with a reference to the registry
         let batch_tool = batch::BatchTool::new(registry.clone());
         tools_map.insert("batch".to_string(), Arc::new(batch_tool) as Arc<dyn Tool>);
 
-        // Replace the empty map with our populated one
-        *tools.blocking_write() = tools_map;
+        // Populate the registry
+        *registry.tools.write().await = tools_map;
 
         registry
     }
@@ -95,12 +95,6 @@ impl Registry {
     /// Get all tool definitions for the API
     pub async fn definitions(&self) -> Vec<ToolDefinition> {
         let tools = self.tools.read().await;
-        tools.values().map(|t| t.to_definition()).collect()
-    }
-
-    /// Get all tool definitions (blocking version for sync contexts)
-    pub fn definitions_sync(&self) -> Vec<ToolDefinition> {
-        let tools = self.tools.blocking_read();
         tools.values().map(|t| t.to_definition()).collect()
     }
 
@@ -116,11 +110,5 @@ impl Registry {
         drop(tools);
 
         tool.execute(input).await
-    }
-}
-
-impl Default for Registry {
-    fn default() -> Self {
-        Self::new()
     }
 }

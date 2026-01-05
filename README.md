@@ -91,11 +91,12 @@ jcode -C /path/to/project
 
 ## How It Works
 
-J-Code reads OAuth credentials from:
-- `~/.claude/.credentials.json` (Claude Max)
-- `~/.codex/auth.json` (ChatGPT Pro/Plus)
+J-Code stores/reads OAuth credentials from:
+- `~/.jcode/auth.json` (Claude Max, from `jcode login --provider claude`)
+- `~/.codex/auth.json` (OpenAI, from `jcode login --provider openai` or `codex login`)
 
 It then uses these tokens to make API calls to the respective providers, just like the official CLI tools do.
+For full OAuth details (Claude Code and Codex), see `OAUTH.md`.
 
 ## License
 

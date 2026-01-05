@@ -1,4 +1,5 @@
 pub mod claude;
+pub mod claude_subprocess;
 pub mod openai;
 
 use crate::message::{Message, StreamEvent, ToolDefinition};

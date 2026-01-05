@@ -1,222 +1,373 @@
 use super::{EventStream, Provider};
 use crate::auth::codex::CodexCredentials;
+use crate::auth::oauth;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use reqwest::{Client, StatusCode};
+use serde::Deserialize;
+use serde_json::Value;
+use std::collections::VecDeque;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
+use tokio::sync::RwLock;
 
-const API_URL: &str = "https://api.openai.com/v1/chat/completions";
+const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
+const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
+const RESPONSES_PATH: &str = "responses";
+const CHATGPT_MODEL_ID: &str = "gpt-5.1-codex-max";
+const API_MODEL_ID: &str = "gpt-5.1-codex-max";
+const ORIGINATOR: &str = "codex_cli_rs";
+const CHATGPT_INSTRUCTIONS: &str = include_str!("../prompts/gpt-5.1-codex-max_prompt.md");
 
 pub struct OpenAIProvider {
     client: Client,
-    credentials: CodexCredentials,
+    credentials: Arc<RwLock<CodexCredentials>>,
 }
 
 impl OpenAIProvider {
     pub fn new(credentials: CodexCredentials) -> Self {
         Self {
             client: Client::new(),
-            credentials,
+            credentials: Arc::new(RwLock::new(credentials)),
         }
+    }
+
+    async fn get_access_token(&self) -> Result<String> {
+        let tokens = self.credentials.read().await;
+        if tokens.access_token.is_empty() {
+            anyhow::bail!("OpenAI access token is empty");
+        }
+
+        if let Some(expires_at) = tokens.expires_at {
+            let now = chrono::Utc::now().timestamp_millis();
+            if expires_at < now + 300_000 && !tokens.refresh_token.is_empty() {
+                drop(tokens);
+                return self.refresh_access_token().await;
+            }
+        }
+
+        Ok(tokens.access_token.clone())
+    }
+
+    async fn refresh_access_token(&self) -> Result<String> {
+        let mut tokens = self.credentials.write().await;
+        if tokens.refresh_token.is_empty() {
+            anyhow::bail!("OpenAI refresh token is missing");
+        }
+
+        let refreshed = oauth::refresh_openai_tokens(&tokens.refresh_token).await?;
+        let id_token = refreshed.id_token.clone().or_else(|| tokens.id_token.clone());
+        let account_id = tokens.account_id.clone();
+
+        *tokens = CodexCredentials {
+            access_token: refreshed.access_token,
+            refresh_token: refreshed.refresh_token,
+            id_token,
+            account_id,
+            expires_at: Some(refreshed.expires_at),
+        };
+
+        Ok(tokens.access_token.clone())
+    }
+
+    fn is_chatgpt_mode(credentials: &CodexCredentials) -> bool {
+        !credentials.refresh_token.is_empty() || credentials.id_token.is_some()
+    }
+
+    fn responses_url(credentials: &CodexCredentials) -> String {
+        let base = if Self::is_chatgpt_mode(credentials) {
+            CHATGPT_API_BASE
+        } else {
+            OPENAI_API_BASE
+        };
+        format!("{}/{}", base.trim_end_matches('/'), RESPONSES_PATH)
+    }
+
+    fn model_id(credentials: &CodexCredentials) -> &'static str {
+        if Self::is_chatgpt_mode(credentials) {
+            CHATGPT_MODEL_ID
+        } else {
+            API_MODEL_ID
+        }
+    }
+
+    async fn send_request(&self, request: &Value, access_token: &str) -> Result<reqwest::Response> {
+        let credentials = self.credentials.read().await;
+        let url = Self::responses_url(&credentials);
+        let mut builder = self
+            .client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Content-Type", "application/json");
+
+        if Self::is_chatgpt_mode(&credentials) {
+            builder = builder.header("originator", ORIGINATOR);
+            if let Some(account_id) = credentials.account_id.as_ref() {
+                builder = builder.header("chatgpt-account-id", account_id);
+            }
+        }
+
+        builder
+            .json(request)
+            .send()
+            .await
+            .context("Failed to send request to OpenAI API")
     }
 }
 
-#[derive(Serialize)]
-struct ApiRequest<'a> {
-    model: &'a str,
-    messages: Vec<ApiMessage>,
-    tools: Vec<OpenAITool<'a>>,
-    stream: bool,
+fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "type": "function",
+                "name": t.name,
+                "description": t.description,
+                "strict": false,
+                "parameters": t.input_schema,
+            })
+        })
+        .collect()
 }
 
-#[derive(Serialize)]
-struct ApiMessage {
-    role: String,
-    content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<ToolCallMessage>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ToolCallMessage {
-    id: String,
-    #[serde(rename = "type")]
-    call_type: String,
-    function: FunctionCall,
-}
-
-#[derive(Serialize)]
-struct FunctionCall {
-    name: String,
-    arguments: String,
-}
-
-#[derive(Serialize)]
-struct OpenAITool<'a> {
-    #[serde(rename = "type")]
-    tool_type: &'a str,
-    function: OpenAIFunction<'a>,
-}
-
-#[derive(Serialize)]
-struct OpenAIFunction<'a> {
-    name: &'a str,
-    description: &'a str,
-    parameters: &'a serde_json::Value,
-}
-
-fn convert_messages(messages: &[Message], system: &str) -> Vec<ApiMessage> {
-    let mut result = vec![ApiMessage {
-        role: "system".to_string(),
-        content: Some(system.to_string()),
-        tool_calls: None,
-        tool_call_id: None,
-    }];
+fn build_responses_input(messages: &[Message]) -> Vec<Value> {
+    let mut items = Vec::new();
 
     for msg in messages {
         match msg.role {
             Role::User => {
-                // Collect text and tool results
                 for block in &msg.content {
                     match block {
                         ContentBlock::Text { text } => {
-                            result.push(ApiMessage {
-                                role: "user".to_string(),
-                                content: Some(text.clone()),
-                                tool_calls: None,
-                                tool_call_id: None,
-                            });
+                            items.push(serde_json::json!({
+                                "type": "message",
+                                "role": "user",
+                                "content": [{ "type": "input_text", "text": text }]
+                            }));
                         }
                         ContentBlock::ToolResult {
                             tool_use_id,
                             content,
-                            ..
+                            is_error,
                         } => {
-                            result.push(ApiMessage {
-                                role: "tool".to_string(),
-                                content: Some(content.clone()),
-                                tool_calls: None,
-                                tool_call_id: Some(tool_use_id.clone()),
-                            });
+                            let output = if is_error == &Some(true) {
+                                serde_json::json!({ "content": content, "success": false })
+                            } else {
+                                serde_json::json!(content)
+                            };
+                            items.push(serde_json::json!({
+                                "type": "function_call_output",
+                                "call_id": tool_use_id,
+                                "output": output
+                            }));
                         }
                         _ => {}
                     }
                 }
             }
             Role::Assistant => {
-                let mut text_content = String::new();
-                let mut tool_calls = Vec::new();
-
                 for block in &msg.content {
                     match block {
                         ContentBlock::Text { text } => {
-                            text_content.push_str(text);
+                            items.push(serde_json::json!({
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{ "type": "output_text", "text": text }]
+                            }));
                         }
                         ContentBlock::ToolUse { id, name, input } => {
-                            tool_calls.push(ToolCallMessage {
-                                id: id.clone(),
-                                call_type: "function".to_string(),
-                                function: FunctionCall {
-                                    name: name.clone(),
-                                    arguments: serde_json::to_string(input).unwrap_or_default(),
-                                },
-                            });
+                            let arguments = serde_json::to_string(input).unwrap_or_default();
+                            items.push(serde_json::json!({
+                                "type": "function_call",
+                                "name": name,
+                                "arguments": arguments,
+                                "call_id": id
+                            }));
                         }
                         _ => {}
                     }
                 }
-
-                result.push(ApiMessage {
-                    role: "assistant".to_string(),
-                    content: if text_content.is_empty() {
-                        None
-                    } else {
-                        Some(text_content)
-                    },
-                    tool_calls: if tool_calls.is_empty() {
-                        None
-                    } else {
-                        Some(tool_calls)
-                    },
-                    tool_call_id: None,
-                });
             }
         }
     }
 
-    result
-}
-
-fn convert_tools(tools: &[ToolDefinition]) -> Vec<OpenAITool> {
-    tools
-        .iter()
-        .map(|t| OpenAITool {
-            tool_type: "function",
-            function: OpenAIFunction {
-                name: &t.name,
-                description: &t.description,
-                parameters: &t.input_schema,
-            },
-        })
-        .collect()
+    items
 }
 
 #[derive(Deserialize, Debug)]
-struct SseChunk {
-    choices: Vec<Choice>,
+struct ResponseSseEvent {
+    #[serde(rename = "type")]
+    kind: String,
+    item: Option<Value>,
+    delta: Option<String>,
+    response: Option<Value>,
 }
 
-#[derive(Deserialize, Debug)]
-struct Choice {
-    delta: Delta,
-    finish_reason: Option<String>,
-}
-
-#[derive(Deserialize, Debug, Default)]
-struct Delta {
-    content: Option<String>,
-    tool_calls: Option<Vec<ToolCallDelta>>,
-}
-
-#[derive(Deserialize, Debug)]
-struct ToolCallDelta {
-    index: usize,
-    id: Option<String>,
-    function: Option<FunctionDelta>,
-}
-
-#[derive(Deserialize, Debug)]
-struct FunctionDelta {
-    name: Option<String>,
-    arguments: Option<String>,
-}
-
-/// Stream wrapper for OpenAI SSE events
-struct OpenAIStream {
+struct OpenAIResponsesStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     buffer: String,
-    current_tool_id: Option<String>,
-    current_tool_name: Option<String>,
+    pending: VecDeque<StreamEvent>,
+    saw_text_delta: bool,
 }
 
-impl Stream for OpenAIStream {
+impl OpenAIResponsesStream {
+    fn new(stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static) -> Self {
+        Self {
+            inner: Box::pin(stream),
+            buffer: String::new(),
+            pending: VecDeque::new(),
+            saw_text_delta: false,
+        }
+    }
+
+    fn parse_next_event(&mut self) -> Option<StreamEvent> {
+        if let Some(event) = self.pending.pop_front() {
+            return Some(event);
+        }
+
+        while let Some(pos) = self.buffer.find("\n\n") {
+            let event_str = self.buffer[..pos].to_string();
+            self.buffer = self.buffer[pos + 2..].to_string();
+
+            let mut data_lines = Vec::new();
+            for line in event_str.lines() {
+                if let Some(data) = line.strip_prefix("data: ") {
+                    data_lines.push(data);
+                }
+            }
+
+            if data_lines.is_empty() {
+                continue;
+            }
+
+            let data = data_lines.join("\n");
+            if data == "[DONE]" {
+                return Some(StreamEvent::MessageEnd { stop_reason: None });
+            }
+
+            let event: ResponseSseEvent = match serde_json::from_str(&data) {
+                Ok(parsed) => parsed,
+                Err(_) => continue,
+            };
+
+            match event.kind.as_str() {
+                "response.output_text.delta" => {
+                    if let Some(delta) = event.delta {
+                        self.saw_text_delta = true;
+                        return Some(StreamEvent::TextDelta(delta));
+                    }
+                }
+                "response.output_item.done" => {
+                    if let Some(item) = event.item {
+                        if let Some(event) = self.handle_output_item(item) {
+                            return Some(event);
+                        }
+                    }
+                }
+                "response.completed" => {
+                    if let Some(response) = event.response {
+                        if let Some(usage_event) = extract_usage_from_response(&response) {
+                            self.pending.push_back(usage_event);
+                        }
+                    }
+                    self.pending
+                        .push_back(StreamEvent::MessageEnd { stop_reason: None });
+                    return self.pending.pop_front();
+                }
+                "response.failed" | "error" => {
+                    let message = extract_error_message(&event.response).unwrap_or_else(|| {
+                        "OpenAI response stream error".to_string()
+                    });
+                    return Some(StreamEvent::Error(message));
+                }
+                _ => {}
+            }
+        }
+
+        None
+    }
+
+    fn handle_output_item(&mut self, item: Value) -> Option<StreamEvent> {
+        let item_type = item.get("type")?.as_str()?;
+        match item_type {
+            "function_call" | "custom_tool_call" => {
+                let call_id = item
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let arguments = item
+                    .get("arguments")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| item.get("input").and_then(|v| v.as_str()))
+                    .unwrap_or("{}");
+
+                self.pending.push_back(StreamEvent::ToolUseStart {
+                    id: call_id.clone(),
+                    name,
+                });
+                self.pending
+                    .push_back(StreamEvent::ToolInputDelta(arguments.to_string()));
+                self.pending.push_back(StreamEvent::ToolUseEnd);
+                return self.pending.pop_front();
+            }
+            "message" => {
+                if self.saw_text_delta {
+                    return None;
+                }
+                let mut text = String::new();
+                if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
+                    for entry in content {
+                        let entry_type = entry.get("type").and_then(|v| v.as_str());
+                        if matches!(entry_type, Some("output_text") | Some("text")) {
+                            if let Some(t) = entry.get("text").and_then(|v| v.as_str()) {
+                                text.push_str(t);
+                            }
+                        }
+                    }
+                }
+                if !text.is_empty() {
+                    return Some(StreamEvent::TextDelta(text));
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+}
+
+fn extract_usage_from_response(response: &Value) -> Option<StreamEvent> {
+    let usage = response.get("usage")?;
+    let input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64());
+    let output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64());
+    if input_tokens.is_some() || output_tokens.is_some() {
+        Some(StreamEvent::TokenUsage {
+            input_tokens,
+            output_tokens,
+        })
+    } else {
+        None
+    }
+}
+
+impl Stream for OpenAIResponsesStream {
     type Item = Result<StreamEvent>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            // Check if we have a complete event in the buffer
             if let Some(event) = self.parse_next_event() {
                 return Poll::Ready(Some(Ok(event)));
             }
 
-            // Try to get more data
             match self.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
                     if let Ok(text) = std::str::from_utf8(&bytes) {
@@ -237,89 +388,6 @@ impl Stream for OpenAIStream {
     }
 }
 
-impl OpenAIStream {
-    fn new(stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static) -> Self {
-        Self {
-            inner: Box::pin(stream),
-            buffer: String::new(),
-            current_tool_id: None,
-            current_tool_name: None,
-        }
-    }
-
-    fn parse_next_event(&mut self) -> Option<StreamEvent> {
-        while let Some(pos) = self.buffer.find('\n') {
-            let line = self.buffer[..pos].to_string();
-            self.buffer = self.buffer[pos + 1..].to_string();
-
-            if let Some(data) = line.strip_prefix("data: ") {
-                if data == "[DONE]" {
-                    return Some(StreamEvent::MessageEnd { stop_reason: None });
-                }
-
-                if let Ok(chunk) = serde_json::from_str::<SseChunk>(data) {
-                    if let Some(event) = self.convert_chunk(chunk) {
-                        return Some(event);
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    fn convert_chunk(&mut self, chunk: SseChunk) -> Option<StreamEvent> {
-        let choice = chunk.choices.first()?;
-
-        // Check for finish
-        if choice.finish_reason.is_some() {
-            if self.current_tool_id.is_some() {
-                self.current_tool_id = None;
-                self.current_tool_name = None;
-                return Some(StreamEvent::ToolUseEnd);
-            }
-            return Some(StreamEvent::MessageEnd {
-                stop_reason: choice.finish_reason.clone(),
-            });
-        }
-
-        // Text content
-        if let Some(content) = &choice.delta.content {
-            return Some(StreamEvent::TextDelta(content.clone()));
-        }
-
-        // Tool calls
-        if let Some(tool_calls) = &choice.delta.tool_calls {
-            for tc in tool_calls {
-                // New tool call starting
-                if let Some(id) = &tc.id {
-                    let name = tc
-                        .function
-                        .as_ref()
-                        .and_then(|f| f.name.clone())
-                        .unwrap_or_default();
-
-                    self.current_tool_id = Some(id.clone());
-                    self.current_tool_name = Some(name.clone());
-
-                    return Some(StreamEvent::ToolUseStart {
-                        id: id.clone(),
-                        name,
-                    });
-                }
-
-                // Tool arguments delta
-                if let Some(func) = &tc.function {
-                    if let Some(args) = &func.arguments {
-                        return Some(StreamEvent::ToolInputDelta(args.clone()));
-                    }
-                }
-            }
-        }
-
-        None
-    }
-}
-
 #[async_trait]
 impl Provider for OpenAIProvider {
     async fn complete(
@@ -328,40 +396,76 @@ impl Provider for OpenAIProvider {
         tools: &[ToolDefinition],
         system: &str,
     ) -> Result<EventStream> {
-        let api_messages = convert_messages(messages, system);
-        let api_tools = convert_tools(tools);
-
-        let request = ApiRequest {
-            model: "gpt-4o",
-            messages: api_messages,
-            tools: api_tools,
-            stream: true,
+        let input = build_responses_input(messages);
+        let api_tools = build_tools(tools);
+        let (model_id, instructions) = {
+            let credentials = self.credentials.read().await;
+            let model_id = Self::model_id(&credentials);
+            let instructions = if Self::is_chatgpt_mode(&credentials) {
+                CHATGPT_INSTRUCTIONS.to_string()
+            } else {
+                system.to_string()
+            };
+            (model_id, instructions)
         };
 
-        let response = self
-            .client
-            .post(API_URL)
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.credentials.access_token),
-            )
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to send request to OpenAI API")?;
+        let request = serde_json::json!({
+            "model": model_id,
+            "instructions": instructions,
+            "input": input,
+            "tools": api_tools,
+            "tool_choice": "auto",
+            "parallel_tool_calls": false,
+            "stream": true,
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+        });
+
+        let access_token = self.get_access_token().await?;
+        let response = self.send_request(&request, &access_token).await?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            if should_refresh_token(status, &body) {
+                let refreshed_token = self.refresh_access_token().await?;
+                let retry = self.send_request(&request, &refreshed_token).await?;
+                if !retry.status().is_success() {
+                    let retry_status = retry.status();
+                    let retry_body = retry.text().await.unwrap_or_default();
+                    anyhow::bail!("OpenAI API error {}: {}", retry_status, retry_body);
+                }
+                let stream = OpenAIResponsesStream::new(retry.bytes_stream());
+                return Ok(Box::pin(stream));
+            }
             anyhow::bail!("OpenAI API error {}: {}", status, body);
         }
 
-        let stream = OpenAIStream::new(response.bytes_stream());
+        let stream = OpenAIResponsesStream::new(response.bytes_stream());
         Ok(Box::pin(stream))
     }
 
     fn name(&self) -> &str {
         "openai"
     }
+}
+
+fn should_refresh_token(status: StatusCode, body: &str) -> bool {
+    if status == StatusCode::UNAUTHORIZED {
+        return true;
+    }
+    if status == StatusCode::FORBIDDEN {
+        let lower = body.to_lowercase();
+        return lower.contains("token") || lower.contains("expired") || lower.contains("unauthorized");
+    }
+    false
+}
+
+fn extract_error_message(response: &Option<Value>) -> Option<String> {
+    let resp = response.as_ref()?;
+    let error = resp.get("error")?;
+    error
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }

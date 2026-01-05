@@ -28,13 +28,37 @@ struct ClaudeOAuth {
     subscription_type: Option<String>,
 }
 
-fn credentials_path() -> Result<PathBuf> {
+fn claude_code_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     Ok(home.join(".claude").join(".credentials.json"))
 }
 
+fn opencode_path() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Could not find home directory")?;
+    Ok(home.join(".local").join("share").join("opencode").join("auth.json"))
+}
+
+// OpenCode auth.json format
+#[derive(Deserialize)]
+struct OpenCodeAuth {
+    anthropic: Option<OpenCodeAnthropicAuth>,
+}
+
+#[derive(Deserialize)]
+struct OpenCodeAnthropicAuth {
+    access: String,
+    refresh: String,
+    expires: i64,
+}
+
 pub fn load_credentials() -> Result<ClaudeCredentials> {
-    let path = credentials_path()?;
+    // First try OpenCode credentials (they work with the API)
+    if let Ok(creds) = load_opencode_credentials() {
+        return Ok(creds);
+    }
+
+    // Fall back to Claude Code credentials
+    let path = claude_code_path()?;
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Could not read credentials from {:?}", path))?;
 
@@ -48,9 +72,7 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
     // Check if token is expired
     let now_ms = chrono::Utc::now().timestamp_millis();
     if oauth.expires_at < now_ms {
-        anyhow::bail!(
-            "Claude OAuth token expired. Run 'claude' and '/login' to refresh."
-        );
+        eprintln!("Claude OAuth token expired; will attempt refresh.");
     }
 
     Ok(ClaudeCredentials {
@@ -58,5 +80,31 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
         refresh_token: oauth.refresh_token,
         expires_at: oauth.expires_at,
         subscription_type: oauth.subscription_type,
+    })
+}
+
+pub fn load_opencode_credentials() -> Result<ClaudeCredentials> {
+    let path = opencode_path()?;
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("Could not read OpenCode credentials from {:?}", path))?;
+
+    let auth: OpenCodeAuth =
+        serde_json::from_str(&content).context("Could not parse OpenCode credentials")?;
+
+    let anthropic = auth
+        .anthropic
+        .context("No anthropic OAuth credentials in OpenCode auth file")?;
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if anthropic.expires <= now_ms {
+        eprintln!("OpenCode Anthropic token expired; will attempt refresh.");
+    }
+    eprintln!("Using OpenCode Anthropic credentials");
+
+    Ok(ClaudeCredentials {
+        access_token: anthropic.access,
+        refresh_token: anthropic.refresh,
+        expires_at: anthropic.expires,
+        subscription_type: Some("max".to_string()),
     })
 }
