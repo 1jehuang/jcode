@@ -66,6 +66,13 @@ jcode -C /path/to/project
 | `ls` | List directory contents |
 | `webfetch` | Fetch URL content |
 | `websearch` | Search the web (DuckDuckGo) |
+| `codesearch` | Search code/documentation via Exa |
+| `skill` | Load a skill from SKILL.md |
+| `task` | Run a delegated sub-task |
+| `todowrite` | Update todo list |
+| `todoread` | Read todo list |
+| `lsp` | LSP operations (fallback in jcode) |
+| `invalid` | Report invalid tool calls |
 | `batch` | Execute up to 10 tools in parallel |
 
 ## Architecture

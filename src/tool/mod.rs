@@ -1,13 +1,19 @@
+mod codesearch;
 mod bash;
 mod apply_patch;
 mod batch;
 mod edit;
 mod glob;
 mod grep;
+mod invalid;
 mod ls;
 mod multiedit;
 mod patch;
 mod read;
+mod skill;
+mod lsp;
+mod task;
+mod todo;
 mod webfetch;
 mod websearch;
 mod write;
@@ -81,6 +87,18 @@ impl Registry {
         // Web
         tools_map.insert("webfetch".to_string(), Arc::new(webfetch::WebFetchTool::new()) as Arc<dyn Tool>);
         tools_map.insert("websearch".to_string(), Arc::new(websearch::WebSearchTool::new()) as Arc<dyn Tool>);
+        tools_map.insert(
+            "codesearch".to_string(),
+            Arc::new(codesearch::CodeSearchTool::new()) as Arc<dyn Tool>,
+        );
+
+        // Meta tools
+        tools_map.insert("invalid".to_string(), Arc::new(invalid::InvalidTool::new()) as Arc<dyn Tool>);
+        tools_map.insert("skill".to_string(), Arc::new(skill::SkillTool::new()) as Arc<dyn Tool>);
+        tools_map.insert("lsp".to_string(), Arc::new(lsp::LspTool::new()) as Arc<dyn Tool>);
+        tools_map.insert("task".to_string(), Arc::new(task::TaskTool::new()) as Arc<dyn Tool>);
+        tools_map.insert("todowrite".to_string(), Arc::new(todo::TodoWriteTool::new()) as Arc<dyn Tool>);
+        tools_map.insert("todoread".to_string(), Arc::new(todo::TodoReadTool::new()) as Arc<dyn Tool>);
 
         // Add batch with a reference to the registry
         let batch_tool = batch::BatchTool::new(registry.clone());

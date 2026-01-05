@@ -106,11 +106,13 @@ async fn init_provider_and_registry(
             // Use jcode's own OAuth tokens
             let tokens = auth::oauth::load_claude_tokens()?;
             eprintln!("Using Claude with jcode OAuth");
+            std::env::set_var("JCODE_ACTIVE_PROVIDER", "claude");
             Box::new(provider::claude::ClaudeProvider::new(tokens))
         }
         ProviderChoice::ClaudeSubprocess => {
             // Fallback: Use Claude Code CLI as subprocess
             eprintln!("Using Claude Code subprocess provider");
+            std::env::set_var("JCODE_ACTIVE_PROVIDER", "claude-subprocess");
             Box::new(provider::claude_subprocess::ClaudeSubprocessProvider::new(
                 "claude-sonnet-4-20250514",
                 true, // bypass permissions
@@ -118,15 +120,18 @@ async fn init_provider_and_registry(
         }
         ProviderChoice::Openai => {
             let creds = auth::codex::load_credentials()?;
+            std::env::set_var("JCODE_ACTIVE_PROVIDER", "openai");
             Box::new(provider::openai::OpenAIProvider::new(creds))
         }
         ProviderChoice::Auto => {
             // Try jcode's own Claude OAuth first
             if let Ok(tokens) = auth::oauth::load_claude_tokens() {
                 eprintln!("Using Claude with jcode OAuth");
+                std::env::set_var("JCODE_ACTIVE_PROVIDER", "claude");
                 Box::new(provider::claude::ClaudeProvider::new(tokens))
             } else if let Ok(creds) = auth::codex::load_credentials() {
                 eprintln!("Using OpenAI/Codex provider");
+                std::env::set_var("JCODE_ACTIVE_PROVIDER", "openai");
                 Box::new(provider::openai::OpenAIProvider::new(creds))
             } else {
                 // No credentials - prompt for login
