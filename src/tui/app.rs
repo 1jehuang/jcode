@@ -3,13 +3,14 @@ use crate::provider::Provider;
 use crate::skill::SkillRegistry;
 use crate::tool::Registry;
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::{
     DefaultTerminal,
     prelude::*,
 };
 use std::time::{Duration, Instant};
+use tokio::time::interval;
 
 /// Queue mode for pending messages
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -107,31 +108,67 @@ impl App {
 
     /// Run the TUI application
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
+        let mut event_stream = EventStream::new();
+        let mut redraw_interval = interval(Duration::from_millis(50));
+
         loop {
-            // Draw UI first - this ensures user sees their message before processing starts
+            // Draw UI
             terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
-
-            // Process pending turn after UI redraw
-            if self.pending_turn {
-                self.pending_turn = false;
-                self.process_turn().await;
-            }
-
-            // Handle input (non-blocking)
-            if event::poll(Duration::from_millis(50))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        self.handle_key(key.code, key.modifiers)?;
-                    }
-                }
-            }
 
             if self.should_quit {
                 break;
             }
+
+            // Process pending turn OR wait for input/redraw
+            if self.pending_turn {
+                self.pending_turn = false;
+                // Process turn while still handling input
+                self.process_turn_with_input(&mut terminal, &mut event_stream).await;
+            } else {
+                // Wait for input or redraw tick
+                tokio::select! {
+                    _ = redraw_interval.tick() => {
+                        // Just redraw on next iteration
+                    }
+                    event = event_stream.next() => {
+                        if let Some(Ok(Event::Key(key))) = event {
+                            if key.kind == KeyEventKind::Press {
+                                self.handle_key(key.code, key.modifiers)?;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Ok(())
+    }
+
+    /// Process turn while still accepting input for queueing
+    async fn process_turn_with_input(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        event_stream: &mut EventStream,
+    ) {
+        use tokio::select;
+
+        // We need to run the turn logic step by step, checking for input between steps
+        // For now, run the turn but poll for input during streaming
+
+        if let Err(e) = self.run_turn_interactive(terminal, event_stream).await {
+            self.display_messages.push(DisplayMessage {
+                role: "error".to_string(),
+                content: format!("Error: {}", e),
+                tool_calls: vec![],
+            });
+        }
+
+        // Process any queued "after completion" messages
+        self.process_after_queue().await;
+
+        self.is_processing = false;
+        self.status = ProcessingStatus::Idle;
+        self.processing_started = None;
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
@@ -289,6 +326,7 @@ impl App {
 
         // Set up processing state - actual processing happens after UI redraws
         self.is_processing = true;
+        self.status = ProcessingStatus::Sending;
         self.streaming_text.clear();
         self.streaming_input_tokens = 0;
         self.streaming_output_tokens = 0;
@@ -476,6 +514,183 @@ impl App {
                 };
 
                 // Truncate for display
+                let display_output = if output.len() > 500 {
+                    format!("{}...", &output[..500])
+                } else {
+                    output.clone()
+                };
+
+                self.display_messages.push(DisplayMessage {
+                    role: "tool".to_string(),
+                    content: format!("[{}] {}", tc.name, display_output),
+                    tool_calls: vec![],
+                });
+
+                self.messages.push(Message::tool_result(&tc.id, &output, is_error));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Run turn with interactive input handling (redraws UI, accepts input during streaming)
+    async fn run_turn_interactive(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        event_stream: &mut EventStream,
+    ) -> Result<()> {
+        let mut redraw_interval = interval(Duration::from_millis(50));
+
+        loop {
+            // Check for interleaved messages before starting a new API call
+            if self.process_interleaved_queue().await? {
+                continue;
+            }
+
+            let tools = self.registry.definitions().await;
+            let system_prompt = self.build_system_prompt();
+
+            self.status = ProcessingStatus::Sending;
+            // Redraw to show "sending" status
+            terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
+
+            let mut stream = self
+                .provider
+                .complete(&self.messages, &tools, &system_prompt)
+                .await?;
+
+            let mut text_content = String::new();
+            let mut tool_calls: Vec<ToolCall> = Vec::new();
+            let mut current_tool: Option<ToolCall> = None;
+            let mut current_tool_input = String::new();
+            let mut first_event = true;
+
+            // Stream with input handling
+            loop {
+                tokio::select! {
+                    // Redraw periodically
+                    _ = redraw_interval.tick() => {
+                        terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
+                    }
+                    // Handle keyboard input
+                    event = event_stream.next() => {
+                        if let Some(Ok(Event::Key(key))) = event {
+                            if key.kind == KeyEventKind::Press {
+                                let _ = self.handle_key(key.code, key.modifiers);
+                            }
+                        }
+                    }
+                    // Handle stream events
+                    stream_event = stream.next() => {
+                        match stream_event {
+                            Some(Ok(event)) => {
+                                if first_event {
+                                    self.status = ProcessingStatus::Streaming;
+                                    first_event = false;
+                                }
+                                match event {
+                                    StreamEvent::TextDelta(text) => {
+                                        self.streaming_text.push_str(&text);
+                                        text_content.push_str(&text);
+                                    }
+                                    StreamEvent::ToolUseStart { id, name } => {
+                                        current_tool = Some(ToolCall {
+                                            id,
+                                            name,
+                                            input: serde_json::Value::Null,
+                                        });
+                                        current_tool_input.clear();
+                                    }
+                                    StreamEvent::ToolInputDelta(delta) => {
+                                        current_tool_input.push_str(&delta);
+                                    }
+                                    StreamEvent::ToolUseEnd => {
+                                        if let Some(mut tool) = current_tool.take() {
+                                            tool.input = serde_json::from_str(&current_tool_input)
+                                                .unwrap_or(serde_json::Value::Null);
+                                            tool_calls.push(tool);
+                                            current_tool_input.clear();
+                                        }
+                                    }
+                                    StreamEvent::TokenUsage { input_tokens, output_tokens } => {
+                                        if let Some(input) = input_tokens {
+                                            self.streaming_input_tokens = input;
+                                        }
+                                        if let Some(output) = output_tokens {
+                                            self.streaming_output_tokens = output;
+                                        }
+                                    }
+                                    StreamEvent::MessageEnd { .. } => break,
+                                    StreamEvent::Error(e) => {
+                                        return Err(anyhow::anyhow!("Stream error: {}", e));
+                                    }
+                                }
+                            }
+                            Some(Err(e)) => return Err(e),
+                            None => break, // Stream ended
+                        }
+                    }
+                }
+            }
+
+            // Add assistant message to history
+            let mut content_blocks = Vec::new();
+            if !text_content.is_empty() {
+                content_blocks.push(ContentBlock::Text {
+                    text: text_content.clone(),
+                });
+            }
+            for tc in &tool_calls {
+                content_blocks.push(ContentBlock::ToolUse {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    input: tc.input.clone(),
+                });
+            }
+
+            if !content_blocks.is_empty() {
+                self.messages.push(Message {
+                    role: Role::Assistant,
+                    content: content_blocks,
+                });
+            }
+
+            // Add to display
+            let tool_strs: Vec<String> = tool_calls
+                .iter()
+                .map(|tc| format!("[{}]", tc.name))
+                .collect();
+
+            self.display_messages.push(DisplayMessage {
+                role: "assistant".to_string(),
+                content: text_content,
+                tool_calls: tool_strs,
+            });
+            self.streaming_text.clear();
+
+            // If no tool calls, we're done
+            if tool_calls.is_empty() {
+                break;
+            }
+
+            // Execute tools with input handling
+            for tc in tool_calls {
+                if self.interrupt_for_message {
+                    self.interrupt_for_message = false;
+                    if self.process_interleaved_queue().await? {
+                        // Message was processed
+                    }
+                }
+
+                self.status = ProcessingStatus::RunningTool(tc.name.clone());
+                terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
+
+                let result = self.registry.execute(&tc.name, tc.input.clone()).await;
+                let (output, is_error) = match result {
+                    Ok(o) => (o, false),
+                    Err(e) => (format!("Error: {}", e), true),
+                };
+
                 let display_output = if output.len() > 500 {
                     format!("{}...", &output[..500])
                 } else {
