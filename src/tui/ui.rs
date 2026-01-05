@@ -35,8 +35,15 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
     // Header - minimal
     if app.display_messages().is_empty() && !app.is_processing() {
         lines.push(Line::from(vec![
-            Span::styled("jcode", Style::default().fg(DIM_COLOR)),
+            Span::styled(
+                format!("jcode v{}", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(DIM_COLOR),
+            ),
         ]));
+        lines.push(Line::from(Span::styled(
+            "new: message queueing, live status & tokens",
+            Style::default().fg(DIM_COLOR).italic(),
+        )));
         lines.push(Line::from(""));
 
         // Show skill hint if available
