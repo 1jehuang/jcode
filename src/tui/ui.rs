@@ -97,17 +97,34 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
             "tool" => {
-                // Tool output: indented, gray, compact
-                let preview: String = msg.content.lines().take(3).collect::<Vec<_>>().join(" ");
-                let short = if preview.len() > 60 {
-                    format!("{}…", &preview[..60])
-                } else {
-                    preview
-                };
-                lines.push(Line::from(vec![
-                    Span::raw("    "),
-                    Span::styled(short, Style::default().fg(TOOL_COLOR).dim()),
-                ]));
+                // Tool output with diff coloring
+                for (i, line) in msg.content.lines().take(15).enumerate() {
+                    let (prefix, style) = if line.starts_with('+') && !line.starts_with("++") {
+                        ("    ", Style::default().fg(Color::Green))
+                    } else if line.starts_with('-') && !line.starts_with("--") {
+                        ("    ", Style::default().fg(Color::Red))
+                    } else if line.starts_with("...(truncated)") {
+                        ("    ", Style::default().fg(DIM_COLOR).italic())
+                    } else {
+                        ("    ", Style::default().fg(TOOL_COLOR).dim())
+                    };
+                    let display_line = if line.len() > 80 {
+                        format!("{}…", &line[..80])
+                    } else {
+                        line.to_string()
+                    };
+                    lines.push(Line::from(vec![
+                        Span::raw(prefix),
+                        Span::styled(display_line, style),
+                    ]));
+                    // Show truncation indicator if we hit the limit
+                    if i == 14 && msg.content.lines().count() > 15 {
+                        lines.push(Line::from(vec![
+                            Span::raw("    "),
+                            Span::styled("...(more)", Style::default().fg(DIM_COLOR).italic()),
+                        ]));
+                    }
+                }
             }
             "system" => {
                 lines.push(Line::from(vec![
@@ -161,6 +178,18 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                     ]));
                 }
             }
+        }
+        // Show streaming tool calls as they are detected
+        let streaming_tools = app.streaming_tool_calls();
+        if !streaming_tools.is_empty() {
+            let tools_str = streaming_tools.iter()
+                .map(|t| format!("[{}]", t))
+                .collect::<Vec<_>>()
+                .join(" ");
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(tools_str, Style::default().fg(ACCENT_COLOR).dim()),
+            ]));
         }
         // Status line with phase, tokens, and elapsed time
         let (input_tokens, output_tokens) = app.streaming_tokens();

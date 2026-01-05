@@ -42,7 +42,7 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(provider: Box<dyn Provider>, registry: Registry) -> Self {
+    pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
         let agent = Agent::new(provider, registry);
         Self {
             agent: Arc::new(Mutex::new(agent)),

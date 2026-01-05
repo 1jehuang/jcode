@@ -1,4 +1,4 @@
-use super::Tool;
+use super::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -73,7 +73,7 @@ impl Tool for LspTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: LspInput = serde_json::from_value(input)?;
         if !OPERATIONS.contains(&params.operation.as_str()) {
             return Err(anyhow::anyhow!("Unsupported LSP operation: {}", params.operation));
@@ -84,12 +84,12 @@ impl Tool for LspTool {
             return Err(anyhow::anyhow!("File not found: {}", params.file_path));
         }
 
-        Ok(format!(
+        Ok(ToolOutput::new(format!(
             "LSP is not integrated in jcode yet. Requested: {} at {}:{}:{}.\nUse grep or read to inspect symbols.",
             params.operation,
             params.file_path,
             params.line,
             params.character
-        ))
+        )))
     }
 }

@@ -1,8 +1,9 @@
-use super::Tool;
+use super::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use similar::{ChangeTag, TextDiff};
 use std::path::Path;
 
 pub struct EditTool;
@@ -59,7 +60,7 @@ impl Tool for EditTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: EditInput = serde_json::from_value(input)?;
 
         if params.old_string == params.new_string {
@@ -103,18 +104,45 @@ impl Tool for EditTool {
         // Write back
         tokio::fs::write(path, &new_content).await?;
 
-        // Generate a simple diff summary
-        let old_lines = params.old_string.lines().count();
-        let new_lines = params.new_string.lines().count();
+        // Generate a unified diff
+        let diff = generate_diff(&params.old_string, &params.new_string);
 
-        Ok(format!(
-            "Edited {}: replaced {} occurrence(s)\n  -{} lines\n  +{} lines",
-            params.file_path, occurrences, old_lines, new_lines
-        ))
+        Ok(ToolOutput::new(format!(
+            "Edited {}: replaced {} occurrence(s)\n{}",
+            params.file_path, occurrences, diff
+        )).with_title(format!("{}", params.file_path)))
     }
 }
 
-fn try_flexible_match(content: &str, old_string: &str, file_path: &str) -> Result<String> {
+/// Generate a unified-style diff between two strings
+fn generate_diff(old: &str, new: &str) -> String {
+    let diff = TextDiff::from_lines(old, new);
+    let mut output = String::new();
+
+    for change in diff.iter_all_changes() {
+        let prefix = match change.tag() {
+            ChangeTag::Delete => "-",
+            ChangeTag::Insert => "+",
+            ChangeTag::Equal => " ",
+        };
+        // Only show changed lines, limit context
+        if change.tag() != ChangeTag::Equal {
+            output.push_str(prefix);
+            output.push_str(change.value());
+            if !change.value().ends_with('\n') {
+                output.push('\n');
+            }
+        }
+    }
+
+    if output.is_empty() {
+        "(no visible changes)".to_string()
+    } else {
+        output.trim_end().to_string()
+    }
+}
+
+fn try_flexible_match(content: &str, old_string: &str, file_path: &str) -> Result<ToolOutput> {
     // Try trimmed matching
     let trimmed = old_string.trim();
     if content.contains(trimmed) && trimmed != old_string {

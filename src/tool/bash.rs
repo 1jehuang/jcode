@@ -1,4 +1,4 @@
-use super::Tool;
+use super::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -61,7 +61,7 @@ impl Tool for BashTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: BashInput = serde_json::from_value(input)?;
 
         let timeout_ms = params.timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(600000);
@@ -114,11 +114,12 @@ impl Tool for BashTool {
                     output.push_str(&format!("\n\nExit code: {}", status.code().unwrap_or(-1)));
                 }
 
-                if output.is_empty() {
-                    Ok("Command completed successfully (no output)".to_string())
+                let output = if output.is_empty() {
+                    "Command completed successfully (no output)".to_string()
                 } else {
-                    Ok(output)
-                }
+                    output
+                };
+                Ok(ToolOutput::new(output).with_title(params.description.unwrap_or_else(|| params.command.clone())))
             }
             Ok(Err(e)) => Err(anyhow::anyhow!("Command failed: {}", e)),
             Err(_) => {

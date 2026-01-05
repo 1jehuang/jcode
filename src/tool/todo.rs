@@ -1,22 +1,10 @@
-use super::Tool;
+use super::{Tool, ToolContext, ToolOutput};
+use crate::bus::{Bus, BusEvent, TodoEvent};
+use crate::todo::{load_todos, save_todos, TodoItem};
 use anyhow::Result;
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
-use std::sync::{Mutex, OnceLock};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TodoItem {
-    pub content: String,
-    pub status: String,
-    pub priority: String,
-    pub id: String,
-}
-
-fn todo_store() -> &'static Mutex<Vec<TodoItem>> {
-    static STORE: OnceLock<Mutex<Vec<TodoItem>>> = OnceLock::new();
-    STORE.get_or_init(|| Mutex::new(Vec::new()))
-}
 
 pub struct TodoWriteTool;
 pub struct TodoReadTool;
@@ -83,23 +71,23 @@ impl Tool for TodoWriteTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: TodoWriteInput = serde_json::from_value(input)?;
-        let mut store = todo_store()
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Todo store lock poisoned"))?;
-        *store = params.todos.clone();
+        save_todos(&ctx.session_id, &params.todos)?;
+
+        Bus::global().publish(BusEvent::TodoUpdated(TodoEvent {
+            session_id: ctx.session_id.clone(),
+            todos: params.todos.clone(),
+        }));
 
         let remaining = params
             .todos
             .iter()
             .filter(|t| t.status != "completed")
             .count();
-        Ok(format!(
-            "{} todos\n{}",
-            remaining,
-            serde_json::to_string_pretty(&params.todos)?
-        ))
+        Ok(ToolOutput::new(serde_json::to_string_pretty(&params.todos)?)
+            .with_title(format!("{} todos", remaining))
+            .with_metadata(json!({"todos": params.todos})))
     }
 }
 
@@ -120,15 +108,11 @@ impl Tool for TodoReadTool {
         })
     }
 
-    async fn execute(&self, _input: Value) -> Result<String> {
-        let store = todo_store()
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Todo store lock poisoned"))?;
-        let remaining = store.iter().filter(|t| t.status != "completed").count();
-        Ok(format!(
-            "{} todos\n{}",
-            remaining,
-            serde_json::to_string_pretty(&*store)?
-        ))
+    async fn execute(&self, _input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let todos = load_todos(&ctx.session_id)?;
+        let remaining = todos.iter().filter(|t| t.status != "completed").count();
+        Ok(ToolOutput::new(serde_json::to_string_pretty(&todos)?)
+            .with_title(format!("{} todos", remaining))
+            .with_metadata(json!({"todos": todos})))
     }
 }

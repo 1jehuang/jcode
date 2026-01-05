@@ -1,4 +1,4 @@
-use super::Tool;
+use super::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -58,7 +58,7 @@ impl Tool for ReadTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: ReadInput = serde_json::from_value(input)?;
 
         let path = Path::new(&params.file_path);
@@ -80,10 +80,10 @@ impl Tool for ReadTool {
 
         // Check for binary files
         if is_binary_file(path) {
-            return Ok(format!(
+            return Ok(ToolOutput::new(format!(
                 "Binary file detected: {}\nUse appropriate tools to handle binary files.",
                 params.file_path
-            ));
+            )));
         }
 
         // Read file
@@ -118,9 +118,9 @@ impl Tool for ReadTool {
         }
 
         if output.is_empty() {
-            Ok("(empty file)".to_string())
+            Ok(ToolOutput::new("(empty file)"))
         } else {
-            Ok(output)
+            Ok(ToolOutput::new(output))
         }
     }
 }

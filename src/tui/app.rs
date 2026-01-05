@@ -1,19 +1,19 @@
+use crate::bus::{Bus, BusEvent, ToolEvent, ToolStatus};
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall};
 use crate::provider::Provider;
+use crate::session::Session;
 use crate::skill::SkillRegistry;
-use crate::tool::Registry;
+use crate::tool::{Registry, ToolContext};
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
-use ratatui::{
-    DefaultTerminal,
-    prelude::*,
-};
+use ratatui::DefaultTerminal;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::interval;
 
 /// Queue mode for pending messages
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum QueueMode {
     /// Insert message between tool calls (interrupt current flow)
     Interleave,
@@ -52,10 +52,11 @@ pub struct DisplayMessage {
 
 /// TUI Application state
 pub struct App {
-    provider: Box<dyn Provider>,
+    provider: Arc<dyn Provider>,
     registry: Registry,
     skills: SkillRegistry,
     messages: Vec<Message>,
+    session: Session,
     display_messages: Vec<DisplayMessage>,
     input: String,
     cursor_pos: usize,
@@ -77,16 +78,19 @@ pub struct App {
     processing_started: Option<Instant>,
     // Pending turn to process (allows UI to redraw before processing starts)
     pending_turn: bool,
+    // Tool calls detected during streaming (shown in real-time)
+    streaming_tool_calls: Vec<String>,
 }
 
 impl App {
-    pub fn new(provider: Box<dyn Provider>, registry: Registry) -> Self {
+    pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
         let skills = SkillRegistry::load().unwrap_or_default();
         Self {
             provider,
             registry,
             skills,
             messages: Vec::new(),
+            session: Session::create(None, None),
             display_messages: Vec::new(),
             input: String::new(),
             cursor_pos: 0,
@@ -103,6 +107,7 @@ impl App {
             status: ProcessingStatus::default(),
             processing_started: None,
             pending_turn: false,
+            streaming_tool_calls: Vec::new(),
         }
     }
 
@@ -184,6 +189,7 @@ impl App {
                     self.display_messages.clear();
                     self.queued_messages.clear();
                     self.active_skill = None;
+                    self.session = Session::create(None, None);
                     return Ok(());
                 }
                 KeyCode::Char('u') => {
@@ -323,11 +329,17 @@ impl App {
             tool_calls: vec![],
         });
         self.messages.push(Message::user(&input));
+        self.session.add_message(
+            Role::User,
+            vec![ContentBlock::Text { text: input.clone() }],
+        );
+        let _ = self.session.save();
 
         // Set up processing state - actual processing happens after UI redraws
         self.is_processing = true;
         self.status = ProcessingStatus::Sending;
         self.streaming_text.clear();
+        self.streaming_tool_calls.clear();
         self.streaming_input_tokens = 0;
         self.streaming_output_tokens = 0;
         self.processing_started = Some(Instant::now());
@@ -367,7 +379,13 @@ impl App {
             }
 
             self.messages.push(Message::user(&queued.content));
+            self.session.add_message(
+                Role::User,
+                vec![ContentBlock::Text { text: queued.content.clone() }],
+            );
+            let _ = self.session.save();
             self.streaming_text.clear();
+            self.streaming_tool_calls.clear();
             self.streaming_input_tokens = 0;
             self.streaming_output_tokens = 0;
 
@@ -390,7 +408,7 @@ impl App {
                 continue;
             }
 
-            let tools = self.registry.definitions().await;
+            let tools = self.registry.definitions(None).await;
 
             // Build system prompt with active skill
             let system_prompt = self.build_system_prompt();
@@ -418,6 +436,7 @@ impl App {
                         text_content.push_str(&text);
                     }
                     StreamEvent::ToolUseStart { id, name } => {
+                        self.streaming_tool_calls.push(name.clone());
                         current_tool = Some(ToolCall {
                             id,
                             name,
@@ -469,12 +488,18 @@ impl App {
                 });
             }
 
-            if !content_blocks.is_empty() {
+            let assistant_message_id = if !content_blocks.is_empty() {
+                let content_clone = content_blocks.clone();
                 self.messages.push(Message {
                     role: Role::Assistant,
                     content: content_blocks,
                 });
-            }
+                let message_id = self.session.add_message(Role::Assistant, content_clone);
+                let _ = self.session.save();
+                Some(message_id)
+            } else {
+                None
+            };
 
             // Add to display
             let tool_strs: Vec<String> = tool_calls
@@ -488,6 +513,7 @@ impl App {
                 tool_calls: tool_strs,
             });
             self.streaming_text.clear();
+            self.streaming_tool_calls.clear();
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
@@ -507,10 +533,48 @@ impl App {
                 }
 
                 self.status = ProcessingStatus::RunningTool(tc.name.clone());
-                let result = self.registry.execute(&tc.name, tc.input.clone()).await;
+                let message_id = assistant_message_id
+                    .clone()
+                    .unwrap_or_else(|| self.session.id.clone());
+                let ctx = ToolContext {
+                    session_id: self.session.id.clone(),
+                    message_id: message_id.clone(),
+                    tool_call_id: tc.id.clone(),
+                };
+
+                Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                    session_id: self.session.id.clone(),
+                    message_id: message_id.clone(),
+                    tool_call_id: tc.id.clone(),
+                    tool_name: tc.name.clone(),
+                    status: ToolStatus::Running,
+                    title: None,
+                }));
+
+                let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
                 let (output, is_error) = match result {
-                    Ok(o) => (o, false),
-                    Err(e) => (format!("Error: {}", e), true),
+                    Ok(o) => {
+                        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                            session_id: self.session.id.clone(),
+                            message_id: message_id.clone(),
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            status: ToolStatus::Completed,
+                            title: o.title.clone(),
+                        }));
+                        (o.output, false)
+                    }
+                    Err(e) => {
+                        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                            session_id: self.session.id.clone(),
+                            message_id: message_id.clone(),
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            status: ToolStatus::Error,
+                            title: None,
+                        }));
+                        (format!("Error: {}", e), true)
+                    }
                 };
 
                 // Truncate for display
@@ -527,6 +591,15 @@ impl App {
                 });
 
                 self.messages.push(Message::tool_result(&tc.id, &output, is_error));
+                self.session.add_message(
+                    Role::User,
+                    vec![ContentBlock::ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        content: output.clone(),
+                        is_error: if is_error { Some(true) } else { None },
+                    }],
+                );
+                let _ = self.session.save();
             }
         }
 
@@ -547,7 +620,7 @@ impl App {
                 continue;
             }
 
-            let tools = self.registry.definitions().await;
+            let tools = self.registry.definitions(None).await;
             let system_prompt = self.build_system_prompt();
 
             self.status = ProcessingStatus::Sending;
@@ -594,6 +667,7 @@ impl App {
                                         text_content.push_str(&text);
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
+                                        self.streaming_tool_calls.push(name.clone());
                                         current_tool = Some(ToolCall {
                                             id,
                                             name,
@@ -648,12 +722,18 @@ impl App {
                 });
             }
 
-            if !content_blocks.is_empty() {
+            let assistant_message_id = if !content_blocks.is_empty() {
+                let content_clone = content_blocks.clone();
                 self.messages.push(Message {
                     role: Role::Assistant,
                     content: content_blocks,
                 });
-            }
+                let message_id = self.session.add_message(Role::Assistant, content_clone);
+                let _ = self.session.save();
+                Some(message_id)
+            } else {
+                None
+            };
 
             // Add to display
             let tool_strs: Vec<String> = tool_calls
@@ -667,6 +747,7 @@ impl App {
                 tool_calls: tool_strs,
             });
             self.streaming_text.clear();
+            self.streaming_tool_calls.clear();
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
@@ -685,10 +766,48 @@ impl App {
                 self.status = ProcessingStatus::RunningTool(tc.name.clone());
                 terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
 
-                let result = self.registry.execute(&tc.name, tc.input.clone()).await;
+                let message_id = assistant_message_id
+                    .clone()
+                    .unwrap_or_else(|| self.session.id.clone());
+                let ctx = ToolContext {
+                    session_id: self.session.id.clone(),
+                    message_id: message_id.clone(),
+                    tool_call_id: tc.id.clone(),
+                };
+
+                Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                    session_id: self.session.id.clone(),
+                    message_id: message_id.clone(),
+                    tool_call_id: tc.id.clone(),
+                    tool_name: tc.name.clone(),
+                    status: ToolStatus::Running,
+                    title: None,
+                }));
+
+                let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
                 let (output, is_error) = match result {
-                    Ok(o) => (o, false),
-                    Err(e) => (format!("Error: {}", e), true),
+                    Ok(o) => {
+                        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                            session_id: self.session.id.clone(),
+                            message_id: message_id.clone(),
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            status: ToolStatus::Completed,
+                            title: o.title.clone(),
+                        }));
+                        (o.output, false)
+                    }
+                    Err(e) => {
+                        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                            session_id: self.session.id.clone(),
+                            message_id: message_id.clone(),
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            status: ToolStatus::Error,
+                            title: None,
+                        }));
+                        (format!("Error: {}", e), true)
+                    }
                 };
 
                 let display_output = if output.len() > 500 {
@@ -704,6 +823,15 @@ impl App {
                 });
 
                 self.messages.push(Message::tool_result(&tc.id, &output, is_error));
+                self.session.add_message(
+                    Role::User,
+                    vec![ContentBlock::ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        content: output.clone(),
+                        is_error: if is_error { Some(true) } else { None },
+                    }],
+                );
+                let _ = self.session.save();
             }
         }
 
@@ -725,6 +853,11 @@ impl App {
             }
 
             self.messages.push(Message::user(&queued.content));
+            self.session.add_message(
+                Role::User,
+                vec![ContentBlock::Text { text: queued.content.clone() }],
+            );
+            let _ = self.session.save();
             self.interrupt_for_message = false;
             Ok(true)
         } else {
@@ -807,11 +940,297 @@ When you need to make changes, use the tools directly. Don't just describe what 
         (self.streaming_input_tokens, self.streaming_output_tokens)
     }
 
+    pub fn streaming_tool_calls(&self) -> &[String] {
+        &self.streaming_tool_calls
+    }
+
     pub fn status(&self) -> &ProcessingStatus {
         &self.status
     }
 
     pub fn elapsed(&self) -> Option<Duration> {
         self.processing_started.map(|t| t.elapsed())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Mock provider for testing
+    struct MockProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for MockProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+        ) -> Result<crate::provider::EventStream> {
+            unimplemented!("Mock provider")
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+    }
+
+    fn create_test_app() -> App {
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        App::new(provider, registry)
+    }
+
+    #[test]
+    fn test_initial_state() {
+        let app = create_test_app();
+
+        assert!(!app.is_processing());
+        assert!(app.input().is_empty());
+        assert_eq!(app.cursor_pos(), 0);
+        assert!(app.display_messages().is_empty());
+        assert!(app.streaming_text().is_empty());
+        assert_eq!(app.queued_count(), 0);
+        assert_eq!(app.queue_mode(), QueueMode::AfterCompletion);
+        assert!(matches!(app.status(), ProcessingStatus::Idle));
+        assert!(app.elapsed().is_none());
+    }
+
+    #[test]
+    fn test_queue_mode_default() {
+        assert_eq!(QueueMode::default(), QueueMode::AfterCompletion);
+    }
+
+    #[test]
+    fn test_handle_key_typing() {
+        let mut app = create_test_app();
+
+        // Type "hello"
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('l'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('l'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('o'), KeyModifiers::empty()).unwrap();
+
+        assert_eq!(app.input(), "hello");
+        assert_eq!(app.cursor_pos(), 5);
+    }
+
+    #[test]
+    fn test_handle_key_backspace() {
+        let mut app = create_test_app();
+
+        app.handle_key(KeyCode::Char('a'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('b'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Backspace, KeyModifiers::empty()).unwrap();
+
+        assert_eq!(app.input(), "a");
+        assert_eq!(app.cursor_pos(), 1);
+    }
+
+    #[test]
+    fn test_handle_key_cursor_movement() {
+        let mut app = create_test_app();
+
+        app.handle_key(KeyCode::Char('a'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('b'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('c'), KeyModifiers::empty()).unwrap();
+
+        assert_eq!(app.cursor_pos(), 3);
+
+        app.handle_key(KeyCode::Left, KeyModifiers::empty()).unwrap();
+        assert_eq!(app.cursor_pos(), 2);
+
+        app.handle_key(KeyCode::Home, KeyModifiers::empty()).unwrap();
+        assert_eq!(app.cursor_pos(), 0);
+
+        app.handle_key(KeyCode::End, KeyModifiers::empty()).unwrap();
+        assert_eq!(app.cursor_pos(), 3);
+    }
+
+    #[test]
+    fn test_handle_key_escape_clears_input() {
+        let mut app = create_test_app();
+
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty()).unwrap();
+
+        assert_eq!(app.input(), "test");
+
+        app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
+
+        assert!(app.input().is_empty());
+        assert_eq!(app.cursor_pos(), 0);
+    }
+
+    #[test]
+    fn test_handle_key_ctrl_u_clears_input() {
+        let mut app = create_test_app();
+
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty()).unwrap();
+
+        app.handle_key(KeyCode::Char('u'), KeyModifiers::CONTROL).unwrap();
+
+        assert!(app.input().is_empty());
+        assert_eq!(app.cursor_pos(), 0);
+    }
+
+    #[test]
+    fn test_submit_input_adds_message() {
+        let mut app = create_test_app();
+
+        // Type and submit
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('i'), KeyModifiers::empty()).unwrap();
+        app.submit_input();
+
+        // Check message was added to display
+        assert_eq!(app.display_messages().len(), 1);
+        assert_eq!(app.display_messages()[0].role, "user");
+        assert_eq!(app.display_messages()[0].content, "hi");
+
+        // Check processing state
+        assert!(app.is_processing());
+        assert!(app.pending_turn);
+        assert!(matches!(app.status(), ProcessingStatus::Sending));
+        assert!(app.elapsed().is_some());
+
+        // Input should be cleared
+        assert!(app.input().is_empty());
+    }
+
+    #[test]
+    fn test_queue_message_while_processing() {
+        let mut app = create_test_app();
+
+        // Simulate processing state
+        app.is_processing = true;
+
+        // Type a message
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty()).unwrap();
+
+        // Press Enter should queue, not submit
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+
+        assert_eq!(app.queued_count(), 1);
+        assert!(app.input().is_empty());
+
+        // Should show queued message in display
+        assert_eq!(app.display_messages().len(), 1);
+        assert_eq!(app.display_messages()[0].role, "queued");
+        assert_eq!(app.display_messages()[0].content, "test");
+    }
+
+    #[test]
+    fn test_queue_mode_toggle() {
+        let mut app = create_test_app();
+        app.is_processing = true;
+
+        assert_eq!(app.queue_mode(), QueueMode::AfterCompletion);
+
+        // Tab toggles queue mode during processing
+        app.handle_key(KeyCode::Tab, KeyModifiers::empty()).unwrap();
+        assert_eq!(app.queue_mode(), QueueMode::Interleave);
+
+        app.handle_key(KeyCode::Tab, KeyModifiers::empty()).unwrap();
+        assert_eq!(app.queue_mode(), QueueMode::AfterCompletion);
+    }
+
+    #[test]
+    fn test_queue_message_interleave_sets_interrupt() {
+        let mut app = create_test_app();
+        app.is_processing = true;
+        app.queue_mode = QueueMode::Interleave;
+
+        app.handle_key(KeyCode::Char('x'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+
+        assert!(app.interrupt_for_message);
+        assert_eq!(app.queued_messages[0].mode, QueueMode::Interleave);
+    }
+
+    #[test]
+    fn test_queue_message_after_completion_no_interrupt() {
+        let mut app = create_test_app();
+        app.is_processing = true;
+        app.queue_mode = QueueMode::AfterCompletion;
+
+        app.handle_key(KeyCode::Char('x'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+
+        assert!(!app.interrupt_for_message);
+        assert_eq!(app.queued_messages[0].mode, QueueMode::AfterCompletion);
+    }
+
+    #[test]
+    fn test_typing_during_processing() {
+        let mut app = create_test_app();
+        app.is_processing = true;
+
+        // Should still be able to type
+        app.handle_key(KeyCode::Char('a'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('b'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('c'), KeyModifiers::empty()).unwrap();
+
+        assert_eq!(app.input(), "abc");
+    }
+
+    #[test]
+    fn test_streaming_tokens() {
+        let mut app = create_test_app();
+
+        assert_eq!(app.streaming_tokens(), (0, 0));
+
+        app.streaming_input_tokens = 100;
+        app.streaming_output_tokens = 50;
+
+        assert_eq!(app.streaming_tokens(), (100, 50));
+    }
+
+    #[test]
+    fn test_processing_status_display() {
+        let status = ProcessingStatus::Sending;
+        assert!(matches!(status, ProcessingStatus::Sending));
+
+        let status = ProcessingStatus::Streaming;
+        assert!(matches!(status, ProcessingStatus::Streaming));
+
+        let status = ProcessingStatus::RunningTool("bash".to_string());
+        if let ProcessingStatus::RunningTool(name) = status {
+            assert_eq!(name, "bash");
+        } else {
+            panic!("Expected RunningTool");
+        }
+    }
+
+    #[test]
+    fn test_skill_invocation_not_queued() {
+        let mut app = create_test_app();
+
+        // Type a skill command
+        app.handle_key(KeyCode::Char('/'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty()).unwrap();
+
+        app.submit_input();
+
+        // Should show error for unknown skill, not start processing
+        assert!(!app.pending_turn);
+        assert!(!app.is_processing);
+        // Should have an error message about unknown skill
+        assert_eq!(app.display_messages().len(), 1);
+        assert_eq!(app.display_messages()[0].role, "error");
     }
 }

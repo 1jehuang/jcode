@@ -1,8 +1,9 @@
-use super::Tool;
+use super::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use similar::{ChangeTag, TextDiff};
 use std::path::Path;
 
 pub struct MultiEditTool;
@@ -74,7 +75,7 @@ impl Tool for MultiEditTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: MultiEditInput = serde_json::from_value(input)?;
 
         let path = Path::new(&params.file_path);
@@ -83,7 +84,8 @@ impl Tool for MultiEditTool {
             return Err(anyhow::anyhow!("File not found: {}", params.file_path));
         }
 
-        let mut content = tokio::fs::read_to_string(path).await?;
+        let original_content = tokio::fs::read_to_string(path).await?;
+        let mut content = original_content.clone();
         let mut applied = Vec::new();
         let mut failed = Vec::new();
 
@@ -140,11 +142,48 @@ impl Tool for MultiEditTool {
         }
 
         output.push_str(&format!(
-            "\nTotal: {} applied, {} failed",
+            "\nTotal: {} applied, {} failed\n",
             applied.len(),
             failed.len()
         ));
 
-        Ok(output)
+        // Generate diff summary
+        if !applied.is_empty() {
+            output.push_str("\nDiff:\n");
+            output.push_str(&generate_diff_summary(&original_content, &content));
+        }
+
+        Ok(ToolOutput::new(output).with_title(format!("{}", params.file_path)))
     }
+}
+
+/// Generate a compact diff summary (max 30 lines shown)
+fn generate_diff_summary(old: &str, new: &str) -> String {
+    let diff = TextDiff::from_lines(old, new);
+    let mut output = String::new();
+    let mut lines_shown = 0;
+    const MAX_LINES: usize = 30;
+
+    for change in diff.iter_all_changes() {
+        if change.tag() == ChangeTag::Equal {
+            continue;
+        }
+        if lines_shown >= MAX_LINES {
+            output.push_str("...(truncated)\n");
+            break;
+        }
+        let prefix = match change.tag() {
+            ChangeTag::Delete => "-",
+            ChangeTag::Insert => "+",
+            ChangeTag::Equal => " ",
+        };
+        output.push_str(prefix);
+        output.push_str(change.value());
+        if !change.value().ends_with('\n') {
+            output.push('\n');
+        }
+        lines_shown += 1;
+    }
+
+    output
 }

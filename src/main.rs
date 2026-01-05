@@ -1,15 +1,21 @@
 mod agent;
 mod auth;
+mod bus;
+mod id;
 mod message;
 mod provider;
 mod server;
+mod session;
 mod skill;
+mod storage;
 mod tool;
+mod todo;
 mod tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::io::{self, Write};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, ValueEnum)]
 enum ProviderChoice {
@@ -100,20 +106,20 @@ async fn main() -> Result<()> {
 
 async fn init_provider_and_registry(
     choice: &ProviderChoice,
-) -> Result<(Box<dyn provider::Provider>, tool::Registry)> {
-    let provider: Box<dyn provider::Provider> = match choice {
+) -> Result<(Arc<dyn provider::Provider>, tool::Registry)> {
+    let provider: Arc<dyn provider::Provider> = match choice {
         ProviderChoice::Claude => {
             // Use jcode's own OAuth tokens
             let tokens = auth::oauth::load_claude_tokens()?;
             eprintln!("Using Claude with jcode OAuth");
             std::env::set_var("JCODE_ACTIVE_PROVIDER", "claude");
-            Box::new(provider::claude::ClaudeProvider::new(tokens))
+            Arc::new(provider::claude::ClaudeProvider::new(tokens))
         }
         ProviderChoice::ClaudeSubprocess => {
             // Fallback: Use Claude Code CLI as subprocess
             eprintln!("Using Claude Code subprocess provider");
             std::env::set_var("JCODE_ACTIVE_PROVIDER", "claude-subprocess");
-            Box::new(provider::claude_subprocess::ClaudeSubprocessProvider::new(
+            Arc::new(provider::claude_subprocess::ClaudeSubprocessProvider::new(
                 "claude-sonnet-4-20250514",
                 true, // bypass permissions
             ))
@@ -121,18 +127,18 @@ async fn init_provider_and_registry(
         ProviderChoice::Openai => {
             let creds = auth::codex::load_credentials()?;
             std::env::set_var("JCODE_ACTIVE_PROVIDER", "openai");
-            Box::new(provider::openai::OpenAIProvider::new(creds))
+            Arc::new(provider::openai::OpenAIProvider::new(creds))
         }
         ProviderChoice::Auto => {
             // Try jcode's own Claude OAuth first
             if let Ok(tokens) = auth::oauth::load_claude_tokens() {
                 eprintln!("Using Claude with jcode OAuth");
                 std::env::set_var("JCODE_ACTIVE_PROVIDER", "claude");
-                Box::new(provider::claude::ClaudeProvider::new(tokens))
+                Arc::new(provider::claude::ClaudeProvider::new(tokens))
             } else if let Ok(creds) = auth::codex::load_credentials() {
                 eprintln!("Using OpenAI/Codex provider");
                 std::env::set_var("JCODE_ACTIVE_PROVIDER", "openai");
-                Box::new(provider::openai::OpenAIProvider::new(creds))
+                Arc::new(provider::openai::OpenAIProvider::new(creds))
             } else {
                 // No credentials - prompt for login
                 eprintln!("No credentials found. Let's log in!\n");
@@ -150,14 +156,14 @@ async fn init_provider_and_registry(
                         let tokens = auth::oauth::login_claude().await?;
                         auth::oauth::save_claude_tokens(&tokens)?;
                         eprintln!("\nSuccessfully logged in to Claude!\n");
-                        Box::new(provider::claude::ClaudeProvider::new(tokens))
+                        Arc::new(provider::claude::ClaudeProvider::new(tokens))
                     }
                     "2" => {
                         let tokens = auth::oauth::login_openai().await?;
                         auth::oauth::save_openai_tokens(&tokens)?;
                         eprintln!("\nSuccessfully logged in to OpenAI!\n");
                         let creds = auth::codex::load_credentials()?;
-                        Box::new(provider::openai::OpenAIProvider::new(creds))
+                        Arc::new(provider::openai::OpenAIProvider::new(creds))
                     }
                     _ => {
                         anyhow::bail!("Invalid choice. Run 'jcode login' to try again.");
@@ -167,11 +173,11 @@ async fn init_provider_and_registry(
         }
     };
 
-    let registry = tool::Registry::new().await;
+    let registry = tool::Registry::new(provider.clone()).await;
     Ok((provider, registry))
 }
 
-async fn run_tui(provider: Box<dyn provider::Provider>, registry: tool::Registry) -> Result<()> {
+async fn run_tui(provider: Arc<dyn provider::Provider>, registry: tool::Registry) -> Result<()> {
     let terminal = ratatui::init();
     let app = tui::App::new(provider, registry);
     let result = app.run(terminal).await;

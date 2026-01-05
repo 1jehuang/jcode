@@ -1,4 +1,4 @@
-use super::Tool;
+use super::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -62,7 +62,7 @@ impl Tool for WebSearchTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: WebSearchInput = serde_json::from_value(input)?;
         let num_results = params.num_results.unwrap_or(8).min(20);
 
@@ -89,7 +89,7 @@ impl Tool for WebSearchTool {
         let results = parse_ddg_results(&html, num_results);
 
         if results.is_empty() {
-            return Ok(format!("No results found for: {}", params.query));
+            return Ok(ToolOutput::new(format!("No results found for: {}", params.query)));
         }
 
         // Format results
@@ -105,7 +105,7 @@ impl Tool for WebSearchTool {
             ));
         }
 
-        Ok(output)
+        Ok(ToolOutput::new(output))
     }
 }
 

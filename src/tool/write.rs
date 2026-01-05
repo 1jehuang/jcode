@@ -1,8 +1,9 @@
-use super::Tool;
+use super::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use similar::{ChangeTag, TextDiff};
 use std::path::Path;
 
 pub struct WriteTool;
@@ -47,7 +48,7 @@ impl Tool for WriteTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: WriteInput = serde_json::from_value(input)?;
 
         let path = Path::new(&params.file_path);
@@ -59,10 +60,10 @@ impl Tool for WriteTool {
             }
         }
 
-        // Check if file existed before
+        // Check if file existed before and read old content for diff
         let existed = path.exists();
-        let old_len = if existed {
-            tokio::fs::metadata(path).await.ok().map(|m| m.len())
+        let old_content = if existed {
+            tokio::fs::read_to_string(path).await.ok()
         } else {
             None
         };
@@ -74,18 +75,54 @@ impl Tool for WriteTool {
         let line_count = params.content.lines().count();
 
         if existed {
-            Ok(format!(
-                "Updated {} ({} bytes → {} bytes, {} lines)",
+            let diff = if let Some(ref old) = old_content {
+                generate_diff_summary(old, &params.content)
+            } else {
+                String::new()
+            };
+            Ok(ToolOutput::new(format!(
+                "Updated {} ({} lines){}\n{}",
                 params.file_path,
-                old_len.unwrap_or(0),
-                new_len,
-                line_count
-            ))
+                line_count,
+                if diff.is_empty() { "" } else { ":" },
+                diff
+            )).with_title(format!("{}", params.file_path)))
         } else {
-            Ok(format!(
+            Ok(ToolOutput::new(format!(
                 "Created {} ({} bytes, {} lines)",
                 params.file_path, new_len, line_count
-            ))
+            )).with_title(format!("{}", params.file_path)))
         }
     }
+}
+
+/// Generate a compact diff summary (max 20 lines shown)
+fn generate_diff_summary(old: &str, new: &str) -> String {
+    let diff = TextDiff::from_lines(old, new);
+    let mut output = String::new();
+    let mut lines_shown = 0;
+    const MAX_LINES: usize = 20;
+
+    for change in diff.iter_all_changes() {
+        if change.tag() == ChangeTag::Equal {
+            continue;
+        }
+        if lines_shown >= MAX_LINES {
+            output.push_str("...(truncated)\n");
+            break;
+        }
+        let prefix = match change.tag() {
+            ChangeTag::Delete => "-",
+            ChangeTag::Insert => "+",
+            ChangeTag::Equal => " ",
+        };
+        output.push_str(prefix);
+        output.push_str(change.value());
+        if !change.value().ends_with('\n') {
+            output.push('\n');
+        }
+        lines_shown += 1;
+    }
+
+    output.trim_end().to_string()
 }

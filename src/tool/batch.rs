@@ -1,4 +1,4 @@
-use super::{Registry, Tool};
+use super::{Registry, Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -67,7 +67,7 @@ impl Tool for BatchTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: BatchInput = serde_json::from_value(input)?;
 
         if params.tool_calls.is_empty() {
@@ -96,8 +96,9 @@ impl Tool for BatchTool {
             .map(|(i, tc)| {
                 let registry = self.registry.clone();
                 let tool_name = tc.tool.clone();
+                let sub_ctx = ctx.for_subcall(format!("batch-{}-{}", i + 1, tool_name.clone()));
                 async move {
-                    let result = registry.execute(&tc.tool, tc.parameters).await;
+                    let result = registry.execute(&tc.tool, tc.parameters, sub_ctx).await;
                     (i, tool_name, result)
                 }
             })
@@ -116,10 +117,10 @@ impl Tool for BatchTool {
                 Ok(out) => {
                     success_count += 1;
                     // Truncate long outputs
-                    let truncated = if out.len() > 1000 {
-                        format!("{}...\n(truncated)", &out[..1000])
+                    let truncated = if out.output.len() > 1000 {
+                        format!("{}...\n(truncated)", &out.output[..1000])
                     } else {
-                        out
+                        out.output
                     };
                     output.push_str(&truncated);
                 }
@@ -136,6 +137,6 @@ impl Tool for BatchTool {
             success_count, error_count
         ));
 
-        Ok(output)
+        Ok(ToolOutput::new(output))
     }
 }

@@ -1,4 +1,4 @@
-use super::Tool;
+use super::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -66,7 +66,7 @@ impl Tool for WebFetchTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: WebFetchInput = serde_json::from_value(input)?;
 
         // Validate URL
@@ -135,12 +135,12 @@ impl Tool for WebFetchTool {
             }
         };
 
-        Ok(format!(
+        Ok(ToolOutput::new(format!(
             "Fetched {} ({} bytes)\n\n{}",
             params.url,
             output.len(),
             output
-        ))
+        )))
     }
 }
 

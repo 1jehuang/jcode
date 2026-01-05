@@ -1,4 +1,4 @@
-use super::Tool;
+use super::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -71,7 +71,7 @@ impl Tool for LsTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: LsInput = serde_json::from_value(input)?;
 
         let base_path = params.path.as_deref().unwrap_or(".");
@@ -121,7 +121,7 @@ impl Tool for LsTool {
             file_count, dir_count
         ));
 
-        Ok(output)
+        Ok(ToolOutput::new(output))
     }
 }
 

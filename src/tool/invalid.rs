@@ -1,4 +1,4 @@
-use super::Tool;
+use super::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -45,11 +45,11 @@ impl Tool for InvalidTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: InvalidInput = serde_json::from_value(input)?;
-        Ok(format!(
+        Ok(ToolOutput::new(format!(
             "Invalid tool invocation for '{}': {}",
             params.tool, params.error
-        ))
+        )))
     }
 }

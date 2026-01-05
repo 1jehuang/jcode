@@ -1,4 +1,4 @@
-use super::Tool;
+use super::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -50,7 +50,7 @@ impl Tool for GlobTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: GlobInput = serde_json::from_value(input)?;
 
         let base_path = params.path.as_deref().unwrap_or(".");
@@ -138,6 +138,6 @@ impl Tool for GlobTool {
             ));
         }
 
-        Ok(output)
+        Ok(ToolOutput::new(output))
     }
 }

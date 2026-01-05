@@ -1,4 +1,4 @@
-use super::Tool;
+use super::{Tool, ToolContext, ToolOutput};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -46,7 +46,7 @@ impl Tool for ApplyPatchTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: ApplyPatchInput = serde_json::from_value(input)?;
         let parsed = parse_apply_patch(&params.patch_text)?;
 
@@ -88,9 +88,9 @@ impl Tool for ApplyPatchTool {
         if !unified.trim().is_empty() {
             let patch_tool = super::patch::PatchTool::new();
             let patch_result = patch_tool
-                .execute(json!({"patch_text": unified}))
+                .execute(json!({"patch_text": unified}), ctx.for_subcall("patch".to_string()))
                 .await?;
-            results.push(patch_result);
+            results.push(patch_result.output);
         }
 
         for path in &parsed.deletes {
@@ -113,9 +113,9 @@ impl Tool for ApplyPatchTool {
         }
 
         if results.is_empty() {
-            Ok("No changes applied".to_string())
+            Ok(ToolOutput::new("No changes applied"))
         } else {
-            Ok(results.join("\n"))
+            Ok(ToolOutput::new(results.join("\n")))
         }
     }
 }

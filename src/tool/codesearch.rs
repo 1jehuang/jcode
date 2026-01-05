@@ -1,4 +1,4 @@
-use super::Tool;
+use super::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -78,7 +78,7 @@ impl Tool for CodeSearchTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: CodeSearchInput = serde_json::from_value(input)?;
         let tokens_num = params
             .tokens_num
@@ -128,13 +128,13 @@ impl Tool for CodeSearchTool {
                                 output.truncate(MAX_OUTPUT_LEN);
                                 output.push_str("\n... (truncated)");
                             }
-                            return Ok(output);
+                            return Ok(ToolOutput::new(output).with_title(format!("codesearch: {}", params.query)));
                         }
                     }
                 }
             }
         }
 
-        Ok("No code snippets found. Try a different query.".to_string())
+        Ok(ToolOutput::new("No code snippets found. Try a different query."))
     }
 }

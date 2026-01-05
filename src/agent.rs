@@ -1,10 +1,14 @@
-use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall};
+use crate::bus::{Bus, BusEvent, ToolEvent, ToolStatus};
+use crate::message::{ContentBlock, Role, StreamEvent, ToolCall};
 use crate::provider::Provider;
+use crate::session::Session;
 use crate::skill::SkillRegistry;
-use crate::tool::Registry;
+use crate::tool::{Registry, ToolContext};
 use anyhow::Result;
 use futures::StreamExt;
+use std::collections::HashSet;
 use std::io::{self, Write};
+use std::sync::Arc;
 
 const SYSTEM_PROMPT: &str = r#"You are a coding assistant with access to tools for file operations and shell commands.
 
@@ -28,34 +32,72 @@ const SYSTEM_PROMPT: &str = r#"You are a coding assistant with access to tools f
 When you need to make changes, use the tools directly. Don't just describe what to do."#;
 
 pub struct Agent {
-    provider: Box<dyn Provider>,
+    provider: Arc<dyn Provider>,
     registry: Registry,
     skills: SkillRegistry,
-    messages: Vec<Message>,
+    session: Session,
     active_skill: Option<String>,
+    allowed_tools: Option<HashSet<String>>,
 }
 
 impl Agent {
-    pub fn new(provider: Box<dyn Provider>, registry: Registry) -> Self {
+    pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
         let skills = SkillRegistry::load().unwrap_or_default();
         Self {
             provider,
             registry,
             skills,
-            messages: Vec::new(),
+            session: Session::create(None, None),
             active_skill: None,
+            allowed_tools: None,
         }
+    }
+
+    pub fn new_with_session(
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        session: Session,
+        allowed_tools: Option<HashSet<String>>,
+    ) -> Self {
+        let skills = SkillRegistry::load().unwrap_or_default();
+        Self {
+            provider,
+            registry,
+            skills,
+            session,
+            active_skill: None,
+            allowed_tools,
+        }
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session.id
     }
 
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
-        self.messages.push(Message::user(user_message));
-        self.run_turn().await
+        self.session
+            .add_message(Role::User, vec![ContentBlock::Text {
+                text: user_message.to_string(),
+            }]);
+        self.session.save()?;
+        let _ = self.run_turn(true).await?;
+        Ok(())
+    }
+
+    pub async fn run_once_capture(&mut self, user_message: &str) -> Result<String> {
+        self.session
+            .add_message(Role::User, vec![ContentBlock::Text {
+                text: user_message.to_string(),
+            }]);
+        self.session.save()?;
+        self.run_turn(false).await
     }
 
     /// Clear conversation history
     pub fn clear(&mut self) {
-        self.messages.clear();
+        self.session = Session::create(None, None);
+        self.active_skill = None;
     }
 
     /// Start an interactive REPL
@@ -66,8 +108,14 @@ impl Agent {
         // Show available skills
         let skill_list = self.skills.list();
         if !skill_list.is_empty() {
-            println!("Available skills: {}",
-                skill_list.iter().map(|s| format!("/{}", s.name)).collect::<Vec<_>>().join(", "));
+            println!(
+                "Available skills: {}",
+                skill_list
+                    .iter()
+                    .map(|s| format!("/{}", s.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
         println!();
 
@@ -88,8 +136,7 @@ impl Agent {
             }
 
             if input == "clear" {
-                self.messages.clear();
-                self.active_skill = None;
+                self.clear();
                 println!("Conversation cleared.");
                 continue;
             }
@@ -103,15 +150,20 @@ impl Agent {
                     continue;
                 } else {
                     println!("Unknown skill: /{}", skill_name);
-                    println!("Available: {}",
-                        self.skills.list().iter().map(|s| format!("/{}", s.name)).collect::<Vec<_>>().join(", "));
+                    println!(
+                        "Available: {}",
+                        self.skills
+                            .list()
+                            .iter()
+                            .map(|s| format!("/{}", s.name))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
                     continue;
                 }
             }
 
-            self.messages.push(Message::user(input));
-
-            if let Err(e) = self.run_turn().await {
+            if let Err(e) = self.run_once(input).await {
                 eprintln!("\nError: {}\n", e);
             }
 
@@ -122,9 +174,11 @@ impl Agent {
     }
 
     /// Run turns until no more tool calls
-    async fn run_turn(&mut self) -> Result<()> {
+    async fn run_turn(&mut self, print_output: bool) -> Result<String> {
+        let mut final_text = String::new();
+
         loop {
-            let tools = self.registry.definitions().await;
+            let tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
 
             // Build system prompt with active skill
             let system_prompt = if let Some(ref skill_name) = self.active_skill {
@@ -137,9 +191,11 @@ impl Agent {
                 SYSTEM_PROMPT.to_string()
             };
 
+            let messages = self.session.messages_for_provider();
+
             let mut stream = self
                 .provider
-                .complete(&self.messages, &tools, &system_prompt)
+                .complete(&messages, &tools, &system_prompt)
                 .await?;
 
             let mut text_content = String::new();
@@ -152,13 +208,17 @@ impl Agent {
             while let Some(event) = stream.next().await {
                 match event? {
                     StreamEvent::TextDelta(text) => {
-                        print!("{}", text);
-                        io::stdout().flush()?;
+                        if print_output {
+                            print!("{}", text);
+                            io::stdout().flush()?;
+                        }
                         text_content.push_str(&text);
                     }
                     StreamEvent::ToolUseStart { id, name } => {
-                        print!("\n[{}] ", name);
-                        io::stdout().flush()?;
+                        if print_output {
+                            print!("\n[{}] ", name);
+                            io::stdout().flush()?;
+                        }
                         current_tool = Some(ToolCall {
                             id,
                             name,
@@ -175,8 +235,10 @@ impl Agent {
                             tool.input = serde_json::from_str(&current_tool_input)
                                 .unwrap_or(serde_json::Value::Null);
 
-                            // Show brief tool info
-                            print_tool_summary(&tool);
+                            if print_output {
+                                // Show brief tool info
+                                print_tool_summary(&tool);
+                            }
 
                             tool_calls.push(tool);
                             current_tool_input.clear();
@@ -202,7 +264,7 @@ impl Agent {
                 }
             }
 
-            if usage_input.is_some() || usage_output.is_some() {
+            if print_output && (usage_input.is_some() || usage_output.is_some()) {
                 let input = usage_input.unwrap_or(0);
                 let output = usage_output.unwrap_or(0);
                 print!("\n[Tokens] upload: {} download: {}\n", input, output);
@@ -212,7 +274,7 @@ impl Agent {
             // Add assistant message to history
             let mut content_blocks = Vec::new();
             if !text_content.is_empty() {
-                content_blocks.push(ContentBlock::Text { text: text_content });
+                content_blocks.push(ContentBlock::Text { text: text_content.clone() });
             }
             for tc in &tool_calls {
                 content_blocks.push(ContentBlock::ToolUse {
@@ -222,52 +284,119 @@ impl Agent {
                 });
             }
 
-            if !content_blocks.is_empty() {
-                self.messages.push(Message {
-                    role: Role::Assistant,
-                    content: content_blocks,
-                });
-            }
+            let assistant_message_id = if !content_blocks.is_empty() {
+                let message_id = self.session.add_message(Role::Assistant, content_blocks);
+                self.session.save()?;
+                Some(message_id)
+            } else {
+                None
+            };
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
-                println!();
+                if print_output {
+                    println!();
+                }
+                final_text = text_content;
                 break;
             }
 
             // Execute tools and add results
             for tc in tool_calls {
-                print!("\n  → ");
-                io::stdout().flush()?;
+                if let Some(allowed) = self.allowed_tools.as_ref() {
+                    if !allowed.contains(&tc.name) {
+                        return Err(anyhow::anyhow!("Tool '{}' is not allowed", tc.name));
+                    }
+                }
 
-                let result = self.registry.execute(&tc.name, tc.input.clone()).await;
+                if print_output {
+                    print!("\n  → ");
+                    io::stdout().flush()?;
+                }
+
+                let message_id = assistant_message_id
+                    .clone()
+                    .unwrap_or_else(|| self.session.id.clone());
+                let ctx = ToolContext {
+                    session_id: self.session.id.clone(),
+                    message_id: message_id.clone(),
+                    tool_call_id: tc.id.clone(),
+                };
+
+                Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                    session_id: self.session.id.clone(),
+                    message_id: message_id.clone(),
+                    tool_call_id: tc.id.clone(),
+                    tool_name: tc.name.clone(),
+                    status: ToolStatus::Running,
+                    title: None,
+                }));
+
+                let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
 
                 match result {
                     Ok(output) => {
-                        // Show truncated output
-                        let preview = if output.len() > 200 {
-                            format!("{}...", &output[..200])
-                        } else {
-                            output.clone()
-                        };
-                        println!("{}", preview.lines().next().unwrap_or("(done)"));
+                        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                            session_id: self.session.id.clone(),
+                            message_id: message_id.clone(),
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            status: ToolStatus::Completed,
+                            title: output.title.clone(),
+                        }));
 
-                        self.messages
-                            .push(Message::tool_result(&tc.id, &output, false));
+                        if print_output {
+                            let preview = if output.output.len() > 200 {
+                                format!("{}...", &output.output[..200])
+                            } else {
+                                output.output.clone()
+                            };
+                            println!("{}", preview.lines().next().unwrap_or("(done)"));
+                        }
+
+                        self.session.add_message(
+                            Role::User,
+                            vec![ContentBlock::ToolResult {
+                                tool_use_id: tc.id,
+                                content: output.output,
+                                is_error: None,
+                            }],
+                        );
+                        self.session.save()?;
                     }
                     Err(e) => {
+                        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                            session_id: self.session.id.clone(),
+                            message_id: message_id.clone(),
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            status: ToolStatus::Error,
+                            title: None,
+                        }));
+
                         let error_msg = format!("Error: {}", e);
-                        println!("{}", error_msg);
-                        self.messages
-                            .push(Message::tool_result(&tc.id, &error_msg, true));
+                        if print_output {
+                            println!("{}", error_msg);
+                        }
+                        self.session.add_message(
+                            Role::User,
+                            vec![ContentBlock::ToolResult {
+                                tool_use_id: tc.id,
+                                content: error_msg,
+                                is_error: Some(true),
+                            }],
+                        );
+                        self.session.save()?;
                     }
                 }
             }
 
-            println!();
+            if print_output {
+                println!();
+            }
         }
 
-        Ok(())
+        Ok(final_text)
     }
 }
 

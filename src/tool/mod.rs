@@ -19,12 +19,57 @@ mod websearch;
 mod write;
 
 use crate::message::ToolDefinition;
+use crate::provider::Provider;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+#[derive(Debug, Clone)]
+pub struct ToolOutput {
+    pub output: String,
+    pub title: Option<String>,
+    pub metadata: Option<Value>,
+}
+
+impl ToolOutput {
+    pub fn new(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            title: None,
+            metadata: None,
+        }
+    }
+
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: Value) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+}
+
+#[derive(Clone)]
+pub struct ToolContext {
+    pub session_id: String,
+    pub message_id: String,
+    pub tool_call_id: String,
+}
+
+impl ToolContext {
+    pub fn for_subcall(&self, tool_call_id: String) -> Self {
+        Self {
+            session_id: self.session_id.clone(),
+            message_id: self.message_id.clone(),
+            tool_call_id,
+        }
+    }
+}
 
 /// A tool that can be executed by the agent
 #[async_trait]
@@ -39,7 +84,7 @@ pub trait Tool: Send + Sync {
     fn parameters_schema(&self) -> Value;
 
     /// Execute the tool with the given input
-    async fn execute(&self, input: Value) -> Result<String>;
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput>;
 
     /// Convert to API tool definition
     fn to_definition(&self) -> ToolDefinition {
@@ -58,7 +103,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    pub async fn new() -> Self {
+    pub async fn new(provider: Arc<dyn Provider>) -> Self {
         let registry = Self {
             tools: Arc::new(RwLock::new(HashMap::new())),
         };
@@ -96,7 +141,8 @@ impl Registry {
         tools_map.insert("invalid".to_string(), Arc::new(invalid::InvalidTool::new()) as Arc<dyn Tool>);
         tools_map.insert("skill".to_string(), Arc::new(skill::SkillTool::new()) as Arc<dyn Tool>);
         tools_map.insert("lsp".to_string(), Arc::new(lsp::LspTool::new()) as Arc<dyn Tool>);
-        tools_map.insert("task".to_string(), Arc::new(task::TaskTool::new()) as Arc<dyn Tool>);
+        let task_tool = task::TaskTool::new(provider, registry.clone());
+        tools_map.insert("task".to_string(), Arc::new(task_tool) as Arc<dyn Tool>);
         tools_map.insert("todowrite".to_string(), Arc::new(todo::TodoWriteTool::new()) as Arc<dyn Tool>);
         tools_map.insert("todoread".to_string(), Arc::new(todo::TodoReadTool::new()) as Arc<dyn Tool>);
 
@@ -111,13 +157,24 @@ impl Registry {
     }
 
     /// Get all tool definitions for the API
-    pub async fn definitions(&self) -> Vec<ToolDefinition> {
+    pub async fn definitions(&self, allowed_tools: Option<&HashSet<String>>) -> Vec<ToolDefinition> {
         let tools = self.tools.read().await;
-        tools.values().map(|t| t.to_definition()).collect()
+        tools
+            .iter()
+            .filter(|(name, _)| {
+                allowed_tools.map(|set| set.contains(*name)).unwrap_or(true)
+            })
+            .map(|(_, tool)| tool.to_definition())
+            .collect()
+    }
+
+    pub async fn tool_names(&self) -> Vec<String> {
+        let tools = self.tools.read().await;
+        tools.keys().cloned().collect()
     }
 
     /// Execute a tool by name
-    pub async fn execute(&self, name: &str, input: Value) -> Result<String> {
+    pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let tools = self.tools.read().await;
         let tool = tools
             .get(name)
@@ -127,6 +184,6 @@ impl Registry {
         // Drop the lock before executing
         drop(tools);
 
-        tool.execute(input).await
+        tool.execute(input, ctx).await
     }
 }

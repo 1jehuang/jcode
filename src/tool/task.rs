@@ -1,22 +1,24 @@
-use super::Tool;
+use super::{Registry, Tool, ToolContext, ToolOutput};
+use crate::agent::Agent;
+use crate::bus::{Bus, BusEvent, ToolSummary, ToolSummaryState};
+use crate::provider::Provider;
+use crate::session::Session;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::process::Stdio;
-use std::time::Duration;
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
-use tokio::time::timeout;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use tokio::sync::broadcast;
 
-const DEFAULT_TIMEOUT_MS: u64 = 300_000;
-const MAX_OUTPUT_LEN: usize = 30000;
-
-pub struct TaskTool;
+pub struct TaskTool {
+    provider: Arc<dyn Provider>,
+    registry: Registry,
+}
 
 impl TaskTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
+        Self { provider, registry }
     }
 }
 
@@ -38,8 +40,7 @@ impl Tool for TaskTool {
     }
 
     fn description(&self) -> &str {
-        "Run a sub-task using a separate jcode invocation. Use for delegated work. \
-         The subagent_type is informational in jcode."
+        "Run a sub-task using a dedicated subagent session. Returns the subagent output and a task session id."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -49,7 +50,7 @@ impl Tool for TaskTool {
             "properties": {
                 "description": {
                     "type": "string",
-                    "description": "Short description of the task"
+                    "description": "A short (3-5 words) description of the task"
                 },
                 "prompt": {
                     "type": "string",
@@ -57,100 +58,117 @@ impl Tool for TaskTool {
                 },
                 "subagent_type": {
                     "type": "string",
-                    "description": "Subagent type (informational in jcode)"
+                    "description": "The type of specialized agent to use for this task"
                 },
                 "session_id": {
                     "type": "string",
-                    "description": "Optional session identifier to continue"
+                    "description": "Existing Task session to continue"
                 },
                 "command": {
                     "type": "string",
-                    "description": "Optional command that triggered this task"
+                    "description": "The command that triggered this task"
                 }
             }
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: TaskInput = serde_json::from_value(input)?;
 
-        let provider = std::env::var("JCODE_TASK_PROVIDER")
-            .or_else(|_| std::env::var("JCODE_ACTIVE_PROVIDER"))
-            .unwrap_or_else(|_| "claude".to_string());
+        let mut session = if let Some(session_id) = &params.session_id {
+            Session::load(session_id).unwrap_or_else(|_| {
+                Session::create(Some(ctx.session_id.clone()), Some(task_title(&params)))
+            })
+        } else {
+            Session::create(Some(ctx.session_id.clone()), Some(task_title(&params)))
+        };
 
-        let exe = std::env::current_exe()
-            .map_err(|e| anyhow::anyhow!("Unable to locate jcode binary: {}", e))?;
+        session.save()?;
 
-        let mut child = Command::new(exe)
-            .arg("--provider")
-            .arg(&provider)
-            .arg("run")
-            .arg(&params.prompt)
-            .env("JCODE_NO_UPDATE", "1")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-
-        let timeout_duration = Duration::from_millis(DEFAULT_TIMEOUT_MS);
-        let result = timeout(timeout_duration, async {
-            let status = child.wait().await?;
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-
-            if let Some(mut out) = child.stdout.take() {
-                out.read_to_string(&mut stdout).await?;
-            }
-            if let Some(mut err) = child.stderr.take() {
-                err.read_to_string(&mut stderr).await?;
-            }
-
-            Ok::<_, anyhow::Error>((status, stdout, stderr))
-        })
-        .await;
-
-        match result {
-            Ok(Ok((status, stdout, stderr))) => {
-                let mut output = String::new();
-                output.push_str(&format!(
-                    "Task: {}\nSubagent: {}\nProvider: {}\n",
-                    params.description, params.subagent_type, provider
-                ));
-                if let Some(session_id) = params.session_id {
-                    output.push_str(&format!("Session: {}\n", session_id));
-                }
-                if let Some(command) = params.command {
-                    output.push_str(&format!("Command: {}\n", command));
-                }
-                output.push('\n');
-                if !stdout.is_empty() {
-                    output.push_str(&stdout);
-                }
-                if !stderr.is_empty() {
-                    if !output.ends_with('\n') {
-                        output.push('\n');
-                    }
-                    output.push_str(&stderr);
-                }
-                if !status.success() {
-                    output.push_str(&format!(
-                        "\nExit code: {}\n",
-                        status.code().unwrap_or(-1)
-                    ));
-                }
-                if output.len() > MAX_OUTPUT_LEN {
-                    output.truncate(MAX_OUTPUT_LEN);
-                    output.push_str("\n... (output truncated)");
-                }
-                Ok(output)
-            }
-            Ok(Err(e)) => Err(anyhow::anyhow!("Task failed: {}", e)),
-            Err(_) => {
-                let _ = child.kill().await;
-                Err(anyhow::anyhow!(
-                    "Task timed out after {}ms",
-                    DEFAULT_TIMEOUT_MS
-                ))
-            }
+        let mut allowed: HashSet<String> = self
+            .registry
+            .tool_names()
+            .await
+            .into_iter()
+            .collect();
+        for blocked in ["task", "todowrite", "todoread"] {
+            allowed.remove(blocked);
         }
+
+        let summary_map: Arc<Mutex<HashMap<String, ToolSummary>>> = Arc::new(Mutex::new(HashMap::new()));
+        let summary_map_handle = summary_map.clone();
+        let session_id = session.id.clone();
+
+        let mut receiver = Bus::global().subscribe();
+        let listener = tokio::spawn(async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(BusEvent::ToolUpdated(event)) => {
+                        if event.session_id != session_id {
+                            continue;
+                        }
+                        let mut summary = summary_map_handle.lock().expect("tool summary lock");
+                        summary.insert(
+                            event.tool_call_id.clone(),
+                            ToolSummary {
+                                id: event.tool_call_id.clone(),
+                                tool: event.tool_name.clone(),
+                                state: ToolSummaryState {
+                                    status: event.status.as_str().to_string(),
+                                    title: if event.status.as_str() == "completed" {
+                                        event.title.clone()
+                                    } else {
+                                        None
+                                    },
+                                },
+                            },
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        });
+
+        let mut agent = Agent::new_with_session(
+            self.provider.clone(),
+            self.registry.clone(),
+            session,
+            Some(allowed),
+        );
+
+        let final_text = agent.run_once_capture(&params.prompt).await?;
+        let sub_session_id = agent.session_id().to_string();
+
+        listener.abort();
+
+        let mut summary: Vec<ToolSummary> = summary_map
+            .lock()
+            .map_err(|_| anyhow::anyhow!("tool summary lock poisoned"))?
+            .values()
+            .cloned()
+            .collect();
+        summary.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let mut output = final_text;
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push('\n');
+        output.push_str("<task_metadata>\n");
+        output.push_str(&format!("session_id: {}\n", sub_session_id));
+        output.push_str("</task_metadata>");
+
+        Ok(ToolOutput::new(output)
+            .with_title(params.description)
+            .with_metadata(json!({
+                "summary": summary,
+                "sessionId": sub_session_id,
+            })))
     }
+}
+
+fn task_title(params: &TaskInput) -> String {
+    format!("{} (@{} subagent)", params.description, params.subagent_type)
 }

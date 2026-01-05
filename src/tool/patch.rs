@@ -1,4 +1,4 @@
-use super::Tool;
+use super::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -57,7 +57,7 @@ impl Tool for PatchTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: PatchInput = serde_json::from_value(input)?;
 
         let patches = parse_patch(&params.patch_text)?;
@@ -76,7 +76,7 @@ impl Tool for PatchTool {
             }
         }
 
-        Ok(results.join("\n"))
+        Ok(ToolOutput::new(results.join("\n")))
     }
 }
 

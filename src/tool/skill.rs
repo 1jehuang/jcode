@@ -1,4 +1,4 @@
-use super::Tool;
+use super::{Tool, ToolContext, ToolOutput};
 use crate::skill::SkillRegistry;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -42,7 +42,7 @@ impl Tool for SkillTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<String> {
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: SkillInput = serde_json::from_value(input)?;
         let registry = SkillRegistry::load().unwrap_or_default();
         let skill = registry
@@ -55,11 +55,11 @@ impl Tool for SkillTool {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| ".".to_string());
 
-        Ok(format!(
+        Ok(ToolOutput::new(format!(
             "## Skill: {}\n\n**Base directory**: {}\n\n{}",
             skill.name,
             base_dir,
             skill.get_prompt()
-        ))
+        )).with_title(format!("skill: {}", skill.name)))
     }
 }
