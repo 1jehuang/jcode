@@ -9,7 +9,7 @@ use ratatui::{
     DefaultTerminal,
     prelude::*,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Queue mode for pending messages
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -19,6 +19,19 @@ pub enum QueueMode {
     /// Send message after current response completes
     #[default]
     AfterCompletion,
+}
+
+/// Current processing status
+#[derive(Clone, Default)]
+pub enum ProcessingStatus {
+    #[default]
+    Idle,
+    /// Sending request to API
+    Sending,
+    /// Receiving streaming response
+    Streaming,
+    /// Executing a tool
+    RunningTool(String),
 }
 
 /// A queued message waiting to be sent
@@ -55,6 +68,12 @@ pub struct App {
     queue_mode: QueueMode,
     /// Signal to interrupt current turn for interleaved message
     interrupt_for_message: bool,
+    // Live token usage
+    streaming_input_tokens: u64,
+    streaming_output_tokens: u64,
+    // Current status
+    status: ProcessingStatus,
+    processing_started: Option<Instant>,
 }
 
 impl App {
@@ -76,6 +95,10 @@ impl App {
             queued_messages: Vec::new(),
             queue_mode: QueueMode::default(),
             interrupt_for_message: false,
+            streaming_input_tokens: 0,
+            streaming_output_tokens: 0,
+            status: ProcessingStatus::default(),
+            processing_started: None,
         }
     }
 
@@ -257,6 +280,9 @@ impl App {
         // Process with LLM
         self.is_processing = true;
         self.streaming_text.clear();
+        self.streaming_input_tokens = 0;
+        self.streaming_output_tokens = 0;
+        self.processing_started = Some(Instant::now());
 
         if let Err(e) = self.run_turn().await {
             self.display_messages.push(DisplayMessage {
@@ -270,6 +296,8 @@ impl App {
         self.process_after_queue().await;
 
         self.is_processing = false;
+        self.status = ProcessingStatus::Idle;
+        self.processing_started = None;
         Ok(())
     }
 
@@ -289,6 +317,8 @@ impl App {
 
             self.messages.push(Message::user(&queued.content));
             self.streaming_text.clear();
+            self.streaming_input_tokens = 0;
+            self.streaming_output_tokens = 0;
 
             if let Err(e) = self.run_turn().await {
                 self.display_messages.push(DisplayMessage {
@@ -314,6 +344,7 @@ impl App {
             // Build system prompt with active skill
             let system_prompt = self.build_system_prompt();
 
+            self.status = ProcessingStatus::Sending;
             let mut stream = self
                 .provider
                 .complete(&self.messages, &tools, &system_prompt)
@@ -323,10 +354,13 @@ impl App {
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut current_tool: Option<ToolCall> = None;
             let mut current_tool_input = String::new();
-            let mut usage_input: Option<u64> = None;
-            let mut usage_output: Option<u64> = None;
+            let mut first_event = true;
 
             while let Some(event) = stream.next().await {
+                if first_event {
+                    self.status = ProcessingStatus::Streaming;
+                    first_event = false;
+                }
                 match event? {
                     StreamEvent::TextDelta(text) => {
                         self.streaming_text.push_str(&text);
@@ -356,10 +390,10 @@ impl App {
                         output_tokens,
                     } => {
                         if let Some(input) = input_tokens {
-                            usage_input = Some(input);
+                            self.streaming_input_tokens = input;
                         }
                         if let Some(output) = output_tokens {
-                            usage_output = Some(output);
+                            self.streaming_output_tokens = output;
                         }
                     }
                     StreamEvent::MessageEnd { .. } => break,
@@ -402,15 +436,6 @@ impl App {
                 content: text_content,
                 tool_calls: tool_strs,
             });
-            if usage_input.is_some() || usage_output.is_some() {
-                let input = usage_input.unwrap_or(0);
-                let output = usage_output.unwrap_or(0);
-                self.display_messages.push(DisplayMessage {
-                    role: "usage".to_string(),
-                    content: format!("tokens: upload {} | download {}", input, output),
-                    tool_calls: vec![],
-                });
-            }
             self.streaming_text.clear();
 
             // If no tool calls, we're done
@@ -430,6 +455,7 @@ impl App {
                     }
                 }
 
+                self.status = ProcessingStatus::RunningTool(tc.name.clone());
                 let result = self.registry.execute(&tc.name, tc.input.clone()).await;
                 let (output, is_error) = match result {
                     Ok(o) => (o, false),
@@ -547,5 +573,17 @@ When you need to make changes, use the tools directly. Don't just describe what 
 
     pub fn queued_count(&self) -> usize {
         self.queued_messages.len()
+    }
+
+    pub fn streaming_tokens(&self) -> (u64, u64) {
+        (self.streaming_input_tokens, self.streaming_output_tokens)
+    }
+
+    pub fn status(&self) -> &ProcessingStatus {
+        &self.status
+    }
+
+    pub fn elapsed(&self) -> Option<Duration> {
+        self.processing_started.map(|t| t.elapsed())
     }
 }

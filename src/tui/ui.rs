@@ -1,4 +1,4 @@
-use super::app::{App, QueueMode};
+use super::app::{App, ProcessingStatus, QueueMode};
 use ratatui::{
     prelude::*,
     widgets::{Paragraph, Wrap},
@@ -155,10 +155,27 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
         }
-        // Minimal cursor
+        // Status line with phase, tokens, and elapsed time
+        let (input_tokens, output_tokens) = app.streaming_tokens();
+        let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
+
+        let status_text = match app.status() {
+            ProcessingStatus::Idle => String::new(),
+            ProcessingStatus::Sending => format!("sending… {:.1}s", elapsed),
+            ProcessingStatus::Streaming => {
+                if input_tokens > 0 || output_tokens > 0 {
+                    format!("↑{} ↓{} {:.1}s", input_tokens, output_tokens, elapsed)
+                } else {
+                    format!("streaming… {:.1}s", elapsed)
+                }
+            }
+            ProcessingStatus::RunningTool(name) => format!("running {}… {:.1}s", name, elapsed),
+        };
+
         lines.push(Line::from(vec![
             Span::raw("  "),
             Span::styled("▍", Style::default().fg(AI_COLOR)),
+            Span::styled(format!(" {}", status_text), Style::default().fg(DIM_COLOR)),
         ]));
     }
 
