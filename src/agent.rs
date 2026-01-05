@@ -47,6 +47,11 @@ impl Agent {
         self.run_turn().await
     }
 
+    /// Clear conversation history
+    pub fn clear(&mut self) {
+        self.messages.clear();
+    }
+
     /// Start an interactive REPL
     pub async fn repl(&mut self) -> Result<()> {
         println!("J-Code - Coding Agent");
