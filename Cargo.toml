@@ -32,6 +32,7 @@ anyhow = "1"
 thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
+urlencoding = "2"        # URL encoding for web search
 
 # Streaming SSE parsing
 eventsource-stream = "0.2"
