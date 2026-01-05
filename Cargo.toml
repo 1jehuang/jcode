@@ -1,0 +1,40 @@
+[package]
+name = "jcode"
+version = "0.1.0"
+description = "A Rust coding agent using Claude Max or ChatGPT Pro subscriptions"
+edition = "2021"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full", "process"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# File operations
+glob = "0.3"
+ignore = "0.4"           # gitignore-aware file walking
+walkdir = "2"
+similar = "2"            # diffing for edits
+
+# Utilities
+dirs = "5"               # home directory
+anyhow = "1"
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+
+# Streaming SSE parsing
+eventsource-stream = "0.2"
+tokio-stream = "0.1"
+pin-project-lite = "0.2"
+bytes = "1"
