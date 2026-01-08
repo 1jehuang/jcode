@@ -12,16 +12,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::interval;
 
-/// Queue mode for pending messages
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum QueueMode {
-    /// Insert message between tool calls (interrupt current flow)
-    Interleave,
-    /// Send message after current response completes
-    #[default]
-    AfterCompletion,
-}
-
 /// Current processing status
 #[derive(Clone, Default)]
 pub enum ProcessingStatus {
@@ -35,19 +25,13 @@ pub enum ProcessingStatus {
     RunningTool(String),
 }
 
-/// A queued message waiting to be sent
-#[derive(Clone)]
-pub struct QueuedMessage {
-    pub content: String,
-    pub mode: QueueMode,
-}
-
 /// A message in the conversation for display
 #[derive(Clone)]
 pub struct DisplayMessage {
     pub role: String,
     pub content: String,
     pub tool_calls: Vec<String>,
+    pub duration_secs: Option<f32>,
 }
 
 /// TUI Application state
@@ -66,10 +50,7 @@ pub struct App {
     streaming_text: String,
     should_quit: bool,
     // Message queueing
-    queued_messages: Vec<QueuedMessage>,
-    queue_mode: QueueMode,
-    /// Signal to interrupt current turn for interleaved message
-    interrupt_for_message: bool,
+    queued_messages: Vec<String>,
     // Live token usage
     streaming_input_tokens: u64,
     streaming_output_tokens: u64,
@@ -100,8 +81,6 @@ impl App {
             streaming_text: String::new(),
             should_quit: false,
             queued_messages: Vec::new(),
-            queue_mode: QueueMode::default(),
-            interrupt_for_message: false,
             streaming_input_tokens: 0,
             streaming_output_tokens: 0,
             status: ProcessingStatus::default(),
@@ -165,11 +144,12 @@ impl App {
                 role: "error".to_string(),
                 content: format!("Error: {}", e),
                 tool_calls: vec![],
+                duration_secs: None,
             });
         }
 
         // Process any queued "after completion" messages
-        self.process_after_queue().await;
+        self.process_queued_messages().await;
 
         self.is_processing = false;
         self.status = ProcessingStatus::Idle;
@@ -195,14 +175,6 @@ impl App {
                 KeyCode::Char('u') => {
                     self.input.clear();
                     self.cursor_pos = 0;
-                    return Ok(());
-                }
-                // Tab to toggle queue mode while processing
-                KeyCode::Char('t') if self.is_processing => {
-                    self.queue_mode = match self.queue_mode {
-                        QueueMode::Interleave => QueueMode::AfterCompletion,
-                        QueueMode::AfterCompletion => QueueMode::Interleave,
-                    };
                     return Ok(());
                 }
                 _ => {}
@@ -259,13 +231,6 @@ impl App {
                 self.input.clear();
                 self.cursor_pos = 0;
             }
-            KeyCode::Tab if self.is_processing => {
-                // Tab to toggle queue mode while processing
-                self.queue_mode = match self.queue_mode {
-                    QueueMode::Interleave => QueueMode::AfterCompletion,
-                    QueueMode::AfterCompletion => QueueMode::Interleave,
-                };
-            }
             _ => {}
         }
 
@@ -281,21 +246,11 @@ impl App {
         self.display_messages.push(DisplayMessage {
             role: "queued".to_string(),
             content: content.clone(),
-            tool_calls: vec![match self.queue_mode {
-                QueueMode::Interleave => "interleave".to_string(),
-                QueueMode::AfterCompletion => "after".to_string(),
-            }],
+            tool_calls: vec![],
+            duration_secs: None,
         });
 
-        self.queued_messages.push(QueuedMessage {
-            content,
-            mode: self.queue_mode,
-        });
-
-        // If interleave mode, signal to interrupt current turn
-        if self.queue_mode == QueueMode::Interleave {
-            self.interrupt_for_message = true;
-        }
+        self.queued_messages.push(content);
     }
 
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
@@ -311,12 +266,14 @@ impl App {
                     role: "system".to_string(),
                     content: format!("Activated skill: {} - {}", skill.name, skill.description),
                     tool_calls: vec![],
+                duration_secs: None,
                 });
             } else {
                 self.display_messages.push(DisplayMessage {
                     role: "error".to_string(),
                     content: format!("Unknown skill: /{}", skill_name),
                     tool_calls: vec![],
+                duration_secs: None,
                 });
             }
             return;
@@ -327,6 +284,7 @@ impl App {
             role: "user".to_string(),
             content: input.clone(),
             tool_calls: vec![],
+                duration_secs: None,
         });
         self.messages.push(Message::user(&input));
         self.session.add_message(
@@ -353,47 +311,48 @@ impl App {
                 role: "error".to_string(),
                 content: format!("Error: {}", e),
                 tool_calls: vec![],
+                duration_secs: None,
             });
         }
 
         // Process any queued "after completion" messages
-        self.process_after_queue().await;
+        self.process_queued_messages().await;
 
         self.is_processing = false;
         self.status = ProcessingStatus::Idle;
         self.processing_started = None;
     }
 
-    /// Process messages queued for after completion
-    async fn process_after_queue(&mut self) {
-        // Keep processing until no more after-completion messages
-        while let Some(idx) = self.queued_messages.iter().position(|m| m.mode == QueueMode::AfterCompletion) {
-            let queued = self.queued_messages.remove(idx);
+    /// Process all queued messages
+    async fn process_queued_messages(&mut self) {
+        while !self.queued_messages.is_empty() {
+            let content = self.queued_messages.remove(0);
 
             // Update display: change "queued" to "user"
             if let Some(display_msg) = self.display_messages.iter_mut().rev()
-                .find(|m| m.role == "queued" && m.content == queued.content)
+                .find(|m| m.role == "queued" && m.content == content)
             {
                 display_msg.role = "user".to_string();
-                display_msg.tool_calls.clear();
             }
 
-            self.messages.push(Message::user(&queued.content));
+            self.messages.push(Message::user(&content));
             self.session.add_message(
                 Role::User,
-                vec![ContentBlock::Text { text: queued.content.clone() }],
+                vec![ContentBlock::Text { text: content.clone() }],
             );
             let _ = self.session.save();
             self.streaming_text.clear();
             self.streaming_tool_calls.clear();
             self.streaming_input_tokens = 0;
             self.streaming_output_tokens = 0;
+            self.processing_started = Some(Instant::now());
 
             if let Err(e) = self.run_turn().await {
                 self.display_messages.push(DisplayMessage {
                     role: "error".to_string(),
                     content: format!("Error: {}", e),
                     tool_calls: vec![],
+                    duration_secs: None,
                 });
             }
         }
@@ -401,13 +360,6 @@ impl App {
 
     async fn run_turn(&mut self) -> Result<()> {
         loop {
-            // Check for interleaved messages before starting a new API call
-            if self.process_interleaved_queue().await? {
-                // An interleaved message was processed, continue the loop
-                // to let the model respond to it
-                continue;
-            }
-
             let tools = self.registry.definitions(None).await;
 
             // Build system prompt with active skill
@@ -507,10 +459,12 @@ impl App {
                 .map(|tc| format!("[{}]", tc.name))
                 .collect();
 
+            let duration = self.processing_started.map(|t| t.elapsed().as_secs_f32());
             self.display_messages.push(DisplayMessage {
                 role: "assistant".to_string(),
                 content: text_content,
                 tool_calls: tool_strs,
+                duration_secs: if tool_calls.is_empty() { duration } else { None },
             });
             self.streaming_text.clear();
             self.streaming_tool_calls.clear();
@@ -520,18 +474,8 @@ impl App {
                 break;
             }
 
-            // Execute tools, checking for interleaved messages between each
+            // Execute tools
             for tc in tool_calls {
-                // Check for interleaved message before executing tool
-                if self.interrupt_for_message {
-                    self.interrupt_for_message = false;
-                    // Process the interleaved message
-                    if self.process_interleaved_queue().await? {
-                        // Message was processed, tool results already in history
-                        // Continue to let model respond to both
-                    }
-                }
-
                 self.status = ProcessingStatus::RunningTool(tc.name.clone());
                 let message_id = assistant_message_id
                     .clone()
@@ -588,6 +532,7 @@ impl App {
                     role: "tool".to_string(),
                     content: format!("[{}] {}", tc.name, display_output),
                     tool_calls: vec![],
+                duration_secs: None,
                 });
 
                 self.messages.push(Message::tool_result(&tc.id, &output, is_error));
@@ -615,11 +560,6 @@ impl App {
         let mut redraw_interval = interval(Duration::from_millis(50));
 
         loop {
-            // Check for interleaved messages before starting a new API call
-            if self.process_interleaved_queue().await? {
-                continue;
-            }
-
             let tools = self.registry.definitions(None).await;
             let system_prompt = self.build_system_prompt();
 
@@ -741,10 +681,12 @@ impl App {
                 .map(|tc| format!("[{}]", tc.name))
                 .collect();
 
+            let duration = self.processing_started.map(|t| t.elapsed().as_secs_f32());
             self.display_messages.push(DisplayMessage {
                 role: "assistant".to_string(),
                 content: text_content,
                 tool_calls: tool_strs,
+                duration_secs: if tool_calls.is_empty() { duration } else { None },
             });
             self.streaming_text.clear();
             self.streaming_tool_calls.clear();
@@ -756,13 +698,6 @@ impl App {
 
             // Execute tools with input handling
             for tc in tool_calls {
-                if self.interrupt_for_message {
-                    self.interrupt_for_message = false;
-                    if self.process_interleaved_queue().await? {
-                        // Message was processed
-                    }
-                }
-
                 self.status = ProcessingStatus::RunningTool(tc.name.clone());
                 terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
 
@@ -820,6 +755,7 @@ impl App {
                     role: "tool".to_string(),
                     content: format!("[{}] {}", tc.name, display_output),
                     tool_calls: vec![],
+                duration_secs: None,
                 });
 
                 self.messages.push(Message::tool_result(&tc.id, &output, is_error));
@@ -836,33 +772,6 @@ impl App {
         }
 
         Ok(())
-    }
-
-    /// Process any interleaved messages in the queue
-    /// Returns true if a message was processed
-    async fn process_interleaved_queue(&mut self) -> Result<bool> {
-        if let Some(idx) = self.queued_messages.iter().position(|m| m.mode == QueueMode::Interleave) {
-            let queued = self.queued_messages.remove(idx);
-
-            // Update display: change "queued" to "user"
-            if let Some(display_msg) = self.display_messages.iter_mut().rev()
-                .find(|m| m.role == "queued" && m.content == queued.content)
-            {
-                display_msg.role = "user".to_string();
-                display_msg.tool_calls.clear();
-            }
-
-            self.messages.push(Message::user(&queued.content));
-            self.session.add_message(
-                Role::User,
-                vec![ContentBlock::Text { text: queued.content.clone() }],
-            );
-            let _ = self.session.save();
-            self.interrupt_for_message = false;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
     }
 
     fn build_system_prompt(&self) -> String {
@@ -928,10 +837,6 @@ When you need to make changes, use the tools directly. Don't just describe what 
         self.skills.list().iter().map(|s| s.name.as_str()).collect()
     }
 
-    pub fn queue_mode(&self) -> QueueMode {
-        self.queue_mode
-    }
-
     pub fn queued_count(&self) -> usize {
         self.queued_messages.len()
     }
@@ -993,14 +898,8 @@ mod tests {
         assert!(app.display_messages().is_empty());
         assert!(app.streaming_text().is_empty());
         assert_eq!(app.queued_count(), 0);
-        assert_eq!(app.queue_mode(), QueueMode::AfterCompletion);
         assert!(matches!(app.status(), ProcessingStatus::Idle));
         assert!(app.elapsed().is_none());
-    }
-
-    #[test]
-    fn test_queue_mode_default() {
-        assert_eq!(QueueMode::default(), QueueMode::AfterCompletion);
     }
 
     #[test]
@@ -1129,47 +1028,6 @@ mod tests {
         assert_eq!(app.display_messages().len(), 1);
         assert_eq!(app.display_messages()[0].role, "queued");
         assert_eq!(app.display_messages()[0].content, "test");
-    }
-
-    #[test]
-    fn test_queue_mode_toggle() {
-        let mut app = create_test_app();
-        app.is_processing = true;
-
-        assert_eq!(app.queue_mode(), QueueMode::AfterCompletion);
-
-        // Tab toggles queue mode during processing
-        app.handle_key(KeyCode::Tab, KeyModifiers::empty()).unwrap();
-        assert_eq!(app.queue_mode(), QueueMode::Interleave);
-
-        app.handle_key(KeyCode::Tab, KeyModifiers::empty()).unwrap();
-        assert_eq!(app.queue_mode(), QueueMode::AfterCompletion);
-    }
-
-    #[test]
-    fn test_queue_message_interleave_sets_interrupt() {
-        let mut app = create_test_app();
-        app.is_processing = true;
-        app.queue_mode = QueueMode::Interleave;
-
-        app.handle_key(KeyCode::Char('x'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
-
-        assert!(app.interrupt_for_message);
-        assert_eq!(app.queued_messages[0].mode, QueueMode::Interleave);
-    }
-
-    #[test]
-    fn test_queue_message_after_completion_no_interrupt() {
-        let mut app = create_test_app();
-        app.is_processing = true;
-        app.queue_mode = QueueMode::AfterCompletion;
-
-        app.handle_key(KeyCode::Char('x'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
-
-        assert!(!app.interrupt_for_message);
-        assert_eq!(app.queued_messages[0].mode, QueueMode::AfterCompletion);
     }
 
     #[test]

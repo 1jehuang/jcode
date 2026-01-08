@@ -1,4 +1,4 @@
-use super::app::{App, ProcessingStatus, QueueMode};
+use super::app::{App, ProcessingStatus};
 use ratatui::{
     prelude::*,
     widgets::{Paragraph, Wrap},
@@ -90,6 +90,16 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                         Span::styled(
                             msg.tool_calls.join(" "),
                             Style::default().fg(ACCENT_COLOR).dim(),
+                        ),
+                    ]));
+                }
+                // Show duration if available
+                if let Some(secs) = msg.duration_secs {
+                    lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            format!("{:.1}s", secs),
+                            Style::default().fg(DIM_COLOR),
                         ),
                     ]));
                 }
@@ -235,22 +245,23 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let cursor_pos = app.cursor_pos();
 
     // Build input line with prompt
-    let (prompt, suffix) = if app.is_processing() {
-        // Show queue mode indicator when processing
-        let mode_indicator = match app.queue_mode() {
-            QueueMode::Interleave => Span::styled(" [Tab:⚡]", Style::default().fg(QUEUED_COLOR)),
-            QueueMode::AfterCompletion => Span::styled(" [Tab:⏳]", Style::default().fg(DIM_COLOR)),
-        };
-        (Span::styled("… ", Style::default().fg(QUEUED_COLOR)), Some(mode_indicator))
+    let prompt = if app.is_processing() {
+        Span::styled("… ", Style::default().fg(QUEUED_COLOR))
     } else if app.active_skill().is_some() {
-        (Span::styled("» ", Style::default().fg(ACCENT_COLOR)), None)
+        Span::styled("» ", Style::default().fg(ACCENT_COLOR))
     } else {
-        (Span::styled("> ", Style::default().fg(DIM_COLOR)), None)
+        Span::styled("> ", Style::default().fg(DIM_COLOR))
     };
 
     let mut spans = vec![prompt, Span::raw(input_text)];
-    if let Some(s) = suffix {
-        spans.push(s);
+
+    // Show queued message count if any
+    let queued = app.queued_count();
+    if queued > 0 {
+        spans.push(Span::styled(
+            format!(" ({} queued)", queued),
+            Style::default().fg(DIM_COLOR),
+        ));
     }
 
     let input_line = Line::from(spans);
