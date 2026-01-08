@@ -18,20 +18,27 @@ const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    // Layout: messages + status + input
+    // Calculate queued messages height (1 line per message, max 3)
+    let queued_height = app.queued_messages().len().min(3) as u16;
+
+    // Layout: messages + status + queued + input
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([
-            Constraint::Min(3),      // Messages
-            Constraint::Length(1),   // Status line
-            Constraint::Length(1),   // Input
+            Constraint::Min(3),              // Messages
+            Constraint::Length(1),           // Status line
+            Constraint::Length(queued_height), // Queued messages
+            Constraint::Length(1),           // Input
         ])
         .split(area);
 
     draw_messages(frame, app, chunks[0]);
     draw_status(frame, app, chunks[1]);
-    draw_input(frame, app, chunks[2]);
+    if queued_height > 0 {
+        draw_queued(frame, app, chunks[2]);
+    }
+    draw_input(frame, app, chunks[3]);
 }
 
 fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
@@ -152,17 +159,6 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                     Span::styled(&msg.content, Style::default().fg(Color::Red)),
                 ]));
             }
-            "queued" => {
-                // Queued message: show with amber color and mode indicator
-                let mode_tag = msg.tool_calls.first()
-                    .map(|s| s.as_str())
-                    .unwrap_or("after");
-                lines.push(Line::from(vec![
-                    Span::styled("⏳ ", Style::default().fg(QUEUED_COLOR)),
-                    Span::styled(&msg.content, Style::default().fg(QUEUED_COLOR).dim()),
-                    Span::styled(format!(" [{}]", mode_tag), Style::default().fg(DIM_COLOR)),
-                ]));
-            }
             _ => {}
         }
     }
@@ -240,6 +236,22 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
+fn draw_queued(frame: &mut Frame, app: &App, area: Rect) {
+    let queued = app.queued_messages();
+    let lines: Vec<Line> = queued.iter()
+        .take(3)
+        .map(|msg| {
+            Line::from(vec![
+                Span::styled("⏳ ", Style::default().fg(QUEUED_COLOR)),
+                Span::styled(msg.as_str(), Style::default().fg(QUEUED_COLOR).dim()),
+            ])
+        })
+        .collect();
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, area);
+}
+
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let input_text = app.input();
     let cursor_pos = app.cursor_pos();
@@ -253,17 +265,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("> ", Style::default().fg(DIM_COLOR))
     };
 
-    let mut spans = vec![prompt, Span::raw(input_text)];
-
-    // Show queued message count if any
-    let queued = app.queued_count();
-    if queued > 0 {
-        spans.push(Span::styled(
-            format!(" ({} queued)", queued),
-            Style::default().fg(DIM_COLOR),
-        ));
-    }
-
+    let spans = vec![prompt, Span::raw(input_text)];
     let input_line = Line::from(spans);
     let paragraph = Paragraph::new(input_line);
     frame.render_widget(paragraph, area);

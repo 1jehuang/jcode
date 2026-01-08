@@ -148,8 +148,8 @@ impl App {
             });
         }
 
-        // Process any queued "after completion" messages
-        self.process_queued_messages().await;
+        // Process any queued messages
+        self.process_queued_messages(terminal, event_stream).await;
 
         self.is_processing = false;
         self.status = ProcessingStatus::Idle;
@@ -241,15 +241,6 @@ impl App {
     fn queue_message(&mut self) {
         let content = std::mem::take(&mut self.input);
         self.cursor_pos = 0;
-
-        // Show queued message in display immediately
-        self.display_messages.push(DisplayMessage {
-            role: "queued".to_string(),
-            content: content.clone(),
-            tool_calls: vec![],
-            duration_secs: None,
-        });
-
         self.queued_messages.push(content);
     }
 
@@ -304,36 +295,22 @@ impl App {
         self.pending_turn = true;
     }
 
-    /// Process the pending turn (called from main loop after UI redraw)
-    async fn process_turn(&mut self) {
-        if let Err(e) = self.run_turn().await {
-            self.display_messages.push(DisplayMessage {
-                role: "error".to_string(),
-                content: format!("Error: {}", e),
-                tool_calls: vec![],
-                duration_secs: None,
-            });
-        }
-
-        // Process any queued "after completion" messages
-        self.process_queued_messages().await;
-
-        self.is_processing = false;
-        self.status = ProcessingStatus::Idle;
-        self.processing_started = None;
-    }
-
     /// Process all queued messages
-    async fn process_queued_messages(&mut self) {
+    async fn process_queued_messages(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        event_stream: &mut EventStream,
+    ) {
         while !self.queued_messages.is_empty() {
             let content = self.queued_messages.remove(0);
 
-            // Update display: change "queued" to "user"
-            if let Some(display_msg) = self.display_messages.iter_mut().rev()
-                .find(|m| m.role == "queued" && m.content == content)
-            {
-                display_msg.role = "user".to_string();
-            }
+            // Add user message to display
+            self.display_messages.push(DisplayMessage {
+                role: "user".to_string(),
+                content: content.clone(),
+                tool_calls: vec![],
+                duration_secs: None,
+            });
 
             self.messages.push(Message::user(&content));
             self.session.add_message(
@@ -346,8 +323,9 @@ impl App {
             self.streaming_input_tokens = 0;
             self.streaming_output_tokens = 0;
             self.processing_started = Some(Instant::now());
+            self.status = ProcessingStatus::Sending;
 
-            if let Err(e) = self.run_turn().await {
+            if let Err(e) = self.run_turn_interactive(terminal, event_stream).await {
                 self.display_messages.push(DisplayMessage {
                     role: "error".to_string(),
                     content: format!("Error: {}", e),
@@ -841,6 +819,10 @@ When you need to make changes, use the tools directly. Don't just describe what 
         self.queued_messages.len()
     }
 
+    pub fn queued_messages(&self) -> &[String] {
+        &self.queued_messages
+    }
+
     pub fn streaming_tokens(&self) -> (u64, u64) {
         (self.streaming_input_tokens, self.streaming_output_tokens)
     }
@@ -1024,10 +1006,9 @@ mod tests {
         assert_eq!(app.queued_count(), 1);
         assert!(app.input().is_empty());
 
-        // Should show queued message in display
-        assert_eq!(app.display_messages().len(), 1);
-        assert_eq!(app.display_messages()[0].role, "queued");
-        assert_eq!(app.display_messages()[0].content, "test");
+        // Queued messages are stored in queued_messages, not display_messages
+        assert_eq!(app.queued_messages()[0], "test");
+        assert!(app.display_messages().is_empty());
     }
 
     #[test]
