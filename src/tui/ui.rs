@@ -76,11 +76,11 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                 ]));
             }
             "assistant" => {
-                // AI messages: green color for all lines
+                // AI messages: white/default color
                 for line in msg.content.lines() {
                     lines.push(Line::from(vec![
                         Span::raw("  "),
-                        Span::styled(line, Style::default().fg(AI_COLOR)),
+                        Span::raw(line),
                     ]));
                 }
                 // Tool badges inline
@@ -166,7 +166,7 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
             for line in app.streaming_text().lines() {
                 lines.push(Line::from(vec![
                     Span::raw("  "),
-                    Span::styled(line, Style::default().fg(AI_COLOR)),
+                    Span::raw(line),
                 ]));
             }
         }
