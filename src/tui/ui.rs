@@ -12,21 +12,26 @@ const DIM_COLOR: Color = Color::Rgb(80, 80, 80);        // Dimmer gray
 const ACCENT_COLOR: Color = Color::Rgb(186, 139, 255);  // Purple accent
 const QUEUED_COLOR: Color = Color::Rgb(255, 193, 7);    // Amber/yellow for queued
 
+// Spinner frames for animated status
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    // Layout: messages + input (no status bar clutter)
+    // Layout: messages + status + input
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([
             Constraint::Min(3),      // Messages
+            Constraint::Length(1),   // Status line
             Constraint::Length(1),   // Input
         ])
         .split(area);
 
     draw_messages(frame, app, chunks[0]);
-    draw_input(frame, app, chunks[1]);
+    draw_status(frame, app, chunks[1]);
+    draw_input(frame, app, chunks[2]);
 }
 
 fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
@@ -71,19 +76,12 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                 ]));
             }
             "assistant" => {
-                // AI messages: just the content, slightly dimmer
-                for (i, line) in msg.content.lines().enumerate() {
-                    if i == 0 {
-                        lines.push(Line::from(vec![
-                            Span::styled("  ", Style::default()),
-                            Span::styled(line, Style::default().fg(AI_COLOR)),
-                        ]));
-                    } else {
-                        lines.push(Line::from(vec![
-                            Span::raw("  "),
-                            Span::raw(line),
-                        ]));
-                    }
+                // AI messages: green color for all lines
+                for line in msg.content.lines() {
+                    lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(line, Style::default().fg(AI_COLOR)),
+                    ]));
                 }
                 // Tool badges inline
                 if !msg.tool_calls.is_empty() {
@@ -165,18 +163,11 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
             if !lines.is_empty() {
                 lines.push(Line::from(""));
             }
-            for (i, line) in app.streaming_text().lines().enumerate() {
-                if i == 0 {
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", Style::default()),
-                        Span::styled(line, Style::default().fg(AI_COLOR)),
-                    ]));
-                } else {
-                    lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::raw(line),
-                    ]));
-                }
+            for line in app.streaming_text().lines() {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(line, Style::default().fg(AI_COLOR)),
+                ]));
             }
         }
         // Show streaming tool calls as they are detected
@@ -191,9 +182,27 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                 Span::styled(tools_str, Style::default().fg(ACCENT_COLOR).dim()),
             ]));
         }
-        // Status line with phase, tokens, and elapsed time
-        let (input_tokens, output_tokens) = app.streaming_tokens();
-        let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
+    }
+
+    // Auto-scroll to bottom
+    let visible_height = area.height as usize;
+    let scroll = lines.len().saturating_sub(visible_height);
+
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll as u16, 0));
+
+    frame.render_widget(paragraph, area);
+}
+
+fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
+    let (input_tokens, output_tokens) = app.streaming_tokens();
+    let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
+
+    let line = if app.is_processing() {
+        // Animated spinner based on elapsed time (cycles every 80ms per frame)
+        let spinner_idx = (elapsed * 12.5) as usize % SPINNER_FRAMES.len();
+        let spinner = SPINNER_FRAMES[spinner_idx];
 
         let status_text = match app.status() {
             ProcessingStatus::Idle => String::new(),
@@ -208,21 +217,16 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
             ProcessingStatus::RunningTool(name) => format!("running {}… {:.1}s", name, elapsed),
         };
 
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("▍", Style::default().fg(AI_COLOR)),
+        Line::from(vec![
+            Span::styled(spinner, Style::default().fg(AI_COLOR)),
             Span::styled(format!(" {}", status_text), Style::default().fg(DIM_COLOR)),
-        ]));
-    }
+        ])
+    } else {
+        // Idle - show nothing or minimal info
+        Line::from(Span::styled("", Style::default().fg(DIM_COLOR)))
+    };
 
-    // Auto-scroll to bottom
-    let visible_height = area.height as usize;
-    let scroll = lines.len().saturating_sub(visible_height);
-
-    let paragraph = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((scroll as u16, 0));
-
+    let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, area);
 }
 
