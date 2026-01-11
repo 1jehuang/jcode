@@ -1,63 +1,41 @@
-# OAuth Notes: Claude Code (Claude Max) + OpenAI/Codex
+# Auth Notes: Claude Agent SDK + OpenAI/Codex
 
-This document explains how OAuth works in J-Code, how to log in, and the one
-detail that makes Claude Code tokens accept requests.
+This document explains how authentication works in J-Code.
 
 ## Overview
 
-J-Code uses OAuth tokens instead of API keys. Tokens are stored locally:
-- Claude Max: `~/.jcode/auth.json`
+J-Code uses the official Claude Agent SDK for Claude, and OAuth for OpenAI.
+
+Credentials are stored locally:
+- Claude Code CLI: `~/.claude/.credentials.json`
+- OpenCode (optional): `~/.local/share/opencode/auth.json`
 - OpenAI/Codex: `~/.codex/auth.json`
 
 Relevant code:
-- Claude login + refresh: `src/auth/oauth.rs`
-- Claude requests: `src/provider/claude.rs`
+- Claude Agent SDK bridge: `scripts/claude_agent_sdk_bridge.py`
+- Claude provider: `src/provider/claude.rs`
 - OpenAI login + refresh: `src/auth/oauth.rs`
 - OpenAI credentials parsing: `src/auth/codex.rs`
 - OpenAI requests: `src/provider/openai.rs`
 
-## Claude Code OAuth (Claude Max)
+## Claude Agent SDK (Claude Max)
 
 ### Login steps
-1. Run `jcode login --provider claude`.
-2. Open the printed URL, click **Authorize**, then copy the code in the form
-   `code#state` into the CLI prompt.
+1. Install the SDK: `pip install claude-agent-sdk`.
+2. Run `claude` (or `claude setup-token`) and complete login.
 3. Verify with `jcode --provider claude run "Say hello from jcode"`.
 
-Tokens are saved to `~/.jcode/auth.json`.
+J-Code does **not** store Claude OAuth tokens anymore; it relies on the Claude
+Code CLI credentials used by the SDK.
 
-### The key detail that makes tokens work
-Claude Code OAuth tokens are accepted only if the request body matches Claude
-Code's system format. The fix is to send the Claude Code identifier as a
-separate system block, not concatenated into the same string as the rest of the
-system prompt.
-
-Implementation: `src/provider/claude.rs:350`
-
-Conceptually:
-```json
-{
-  "system": [
-    { "type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude." },
-    { "type": "text", "text": "<your real system prompt>" }
-  ]
-}
-```
-
-J-Code also mirrors Claude Code headers:
-- `anthropic-beta: oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14`
-- `User-Agent: claude-code/2.0.76`
-
-### Troubleshooting
-- Error: `This credential is only authorized for use with Claude Code`
-  - Re-run `jcode login --provider claude`.
-  - Confirm the system blocks are separate as described above.
-- Error: `OAuth token has been revoked`
-  - Token is stale; re-login.
-
-### Optional automation
-If Firefox Agent Bridge is installed, you can automate the authorization click
-and code capture for the login flow. Otherwise the manual flow above is fine.
+### Configuration knobs
+These environment variables control the SDK bridge:
+- `JCODE_CLAUDE_SDK_PYTHON` (default: `python3`)
+- `JCODE_CLAUDE_SDK_MODEL` (default: `claude-sonnet-4-20250514`)
+- `JCODE_CLAUDE_SDK_PERMISSION_MODE` (default: `bypassPermissions`)
+- `JCODE_CLAUDE_SDK_CLI_PATH` (optional, custom `claude` binary)
+- `JCODE_CLAUDE_SDK_SCRIPT` (optional, custom bridge path)
+- `JCODE_CLAUDE_SDK_PARTIAL` (set to `0` to disable partial streaming)
 
 ## OpenAI / Codex OAuth
 

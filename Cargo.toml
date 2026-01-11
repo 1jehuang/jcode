@@ -16,6 +16,10 @@ path = "src/main.rs"
 name = "test_api"
 path = "src/bin/test_api.rs"
 
+[[bin]]
+name = "jcode-harness"
+path = "src/bin/harness.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full", "process"] }

@@ -1,11 +1,11 @@
 # J-Code
 
-A Rust coding agent that uses your existing **Claude Max** or **ChatGPT Pro** subscriptions via OAuth.
+A Rust coding agent that uses the official **Claude Agent SDK** (Claude Code) or **ChatGPT Pro** via OAuth.
 
 ## Features
 
-- **No API keys needed** - Uses OAuth tokens from Claude Code and Codex CLI
-- **Dual provider support** - Works with both Anthropic Claude and OpenAI
+- **No API keys needed** - Uses Claude Code CLI credentials and Codex OAuth
+- **Dual provider support** - Works with Claude Agent SDK and OpenAI/Codex
 - **Streaming responses** - Real-time output as the model generates
 - **Server/Client architecture** - Run as daemon, connect from multiple clients
 - **12 built-in tools** - File ops, search, web, shell, and parallel execution
@@ -13,7 +13,7 @@ A Rust coding agent that uses your existing **Claude Max** or **ChatGPT Pro** su
 ## Prerequisites
 
 You need at least one of:
-- **Claude Max subscription** - Run `claude` and `/login` to authenticate
+- **Claude Max subscription** - Install the SDK: `pip install claude-agent-sdk`, then run `claude` to authenticate
 - **ChatGPT Pro/Plus subscription** - Run `codex login` to authenticate
 
 ## Installation
@@ -87,8 +87,8 @@ jcode -C /path/to/project
 ├─────────────────────────────────────────────┤
 │            Provider Trait                   │
 │  ┌──────────────┐  ┌──────────────┐        │
-│  │ Claude Max   │  │ OpenAI/Codex │        │
-│  │    OAuth     │  │    OAuth     │        │
+│  │ Claude Agent │  │ OpenAI/Codex │        │
+│  │     SDK      │  │    OAuth     │        │
 │  └──────────────┘  └──────────────┘        │
 ├─────────────────────────────────────────────┤
 │              Tool System                    │
@@ -98,12 +98,20 @@ jcode -C /path/to/project
 
 ## How It Works
 
-J-Code stores/reads OAuth credentials from:
-- `~/.jcode/auth.json` (Claude Max, from `jcode login --provider claude`)
-- `~/.codex/auth.json` (OpenAI, from `jcode login --provider openai` or `codex login`)
+J-Code uses Claude Agent SDK to talk to Claude Code. Claude Code credentials are stored at:
+- `~/.claude/.credentials.json` (Claude Code CLI)
+- `~/.local/share/opencode/auth.json` (OpenCode, if installed)
 
-It then uses these tokens to make API calls to the respective providers, just like the official CLI tools do.
-For full OAuth details (Claude Code and Codex), see `OAUTH.md`.
+OpenAI/Codex OAuth credentials are still stored at:
+- `~/.codex/auth.json`
+
+For provider/auth details, see `OAUTH.md`.
+
+## Testing
+
+- `cargo test`
+- `cargo run --bin test_api` (Claude Agent SDK smoke test)
+- `cargo run --bin jcode-harness` (tool harness; add `--include-network` to exercise web tools)
 
 ## License
 
