@@ -55,10 +55,8 @@ hex = "0.4"
 url = "2"
 open = "5"               # Open URLs in browser
 
-# Streaming SSE parsing
-eventsource-stream = "0.2"
+# Streaming
 tokio-stream = "0.1"
-pin-project-lite = "0.2"
 bytes = "1"
 
 # TUI

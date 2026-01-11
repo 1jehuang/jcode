@@ -108,21 +108,10 @@ async fn init_provider_and_registry(
     choice: &ProviderChoice,
 ) -> Result<(Arc<dyn provider::Provider>, tool::Registry)> {
     let provider: Arc<dyn provider::Provider> = match choice {
-        ProviderChoice::Claude => {
-            // Use jcode's own OAuth tokens
-            let tokens = auth::oauth::load_claude_tokens()?;
-            eprintln!("Using Claude with jcode OAuth");
+        ProviderChoice::Claude | ProviderChoice::ClaudeSubprocess => {
+            eprintln!("Using Claude Agent SDK");
             std::env::set_var("JCODE_ACTIVE_PROVIDER", "claude");
-            Arc::new(provider::claude::ClaudeProvider::new(tokens))
-        }
-        ProviderChoice::ClaudeSubprocess => {
-            // Fallback: Use Claude Code CLI as subprocess
-            eprintln!("Using Claude Code subprocess provider");
-            std::env::set_var("JCODE_ACTIVE_PROVIDER", "claude-subprocess");
-            Arc::new(provider::claude_subprocess::ClaudeSubprocessProvider::new(
-                "claude-sonnet-4-20250514",
-                true, // bypass permissions
-            ))
+            Arc::new(provider::claude::ClaudeProvider::new())
         }
         ProviderChoice::Openai => {
             let creds = auth::codex::load_credentials()?;
@@ -130,11 +119,11 @@ async fn init_provider_and_registry(
             Arc::new(provider::openai::OpenAIProvider::new(creds))
         }
         ProviderChoice::Auto => {
-            // Try jcode's own Claude OAuth first
-            if let Ok(tokens) = auth::oauth::load_claude_tokens() {
-                eprintln!("Using Claude with jcode OAuth");
+            // Prefer Claude if Claude Code credentials are present
+            if auth::claude::load_credentials().is_ok() {
+                eprintln!("Using Claude Agent SDK");
                 std::env::set_var("JCODE_ACTIVE_PROVIDER", "claude");
-                Arc::new(provider::claude::ClaudeProvider::new(tokens))
+                Arc::new(provider::claude::ClaudeProvider::new())
             } else if let Ok(creds) = auth::codex::load_credentials() {
                 eprintln!("Using OpenAI/Codex provider");
                 std::env::set_var("JCODE_ACTIVE_PROVIDER", "openai");
@@ -153,10 +142,8 @@ async fn init_provider_and_registry(
 
                 match input.trim() {
                     "1" => {
-                        let tokens = auth::oauth::login_claude().await?;
-                        auth::oauth::save_claude_tokens(&tokens)?;
-                        eprintln!("\nSuccessfully logged in to Claude!\n");
-                        Arc::new(provider::claude::ClaudeProvider::new(tokens))
+                        eprintln!("\nRun `claude` and complete the login flow, then retry.\n");
+                        Arc::new(provider::claude::ClaudeProvider::new())
                     }
                     "2" => {
                         let tokens = auth::oauth::login_openai().await?;
@@ -188,10 +175,8 @@ async fn run_tui(provider: Arc<dyn provider::Provider>, registry: tool::Registry
 async fn run_login(choice: &ProviderChoice) -> Result<()> {
     match choice {
         ProviderChoice::Claude | ProviderChoice::ClaudeSubprocess => {
-            eprintln!("Logging in to Claude...");
-            let tokens = auth::oauth::login_claude().await?;
-            auth::oauth::save_claude_tokens(&tokens)?;
-            eprintln!("Successfully logged in to Claude!");
+            eprintln!("Claude Agent SDK uses Claude Code CLI credentials.");
+            eprintln!("Run `claude` or `claude setup-token` to authenticate.");
         }
         ProviderChoice::Openai => {
             eprintln!("Logging in to OpenAI/Codex...");

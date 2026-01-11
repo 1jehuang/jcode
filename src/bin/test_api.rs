@@ -1,4 +1,3 @@
-use jcode::auth::oauth::load_claude_tokens;
 use jcode::provider::claude::ClaudeProvider;
 use jcode::provider::Provider;
 use jcode::message::{Message, ContentBlock, ToolDefinition};
@@ -6,10 +5,8 @@ use futures::StreamExt;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let tokens = load_claude_tokens()?;
-    println!("Loaded tokens, testing API...");
-
-    let provider = ClaudeProvider::new(tokens);
+    println!("Testing Claude Agent SDK provider...");
+    let provider = ClaudeProvider::new();
 
     let messages = vec![Message {
         role: jcode::message::Role::User,
