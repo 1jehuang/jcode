@@ -15,6 +15,7 @@ mod tui;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::io::{self, Write};
+use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -36,6 +37,10 @@ struct Args {
     /// Working directory
     #[arg(short = 'C', long, global = true)]
     cwd: Option<String>,
+
+    /// Skip the automatic update check
+    #[arg(long, global = true)]
+    no_update: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -60,6 +65,9 @@ enum Command {
 
     /// Run in simple REPL mode (no TUI)
     Repl,
+
+    /// Update jcode to the latest version
+    Update,
 }
 
 #[tokio::main]
@@ -69,6 +77,15 @@ async fn main() -> Result<()> {
     // Change working directory if specified
     if let Some(cwd) = &args.cwd {
         std::env::set_current_dir(cwd)?;
+    }
+
+    // Check for updates unless --no-update is specified or running Update command
+    if !args.no_update && !matches!(args.command, Some(Command::Update)) {
+        if let Some(update_available) = check_for_updates() {
+            if update_available {
+                eprintln!("Update available! Run `jcode update` to update.");
+            }
+        }
     }
 
     match args.command {
@@ -93,6 +110,9 @@ async fn main() -> Result<()> {
             let (provider, registry) = init_provider_and_registry(&args.provider).await?;
             let mut agent = agent::Agent::new(provider, registry);
             agent.repl().await?;
+        }
+        Some(Command::Update) => {
+            run_update()?;
         }
         None => {
             // Default: TUI mode
@@ -233,6 +253,106 @@ async fn run_client() -> Result<()> {
 
         println!();
     }
+
+    Ok(())
+}
+
+/// Get the jcode repository directory (where the source code lives)
+fn get_repo_dir() -> Option<std::path::PathBuf> {
+    // First try: compile-time directory
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let path = std::path::PathBuf::from(manifest_dir);
+    if path.join(".git").exists() {
+        return Some(path);
+    }
+
+    // Fallback: check relative to executable
+    if let Ok(exe) = std::env::current_exe() {
+        // Assume structure: repo/target/release/jcode
+        if let Some(repo) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+            if repo.join(".git").exists() {
+                return Some(repo.to_path_buf());
+            }
+        }
+    }
+
+    None
+}
+
+/// Check if updates are available (returns None if unable to check)
+fn check_for_updates() -> Option<bool> {
+    let repo_dir = get_repo_dir()?;
+
+    // Fetch quietly
+    let fetch = ProcessCommand::new("git")
+        .args(["fetch", "-q"])
+        .current_dir(&repo_dir)
+        .output()
+        .ok()?;
+
+    if !fetch.status.success() {
+        return None;
+    }
+
+    // Get local HEAD
+    let local = ProcessCommand::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&repo_dir)
+        .output()
+        .ok()?;
+
+    // Get remote HEAD
+    let remote = ProcessCommand::new("git")
+        .args(["rev-parse", "@{u}"])
+        .current_dir(&repo_dir)
+        .output()
+        .ok()?;
+
+    if local.status.success() && remote.status.success() {
+        let local_hash = String::from_utf8_lossy(&local.stdout);
+        let remote_hash = String::from_utf8_lossy(&remote.stdout);
+        Some(local_hash.trim() != remote_hash.trim())
+    } else {
+        None
+    }
+}
+
+/// Run the update process
+fn run_update() -> Result<()> {
+    let repo_dir = get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
+
+    eprintln!("Updating jcode from {}...", repo_dir.display());
+
+    // Git pull
+    eprintln!("Pulling latest changes...");
+    let pull = ProcessCommand::new("git")
+        .args(["pull"])
+        .current_dir(&repo_dir)
+        .status()?;
+
+    if !pull.success() {
+        anyhow::bail!("git pull failed");
+    }
+
+    // Cargo build --release
+    eprintln!("Building...");
+    let build = ProcessCommand::new("cargo")
+        .args(["build", "--release"])
+        .current_dir(&repo_dir)
+        .status()?;
+
+    if !build.success() {
+        anyhow::bail!("cargo build failed");
+    }
+
+    // Get new version hash
+    let hash = ProcessCommand::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(&repo_dir)
+        .output()?;
+
+    let hash = String::from_utf8_lossy(&hash.stdout);
+    eprintln!("Successfully updated to {}", hash.trim());
 
     Ok(())
 }
