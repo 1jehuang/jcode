@@ -7,6 +7,7 @@ pub mod id;
 pub mod logging;
 pub mod mcp;
 pub mod message;
+pub mod prompt;
 pub mod protocol;
 pub mod provider;
 pub mod server;

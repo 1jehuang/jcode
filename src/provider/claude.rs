@@ -95,6 +95,7 @@ struct ClaudeSdkConfig {
     cli_path: Option<String>,
     include_partial_messages: bool,
     max_thinking_tokens: Option<u32>,
+    use_claude_code_preset: bool,
 }
 
 impl ClaudeSdkConfig {
@@ -137,6 +138,15 @@ impl ClaudeSdkConfig {
             .and_then(|value| value.parse::<u32>().ok())
             .or_else(|| Some(128000)); // Max 128k tokens for extended thinking
 
+        // Use Claude Code preset (default: false to save ~15-20k tokens)
+        let use_claude_code_preset = std::env::var("JCODE_USE_CLAUDE_CODE_PRESET")
+            .ok()
+            .map(|value| {
+                let value = value.to_lowercase();
+                value == "1" || value == "true" || value == "yes"
+            })
+            .unwrap_or(false);
+
         Self {
             python_bin,
             bridge_script_path,
@@ -145,6 +155,7 @@ impl ClaudeSdkConfig {
             cli_path,
             include_partial_messages,
             max_thinking_tokens,
+            use_claude_code_preset,
         }
     }
 }
@@ -168,6 +179,7 @@ struct ClaudeSdkOptions {
     resume: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_thinking_tokens: Option<u32>,
+    use_claude_code_preset: bool,
 }
 
 #[derive(Deserialize)]
@@ -498,6 +510,7 @@ impl Provider for ClaudeProvider {
                 include_partial_messages: self.config.include_partial_messages,
                 resume: resume_session_id.map(|s| s.to_string()),
                 max_thinking_tokens: self.config.max_thinking_tokens,
+                use_claude_code_preset: self.config.use_claude_code_preset,
             },
         };
 

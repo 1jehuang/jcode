@@ -7,6 +7,7 @@ mod id;
 mod logging;
 mod mcp;
 mod message;
+mod prompt;
 mod protocol;
 mod provider;
 mod server;

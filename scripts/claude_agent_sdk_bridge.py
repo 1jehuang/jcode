@@ -180,14 +180,25 @@ async def _run() -> None:
         extra_args = dict(extra_args)
         extra_args.setdefault("allow-dangerously-skip-permissions", None)
 
-    if system_prompt.strip():
-        system_value: Optional[Dict[str, Any]] = {
-            "type": "preset",
-            "preset": "claude_code",
-            "append": system_prompt,
-        }
+    # Use custom system prompt if provided, otherwise fall back to claude_code preset
+    use_preset = options.get("use_claude_code_preset", False)
+
+    if use_preset:
+        # Use Claude Code's built-in system prompt
+        if system_prompt.strip():
+            system_value: Optional[Dict[str, Any]] = {
+                "type": "preset",
+                "preset": "claude_code",
+                "append": system_prompt,
+            }
+        else:
+            system_value = {"type": "preset", "preset": "claude_code"}
     else:
-        system_value = {"type": "preset", "preset": "claude_code"}
+        # Use our own system prompt (saves ~15-20k tokens)
+        system_value = {
+            "type": "string",
+            "value": system_prompt if system_prompt.strip() else "You are an AI coding assistant.",
+        }
 
     claude_options = ClaudeAgentOptions(
         tools=tools if tools else None,

@@ -1048,33 +1048,10 @@ impl App {
     }
 
     fn build_system_prompt(&self) -> String {
-        const BASE_PROMPT: &str = r#"You are a coding assistant with access to tools for file operations and shell commands.
-
-## Available Tools
-- bash: Execute shell commands
-- read: Read file contents
-- write: Create or overwrite files
-- edit: Edit files by replacing text
-- glob: Find files by pattern
-- grep: Search file contents with regex
-- ls: List directory contents
-
-## Guidelines
-1. Use tools to explore and modify the codebase
-2. Read files before editing to understand current state
-3. Use glob/grep to find relevant files
-4. Prefer edit over write for existing files
-5. Keep responses concise and action-focused
-6. Execute commands to verify changes work
-
-When you need to make changes, use the tools directly. Don't just describe what to do."#;
-
-        if let Some(ref skill_name) = self.active_skill {
-            if let Some(skill) = self.skills.get(skill_name) {
-                return format!("{}\n\n{}", BASE_PROMPT, skill.get_prompt());
-            }
-        }
-        BASE_PROMPT.to_string()
+        let skill_prompt = self.active_skill.as_ref().and_then(|name| {
+            self.skills.get(name).map(|s| s.get_prompt().to_string())
+        });
+        crate::prompt::build_system_prompt(skill_prompt.as_deref())
     }
 
     // Getters for UI

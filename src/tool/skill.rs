@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn test_tool_name() {
         let tool = create_test_tool();
-        assert_eq!(tool.name(), "skill");
+        assert_eq!(tool.name(), "skill_manage");
     }
 
     #[test]
