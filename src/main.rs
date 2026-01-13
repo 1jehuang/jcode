@@ -49,6 +49,10 @@ struct Args {
     #[arg(long, global = true)]
     no_update: bool,
 
+    /// Auto-update when new version is available (default: false, just notify)
+    #[arg(long, global = true, default_value = "false")]
+    auto_update: bool,
+
     /// Log tool inputs/outputs and token usage to stderr
     #[arg(long, global = true)]
     trace: bool,
@@ -105,10 +109,18 @@ async fn main() -> Result<()> {
     }
 
     // Check for updates unless --no-update is specified or running Update command
-    if !args.no_update && !matches!(args.command, Some(Command::Update)) {
+    if !args.no_update && !matches!(args.command, Some(Command::Update)) && args.resume.is_none() {
         if let Some(update_available) = check_for_updates() {
             if update_available {
-                eprintln!("Update available! Run `jcode update` to update.");
+                if args.auto_update {
+                    eprintln!("Update available - auto-updating...");
+                    if let Err(e) = run_auto_update() {
+                        eprintln!("Auto-update failed: {}. Continuing with current version.", e);
+                    }
+                    // If we get here, exec failed or update failed
+                } else {
+                    eprintln!("\n📦 Update available! Run `jcode update` or `/reload` to update.\n");
+                }
             }
         }
     }
@@ -381,6 +393,7 @@ fn get_repo_dir() -> Option<std::path::PathBuf> {
 }
 
 /// Check if updates are available (returns None if unable to check)
+/// Only returns true if remote is AHEAD of local (not if local is ahead)
 fn check_for_updates() -> Option<bool> {
     let repo_dir = get_repo_dir()?;
 
@@ -395,30 +408,73 @@ fn check_for_updates() -> Option<bool> {
         return None;
     }
 
-    // Get local HEAD
-    let local = ProcessCommand::new("git")
-        .args(["rev-parse", "HEAD"])
+    // Count commits that remote has but local doesn't
+    // This returns 0 if local is equal to or ahead of remote
+    let behind = ProcessCommand::new("git")
+        .args(["rev-list", "--count", "HEAD..@{u}"])
         .current_dir(&repo_dir)
         .output()
         .ok()?;
 
-    // Get remote HEAD
-    let remote = ProcessCommand::new("git")
-        .args(["rev-parse", "@{u}"])
-        .current_dir(&repo_dir)
-        .output()
-        .ok()?;
-
-    if local.status.success() && remote.status.success() {
-        let local_hash = String::from_utf8_lossy(&local.stdout);
-        let remote_hash = String::from_utf8_lossy(&remote.stdout);
-        Some(local_hash.trim() != remote_hash.trim())
+    if behind.status.success() {
+        let count: u32 = String::from_utf8_lossy(&behind.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0);
+        Some(count > 0)
     } else {
         None
     }
 }
 
-/// Run the update process
+/// Auto-update: pull, build, and exec into new binary
+fn run_auto_update() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let repo_dir = get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
+
+    // Git pull (quiet)
+    let pull = ProcessCommand::new("git")
+        .args(["pull", "-q"])
+        .current_dir(&repo_dir)
+        .status()?;
+
+    if !pull.success() {
+        anyhow::bail!("git pull failed");
+    }
+
+    // Cargo build --release (show output for progress)
+    eprintln!("Building new version...");
+    let build = ProcessCommand::new("cargo")
+        .args(["build", "--release"])
+        .current_dir(&repo_dir)
+        .status()?;
+
+    if !build.success() {
+        anyhow::bail!("cargo build failed");
+    }
+
+    // Get new version
+    let hash = ProcessCommand::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(&repo_dir)
+        .output()?;
+    let hash = String::from_utf8_lossy(&hash.stdout);
+    eprintln!("Updated to {}. Restarting...", hash.trim());
+
+    // Exec into new binary with same args
+    let exe = std::env::current_exe()?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    let err = ProcessCommand::new(&exe)
+        .args(&args)
+        .arg("--no-update") // Prevent infinite update loop
+        .exec();
+
+    Err(anyhow::anyhow!("Failed to exec new binary: {}", err))
+}
+
+/// Run the update process (manual)
 fn run_update() -> Result<()> {
     let repo_dir = get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
