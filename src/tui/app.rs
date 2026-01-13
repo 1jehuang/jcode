@@ -66,6 +66,8 @@ pub struct App {
     streaming_tool_calls: Vec<String>,
     // Provider-specific session ID for conversation resume
     provider_session_id: Option<String>,
+    // Cancel flag for interrupting generation
+    cancel_requested: bool,
 }
 
 impl App {
@@ -94,6 +96,7 @@ impl App {
             pending_turn: false,
             streaming_tool_calls: Vec::new(),
             provider_session_id: None,
+            cancel_requested: false,
         }
     }
 
@@ -305,10 +308,15 @@ impl App {
                 self.scroll_offset = self.scroll_offset.saturating_sub(dec);
             }
             KeyCode::Esc => {
-                // Reset scroll to bottom and clear input
-                self.scroll_offset = 0;
-                self.input.clear();
-                self.cursor_pos = 0;
+                if self.is_processing {
+                    // Interrupt generation
+                    self.cancel_requested = true;
+                } else {
+                    // Reset scroll to bottom and clear input
+                    self.scroll_offset = 0;
+                    self.input.clear();
+                    self.cursor_pos = 0;
+                }
             }
             _ => {}
         }
@@ -672,6 +680,18 @@ impl App {
                         if let Some(Ok(Event::Key(key))) = event {
                             if key.kind == KeyEventKind::Press {
                                 let _ = self.handle_key(key.code, key.modifiers);
+                                // Check for cancel request
+                                if self.cancel_requested {
+                                    self.cancel_requested = false;
+                                    self.display_messages.push(DisplayMessage {
+                                        role: "system".to_string(),
+                                        content: "Interrupted".to_string(),
+                                        tool_calls: vec![],
+                                        duration_secs: None,
+                                        title: None,
+                                    });
+                                    return Ok(());
+                                }
                             }
                         }
                     }
