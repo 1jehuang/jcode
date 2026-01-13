@@ -390,48 +390,48 @@ impl App {
     }
 
     /// Process all queued messages (combined into a single request)
+    /// Loops until queue is empty (in case more messages are queued during processing)
     async fn process_queued_messages(
         &mut self,
         terminal: &mut DefaultTerminal,
         event_stream: &mut EventStream,
     ) {
-        if self.queued_messages.is_empty() {
-            return;
-        }
+        while !self.queued_messages.is_empty() {
+            // Combine all currently queued messages into one
+            let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
 
-        // Combine all queued messages into one
-        let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
-
-        // Add user message to display
-        self.display_messages.push(DisplayMessage {
-            role: "user".to_string(),
-            content: combined.clone(),
-            tool_calls: vec![],
-            duration_secs: None,
-            title: None,
-        });
-
-        self.messages.push(Message::user(&combined));
-        self.session.add_message(
-            Role::User,
-            vec![ContentBlock::Text { text: combined }],
-        );
-        let _ = self.session.save();
-        self.streaming_text.clear();
-        self.streaming_tool_calls.clear();
-        self.streaming_input_tokens = 0;
-        self.streaming_output_tokens = 0;
-        self.processing_started = Some(Instant::now());
-        self.status = ProcessingStatus::Sending;
-
-        if let Err(e) = self.run_turn_interactive(terminal, event_stream).await {
+            // Add user message to display
             self.display_messages.push(DisplayMessage {
-                role: "error".to_string(),
-                content: format!("Error: {}", e),
+                role: "user".to_string(),
+                content: combined.clone(),
                 tool_calls: vec![],
                 duration_secs: None,
                 title: None,
             });
+
+            self.messages.push(Message::user(&combined));
+            self.session.add_message(
+                Role::User,
+                vec![ContentBlock::Text { text: combined }],
+            );
+            let _ = self.session.save();
+            self.streaming_text.clear();
+            self.streaming_tool_calls.clear();
+            self.streaming_input_tokens = 0;
+            self.streaming_output_tokens = 0;
+            self.processing_started = Some(Instant::now());
+            self.status = ProcessingStatus::Sending;
+
+            if let Err(e) = self.run_turn_interactive(terminal, event_stream).await {
+                self.display_messages.push(DisplayMessage {
+                    role: "error".to_string(),
+                    content: format!("Error: {}", e),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                });
+            }
+            // Loop will check if more messages were queued during this turn
         }
     }
 
@@ -587,7 +587,7 @@ impl App {
                 }));
 
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
-                let (output, is_error) = match result {
+                let (output, is_error, tool_title) = match result {
                     Ok(o) => {
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
                             session_id: self.session.id.clone(),
@@ -597,7 +597,7 @@ impl App {
                             status: ToolStatus::Completed,
                             title: o.title.clone(),
                         }));
-                        (o.output, false)
+                        (o.output, false, o.title)
                     }
                     Err(e) => {
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
@@ -608,7 +608,7 @@ impl App {
                             status: ToolStatus::Error,
                             title: None,
                         }));
-                        (format!("Error: {}", e), true)
+                        (format!("Error: {}", e), true, None)
                     }
                 };
 
@@ -619,12 +619,15 @@ impl App {
                     output.clone()
                 };
 
+                // Use tool's title (e.g., file path) if available and different from name
+                let display_title = tool_title.filter(|t| t != &tc.name);
+
                 self.display_messages.push(DisplayMessage {
                     role: "tool".to_string(),
                     content: display_output,
                     tool_calls: vec![],
                     duration_secs: None,
-                    title: Some(tc.name.clone()),
+                    title: display_title,
                 });
 
                 self.messages.push(Message::tool_result(&tc.id, &output, is_error));
@@ -838,7 +841,7 @@ impl App {
                 }));
 
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
-                let (output, is_error) = match result {
+                let (output, is_error, tool_title) = match result {
                     Ok(o) => {
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
                             session_id: self.session.id.clone(),
@@ -848,7 +851,7 @@ impl App {
                             status: ToolStatus::Completed,
                             title: o.title.clone(),
                         }));
-                        (o.output, false)
+                        (o.output, false, o.title)
                     }
                     Err(e) => {
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
@@ -859,7 +862,7 @@ impl App {
                             status: ToolStatus::Error,
                             title: None,
                         }));
-                        (format!("Error: {}", e), true)
+                        (format!("Error: {}", e), true, None)
                     }
                 };
 
@@ -869,12 +872,15 @@ impl App {
                     output.clone()
                 };
 
+                // Use tool's title (e.g., file path) if available and different from name
+                let display_title = tool_title.filter(|t| t != &tc.name);
+
                 self.display_messages.push(DisplayMessage {
                     role: "tool".to_string(),
                     content: display_output,
                     tool_calls: vec![],
                     duration_secs: None,
-                    title: Some(tc.name.clone()),
+                    title: display_title,
                 });
 
                 self.messages.push(Message::tool_result(&tc.id, &output, is_error));
