@@ -1055,6 +1055,10 @@ When you need to make changes, use the tools directly. Don't just describe what 
     pub fn elapsed(&self) -> Option<Duration> {
         self.processing_started.map(|t| t.elapsed())
     }
+
+    pub fn provider_name(&self) -> &str {
+        self.provider.name()
+    }
 }
 
 #[cfg(test)]

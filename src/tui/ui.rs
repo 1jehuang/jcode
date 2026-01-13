@@ -8,12 +8,15 @@ use ratatui::{
 use std::time::SystemTime;
 
 // Minimal color palette
-const USER_COLOR: Color = Color::Rgb(138, 180, 248);    // Soft blue
-const AI_COLOR: Color = Color::Rgb(129, 199, 132);      // Soft green
+const USER_COLOR: Color = Color::Rgb(138, 180, 248);    // Soft blue (caret)
+const AI_COLOR: Color = Color::Rgb(129, 199, 132);      // Soft green (unused)
 const TOOL_COLOR: Color = Color::Rgb(120, 120, 120);    // Gray
 const DIM_COLOR: Color = Color::Rgb(80, 80, 80);        // Dimmer gray
 const ACCENT_COLOR: Color = Color::Rgb(186, 139, 255);  // Purple accent
 const QUEUED_COLOR: Color = Color::Rgb(255, 193, 7);    // Amber/yellow for queued
+const USER_TEXT: Color = Color::Rgb(245, 245, 255);     // Bright cool white (user messages)
+const USER_BG: Color = Color::Rgb(35, 40, 50);          // Subtle dark blue background for user
+const AI_TEXT: Color = Color::Rgb(220, 220, 215);       // Softer warm white (AI messages)
 
 // Spinner frames for animated status
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -55,11 +58,12 @@ fn binary_age() -> Option<String> {
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    // Calculate queued messages height (1 line per message, max 3)
-    let queued_height = app.queued_messages().len().min(3) as u16;
+    // Calculate queued messages (full count for numbering)
+    let queued_count = app.queued_messages().len();
+    let queued_height = queued_count.min(3) as u16;
 
     // Calculate input height based on content (max 5 lines to not overwhelm)
-    let available_width = area.width.saturating_sub(4) as usize; // margin + prompt
+    let available_width = area.width.saturating_sub(3) as usize; // prompt chars
     let input_len = app.input().len();
     let input_height = if available_width > 0 {
         ((input_len / available_width) + 1).min(5) as u16
@@ -67,42 +71,132 @@ pub fn draw(frame: &mut Frame, app: &App) {
         1
     };
 
-    // Layout: messages + status + queued + input
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .margin(1)
-        .constraints([
-            Constraint::Min(3),              // Messages
-            Constraint::Length(1),           // Status line
-            Constraint::Length(queued_height), // Queued messages
-            Constraint::Length(input_height), // Input (dynamic height)
-        ])
-        .split(area);
-
     // Count user messages to show next prompt number
     let user_count = app.display_messages().iter().filter(|m| m.role == "user").count();
+
+    // Estimate message content height (no margin, full width)
+    let content_height = estimate_content_height(app, area.width);
+    let fixed_height = 1 + queued_height + input_height; // status + queued + input
+    let available_height = area.height;
+
+    // Use packed layout when content fits, scrolling layout otherwise
+    let use_packed = content_height + fixed_height <= available_height;
+
+    // Both layouts use same structure: messages, status, queued, input
+    // This keeps chunk indices consistent
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(if use_packed {
+            [
+                Constraint::Length(content_height.max(1)), // Messages (exact height)
+                Constraint::Length(1),                     // Status line
+                Constraint::Length(queued_height),         // Queued messages
+                Constraint::Length(input_height),          // Input
+            ]
+        } else {
+            [
+                Constraint::Min(3),                // Messages (scrollable)
+                Constraint::Length(1),             // Status line
+                Constraint::Length(queued_height), // Queued messages
+                Constraint::Length(input_height),  // Input
+            ]
+        })
+        .split(area);
 
     draw_messages(frame, app, chunks[0]);
     draw_status(frame, app, chunks[1]);
     if queued_height > 0 {
-        draw_queued(frame, app, chunks[2]);
+        draw_queued(frame, app, chunks[2], user_count + 1);
     }
-    draw_input(frame, app, chunks[3], user_count + 1);
+    draw_input(frame, app, chunks[3], user_count + queued_count + 1);
+}
+
+/// Estimate how many lines the message content will take
+fn estimate_content_height(app: &App, width: u16) -> u16 {
+    let width = width as usize;
+    if width == 0 {
+        return 1;
+    }
+
+    let mut lines = 0u16;
+
+    // Header when empty
+    if app.display_messages().is_empty() && !app.is_processing() {
+        lines += 2; // version line + blank
+        if !app.available_skills().is_empty() {
+            lines += 1; // skills line
+        }
+    }
+
+    for msg in app.display_messages() {
+        // Spacing between messages
+        if lines > 0 && msg.role != "tool" {
+            lines += 1;
+        }
+
+        match msg.role.as_str() {
+            "user" => {
+                lines += 1;
+            }
+            "assistant" => {
+                // Rough estimate: count newlines + wrap estimate
+                let content_lines = msg.content.lines().count().max(1);
+                let avg_line_len = msg.content.len() / content_lines.max(1);
+                let wrap_factor = if avg_line_len > width { (avg_line_len / width) + 1 } else { 1 };
+                lines += (content_lines * wrap_factor) as u16;
+
+                // Tool badges
+                if !msg.tool_calls.is_empty() {
+                    lines += 1;
+                }
+                // Duration
+                if msg.duration_secs.is_some() {
+                    lines += 1;
+                }
+            }
+            "tool" => {
+                lines += 1;
+                // Diff lines for edit tools
+                if let Some(ref tc) = msg.tool_data {
+                    if tc.name == "edit" || tc.name == "Edit" {
+                        lines += 10; // Rough estimate for diff
+                    }
+                }
+            }
+            _ => {
+                lines += 1;
+            }
+        }
+    }
+
+    // Streaming content
+    if app.is_processing() {
+        let streaming = app.streaming_text();
+        if !streaming.is_empty() {
+            lines += streaming.lines().count().max(1) as u16;
+        }
+        // Active tool calls
+        lines += app.streaming_tool_calls().len() as u16;
+    }
+
+    lines
 }
 
 fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
+    let mut user_line_indices: Vec<usize> = Vec::new(); // Track which lines are user prompts
 
     // Header - minimal
     if app.display_messages().is_empty() && !app.is_processing() {
         let age = binary_age().unwrap_or_else(|| "unknown".to_string());
+        let provider = app.provider_name();
         lines.push(Line::from(vec![
             Span::styled(
                 format!("jcode v{}", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(DIM_COLOR),
             ),
             Span::styled(
-                format!(" (updated {})", age),
+                format!(" ({}, updated {})", provider, age),
                 Style::default().fg(DIM_COLOR).dim(),
             ),
         ]));
@@ -118,7 +212,6 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let mut response_num = 0usize;
     let mut prompt_num = 0usize;
 
     for msg in app.display_messages() {
@@ -130,29 +223,19 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
         match msg.role.as_str() {
             "user" => {
                 prompt_num += 1;
-                // User messages: prompt number, blue prefix, then content
+                user_line_indices.push(lines.len()); // Track this line index
+                // User messages: dim number, blue caret, bright text
                 lines.push(Line::from(vec![
-                    Span::styled(format!("{:>2} ", prompt_num), Style::default().fg(DIM_COLOR)),
+                    Span::styled(format!("{}", prompt_num), Style::default().fg(DIM_COLOR)),
                     Span::styled("› ", Style::default().fg(USER_COLOR)),
-                    Span::raw(msg.content.clone()),
+                    Span::styled(msg.content.clone(), Style::default().fg(USER_TEXT)),
                 ]));
             }
             "assistant" => {
-                response_num += 1;
-                // AI messages: render markdown with syntax highlighting
+                // AI messages: render markdown flush left
                 let md_lines = markdown::render_markdown(&msg.content);
-                let mut first_line = true;
                 for md_line in md_lines {
-                    // Prepend response number on first line, indent on rest
-                    let prefix = if first_line {
-                        first_line = false;
-                        Span::styled(format!("{:>2} ", response_num), Style::default().fg(DIM_COLOR))
-                    } else {
-                        Span::raw("   ")
-                    };
-                    let mut spans = vec![prefix];
-                    spans.extend(md_line.spans);
-                    lines.push(Line::from(spans));
+                    lines.push(md_line);
                 }
                 // Tool badges inline
                 if !msg.tool_calls.is_empty() {
@@ -230,12 +313,30 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
         // Tool calls are now shown inline in display_messages
     }
 
-    // Wrap lines to fit width (manual wrapping so scroll calculation is accurate)
-    let wrap_width = area.width.saturating_sub(2) as usize; // Leave margin
-    let lines = markdown::wrap_lines(lines, wrap_width);
+    // Wrap lines and track which wrapped indices correspond to user lines
+    let wrap_width = area.width.saturating_sub(2) as usize; // Leave margin for right bar
+    let mut wrapped_user_indices: Vec<usize> = Vec::new();
+    let mut wrapped_idx = 0usize;
+
+    let mut wrapped_lines: Vec<Line> = Vec::new();
+    for (orig_idx, line) in lines.into_iter().enumerate() {
+        let is_user_line = user_line_indices.contains(&orig_idx);
+        let new_lines = markdown::wrap_line(line, wrap_width);
+        let count = new_lines.len();
+
+        if is_user_line {
+            // All wrapped lines from a user message get the right bar
+            for i in 0..count {
+                wrapped_user_indices.push(wrapped_idx + i);
+            }
+        }
+
+        wrapped_lines.extend(new_lines);
+        wrapped_idx += count;
+    }
 
     // Calculate scroll position
-    let total_lines = lines.len();
+    let total_lines = wrapped_lines.len();
     let visible_height = area.height as usize;
     let max_scroll = total_lines.saturating_sub(visible_height);
     let user_scroll = app.scroll_offset().min(max_scroll); // Cap to available content
@@ -248,19 +349,31 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
         max_scroll
     };
 
-    let paragraph = Paragraph::new(lines)
+    let paragraph = Paragraph::new(wrapped_lines)
         .scroll((scroll as u16, 0));
 
     frame.render_widget(paragraph, area);
 
+    // Draw right bar for visible user lines
+    let right_x = area.x + area.width.saturating_sub(1);
+    for &line_idx in &wrapped_user_indices {
+        // Check if this line is visible after scroll
+        if line_idx >= scroll && line_idx < scroll + visible_height {
+            let screen_y = area.y + (line_idx - scroll) as u16;
+            let bar_area = Rect { x: right_x, y: screen_y, width: 1, height: 1 };
+            let bar = Paragraph::new(Span::styled("│", Style::default().fg(USER_COLOR)));
+            frame.render_widget(bar, bar_area);
+        }
+    }
+
     // Show scroll indicators
     if scroll > 0 {
-        // Content above indicator (top-right)
+        // Content above indicator (top-right, offset to not overlap bar)
         let indicator = format!("↑{}", scroll);
         let indicator_area = Rect {
-            x: area.x + area.width.saturating_sub(indicator.len() as u16 + 1),
+            x: area.x + area.width.saturating_sub(indicator.len() as u16 + 2),
             y: area.y,
-            width: indicator.len() as u16 + 1,
+            width: indicator.len() as u16,
             height: 1,
         };
         let indicator_widget = Paragraph::new(Line::from(vec![
@@ -273,9 +386,9 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
     if user_scroll > 0 {
         let indicator = format!("↓{}", user_scroll);
         let indicator_area = Rect {
-            x: area.x + area.width.saturating_sub(indicator.len() as u16 + 1),
+            x: area.x + area.width.saturating_sub(indicator.len() as u16 + 2),
             y: area.y + area.height.saturating_sub(1),
-            width: indicator.len() as u16 + 1,
+            width: indicator.len() as u16,
             height: 1,
         };
         let indicator_widget = Paragraph::new(Line::from(vec![
@@ -352,13 +465,15 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_queued(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_queued(frame: &mut Frame, app: &App, area: Rect, start_num: usize) {
     let queued = app.queued_messages();
     let lines: Vec<Line> = queued.iter()
         .take(3)
-        .map(|msg| {
+        .enumerate()
+        .map(|(i, msg)| {
             Line::from(vec![
-                Span::styled("⏳ ", Style::default().fg(QUEUED_COLOR)),
+                Span::styled(format!("{}", start_num + i), Style::default().fg(DIM_COLOR)),
+                Span::styled("… ", Style::default().fg(QUEUED_COLOR)),
                 Span::styled(msg.as_str(), Style::default().fg(QUEUED_COLOR).dim()),
             ])
         })
@@ -372,24 +487,17 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect, next_prompt: usize) {
     let input_text = app.input();
     let cursor_pos = app.cursor_pos();
 
-    // Build prompt with number
-    let prompt_num = format!("{:>2} ", next_prompt);
-    let prompt_str = if app.is_processing() {
-        "… "
+    // Build prompt parts: number (dim) + caret (colored) + space
+    let (prompt_char, caret_color) = if app.is_processing() {
+        ("… ", QUEUED_COLOR)
     } else if app.active_skill().is_some() {
-        "» "
+        ("» ", ACCENT_COLOR)
     } else {
-        "> "
+        ("> ", USER_COLOR)
     };
-    let prompt_style = if app.is_processing() {
-        Style::default().fg(QUEUED_COLOR)
-    } else if app.active_skill().is_some() {
-        Style::default().fg(ACCENT_COLOR)
-    } else {
-        Style::default().fg(DIM_COLOR)
-    };
+    let num_str = format!("{}", next_prompt);
+    let prompt_len = num_str.len() + prompt_char.len();
 
-    let prompt_len = 5; // "NN > " = 5 chars
     let line_width = (area.width as usize).saturating_sub(prompt_len);
 
     if line_width == 0 {
@@ -406,16 +514,16 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect, next_prompt: usize) {
         let line_text: String = chars[pos..end].iter().collect();
 
         if lines.is_empty() {
-            // First line has prompt number and prompt
+            // First line has prompt: dim number + colored caret
             lines.push(Line::from(vec![
-                Span::styled(prompt_num.clone(), Style::default().fg(DIM_COLOR)),
-                Span::styled(prompt_str, prompt_style),
+                Span::styled(num_str.clone(), Style::default().fg(DIM_COLOR)),
+                Span::styled(prompt_char, Style::default().fg(caret_color)),
                 Span::raw(line_text),
             ]));
         } else {
-            // Continuation lines have indent (5 spaces to match "NN > ")
+            // Continuation lines have indent to match prompt length
             lines.push(Line::from(vec![
-                Span::raw("     "),
+                Span::raw(" ".repeat(prompt_len)),
                 Span::raw(line_text),
             ]));
         }
