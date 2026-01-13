@@ -395,6 +395,7 @@ impl Provider for OpenAIProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
         system: &str,
+        _resume_session_id: Option<&str>,  // Not used by OpenAI provider
     ) -> Result<EventStream> {
         let input = build_responses_input(messages);
         let api_tools = build_tools(tools);

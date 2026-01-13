@@ -38,6 +38,8 @@ pub struct Agent {
     session: Session,
     active_skill: Option<String>,
     allowed_tools: Option<HashSet<String>>,
+    /// Provider-specific session ID for conversation resume (e.g., Claude SDK session)
+    provider_session_id: Option<String>,
 }
 
 impl Agent {
@@ -50,6 +52,7 @@ impl Agent {
             session: Session::create(None, None),
             active_skill: None,
             allowed_tools: None,
+            provider_session_id: None,
         }
     }
 
@@ -67,6 +70,7 @@ impl Agent {
             session,
             active_skill: None,
             allowed_tools,
+            provider_session_id: None,
         }
     }
 
@@ -81,6 +85,9 @@ impl Agent {
                 text: user_message.to_string(),
             }]);
         self.session.save()?;
+        if trace_enabled() {
+            eprintln!("[trace] session_id {}", self.session.id);
+        }
         let _ = self.run_turn(true).await?;
         Ok(())
     }
@@ -91,6 +98,9 @@ impl Agent {
                 text: user_message.to_string(),
             }]);
         self.session.save()?;
+        if trace_enabled() {
+            eprintln!("[trace] session_id {}", self.session.id);
+        }
         self.run_turn(false).await
     }
 
@@ -98,6 +108,7 @@ impl Agent {
     pub fn clear(&mut self) {
         self.session = Session::create(None, None);
         self.active_skill = None;
+        self.provider_session_id = None;
     }
 
     /// Start an interactive REPL
@@ -176,6 +187,7 @@ impl Agent {
     /// Run turns until no more tool calls
     async fn run_turn(&mut self, print_output: bool) -> Result<String> {
         let mut final_text = String::new();
+        let trace = trace_enabled();
 
         loop {
             let tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
@@ -195,7 +207,7 @@ impl Agent {
 
             let mut stream = self
                 .provider
-                .complete(&messages, &tools, &system_prompt)
+                .complete(&messages, &tools, &system_prompt, self.provider_session_id.as_deref())
                 .await?;
 
             let mut text_content = String::new();
@@ -204,6 +216,7 @@ impl Agent {
             let mut current_tool_input = String::new();
             let mut usage_input: Option<u64> = None;
             let mut usage_output: Option<u64> = None;
+            let mut saw_message_end = false;
 
             while let Some(event) = stream.next().await {
                 match event? {
@@ -215,6 +228,9 @@ impl Agent {
                         text_content.push_str(&text);
                     }
                     StreamEvent::ToolUseStart { id, name } => {
+                        if trace {
+                            eprintln!("\n[trace] tool_use_start name={} id={}", name, id);
+                        }
                         if print_output {
                             print!("\n[{}] ", name);
                             io::stdout().flush()?;
@@ -232,8 +248,26 @@ impl Agent {
                     StreamEvent::ToolUseEnd => {
                         if let Some(mut tool) = current_tool.take() {
                             // Parse the accumulated JSON
-                            tool.input = serde_json::from_str(&current_tool_input)
-                                .unwrap_or(serde_json::Value::Null);
+                            let tool_input = serde_json::from_str::<serde_json::Value>(
+                                &current_tool_input,
+                            )
+                            .unwrap_or(serde_json::Value::Null);
+                            tool.input = tool_input.clone();
+
+                            if trace {
+                                if current_tool_input.trim().is_empty() {
+                                    eprintln!("[trace] tool_input {} (empty)", tool.name);
+                                } else if tool_input == serde_json::Value::Null {
+                                    eprintln!(
+                                        "[trace] tool_input {} (raw) {}",
+                                        tool.name, current_tool_input
+                                    );
+                                } else {
+                                    let pretty = serde_json::to_string_pretty(&tool_input)
+                                        .unwrap_or_else(|_| tool_input.to_string());
+                                    eprintln!("[trace] tool_input {} {}", tool.name, pretty);
+                                }
+                            }
 
                             if print_output {
                                 // Show brief tool info
@@ -254,11 +288,33 @@ impl Agent {
                         if let Some(output) = output_tokens {
                             usage_output = Some(output);
                         }
+                        if trace {
+                            eprintln!(
+                                "[trace] token_usage input={} output={}",
+                                usage_input.unwrap_or(0),
+                                usage_output.unwrap_or(0)
+                            );
+                        }
                     }
                     StreamEvent::MessageEnd { .. } => {
-                        break;
+                        saw_message_end = true;
+                        // Don't break yet - wait for SessionId which comes after MessageEnd
+                        // (but stream close will also end the loop for providers without SessionId)
+                    }
+                    StreamEvent::SessionId(sid) => {
+                        if trace {
+                            eprintln!("[trace] session_id {}", sid);
+                        }
+                        self.provider_session_id = Some(sid);
+                        // We've received session_id, can exit the loop now
+                        if saw_message_end {
+                            break;
+                        }
                     }
                     StreamEvent::Error(e) => {
+                        if trace {
+                            eprintln!("[trace] stream_error {}", e);
+                        }
                         return Err(anyhow::anyhow!("Stream error: {}", e));
                     }
                 }
@@ -323,6 +379,12 @@ impl Agent {
                     tool_call_id: tc.id.clone(),
                 };
 
+                if trace {
+                    eprintln!(
+                        "[trace] tool_exec_start name={} id={}",
+                        tc.name, tc.id
+                    );
+                }
                 Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
                     session_id: self.session.id.clone(),
                     message_id: message_id.clone(),
@@ -345,6 +407,12 @@ impl Agent {
                             title: output.title.clone(),
                         }));
 
+                        if trace {
+                            eprintln!(
+                                "[trace] tool_exec_done name={} id={}\n{}",
+                                tc.name, tc.id, output.output
+                            );
+                        }
                         if print_output {
                             let preview = if output.output.len() > 200 {
                                 format!("{}...", &output.output[..200])
@@ -375,6 +443,12 @@ impl Agent {
                         }));
 
                         let error_msg = format!("Error: {}", e);
+                        if trace {
+                            eprintln!(
+                                "[trace] tool_exec_error name={} id={} {}",
+                                tc.name, tc.id, error_msg
+                            );
+                        }
                         if print_output {
                             println!("{}", error_msg);
                         }
@@ -431,5 +505,15 @@ fn print_tool_summary(tool: &ToolCall) {
             println!("{}", path);
         }
         _ => {}
+    }
+}
+
+fn trace_enabled() -> bool {
+    match std::env::var("JCODE_TRACE") {
+        Ok(value) => {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && value.to_lowercase() != "false"
+        }
+        Err(_) => false,
     }
 }

@@ -14,11 +14,13 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Send messages and get a streaming response
+    /// resume_session_id: Optional session ID to resume a previous conversation (provider-specific)
     async fn complete(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
         system: &str,
+        resume_session_id: Option<&str>,
     ) -> Result<EventStream>;
 
     /// Get the provider name

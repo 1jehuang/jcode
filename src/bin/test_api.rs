@@ -19,7 +19,7 @@ async fn main() -> anyhow::Result<()> {
     let system = "You are a helpful assistant.";
 
     println!("Sending request...");
-    let mut stream = provider.complete(&messages, &tools, system).await?;
+    let mut stream = provider.complete(&messages, &tools, system, None).await?;
 
     println!("Response:");
     while let Some(event) = stream.next().await {

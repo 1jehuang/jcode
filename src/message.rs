@@ -102,4 +102,6 @@ pub enum StreamEvent {
     },
     /// Error occurred
     Error(String),
+    /// Provider session ID (for conversation resume)
+    SessionId(String),
 }

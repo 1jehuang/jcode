@@ -30,6 +30,7 @@ impl Provider for NoopProvider {
         _messages: &[Message],
         _tools: &[ToolDefinition],
         _system: &str,
+        _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         anyhow::bail!("Noop provider - tool harness does not invoke models.")
     }

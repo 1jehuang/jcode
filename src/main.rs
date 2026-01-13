@@ -42,6 +42,10 @@ struct Args {
     #[arg(long, global = true)]
     no_update: bool,
 
+    /// Log tool inputs/outputs and token usage to stderr
+    #[arg(long, global = true)]
+    trace: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -77,6 +81,10 @@ async fn main() -> Result<()> {
     // Change working directory if specified
     if let Some(cwd) = &args.cwd {
         std::env::set_current_dir(cwd)?;
+    }
+
+    if args.trace {
+        std::env::set_var("JCODE_TRACE", "1");
     }
 
     // Check for updates unless --no-update is specified or running Update command

@@ -61,6 +61,8 @@ pub struct App {
     pending_turn: bool,
     // Tool calls detected during streaming (shown in real-time)
     streaming_tool_calls: Vec<String>,
+    // Provider-specific session ID for conversation resume
+    provider_session_id: Option<String>,
 }
 
 impl App {
@@ -87,6 +89,7 @@ impl App {
             processing_started: None,
             pending_turn: false,
             streaming_tool_calls: Vec::new(),
+            provider_session_id: None,
         }
     }
 
@@ -170,6 +173,7 @@ impl App {
                     self.queued_messages.clear();
                     self.active_skill = None;
                     self.session = Session::create(None, None);
+                    self.provider_session_id = None;
                     return Ok(());
                 }
                 KeyCode::Char('u') => {
@@ -295,44 +299,47 @@ impl App {
         self.pending_turn = true;
     }
 
-    /// Process all queued messages
+    /// Process all queued messages (combined into a single request)
     async fn process_queued_messages(
         &mut self,
         terminal: &mut DefaultTerminal,
         event_stream: &mut EventStream,
     ) {
-        while !self.queued_messages.is_empty() {
-            let content = self.queued_messages.remove(0);
+        if self.queued_messages.is_empty() {
+            return;
+        }
 
-            // Add user message to display
+        // Combine all queued messages into one
+        let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
+
+        // Add user message to display
+        self.display_messages.push(DisplayMessage {
+            role: "user".to_string(),
+            content: combined.clone(),
+            tool_calls: vec![],
+            duration_secs: None,
+        });
+
+        self.messages.push(Message::user(&combined));
+        self.session.add_message(
+            Role::User,
+            vec![ContentBlock::Text { text: combined }],
+        );
+        let _ = self.session.save();
+        self.streaming_text.clear();
+        self.streaming_tool_calls.clear();
+        self.streaming_input_tokens = 0;
+        self.streaming_output_tokens = 0;
+        self.processing_started = Some(Instant::now());
+        self.status = ProcessingStatus::Sending;
+
+        if let Err(e) = self.run_turn_interactive(terminal, event_stream).await {
             self.display_messages.push(DisplayMessage {
-                role: "user".to_string(),
-                content: content.clone(),
+                role: "error".to_string(),
+                content: format!("Error: {}", e),
                 tool_calls: vec![],
                 duration_secs: None,
             });
-
-            self.messages.push(Message::user(&content));
-            self.session.add_message(
-                Role::User,
-                vec![ContentBlock::Text { text: content.clone() }],
-            );
-            let _ = self.session.save();
-            self.streaming_text.clear();
-            self.streaming_tool_calls.clear();
-            self.streaming_input_tokens = 0;
-            self.streaming_output_tokens = 0;
-            self.processing_started = Some(Instant::now());
-            self.status = ProcessingStatus::Sending;
-
-            if let Err(e) = self.run_turn_interactive(terminal, event_stream).await {
-                self.display_messages.push(DisplayMessage {
-                    role: "error".to_string(),
-                    content: format!("Error: {}", e),
-                    tool_calls: vec![],
-                    duration_secs: None,
-                });
-            }
         }
     }
 
@@ -346,7 +353,7 @@ impl App {
             self.status = ProcessingStatus::Sending;
             let mut stream = self
                 .provider
-                .complete(&self.messages, &tools, &system_prompt)
+                .complete(&self.messages, &tools, &system_prompt, self.provider_session_id.as_deref())
                 .await?;
 
             let mut text_content = String::new();
@@ -354,6 +361,7 @@ impl App {
             let mut current_tool: Option<ToolCall> = None;
             let mut current_tool_input = String::new();
             let mut first_event = true;
+            let mut saw_message_end = false;
 
             while let Some(event) = stream.next().await {
                 if first_event {
@@ -396,7 +404,16 @@ impl App {
                             self.streaming_output_tokens = output;
                         }
                     }
-                    StreamEvent::MessageEnd { .. } => break,
+                    StreamEvent::MessageEnd { .. } => {
+                        saw_message_end = true;
+                        // Don't break yet - wait for SessionId
+                    }
+                    StreamEvent::SessionId(sid) => {
+                        self.provider_session_id = Some(sid);
+                        if saw_message_end {
+                            break;
+                        }
+                    }
                     StreamEvent::Error(e) => {
                         return Err(anyhow::anyhow!("Stream error: {}", e));
                     }
@@ -547,7 +564,7 @@ impl App {
 
             let mut stream = self
                 .provider
-                .complete(&self.messages, &tools, &system_prompt)
+                .complete(&self.messages, &tools, &system_prompt, self.provider_session_id.as_deref())
                 .await?;
 
             let mut text_content = String::new();
@@ -555,6 +572,7 @@ impl App {
             let mut current_tool: Option<ToolCall> = None;
             let mut current_tool_input = String::new();
             let mut first_event = true;
+            let mut saw_message_end = false;
 
             // Stream with input handling
             loop {
@@ -612,7 +630,16 @@ impl App {
                                             self.streaming_output_tokens = output;
                                         }
                                     }
-                                    StreamEvent::MessageEnd { .. } => break,
+                                    StreamEvent::MessageEnd { .. } => {
+                                        saw_message_end = true;
+                                        // Don't break yet - wait for SessionId
+                                    }
+                                    StreamEvent::SessionId(sid) => {
+                                        self.provider_session_id = Some(sid);
+                                        if saw_message_end {
+                                            break;
+                                        }
+                                    }
                                     StreamEvent::Error(e) => {
                                         return Err(anyhow::anyhow!("Stream error: {}", e));
                                     }
@@ -854,6 +881,7 @@ mod tests {
             _messages: &[Message],
             _tools: &[crate::message::ToolDefinition],
             _system: &str,
+            _resume_session_id: Option<&str>,
         ) -> Result<crate::provider::EventStream> {
             unimplemented!("Mock provider")
         }

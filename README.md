@@ -112,6 +112,7 @@ For provider/auth details, see `OAUTH.md`.
 - `cargo test`
 - `cargo run --bin test_api` (Claude Agent SDK smoke test)
 - `cargo run --bin jcode-harness` (tool harness; add `--include-network` to exercise web tools)
+- `scripts/agent_trace.sh` (end-to-end agent smoke test with trace logs; set `JCODE_PROVIDER=openai|claude`)
 
 ## License
 

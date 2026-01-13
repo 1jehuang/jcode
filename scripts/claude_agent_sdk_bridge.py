@@ -103,6 +103,7 @@ def _serialize_result_message(message: ResultMessage) -> Dict[str, Any]:
         "usage": message.usage,
         "result": message.result,
         "structured_output": message.structured_output,
+        "session_id": message.session_id,  # Include session_id for resume support
     }
 
 
@@ -129,6 +130,7 @@ async def _run() -> None:
     cwd = options.get("cwd")
     include_partial_messages = options.get("include_partial_messages", True)
     extra_args = options.get("extra_args") or {}
+    resume_session_id = options.get("resume")  # Session ID to resume
 
     if permission_mode == "bypassPermissions":
         extra_args = dict(extra_args)
@@ -153,9 +155,29 @@ async def _run() -> None:
         cwd=cwd,
         include_partial_messages=include_partial_messages,
         extra_args=extra_args,
+        resume=resume_session_id,  # Resume previous session if provided
     )
 
-    async for message in query(prompt=_stream_messages(messages), options=claude_options):
+    # When resuming, only send the last user message as a simple string
+    # When starting fresh, send all messages in streaming format
+    if resume_session_id and messages:
+        # Find the last user message for the prompt
+        last_user_msg = None
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", [])
+                if isinstance(content, str):
+                    last_user_msg = content
+                elif content:
+                    # Extract text from content blocks
+                    texts = [b.get("text", "") for b in content if b.get("type") == "text"]
+                    last_user_msg = "\n\n".join(texts)
+                break
+        prompt_value: Any = last_user_msg or ""
+    else:
+        prompt_value = _stream_messages(messages)
+
+    async for message in query(prompt=prompt_value, options=claude_options):
         payload: Optional[Dict[str, Any]] = None
         if isinstance(message, StreamEvent):
             payload = _serialize_stream_event(message)

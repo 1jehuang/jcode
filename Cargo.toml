@@ -66,3 +66,6 @@ bytes = "1"
 # TUI
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
+
+[dev-dependencies]
+async-stream = "0.3"

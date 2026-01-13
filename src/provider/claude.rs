@@ -156,6 +156,8 @@ struct ClaudeSdkOptions {
     cli_path: Option<String>,
     cwd: Option<String>,
     include_partial_messages: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resume: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -166,6 +168,7 @@ enum SdkOutput {
     Result {
         is_error: bool,
         usage: Option<UsageInfo>,
+        session_id: Option<String>,
     },
     Error { message: String },
     #[serde(other)]
@@ -389,7 +392,7 @@ impl OutputParser {
 
                 events
             }
-            SdkOutput::Result { usage, is_error } => {
+            SdkOutput::Result { usage, is_error, session_id } => {
                 let mut events = Vec::new();
                 if let Some(usage) = usage {
                     if usage.input_tokens.is_some() || usage.output_tokens.is_some() {
@@ -398,6 +401,9 @@ impl OutputParser {
                             output_tokens: usage.output_tokens,
                         });
                     }
+                }
+                if let Some(sid) = session_id {
+                    events.push(StreamEvent::SessionId(sid));
                 }
                 if is_error {
                     events.push(StreamEvent::Error(
@@ -423,6 +429,7 @@ impl Provider for ClaudeProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
         system: &str,
+        resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let tool_names = self.tool_names_for_sdk(tools);
         let cwd = std::env::current_dir()
@@ -439,6 +446,7 @@ impl Provider for ClaudeProvider {
                 cli_path: self.config.cli_path.clone(),
                 cwd,
                 include_partial_messages: self.config.include_partial_messages,
+                resume: resume_session_id.map(|s| s.to_string()),
             },
         };
 
