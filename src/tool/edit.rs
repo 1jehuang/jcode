@@ -101,11 +101,14 @@ impl Tool for EditTool {
             content.replacen(&params.old_string, &params.new_string, 1)
         };
 
+        // Find line number where edit starts
+        let start_line = find_line_number(&content, &params.old_string);
+
         // Write back
         tokio::fs::write(path, &new_content).await?;
 
-        // Generate a unified diff
-        let diff = generate_diff(&params.old_string, &params.new_string);
+        // Generate a diff with line numbers
+        let diff = generate_diff(&params.old_string, &params.new_string, start_line);
 
         Ok(ToolOutput::new(format!(
             "Edited {}: replaced {} occurrence(s)\n{}",
@@ -114,25 +117,48 @@ impl Tool for EditTool {
     }
 }
 
-/// Generate a unified-style diff between two strings
-fn generate_diff(old: &str, new: &str) -> String {
+/// Find the 1-based line number where a substring starts
+fn find_line_number(content: &str, substring: &str) -> usize {
+    if let Some(pos) = content.find(substring) {
+        content[..pos].lines().count() + 1
+    } else {
+        1
+    }
+}
+
+/// Generate a diff with line numbers, left-aligned
+fn generate_diff(old: &str, new: &str, start_line: usize) -> String {
     let diff = TextDiff::from_lines(old, new);
     let mut output = String::new();
 
+    // Track line numbers for old and new content
+    let mut old_line = start_line;
+    let mut new_line = start_line;
+
     for change in diff.iter_all_changes() {
-        let prefix = match change.tag() {
-            ChangeTag::Delete => "-",
-            ChangeTag::Insert => "+",
-            ChangeTag::Equal => " ",
-        };
-        // Only show changed lines, limit context
-        if change.tag() != ChangeTag::Equal {
-            output.push_str(prefix);
-            output.push_str(change.value());
-            if !change.value().ends_with('\n') {
-                output.push('\n');
+        let (prefix, line_info) = match change.tag() {
+            ChangeTag::Delete => {
+                let info = format!("{:>4} ", old_line);
+                old_line += 1;
+                ("-", info)
             }
-        }
+            ChangeTag::Insert => {
+                let info = format!("{:>4} ", new_line);
+                new_line += 1;
+                ("+", info)
+            }
+            ChangeTag::Equal => {
+                old_line += 1;
+                new_line += 1;
+                continue; // Skip equal lines in output
+            }
+        };
+
+        output.push_str(&line_info);
+        output.push_str(prefix);
+        output.push(' ');
+        output.push_str(change.value().trim_end());
+        output.push('\n');
     }
 
     if output.is_empty() {
