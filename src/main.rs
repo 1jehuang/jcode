@@ -1,7 +1,9 @@
 mod agent;
 mod auth;
+mod auto_debug;
 mod bus;
 mod id;
+mod logging;
 mod message;
 mod provider;
 mod server;
@@ -28,6 +30,7 @@ enum ProviderChoice {
 
 #[derive(Parser, Debug)]
 #[command(name = "jcode")]
+#[command(version = env!("JCODE_VERSION"))]
 #[command(about = "J-Code: A coding agent using Claude Max or ChatGPT Pro subscriptions")]
 struct Args {
     /// Provider to use (claude, openai, or auto-detect)
@@ -76,11 +79,17 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize logging
+    logging::init();
+    logging::cleanup_old_logs();
+    logging::info("jcode starting");
+
     let args = Args::parse();
 
     // Change working directory if specified
     if let Some(cwd) = &args.cwd {
         std::env::set_current_dir(cwd)?;
+        logging::info(&format!("Changed working directory to: {}", cwd));
     }
 
     if args.trace {
@@ -95,6 +104,24 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    // Run main logic with error handling for auto-debug
+    if let Err(e) = run_main(args).await {
+        let error_str = format!("{:?}", e);
+        logging::error(&error_str);
+
+        // Trigger auto-debug if enabled
+        if auto_debug::is_enabled() {
+            auto_debug::analyze_error(&error_str, "main execution");
+        }
+
+        return Err(e);
+    }
+
+    Ok(())
+}
+
+async fn run_main(args: Args) -> Result<()> {
 
     match args.command {
         Some(Command::Serve) => {

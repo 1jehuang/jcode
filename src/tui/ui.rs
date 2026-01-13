@@ -1,4 +1,6 @@
 use super::app::{App, ProcessingStatus};
+use super::markdown;
+use crate::message::ToolCall;
 use ratatui::{
     prelude::*,
     widgets::{Paragraph, Wrap},
@@ -43,6 +45,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Calculate queued messages height (1 line per message, max 3)
     let queued_height = app.queued_messages().len().min(3) as u16;
 
+    // Calculate input height based on content (max 5 lines to not overwhelm)
+    let available_width = area.width.saturating_sub(4) as usize; // margin + prompt
+    let input_len = app.input().len();
+    let input_height = if available_width > 0 {
+        ((input_len / available_width) + 1).min(5) as u16
+    } else {
+        1
+    };
+
     // Layout: messages + status + queued + input
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -51,7 +62,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             Constraint::Min(3),              // Messages
             Constraint::Length(1),           // Status line
             Constraint::Length(queued_height), // Queued messages
-            Constraint::Length(1),           // Input
+            Constraint::Length(input_height), // Input (dynamic height)
         ])
         .split(area);
 
@@ -106,12 +117,13 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                 ]));
             }
             "assistant" => {
-                // AI messages: white/default color
-                for line in msg.content.lines() {
-                    lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::raw(line),
-                    ]));
+                // AI messages: render markdown with syntax highlighting
+                let md_lines = markdown::render_markdown(&msg.content);
+                for md_line in md_lines {
+                    // Prepend indent to each line
+                    let mut spans = vec![Span::raw("  ")];
+                    spans.extend(md_line.spans);
+                    lines.push(Line::from(spans));
                 }
                 // Tool badges inline
                 if !msg.tool_calls.is_empty() {
@@ -135,46 +147,7 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
             "tool" => {
-                // Tool header with name/title
-                let tool_name = msg.title.as_deref().unwrap_or("tool");
-                lines.push(Line::from(vec![
-                    Span::styled("  ◦ ", Style::default().fg(TOOL_COLOR)),
-                    Span::styled(tool_name, Style::default().fg(TOOL_COLOR)),
-                ]));
-
-                // Tool output with diff coloring (compact: max 10 lines)
-                let line_count = msg.content.lines().count();
-                let max_lines = 10;
-                for (i, line) in msg.content.lines().take(max_lines).enumerate() {
-                    let style = if line.starts_with('+') && !line.starts_with("++") {
-                        Style::default().fg(Color::Green)
-                    } else if line.starts_with('-') && !line.starts_with("--") {
-                        Style::default().fg(Color::Red)
-                    } else if line.starts_with("@@") {
-                        Style::default().fg(Color::Cyan).dim()
-                    } else {
-                        Style::default().fg(TOOL_COLOR).dim()
-                    };
-                    let display_line = if line.len() > 100 {
-                        format!("{}…", &line[..100])
-                    } else {
-                        line.to_string()
-                    };
-                    lines.push(Line::from(vec![
-                        Span::raw("    "),
-                        Span::styled(display_line, style),
-                    ]));
-                    // Show truncation indicator if we hit the limit
-                    if i == max_lines - 1 && line_count > max_lines {
-                        lines.push(Line::from(vec![
-                            Span::raw("    "),
-                            Span::styled(
-                                format!("...({} more lines)", line_count - max_lines),
-                                Style::default().fg(DIM_COLOR).italic()
-                            ),
-                        ]));
-                    }
-                }
+                // Tool calls are shown inline during streaming, this is kept for backwards compat
             }
             "system" => {
                 lines.push(Line::from(vec![
@@ -211,16 +184,16 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                 ]));
             }
         }
-        // Show streaming tool calls as they are detected
+        // Show streaming tool calls with details as they are detected
         let streaming_tools = app.streaming_tool_calls();
-        if !streaming_tools.is_empty() {
-            let tools_str = streaming_tools.iter()
-                .map(|t| format!("[{}]", t))
-                .collect::<Vec<_>>()
-                .join(" ");
+        for tc in streaming_tools {
+            lines.push(Line::from(""));
+            // Tool header with name and key info
+            let summary = get_tool_summary(tc);
             lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(tools_str, Style::default().fg(ACCENT_COLOR).dim()),
+                Span::styled("  ◦ ", Style::default().fg(TOOL_COLOR)),
+                Span::styled(&tc.name, Style::default().fg(TOOL_COLOR)),
+                Span::styled(format!(" {}", summary), Style::default().fg(DIM_COLOR)),
             ]));
         }
     }
@@ -286,9 +259,9 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         let spinner_idx = (elapsed * 12.5) as usize % SPINNER_FRAMES.len();
         let spinner = SPINNER_FRAMES[spinner_idx];
 
-        let status_text = match app.status() {
-            ProcessingStatus::Idle => String::new(),
-            ProcessingStatus::Sending => format!("sending… {:.1}s", elapsed),
+        let (status_text, progress_bar) = match app.status() {
+            ProcessingStatus::Idle => (String::new(), None),
+            ProcessingStatus::Sending => (format!("sending… {:.1}s", elapsed), None),
             ProcessingStatus::Streaming => {
                 let tokens_str = if input_tokens > 0 || output_tokens > 0 {
                     format!("↑{} ↓{}", input_tokens, output_tokens)
@@ -300,7 +273,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
                     Some(s) if s > 2.0 => format!(" (idle {:.0}s)", s),
                     _ => String::new(),
                 };
-                format!("{}{} {:.1}s", tokens_str, stale_str, elapsed)
+                (format!("{}{} {:.1}s", tokens_str, stale_str, elapsed), None)
             }
             ProcessingStatus::RunningTool(name) => {
                 let tokens_str = if input_tokens > 0 || output_tokens > 0 {
@@ -308,14 +281,25 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     String::new()
                 };
-                format!("{}{}… {:.1}s", tokens_str, name, elapsed)
+                // Animated progress bar for tool execution
+                let bar_width = 10;
+                let progress = ((elapsed * 2.0) % 1.0) as f32; // Cycle every 0.5s
+                let filled = ((progress * bar_width as f32) as usize) % bar_width;
+                let bar: String = (0..bar_width)
+                    .map(|i| if i == filled { '●' } else { '·' })
+                    .collect();
+                (format!("{}{}… {:.1}s", tokens_str, name, elapsed), Some(bar))
             }
         };
 
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(spinner, Style::default().fg(AI_COLOR)),
             Span::styled(format!(" {}", status_text), Style::default().fg(DIM_COLOR)),
-        ])
+        ];
+        if let Some(bar) = progress_bar {
+            spans.push(Span::styled(format!(" {}", bar), Style::default().fg(AI_COLOR)));
+        }
+        Line::from(spans)
     } else {
         // Idle - show nothing or minimal info
         Line::from(Span::styled("", Style::default().fg(DIM_COLOR)))
@@ -345,23 +329,106 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let input_text = app.input();
     let cursor_pos = app.cursor_pos();
 
-    // Build input line with prompt
-    let prompt = if app.is_processing() {
-        Span::styled("… ", Style::default().fg(QUEUED_COLOR))
+    // Build prompt
+    let prompt_str = if app.is_processing() {
+        "… "
     } else if app.active_skill().is_some() {
-        Span::styled("» ", Style::default().fg(ACCENT_COLOR))
+        "» "
     } else {
-        Span::styled("> ", Style::default().fg(DIM_COLOR))
+        "> "
+    };
+    let prompt_style = if app.is_processing() {
+        Style::default().fg(QUEUED_COLOR)
+    } else if app.active_skill().is_some() {
+        Style::default().fg(ACCENT_COLOR)
+    } else {
+        Style::default().fg(DIM_COLOR)
     };
 
-    let spans = vec![prompt, Span::raw(input_text)];
-    let input_line = Line::from(spans);
-    let paragraph = Paragraph::new(input_line);
+    let prompt_len = 2;
+    let line_width = (area.width as usize).saturating_sub(prompt_len);
+
+    if line_width == 0 {
+        return;
+    }
+
+    // Wrap text into lines
+    let chars: Vec<char> = input_text.chars().collect();
+    let mut lines: Vec<Line> = Vec::new();
+    let mut pos = 0;
+
+    while pos < chars.len() || lines.is_empty() {
+        let end = (pos + line_width).min(chars.len());
+        let line_text: String = chars[pos..end].iter().collect();
+
+        if lines.is_empty() {
+            // First line has prompt
+            lines.push(Line::from(vec![
+                Span::styled(prompt_str, prompt_style),
+                Span::raw(line_text),
+            ]));
+        } else {
+            // Continuation lines have indent
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::raw(line_text),
+            ]));
+        }
+
+        if end == pos {
+            break; // Empty input case
+        }
+        pos = end;
+    }
+
+    let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, area);
 
-    // Always show cursor - user can type even during processing
-    frame.set_cursor_position(Position::new(
-        area.x + 2 + cursor_pos as u16,
-        area.y,
-    ));
+    // Calculate cursor position in wrapped text
+    let cursor_line = cursor_pos / line_width;
+    let cursor_col = cursor_pos % line_width;
+    let cursor_y = area.y + (cursor_line as u16).min(area.height.saturating_sub(1));
+    let cursor_x = area.x + prompt_len as u16 + cursor_col as u16;
+
+    frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+}
+
+/// Extract a brief summary from a tool call input (file path, command, etc.)
+fn get_tool_summary(tool: &ToolCall) -> String {
+    match tool.name.as_str() {
+        "bash" => {
+            if let Some(cmd) = tool.input.get("command").and_then(|v| v.as_str()) {
+                let short = if cmd.len() > 50 {
+                    format!("{}...", &cmd[..50])
+                } else {
+                    cmd.to_string()
+                };
+                format!("$ {}", short)
+            } else {
+                String::new()
+            }
+        }
+        "read" | "write" | "edit" => {
+            if let Some(path) = tool.input.get("file_path").and_then(|v| v.as_str()) {
+                path.to_string()
+            } else {
+                String::new()
+            }
+        }
+        "glob" | "grep" => {
+            if let Some(pattern) = tool.input.get("pattern").and_then(|v| v.as_str()) {
+                format!("'{}'", pattern)
+            } else {
+                String::new()
+            }
+        }
+        "ls" => {
+            tool.input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".")
+                .to_string()
+        }
+        _ => String::new()
+    }
 }

@@ -62,8 +62,8 @@ pub struct App {
     processing_started: Option<Instant>,
     // Pending turn to process (allows UI to redraw before processing starts)
     pending_turn: bool,
-    // Tool calls detected during streaming (shown in real-time)
-    streaming_tool_calls: Vec<String>,
+    // Tool calls detected during streaming (shown in real-time with details)
+    streaming_tool_calls: Vec<ToolCall>,
     // Provider-specific session ID for conversation resume
     provider_session_id: Option<String>,
     // Cancel flag for interrupting generation
@@ -300,8 +300,8 @@ impl App {
             KeyCode::End => self.cursor_pos = self.input.len(),
             KeyCode::Up | KeyCode::PageUp => {
                 // Scroll up (increase offset from bottom)
-                // Cap at roughly estimated max (will be clamped in UI anyway)
-                let max_estimate = self.display_messages.len() * 10 + self.streaming_text.lines().count();
+                // Use generous estimate - UI will clamp to actual content
+                let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
                 let inc = if code == KeyCode::PageUp { 10 } else { 1 };
                 self.scroll_offset = (self.scroll_offset + inc).min(max_estimate);
             }
@@ -469,7 +469,6 @@ impl App {
                         text_content.push_str(&text);
                     }
                     StreamEvent::ToolUseStart { id, name } => {
-                        self.streaming_tool_calls.push(name.clone());
                         current_tool = Some(ToolCall {
                             id,
                             name,
@@ -484,6 +483,8 @@ impl App {
                         if let Some(mut tool) = current_tool.take() {
                             tool.input = serde_json::from_str(&current_tool_input)
                                 .unwrap_or(serde_json::Value::Null);
+                            // Show tool call immediately with details
+                            self.streaming_tool_calls.push(tool.clone());
                             tool_calls.push(tool);
                             current_tool_input.clear();
                         }
@@ -587,7 +588,7 @@ impl App {
                 }));
 
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
-                let (output, is_error, tool_title) = match result {
+                let (output, is_error, _tool_title) = match result {
                     Ok(o) => {
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
                             session_id: self.session.id.clone(),
@@ -612,23 +613,7 @@ impl App {
                     }
                 };
 
-                // Truncate for display
-                let display_output = if output.len() > 500 {
-                    format!("{}...", &output[..500])
-                } else {
-                    output.clone()
-                };
-
-                // Use tool's title (e.g., file path) if available and different from name
-                let display_title = tool_title.filter(|t| t != &tc.name);
-
-                self.display_messages.push(DisplayMessage {
-                    role: "tool".to_string(),
-                    content: display_output,
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: display_title,
-                });
+                // Tool calls shown inline during streaming, no separate display message
 
                 self.messages.push(Message::tool_result(&tc.id, &output, is_error));
                 self.session.add_message(
@@ -718,7 +703,6 @@ impl App {
                                         text_content.push_str(&text);
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
-                                        self.streaming_tool_calls.push(name.clone());
                                         current_tool = Some(ToolCall {
                                             id,
                                             name,
@@ -733,6 +717,8 @@ impl App {
                                         if let Some(mut tool) = current_tool.take() {
                                             tool.input = serde_json::from_str(&current_tool_input)
                                                 .unwrap_or(serde_json::Value::Null);
+                                            // Show tool call immediately with details
+                                            self.streaming_tool_calls.push(tool.clone());
                                             tool_calls.push(tool);
                                             current_tool_input.clear();
                                         }
@@ -841,7 +827,7 @@ impl App {
                 }));
 
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
-                let (output, is_error, tool_title) = match result {
+                let (output, is_error, _tool_title) = match result {
                     Ok(o) => {
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
                             session_id: self.session.id.clone(),
@@ -866,22 +852,7 @@ impl App {
                     }
                 };
 
-                let display_output = if output.len() > 500 {
-                    format!("{}...", &output[..500])
-                } else {
-                    output.clone()
-                };
-
-                // Use tool's title (e.g., file path) if available and different from name
-                let display_title = tool_title.filter(|t| t != &tc.name);
-
-                self.display_messages.push(DisplayMessage {
-                    role: "tool".to_string(),
-                    content: display_output,
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: display_title,
-                });
+                // Tool calls shown inline during streaming, no separate display message
 
                 self.messages.push(Message::tool_result(&tc.id, &output, is_error));
                 self.session.add_message(
@@ -1022,7 +993,7 @@ When you need to make changes, use the tools directly. Don't just describe what 
         self.last_stream_activity.map(|t| t.elapsed())
     }
 
-    pub fn streaming_tool_calls(&self) -> &[String] {
+    pub fn streaming_tool_calls(&self) -> &[ToolCall] {
         &self.streaming_tool_calls
     }
 
