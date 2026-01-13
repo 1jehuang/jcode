@@ -618,16 +618,17 @@ impl App {
                         return Err(anyhow::anyhow!("Stream error: {}", e));
                     }
                     StreamEvent::ThinkingStart => {
-                        // Track thinking start for timing display
+                        // Track start but don't display - wait for ThinkingDone
                         self.thinking_start = Some(Instant::now());
                     }
                     StreamEvent::ThinkingEnd => {
-                        // Calculate and display thinking duration
-                        if let Some(start) = self.thinking_start.take() {
-                            let elapsed = start.elapsed();
-                            let thinking_msg = format!("Thought for {:.1}s\n\n", elapsed.as_secs_f64());
-                            self.streaming_text.push_str(&thinking_msg);
-                        }
+                        // Don't display here - ThinkingDone has accurate timing
+                        self.thinking_start = None;
+                    }
+                    StreamEvent::ThinkingDone { duration_secs } => {
+                        // Bridge provides accurate wall-clock timing
+                        let thinking_msg = format!("Thought for {:.1}s\n\n", duration_secs);
+                        self.streaming_text.push_str(&thinking_msg);
                     }
                 }
             }
@@ -908,11 +909,11 @@ impl App {
                                         self.thinking_start = Some(Instant::now());
                                     }
                                     StreamEvent::ThinkingEnd => {
-                                        if let Some(start) = self.thinking_start.take() {
-                                            let elapsed = start.elapsed();
-                                            let thinking_msg = format!("Thought for {:.1}s\n\n", elapsed.as_secs_f64());
-                                            self.streaming_text.push_str(&thinking_msg);
-                                        }
+                                        self.thinking_start = None;
+                                    }
+                                    StreamEvent::ThinkingDone { duration_secs } => {
+                                        let thinking_msg = format!("Thought for {:.1}s\n\n", duration_secs);
+                                        self.streaming_text.push_str(&thinking_msg);
                                     }
                                 }
                             }

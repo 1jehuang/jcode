@@ -123,6 +123,74 @@ impl SkillRegistry {
         self.skills.values().collect()
     }
 
+    /// Reload a specific skill by name
+    pub fn reload(&mut self, name: &str) -> Result<bool> {
+        // Find the skill's path first
+        let path = self.skills.get(name).map(|s| s.path.clone());
+
+        if let Some(path) = path {
+            if path.exists() {
+                let skill = Self::parse_skill(&path)?;
+                self.skills.insert(skill.name.clone(), skill);
+                Ok(true)
+            } else {
+                // Skill file was deleted
+                self.skills.remove(name);
+                Ok(false)
+            }
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Reload all skills from all locations
+    pub fn reload_all(&mut self) -> Result<usize> {
+        self.skills.clear();
+
+        let mut count = 0;
+
+        // Load from ~/.claude/skills/
+        if let Some(home) = dirs::home_dir() {
+            let global_skills = home.join(".claude").join("skills");
+            if global_skills.exists() {
+                count += self.load_from_dir_count(&global_skills)?;
+            }
+        }
+
+        // Load from ./.claude/skills/ (project-local)
+        let local_skills = Path::new(".claude").join("skills");
+        if local_skills.exists() {
+            count += self.load_from_dir_count(&local_skills)?;
+        }
+
+        Ok(count)
+    }
+
+    /// Load skills from a directory and return count
+    fn load_from_dir_count(&mut self, dir: &Path) -> Result<usize> {
+        if !dir.is_dir() {
+            return Ok(0);
+        }
+
+        let mut count = 0;
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if path.is_dir() {
+                let skill_file = path.join("SKILL.md");
+                if skill_file.exists() {
+                    if let Ok(skill) = Self::parse_skill(&skill_file) {
+                        self.skills.insert(skill.name.clone(), skill);
+                        count += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(count)
+    }
+
     /// Check if a message is a skill invocation (starts with /)
     pub fn parse_invocation(input: &str) -> Option<&str> {
         let trimmed = input.trim();

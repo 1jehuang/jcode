@@ -175,6 +175,7 @@ struct ClaudeSdkOptions {
 enum SdkOutput {
     StreamEvent { event: Value },
     AssistantMessage { content: Vec<SdkContentBlock> },
+    ThinkingDone { duration_secs: f64 },
     Result {
         is_error: bool,
         usage: Option<UsageInfo>,
@@ -462,6 +463,9 @@ impl OutputParser {
                 }
                 events
             }
+            SdkOutput::ThinkingDone { duration_secs } => {
+                vec![StreamEvent::ThinkingDone { duration_secs }]
+            }
             SdkOutput::Error { message } => vec![StreamEvent::Error(message)],
             SdkOutput::Other => Vec::new(),
         }
@@ -616,6 +620,7 @@ fn to_claude_tool_name(name: &str) -> String {
         "codesearch" => "CodeSearch",
         "invalid" => "Invalid",
         "skill" => "Skill",
+        "skill_manage" => "SkillManage",
         "lsp" => "Lsp",
         "task" => "Task",
         "todowrite" => "TodoWrite",
@@ -643,6 +648,7 @@ fn to_internal_tool_name(name: &str) -> String {
         "CodeSearch" => "codesearch",
         "Invalid" => "invalid",
         "Skill" => "skill",
+        "SkillManage" => "skill_manage",
         "Lsp" => "lsp",
         "Task" => "task",
         "TodoWrite" => "todowrite",

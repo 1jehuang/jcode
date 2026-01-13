@@ -223,18 +223,17 @@ impl Agent {
             while let Some(event) = stream.next().await {
                 match event? {
                     StreamEvent::ThinkingStart => {
+                        // Track start but don't print - wait for ThinkingDone
                         thinking_start = Some(Instant::now());
-                        if print_output {
-                            print!("Thinking");
-                            io::stdout().flush()?;
-                        }
                     }
                     StreamEvent::ThinkingEnd => {
-                        if let Some(start) = thinking_start.take() {
-                            let elapsed = start.elapsed();
-                            if print_output {
-                                println!(" ({:.1}s)", elapsed.as_secs_f64());
-                            }
+                        // Don't print here - ThinkingDone has accurate timing
+                        thinking_start = None;
+                    }
+                    StreamEvent::ThinkingDone { duration_secs } => {
+                        // Bridge provides accurate wall-clock timing
+                        if print_output {
+                            println!("Thought for {:.1}s", duration_secs);
                         }
                     }
                     StreamEvent::TextDelta(text) => {

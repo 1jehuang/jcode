@@ -97,6 +97,8 @@ pub enum StreamEvent {
     ThinkingStart,
     /// Extended thinking ended
     ThinkingEnd,
+    /// Extended thinking completed with duration
+    ThinkingDone { duration_secs: f64 },
     /// Message complete (may have stop reason)
     MessageEnd { stop_reason: Option<String> },
     /// Token usage update

@@ -21,6 +21,7 @@ mod write;
 
 use crate::message::ToolDefinition;
 use crate::provider::Provider;
+use crate::skill::SkillRegistry;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -101,12 +102,15 @@ pub trait Tool: Send + Sync {
 #[derive(Clone)]
 pub struct Registry {
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    skills: Arc<RwLock<SkillRegistry>>,
 }
 
 impl Registry {
     pub async fn new(provider: Arc<dyn Provider>) -> Self {
+        let skills = Arc::new(RwLock::new(SkillRegistry::load().unwrap_or_default()));
         let registry = Self {
             tools: Arc::new(RwLock::new(HashMap::new())),
+            skills: skills.clone(),
         };
 
         let mut tools_map = HashMap::new();
@@ -140,7 +144,7 @@ impl Registry {
 
         // Meta tools
         tools_map.insert("invalid".to_string(), Arc::new(invalid::InvalidTool::new()) as Arc<dyn Tool>);
-        tools_map.insert("skill".to_string(), Arc::new(skill::SkillTool::new()) as Arc<dyn Tool>);
+        tools_map.insert("skill_manage".to_string(), Arc::new(skill::SkillTool::new(skills)) as Arc<dyn Tool>);
         tools_map.insert("lsp".to_string(), Arc::new(lsp::LspTool::new()) as Arc<dyn Tool>);
         let task_tool = task::TaskTool::new(provider, registry.clone());
         tools_map.insert("task".to_string(), Arc::new(task_tool) as Arc<dyn Tool>);
@@ -212,5 +216,10 @@ impl Registry {
             tools.remove(name);
         }
         to_remove
+    }
+
+    /// Get shared access to the skill registry
+    pub fn skills(&self) -> Arc<RwLock<SkillRegistry>> {
+        self.skills.clone()
     }
 }

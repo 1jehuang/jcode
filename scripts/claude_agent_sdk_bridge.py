@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
 import anyio
@@ -69,8 +70,15 @@ def _to_cli_message(message: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _serialize_assistant_message(message: AssistantMessage) -> Dict[str, Any]:
+def _serialize_assistant_message(message: AssistantMessage) -> tuple[Dict[str, Any], bool, bool]:
+    """Serialize an AssistantMessage.
+
+    Returns: (payload, has_thinking, has_non_thinking)
+    """
     blocks: List[Dict[str, Any]] = []
+    has_thinking = False
+    has_non_thinking = False
+
     for block in message.content:
         # SDK block objects use class names like TextBlock, ToolUseBlock, ThinkingBlock
         # Check class name to determine type
@@ -78,6 +86,7 @@ def _serialize_assistant_message(message: AssistantMessage) -> Dict[str, Any]:
 
         if class_name == "TextBlock" or hasattr(block, "text") and not hasattr(block, "thinking"):
             blocks.append({"type": "text", "text": block.text})
+            has_non_thinking = True
         elif class_name == "ToolUseBlock":
             blocks.append(
                 {
@@ -87,6 +96,7 @@ def _serialize_assistant_message(message: AssistantMessage) -> Dict[str, Any]:
                     "input": block.input,
                 }
             )
+            has_non_thinking = True
         elif class_name == "ToolResultBlock":
             blocks.append(
                 {
@@ -96,14 +106,16 @@ def _serialize_assistant_message(message: AssistantMessage) -> Dict[str, Any]:
                     "is_error": block.is_error,
                 }
             )
+            has_non_thinking = True
         elif class_name == "ThinkingBlock":
-            # Thinking blocks are internal reasoning - skip them
-            pass
+            # Thinking blocks are internal reasoning - skip content but track timing
+            has_thinking = True
         # Also handle legacy type attribute format
         elif hasattr(block, "type"):
             block_type = block.type
             if block_type == "text":
                 blocks.append({"type": "text", "text": block.text})
+                has_non_thinking = True
             elif block_type == "tool_use":
                 blocks.append(
                     {
@@ -113,6 +125,7 @@ def _serialize_assistant_message(message: AssistantMessage) -> Dict[str, Any]:
                         "input": block.input,
                     }
                 )
+                has_non_thinking = True
             elif block_type == "tool_result":
                 blocks.append(
                     {
@@ -122,7 +135,8 @@ def _serialize_assistant_message(message: AssistantMessage) -> Dict[str, Any]:
                         "is_error": block.is_error,
                     }
                 )
-    return {"type": "assistant_message", "content": blocks, "model": message.model}
+                has_non_thinking = True
+    return {"type": "assistant_message", "content": blocks, "model": message.model}, has_thinking, has_non_thinking
 
 
 def _serialize_result_message(message: ResultMessage) -> Dict[str, Any]:
@@ -208,12 +222,53 @@ async def _run() -> None:
     else:
         prompt_value = _stream_messages(messages)
 
+    thinking_start: Optional[float] = None
+    in_thinking_block: bool = False
+    thinking_done_emitted: bool = False
+
+    # Track query start time - thinking happens during the API call
+    query_start = time.time()
+    saw_thinking = False
+
     async for message in query(prompt=prompt_value, options=claude_options):
         payload: Optional[Dict[str, Any]] = None
         if isinstance(message, StreamEvent):
+            event = message.event
+            event_type = event.get("type", "")
+
+            # Track thinking timing from stream events
+            if event_type == "content_block_start":
+                block = event.get("content_block", {})
+                block_type = block.get("type")
+                if block_type == "thinking":
+                    thinking_start = time.time()
+                    in_thinking_block = True
+                    saw_thinking = True
+                elif block_type == "text" and thinking_start is not None and not thinking_done_emitted:
+                    # Text block started - emit thinking duration
+                    elapsed = time.time() - thinking_start
+                    thinking_payload = {"type": "thinking_done", "duration_secs": elapsed}
+                    sys.stdout.write(json.dumps(thinking_payload) + "\n")
+                    sys.stdout.flush()
+                    thinking_done_emitted = True
+            elif event_type == "content_block_stop" and in_thinking_block:
+                in_thinking_block = False
+
             payload = _serialize_stream_event(message)
         elif isinstance(message, AssistantMessage):
-            payload = _serialize_assistant_message(message)
+            payload, has_thinking, has_non_thinking = _serialize_assistant_message(message)
+            # Track thinking from AssistantMessage
+            if has_thinking:
+                saw_thinking = True
+            # Emit thinking duration when we see non-thinking content after thinking
+            # Use time from query start since thinking happens during API call
+            if has_non_thinking and saw_thinking and not thinking_done_emitted:
+                elapsed = time.time() - query_start
+                thinking_done_emitted = True
+                # Emit thinking duration event
+                thinking_payload = {"type": "thinking_done", "duration_secs": elapsed}
+                sys.stdout.write(json.dumps(thinking_payload) + "\n")
+                sys.stdout.flush()
         elif isinstance(message, ResultMessage):
             payload = _serialize_result_message(message)
         elif isinstance(message, (SystemMessage, UserMessage)):
