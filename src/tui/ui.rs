@@ -243,6 +243,37 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
         .scroll((scroll as u16, 0));
 
     frame.render_widget(paragraph, area);
+
+    // Show scroll indicators
+    if scroll > 0 {
+        // Content above indicator (top-right)
+        let indicator = format!("↑{}", scroll);
+        let indicator_area = Rect {
+            x: area.x + area.width.saturating_sub(indicator.len() as u16 + 1),
+            y: area.y,
+            width: indicator.len() as u16 + 1,
+            height: 1,
+        };
+        let indicator_widget = Paragraph::new(Line::from(vec![
+            Span::styled(indicator, Style::default().fg(DIM_COLOR)),
+        ]));
+        frame.render_widget(indicator_widget, indicator_area);
+    }
+
+    // Content below indicator (bottom-right) when user has scrolled up
+    if user_scroll > 0 {
+        let indicator = format!("↓{}", user_scroll);
+        let indicator_area = Rect {
+            x: area.x + area.width.saturating_sub(indicator.len() as u16 + 1),
+            y: area.y + area.height.saturating_sub(1),
+            width: indicator.len() as u16 + 1,
+            height: 1,
+        };
+        let indicator_widget = Paragraph::new(Line::from(vec![
+            Span::styled(indicator, Style::default().fg(QUEUED_COLOR)),
+        ]));
+        frame.render_widget(indicator_widget, indicator_area);
+    }
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
