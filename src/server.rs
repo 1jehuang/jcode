@@ -1,15 +1,18 @@
 use crate::agent::Agent;
+use crate::message::StreamEvent;
+use crate::protocol::{decode_request, encode_event, Request, ServerEvent};
 use crate::provider::Provider;
 use crate::tool::Registry;
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use futures::StreamExt;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex, RwLock};
 
-/// Default socket path
+/// Default socket path for main communication
 pub fn socket_path() -> PathBuf {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -17,69 +20,171 @@ pub fn socket_path() -> PathBuf {
     runtime_dir.join("jcode.sock")
 }
 
-/// JSON-RPC request
-#[derive(Debug, Deserialize)]
-struct Request {
-    id: u64,
-    method: String,
-    params: serde_json::Value,
-}
-
-/// JSON-RPC response
-#[derive(Debug, Serialize, Deserialize)]
-struct Response {
-    id: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+/// Debug socket path for testing/introspection
+pub fn debug_socket_path() -> PathBuf {
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    runtime_dir.join("jcode-debug.sock")
 }
 
 /// Server state
 pub struct Server {
-    agent: Arc<Mutex<Agent>>,
+    provider: Arc<dyn Provider>,
+    registry: Registry,
     socket_path: PathBuf,
+    debug_socket_path: PathBuf,
+    /// Broadcast channel for streaming events to all subscribers
+    event_tx: broadcast::Sender<ServerEvent>,
+    /// Active sessions (session_id -> Agent)
+    sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    /// Current processing state
+    is_processing: Arc<RwLock<bool>>,
+    /// Session ID for the default session
+    session_id: Arc<RwLock<String>>,
 }
 
 impl Server {
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
-        let agent = Agent::new(provider, registry);
+        let (event_tx, _) = broadcast::channel(1024);
         Self {
-            agent: Arc::new(Mutex::new(agent)),
+            provider,
+            registry,
             socket_path: socket_path(),
+            debug_socket_path: debug_socket_path(),
+            event_tx,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            is_processing: Arc::new(RwLock::new(false)),
+            session_id: Arc::new(RwLock::new(String::new())),
         }
     }
 
-    /// Start the server
+    /// Start the server (both main and debug sockets)
     pub async fn run(&self) -> Result<()> {
-        // Remove existing socket
+        // Remove existing sockets
         let _ = std::fs::remove_file(&self.socket_path);
+        let _ = std::fs::remove_file(&self.debug_socket_path);
 
-        let listener = UnixListener::bind(&self.socket_path)?;
+        let main_listener = UnixListener::bind(&self.socket_path)?;
+        let debug_listener = UnixListener::bind(&self.debug_socket_path)?;
+
         eprintln!("Server listening on {:?}", self.socket_path);
+        eprintln!("Debug socket on {:?}", self.debug_socket_path);
 
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    let agent = Arc::clone(&self.agent);
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_client(stream, agent).await {
-                            eprintln!("Client error: {}", e);
-                        }
-                    });
-                }
-                Err(e) => {
-                    eprintln!("Accept error: {}", e);
+        // Create default session
+        let agent = Agent::new(Arc::clone(&self.provider), self.registry.clone());
+        let session_id = agent.session_id().to_string();
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(session_id.clone(), Arc::new(Mutex::new(agent)));
+            *self.session_id.write().await = session_id.clone();
+        }
+
+        // Spawn main socket handler
+        let main_sessions = Arc::clone(&self.sessions);
+        let main_event_tx = self.event_tx.clone();
+        let main_provider = Arc::clone(&self.provider);
+        let main_registry = self.registry.clone();
+        let main_is_processing = Arc::clone(&self.is_processing);
+        let main_session_id = Arc::clone(&self.session_id);
+
+        let main_handle = tokio::spawn(async move {
+            loop {
+                match main_listener.accept().await {
+                    Ok((stream, _)) => {
+                        let sessions = Arc::clone(&main_sessions);
+                        let event_tx = main_event_tx.clone();
+                        let provider = Arc::clone(&main_provider);
+                        let registry = main_registry.clone();
+                        let is_processing = Arc::clone(&main_is_processing);
+                        let session_id = Arc::clone(&main_session_id);
+
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_client(
+                                stream,
+                                sessions,
+                                event_tx,
+                                provider,
+                                registry,
+                                is_processing,
+                                session_id,
+                            )
+                            .await
+                            {
+                                eprintln!("Client error: {}", e);
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("Main accept error: {}", e);
+                    }
                 }
             }
-        }
+        });
+
+        // Spawn debug socket handler
+        let debug_sessions = Arc::clone(&self.sessions);
+        let debug_is_processing = Arc::clone(&self.is_processing);
+        let debug_session_id = Arc::clone(&self.session_id);
+
+        let debug_handle = tokio::spawn(async move {
+            loop {
+                match debug_listener.accept().await {
+                    Ok((stream, _)) => {
+                        let sessions = Arc::clone(&debug_sessions);
+                        let is_processing = Arc::clone(&debug_is_processing);
+                        let session_id = Arc::clone(&debug_session_id);
+
+                        tokio::spawn(async move {
+                            if let Err(e) =
+                                handle_debug_client(stream, sessions, is_processing, session_id)
+                                    .await
+                            {
+                                eprintln!("Debug client error: {}", e);
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("Debug accept error: {}", e);
+                    }
+                }
+            }
+        });
+
+        // Wait for both to complete (they won't normally)
+        let _ = tokio::join!(main_handle, debug_handle);
+        Ok(())
     }
 }
 
-async fn handle_client(stream: UnixStream, agent: Arc<Mutex<Agent>>) -> Result<()> {
-    let (reader, mut writer) = stream.into_split();
+async fn handle_client(
+    stream: UnixStream,
+    sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    event_tx: broadcast::Sender<ServerEvent>,
+    provider: Arc<dyn Provider>,
+    registry: Registry,
+    is_processing: Arc<RwLock<bool>>,
+    session_id: Arc<RwLock<String>>,
+) -> Result<()> {
+    let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
+    let writer = Arc::new(Mutex::new(writer));
     let mut line = String::new();
+
+    // Subscribe to events
+    let mut event_rx = event_tx.subscribe();
+    let writer_clone = Arc::clone(&writer);
+
+    // Spawn event forwarder
+    let event_handle = tokio::spawn(async move {
+        while let Ok(event) = event_rx.recv().await {
+            let json = encode_event(&event);
+            let mut w = writer_clone.lock().await;
+            if w.write_all(json.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
 
     loop {
         line.clear();
@@ -88,76 +193,288 @@ async fn handle_client(stream: UnixStream, agent: Arc<Mutex<Agent>>) -> Result<(
             break; // Client disconnected
         }
 
-        let request: Request = match serde_json::from_str(&line) {
+        let request = match decode_request(&line) {
             Ok(r) => r,
             Err(e) => {
-                let response = Response {
+                let event = ServerEvent::Error {
                     id: 0,
-                    result: None,
-                    error: Some(format!("Invalid request: {}", e)),
+                    message: format!("Invalid request: {}", e),
                 };
-                let mut resp_json = serde_json::to_string(&response)?;
-                resp_json.push('\n');
-                writer.write_all(resp_json.as_bytes()).await?;
+                let json = encode_event(&event);
+                let mut w = writer.lock().await;
+                w.write_all(json.as_bytes()).await?;
                 continue;
             }
         };
 
-        let response = handle_request(&agent, request).await;
-        let mut resp_json = serde_json::to_string(&response)?;
-        resp_json.push('\n');
-        writer.write_all(resp_json.as_bytes()).await?;
+        // Send ack
+        let ack = ServerEvent::Ack { id: request.id() };
+        let json = encode_event(&ack);
+        {
+            let mut w = writer.lock().await;
+            w.write_all(json.as_bytes()).await?;
+        }
+
+        match request {
+            Request::Message { id, content } => {
+                // Check if already processing
+                {
+                    let processing = is_processing.read().await;
+                    if *processing {
+                        let event = ServerEvent::Error {
+                            id,
+                            message: "Already processing a message".to_string(),
+                        };
+                        let _ = event_tx.send(event);
+                        continue;
+                    }
+                }
+
+                // Set processing flag
+                *is_processing.write().await = true;
+
+                // Get or create session
+                let current_session_id = session_id.read().await.clone();
+                let agent = {
+                    let sessions = sessions.read().await;
+                    sessions.get(&current_session_id).cloned()
+                };
+
+                let agent = match agent {
+                    Some(a) => a,
+                    None => {
+                        let new_agent = Agent::new(Arc::clone(&provider), registry.clone());
+                        let new_id = new_agent.session_id().to_string();
+                        let agent = Arc::new(Mutex::new(new_agent));
+                        {
+                            let mut sessions = sessions.write().await;
+                            sessions.insert(new_id.clone(), Arc::clone(&agent));
+                            *session_id.write().await = new_id;
+                        }
+                        agent
+                    }
+                };
+
+                // Process message with streaming
+                let event_tx_clone = event_tx.clone();
+                let is_processing_clone = Arc::clone(&is_processing);
+
+                tokio::spawn(async move {
+                    let result = process_message_streaming(agent, &content, event_tx_clone.clone()).await;
+
+                    // Clear processing flag
+                    *is_processing_clone.write().await = false;
+
+                    match result {
+                        Ok(()) => {
+                            let _ = event_tx_clone.send(ServerEvent::Done { id });
+                        }
+                        Err(e) => {
+                            let _ = event_tx_clone.send(ServerEvent::Error {
+                                id,
+                                message: e.to_string(),
+                            });
+                        }
+                    }
+                });
+            }
+
+            Request::Cancel { id } => {
+                // TODO: Implement cancellation
+                let event = ServerEvent::Done { id };
+                let _ = event_tx.send(event);
+            }
+
+            Request::Clear { id } => {
+                // Create new session
+                let new_agent = Agent::new(Arc::clone(&provider), registry.clone());
+                let new_id = new_agent.session_id().to_string();
+                {
+                    let mut sessions = sessions.write().await;
+                    sessions.insert(new_id.clone(), Arc::new(Mutex::new(new_agent)));
+                    *session_id.write().await = new_id.clone();
+                }
+
+                let event = ServerEvent::SessionId {
+                    session_id: new_id,
+                };
+                let _ = event_tx.send(event);
+                let _ = event_tx.send(ServerEvent::Done { id });
+            }
+
+            Request::Ping { id } => {
+                let event = ServerEvent::Pong { id };
+                let json = encode_event(&event);
+                let mut w = writer.lock().await;
+                w.write_all(json.as_bytes()).await?;
+            }
+
+            Request::GetState { id } => {
+                let current_session_id = session_id.read().await.clone();
+                let sessions = sessions.read().await;
+                let message_count = 0; // TODO: Get actual count
+
+                let event = ServerEvent::State {
+                    id,
+                    session_id: current_session_id,
+                    message_count,
+                    is_processing: *is_processing.read().await,
+                };
+                let json = encode_event(&event);
+                let mut w = writer.lock().await;
+                w.write_all(json.as_bytes()).await?;
+            }
+
+            Request::Subscribe { id } => {
+                // Already subscribed via event_rx
+                let current_session_id = session_id.read().await.clone();
+                let event = ServerEvent::SessionId {
+                    session_id: current_session_id,
+                };
+                let json = encode_event(&event);
+                let mut w = writer.lock().await;
+                w.write_all(json.as_bytes()).await?;
+                let _ = event_tx.send(ServerEvent::Done { id });
+            }
+
+            // Agent-to-agent communication
+            Request::AgentRegister { id, .. } => {
+                // TODO: Implement agent registration
+                let _ = event_tx.send(ServerEvent::Done { id });
+            }
+
+            Request::AgentTask { id, task, .. } => {
+                // Treat as a regular message for now
+                let current_session_id = session_id.read().await.clone();
+                let agent = {
+                    let sessions = sessions.read().await;
+                    sessions.get(&current_session_id).cloned()
+                };
+
+                if let Some(agent) = agent {
+                    let event_tx_clone = event_tx.clone();
+                    tokio::spawn(async move {
+                        let result = process_message_streaming(agent, &task, event_tx_clone.clone()).await;
+                        match result {
+                            Ok(()) => {
+                                let _ = event_tx_clone.send(ServerEvent::Done { id });
+                            }
+                            Err(e) => {
+                                let _ = event_tx_clone.send(ServerEvent::Error {
+                                    id,
+                                    message: e.to_string(),
+                                });
+                            }
+                        }
+                    });
+                }
+            }
+
+            Request::AgentCapabilities { id } => {
+                // Return basic capabilities
+                let _ = event_tx.send(ServerEvent::Done { id });
+            }
+
+            Request::AgentContext { id } => {
+                // TODO: Return conversation context
+                let _ = event_tx.send(ServerEvent::Done { id });
+            }
+        }
+    }
+
+    event_handle.abort();
+    Ok(())
+}
+
+/// Process a message and stream events
+async fn process_message_streaming(
+    agent: Arc<Mutex<Agent>>,
+    content: &str,
+    event_tx: broadcast::Sender<ServerEvent>,
+) -> Result<()> {
+    let mut agent = agent.lock().await;
+
+    // Add user message and get stream
+    // Note: This is a simplified version - full implementation would
+    // need to refactor Agent to expose streaming
+    match agent.run_once(content).await {
+        Ok(()) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Handle debug socket connections (read-only introspection)
+async fn handle_debug_client(
+    stream: UnixStream,
+    sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    is_processing: Arc<RwLock<bool>>,
+    session_id: Arc<RwLock<String>>,
+) -> Result<()> {
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).await?;
+        if n == 0 {
+            break;
+        }
+
+        let request = match decode_request(&line) {
+            Ok(r) => r,
+            Err(e) => {
+                let event = ServerEvent::Error {
+                    id: 0,
+                    message: format!("Invalid request: {}", e),
+                };
+                let json = encode_event(&event);
+                writer.write_all(json.as_bytes()).await?;
+                continue;
+            }
+        };
+
+        match request {
+            Request::Ping { id } => {
+                let event = ServerEvent::Pong { id };
+                let json = encode_event(&event);
+                writer.write_all(json.as_bytes()).await?;
+            }
+
+            Request::GetState { id } => {
+                let current_session_id = session_id.read().await.clone();
+                let sessions = sessions.read().await;
+                let message_count = sessions.len();
+
+                let event = ServerEvent::State {
+                    id,
+                    session_id: current_session_id,
+                    message_count,
+                    is_processing: *is_processing.read().await,
+                };
+                let json = encode_event(&event);
+                writer.write_all(json.as_bytes()).await?;
+            }
+
+            _ => {
+                // Debug socket only allows read-only operations
+                let event = ServerEvent::Error {
+                    id: request.id(),
+                    message: "Debug socket only allows ping and state queries".to_string(),
+                };
+                let json = encode_event(&event);
+                writer.write_all(json.as_bytes()).await?;
+            }
+        }
     }
 
     Ok(())
 }
 
-async fn handle_request(agent: &Arc<Mutex<Agent>>, request: Request) -> Response {
-    match request.method.as_str() {
-        "message" => {
-            let message = request.params.get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            let mut agent = agent.lock().await;
-            match agent.run_once(message).await {
-                Ok(()) => Response {
-                    id: request.id,
-                    result: Some(serde_json::json!({"status": "ok"})),
-                    error: None,
-                },
-                Err(e) => Response {
-                    id: request.id,
-                    result: None,
-                    error: Some(e.to_string()),
-                },
-            }
-        }
-        "ping" => Response {
-            id: request.id,
-            result: Some(serde_json::json!({"pong": true})),
-            error: None,
-        },
-        "clear" => {
-            let mut agent = agent.lock().await;
-            agent.clear();
-            Response {
-                id: request.id,
-                result: Some(serde_json::json!({"cleared": true})),
-                error: None,
-            }
-        }
-        _ => Response {
-            id: request.id,
-            result: None,
-            error: Some(format!("Unknown method: {}", request.method)),
-        },
-    }
-}
-
 /// Client for connecting to a running server
 pub struct Client {
-    stream: UnixStream,
+    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: tokio::net::unix::OwnedWriteHalf,
     next_id: u64,
 }
 
@@ -165,53 +482,97 @@ impl Client {
     pub async fn connect() -> Result<Self> {
         let path = socket_path();
         let stream = UnixStream::connect(&path).await?;
-        Ok(Self { stream, next_id: 1 })
+        let (reader, writer) = stream.into_split();
+        Ok(Self {
+            reader: BufReader::new(reader),
+            writer,
+            next_id: 1,
+        })
     }
 
-    pub async fn send_message(&mut self, content: &str) -> Result<serde_json::Value> {
-        let request = serde_json::json!({
-            "id": self.next_id,
-            "method": "message",
-            "params": {"content": content}
-        });
+    pub async fn connect_debug() -> Result<Self> {
+        let path = debug_socket_path();
+        let stream = UnixStream::connect(&path).await?;
+        let (reader, writer) = stream.into_split();
+        Ok(Self {
+            reader: BufReader::new(reader),
+            writer,
+            next_id: 1,
+        })
+    }
+
+    /// Send a message and return immediately (events come via read_event)
+    pub async fn send_message(&mut self, content: &str) -> Result<u64> {
+        let id = self.next_id;
         self.next_id += 1;
 
-        let mut req_json = serde_json::to_string(&request)?;
-        req_json.push('\n');
+        let request = Request::Message {
+            id,
+            content: content.to_string(),
+        };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+        Ok(id)
+    }
 
-        self.stream.write_all(req_json.as_bytes()).await?;
+    /// Subscribe to events
+    pub async fn subscribe(&mut self) -> Result<u64> {
+        let id = self.next_id;
+        self.next_id += 1;
 
-        let mut reader = BufReader::new(&mut self.stream);
+        let request = Request::Subscribe { id };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+        Ok(id)
+    }
+
+    /// Read the next event from the server
+    pub async fn read_event(&mut self) -> Result<ServerEvent> {
         let mut line = String::new();
-        reader.read_line(&mut line).await?;
-
-        let response: Response = serde_json::from_str(&line)?;
-
-        if let Some(error) = response.error {
-            anyhow::bail!(error);
-        }
-
-        Ok(response.result.unwrap_or(serde_json::Value::Null))
+        self.reader.read_line(&mut line).await?;
+        let event: ServerEvent = serde_json::from_str(&line)?;
+        Ok(event)
     }
 
     pub async fn ping(&mut self) -> Result<bool> {
-        let request = serde_json::json!({
-            "id": self.next_id,
-            "method": "ping",
-            "params": {}
-        });
+        let id = self.next_id;
         self.next_id += 1;
 
-        let mut req_json = serde_json::to_string(&request)?;
-        req_json.push('\n');
+        let request = Request::Ping { id };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
 
-        self.stream.write_all(req_json.as_bytes()).await?;
-
-        let mut reader = BufReader::new(&mut self.stream);
         let mut line = String::new();
-        reader.read_line(&mut line).await?;
+        self.reader.read_line(&mut line).await?;
+        let event: ServerEvent = serde_json::from_str(&line)?;
 
-        let response: Response = serde_json::from_str(&line)?;
-        Ok(response.error.is_none())
+        match event {
+            ServerEvent::Pong { .. } => Ok(true),
+            _ => Ok(false),
+        }
+    }
+
+    pub async fn get_state(&mut self) -> Result<ServerEvent> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::GetState { id };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+
+        let mut line = String::new();
+        self.reader.read_line(&mut line).await?;
+        let event: ServerEvent = serde_json::from_str(&line)?;
+        Ok(event)
+    }
+
+    pub async fn clear(&mut self) -> Result<()> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::Clear { id };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+        Ok(())
     }
 }

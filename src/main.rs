@@ -5,6 +5,7 @@ mod bus;
 mod id;
 mod logging;
 mod message;
+mod protocol;
 mod provider;
 mod server;
 mod session;
@@ -274,10 +275,31 @@ async fn run_client() -> Result<()> {
         }
 
         match client.send_message(input).await {
-            Ok(result) => {
-                if let Some(status) = result.get("status") {
-                    if status == "ok" {
-                        // Output was already printed by server
+            Ok(msg_id) => {
+                // Read events until Done
+                loop {
+                    match client.read_event().await {
+                        Ok(event) => {
+                            use crate::protocol::ServerEvent;
+                            match event {
+                                ServerEvent::TextDelta { text } => {
+                                    print!("{}", text);
+                                    std::io::stdout().flush()?;
+                                }
+                                ServerEvent::Done { id } if id == msg_id => {
+                                    break;
+                                }
+                                ServerEvent::Error { message, .. } => {
+                                    eprintln!("Error: {}", message);
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Event error: {}", e);
+                            break;
+                        }
                     }
                 }
             }

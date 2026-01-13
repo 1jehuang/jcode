@@ -5,6 +5,7 @@ pub mod bus;
 pub mod id;
 pub mod logging;
 pub mod message;
+pub mod protocol;
 pub mod provider;
 pub mod server;
 pub mod session;
