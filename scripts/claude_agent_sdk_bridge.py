@@ -64,7 +64,7 @@ def _to_cli_message(message: Dict[str, Any]) -> Dict[str, Any]:
             content_value = converted
 
     return {
-        "type": "user",
+        "type": role,  # Use role as type: "user" or "assistant"
         "message": {"role": role, "content": content_value},
     }
 
