@@ -1,4 +1,5 @@
 use crate::bus::{Bus, BusEvent, ToolEvent, ToolStatus};
+use crate::mcp::McpManager;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall};
 use crate::provider::Provider;
 use crate::session::Session;
@@ -10,6 +11,7 @@ use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 use tokio::time::interval;
 
 /// Current processing status
@@ -42,6 +44,7 @@ pub struct App {
     provider: Arc<dyn Provider>,
     registry: Registry,
     skills: SkillRegistry,
+    mcp_manager: Arc<RwLock<McpManager>>,
     messages: Vec<Message>,
     session: Session,
     display_messages: Vec<DisplayMessage>,
@@ -70,15 +73,19 @@ pub struct App {
     provider_session_id: Option<String>,
     // Cancel flag for interrupting generation
     cancel_requested: bool,
+    // Cached MCP server names (updated on connect/disconnect)
+    mcp_server_names: Vec<String>,
 }
 
 impl App {
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
         let skills = SkillRegistry::load().unwrap_or_default();
+        let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
         Self {
             provider,
             registry,
             skills,
+            mcp_manager,
             messages: Vec::new(),
             session: Session::create(None, None),
             display_messages: Vec::new(),
@@ -99,6 +106,28 @@ impl App {
             streaming_tool_calls: Vec::new(),
             provider_session_id: None,
             cancel_requested: false,
+            mcp_server_names: Vec::new(),
+        }
+    }
+
+    /// Initialize MCP servers (call after construction)
+    pub async fn init_mcp(&mut self) {
+        let manager = self.mcp_manager.read().await;
+        if !manager.config().servers.is_empty() {
+            drop(manager);
+            let mut manager = self.mcp_manager.write().await;
+            if let Err(e) = manager.connect_all().await {
+                eprintln!("MCP init error: {}", e);
+            }
+            // Cache server names
+            self.mcp_server_names = manager.connected_servers().await;
+            drop(manager);
+
+            // Register MCP tools
+            let tools = crate::mcp::create_mcp_tools(Arc::clone(&self.mcp_manager)).await;
+            for (name, tool) in tools {
+                self.registry.register(name, tool).await;
+            }
         }
     }
 
@@ -1058,6 +1087,10 @@ When you need to make changes, use the tools directly. Don't just describe what 
 
     pub fn provider_name(&self) -> &str {
         self.provider.name()
+    }
+
+    pub fn mcp_servers(&self) -> &[String] {
+        &self.mcp_server_names
     }
 }
 

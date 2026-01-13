@@ -186,4 +186,30 @@ impl Registry {
 
         tool.execute(input, ctx).await
     }
+
+    /// Register a tool dynamically (for MCP tools, etc.)
+    pub async fn register(&self, name: String, tool: Arc<dyn Tool>) {
+        let mut tools = self.tools.write().await;
+        tools.insert(name, tool);
+    }
+
+    /// Unregister a tool
+    pub async fn unregister(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        let mut tools = self.tools.write().await;
+        tools.remove(name)
+    }
+
+    /// Unregister all tools matching a prefix
+    pub async fn unregister_prefix(&self, prefix: &str) -> Vec<String> {
+        let mut tools = self.tools.write().await;
+        let to_remove: Vec<String> = tools
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .cloned()
+            .collect();
+        for name in &to_remove {
+            tools.remove(name);
+        }
+        to_remove
+    }
 }

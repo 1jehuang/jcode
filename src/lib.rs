@@ -4,6 +4,7 @@ pub mod auto_debug;
 pub mod bus;
 pub mod id;
 pub mod logging;
+pub mod mcp;
 pub mod message;
 pub mod protocol;
 pub mod provider;

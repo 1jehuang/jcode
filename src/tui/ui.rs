@@ -120,12 +120,15 @@ fn estimate_content_height(app: &App, width: u16) -> u16 {
 
     let mut lines = 0u16;
 
-    // Header when empty
-    if app.display_messages().is_empty() && !app.is_processing() {
-        lines += 2; // version line + blank
-        if !app.available_skills().is_empty() {
-            lines += 1; // skills line
-        }
+    // Header is always visible: version + model + blank = 3 lines minimum
+    lines += 3;
+    // Plus optional MCP line
+    if !app.mcp_servers().is_empty() {
+        lines += 1;
+    }
+    // Plus optional skills line
+    if !app.available_skills().is_empty() {
+        lines += 1;
     }
 
     for msg in app.display_messages() {
@@ -186,31 +189,42 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     let mut user_line_indices: Vec<usize> = Vec::new(); // Track which lines are user prompts
 
-    // Header - minimal
-    if app.display_messages().is_empty() && !app.is_processing() {
-        let age = binary_age().unwrap_or_else(|| "unknown".to_string());
-        let provider = app.provider_name();
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("jcode v{}", env!("CARGO_PKG_VERSION")),
-                Style::default().fg(DIM_COLOR),
-            ),
-            Span::styled(
-                format!(" ({}, updated {})", provider, age),
-                Style::default().fg(DIM_COLOR).dim(),
-            ),
-        ]));
-        lines.push(Line::from(""));
+    // Header - always visible
+    let age = binary_age().unwrap_or_else(|| "unknown".to_string());
+    let provider = app.provider_name();
 
-        // Show skill hint if available
-        let skills = app.available_skills();
-        if !skills.is_empty() {
-            lines.push(Line::from(Span::styled(
-                format!("skills: {}", skills.iter().map(|s| format!("/{}", s)).collect::<Vec<_>>().join(" ")),
-                Style::default().fg(DIM_COLOR),
-            )));
-        }
+    // Line 1: Version
+    lines.push(Line::from(Span::styled(
+        format!("jcode {} (built {})", env!("JCODE_VERSION"), age),
+        Style::default().fg(DIM_COLOR),
+    )));
+
+    // Line 2: Provider/Model
+    lines.push(Line::from(Span::styled(
+        format!("model: {}", provider),
+        Style::default().fg(DIM_COLOR),
+    )));
+
+    // Line 3: MCPs (if any)
+    let mcps = app.mcp_servers();
+    if !mcps.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("mcp: {}", mcps.join(", ")),
+            Style::default().fg(DIM_COLOR),
+        )));
     }
+
+    // Line 4: Skills (if any)
+    let skills = app.available_skills();
+    if !skills.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("skills: {}", skills.iter().map(|s| format!("/{}", s)).collect::<Vec<_>>().join(" ")),
+            Style::default().fg(DIM_COLOR),
+        )));
+    }
+
+    // Blank line after header
+    lines.push(Line::from(""));
 
     let mut prompt_num = 0usize;
 

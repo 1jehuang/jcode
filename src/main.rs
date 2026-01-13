@@ -4,6 +4,7 @@ mod auto_debug;
 mod bus;
 mod id;
 mod logging;
+mod mcp;
 mod message;
 mod protocol;
 mod provider;
@@ -222,7 +223,8 @@ async fn init_provider_and_registry(
 
 async fn run_tui(provider: Arc<dyn provider::Provider>, registry: tool::Registry) -> Result<()> {
     let terminal = ratatui::init();
-    let app = tui::App::new(provider, registry);
+    let mut app = tui::App::new(provider, registry);
+    app.init_mcp().await;
     let result = app.run(terminal).await;
     ratatui::restore();
     result
