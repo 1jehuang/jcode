@@ -96,32 +96,42 @@ impl Tool for WriteTool {
     }
 }
 
-/// Generate a compact diff summary (max 20 lines shown)
+/// Generate a compact diff summary with line numbers (max 20 lines shown)
 fn generate_diff_summary(old: &str, new: &str) -> String {
     let diff = TextDiff::from_lines(old, new);
     let mut output = String::new();
     let mut lines_shown = 0;
     const MAX_LINES: usize = 20;
 
+    let mut old_line = 1usize;
+    let mut new_line = 1usize;
+
     for change in diff.iter_all_changes() {
-        if change.tag() == ChangeTag::Equal {
-            continue;
+        match change.tag() {
+            ChangeTag::Equal => {
+                old_line += 1;
+                new_line += 1;
+                continue;
+            }
+            ChangeTag::Delete => {
+                if lines_shown >= MAX_LINES {
+                    output.push_str("...(truncated)\n");
+                    break;
+                }
+                output.push_str(&format!("{:>4} - {}\n", old_line, change.value().trim_end()));
+                old_line += 1;
+                lines_shown += 1;
+            }
+            ChangeTag::Insert => {
+                if lines_shown >= MAX_LINES {
+                    output.push_str("...(truncated)\n");
+                    break;
+                }
+                output.push_str(&format!("{:>4} + {}\n", new_line, change.value().trim_end()));
+                new_line += 1;
+                lines_shown += 1;
+            }
         }
-        if lines_shown >= MAX_LINES {
-            output.push_str("...(truncated)\n");
-            break;
-        }
-        let prefix = match change.tag() {
-            ChangeTag::Delete => "-",
-            ChangeTag::Insert => "+",
-            ChangeTag::Equal => " ",
-        };
-        output.push_str(prefix);
-        output.push_str(change.value());
-        if !change.value().ends_with('\n') {
-            output.push('\n');
-        }
-        lines_shown += 1;
     }
 
     output.trim_end().to_string()

@@ -139,7 +139,11 @@ fn estimate_content_height(app: &App, width: u16) -> u16 {
 
         match msg.role.as_str() {
             "user" => {
-                lines += 1;
+                // User messages can wrap - estimate based on content length
+                // Format is "N› content" so add ~4 chars for prefix
+                let msg_len = msg.content.len() + 4;
+                let wrap_lines = (msg_len / width).max(1);
+                lines += wrap_lines as u16;
             }
             "assistant" => {
                 // Rough estimate: count newlines + wrap estimate
@@ -176,11 +180,18 @@ fn estimate_content_height(app: &App, width: u16) -> u16 {
     if app.is_processing() {
         let streaming = app.streaming_text();
         if !streaming.is_empty() {
-            lines += streaming.lines().count().max(1) as u16;
+            // Estimate with wrapping
+            let content_lines = streaming.lines().count().max(1);
+            let avg_line_len = streaming.len() / content_lines.max(1);
+            let wrap_factor = if avg_line_len > width { (avg_line_len / width) + 1 } else { 1 };
+            lines += (content_lines * wrap_factor) as u16;
         }
         // Active tool calls
         lines += app.streaming_tool_calls().len() as u16;
     }
+
+    // Add small buffer for estimation errors (prevents micro-scrolling)
+    lines += 2;
 
     lines
 }
