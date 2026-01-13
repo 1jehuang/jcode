@@ -61,6 +61,9 @@ pub struct App {
     // Live token usage
     streaming_input_tokens: u64,
     streaming_output_tokens: u64,
+    // Context limit tracking (for compaction warning)
+    context_limit: u64,
+    context_warning_shown: bool,
     // Track last streaming activity for "stale" detection
     last_stream_activity: Option<Instant>,
     // Current status
@@ -104,6 +107,8 @@ impl App {
             queued_messages: Vec::new(),
             streaming_input_tokens: 0,
             streaming_output_tokens: 0,
+            context_limit: 200_000, // Claude's context window
+            context_warning_shown: false,
             last_stream_activity: None,
             status: ProcessingStatus::default(),
             processing_started: None,
@@ -599,6 +604,8 @@ impl App {
                     } => {
                         if let Some(input) = input_tokens {
                             self.streaming_input_tokens = input;
+                            // Warn when approaching context limit (80%)
+                            self.check_context_warning(input);
                         }
                         if let Some(output) = output_tokens {
                             self.streaming_output_tokens = output;
@@ -639,6 +646,8 @@ impl App {
                             trigger, tokens_str
                         );
                         self.streaming_text.push_str(&compact_msg);
+                        // Reset warning so it can appear again
+                        self.context_warning_shown = false;
                     }
                 }
             }
@@ -897,6 +906,7 @@ impl App {
                                     StreamEvent::TokenUsage { input_tokens, output_tokens } => {
                                         if let Some(input) = input_tokens {
                                             self.streaming_input_tokens = input;
+                                            self.check_context_warning(input);
                                         }
                                         if let Some(output) = output_tokens {
                                             self.streaming_output_tokens = output;
@@ -934,6 +944,7 @@ impl App {
                                             trigger, tokens_str
                                         );
                                         self.streaming_text.push_str(&compact_msg);
+                                        self.context_warning_shown = false;
                                     }
                                 }
                             }
@@ -1160,6 +1171,41 @@ impl App {
 
     pub fn streaming_tokens(&self) -> (u64, u64) {
         (self.streaming_input_tokens, self.streaming_output_tokens)
+    }
+
+    /// Check if approaching context limit and show warning
+    fn check_context_warning(&mut self, input_tokens: u64) {
+        let usage_percent = (input_tokens as f64 / self.context_limit as f64) * 100.0;
+
+        // Warn at 70%, 80%, 90%
+        if !self.context_warning_shown && usage_percent >= 70.0 {
+            let warning = format!(
+                "\n⚠️  Context usage: {:.0}% ({}/{}k tokens) - compaction approaching\n\n",
+                usage_percent,
+                input_tokens / 1000,
+                self.context_limit / 1000
+            );
+            self.streaming_text.push_str(&warning);
+            self.context_warning_shown = true;
+        } else if self.context_warning_shown && usage_percent >= 80.0 {
+            // Reset to show 80% warning
+            if usage_percent < 85.0 {
+                let warning = format!(
+                    "\n⚠️  Context usage: {:.0}% - compaction imminent\n\n",
+                    usage_percent
+                );
+                self.streaming_text.push_str(&warning);
+            }
+        }
+    }
+
+    /// Get context usage as percentage
+    pub fn context_usage_percent(&self) -> f64 {
+        if self.streaming_input_tokens == 0 {
+            0.0
+        } else {
+            (self.streaming_input_tokens as f64 / self.context_limit as f64) * 100.0
+        }
     }
 
     /// Time since last streaming event (for detecting stale connections)
