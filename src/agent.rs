@@ -1,4 +1,5 @@
 use crate::bus::{Bus, BusEvent, ToolEvent, ToolStatus};
+use crate::logging;
 use crate::message::{ContentBlock, Role, StreamEvent, ToolCall};
 use crate::provider::Provider;
 use crate::session::Session;
@@ -206,10 +207,22 @@ impl Agent {
 
             let messages = self.session.messages_for_provider();
 
+            logging::debug(&format!(
+                "API call starting: {} messages, {} tools",
+                messages.len(),
+                tools.len()
+            ));
+            let api_start = Instant::now();
+
             let mut stream = self
                 .provider
                 .complete(&messages, &tools, &system_prompt, self.provider_session_id.as_deref())
                 .await?;
+
+            logging::debug(&format!(
+                "API stream opened in {:.2}s",
+                api_start.elapsed().as_secs_f64()
+            ));
 
             let mut text_content = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -418,7 +431,15 @@ impl Agent {
                     title: None,
                 }));
 
+                logging::debug(&format!("Tool starting: {}", tc.name));
+                let tool_start = Instant::now();
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
+                let tool_elapsed = tool_start.elapsed();
+                logging::debug(&format!(
+                    "Tool finished: {} in {:.2}s",
+                    tc.name,
+                    tool_elapsed.as_secs_f64()
+                ));
 
                 match result {
                     Ok(output) => {

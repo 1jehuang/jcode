@@ -1,6 +1,7 @@
 use super::{Registry, Tool, ToolContext, ToolOutput};
 use crate::agent::Agent;
 use crate::bus::{Bus, BusEvent, ToolSummary, ToolSummaryState};
+use crate::logging;
 use crate::provider::Provider;
 use crate::session::Session;
 use anyhow::Result;
@@ -131,6 +132,11 @@ impl Tool for TaskTool {
             }
         });
 
+        logging::info(&format!(
+            "Task starting: {} (type: {})",
+            params.description, params.subagent_type
+        ));
+
         let mut agent = Agent::new_with_session(
             self.provider.clone(),
             self.registry.clone(),
@@ -138,8 +144,15 @@ impl Tool for TaskTool {
             Some(allowed),
         );
 
+        let start = std::time::Instant::now();
         let final_text = agent.run_once_capture(&params.prompt).await?;
         let sub_session_id = agent.session_id().to_string();
+
+        logging::info(&format!(
+            "Task completed: {} in {:.1}s",
+            params.description,
+            start.elapsed().as_secs_f64()
+        ));
 
         listener.abort();
 
