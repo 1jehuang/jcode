@@ -55,6 +55,8 @@ pub struct App {
     // Live token usage
     streaming_input_tokens: u64,
     streaming_output_tokens: u64,
+    // Track last streaming activity for "stale" detection
+    last_stream_activity: Option<Instant>,
     // Current status
     status: ProcessingStatus,
     processing_started: Option<Instant>,
@@ -86,6 +88,7 @@ impl App {
             queued_messages: Vec::new(),
             streaming_input_tokens: 0,
             streaming_output_tokens: 0,
+            last_stream_activity: None,
             status: ProcessingStatus::default(),
             processing_started: None,
             pending_turn: false,
@@ -292,15 +295,18 @@ impl App {
             }
             KeyCode::Home => self.cursor_pos = 0,
             KeyCode::End => self.cursor_pos = self.input.len(),
-            KeyCode::Up => {
-                if self.scroll_offset > 0 {
-                    self.scroll_offset -= 1;
-                }
+            KeyCode::Up | KeyCode::PageUp => {
+                // Scroll up (increase offset from bottom)
+                self.scroll_offset += if code == KeyCode::PageUp { 10 } else { 1 };
             }
-            KeyCode::Down => {
-                self.scroll_offset += 1;
+            KeyCode::Down | KeyCode::PageDown => {
+                // Scroll down (decrease offset, 0 = bottom)
+                let dec = if code == KeyCode::PageDown { 10 } else { 1 };
+                self.scroll_offset = self.scroll_offset.saturating_sub(dec);
             }
             KeyCode::Esc => {
+                // Reset scroll to bottom and clear input
+                self.scroll_offset = 0;
                 self.input.clear();
                 self.cursor_pos = 0;
             }
@@ -321,6 +327,7 @@ impl App {
     fn submit_input(&mut self) {
         let input = std::mem::take(&mut self.input);
         self.cursor_pos = 0;
+        self.scroll_offset = 0; // Reset to bottom on new input
 
         // Check for skill invocation
         if let Some(skill_name) = SkillRegistry::parse_invocation(&input) {
@@ -438,6 +445,9 @@ impl App {
             let mut saw_message_end = false;
 
             while let Some(event) = stream.next().await {
+                // Track activity for status display
+                self.last_stream_activity = Some(Instant::now());
+
                 if first_event {
                     self.status = ProcessingStatus::Streaming;
                     first_event = false;
@@ -669,6 +679,9 @@ impl App {
                     stream_event = stream.next() => {
                         match stream_event {
                             Some(Ok(event)) => {
+                                // Track activity for status display
+                                self.last_stream_activity = Some(Instant::now());
+
                                 if first_event {
                                     self.status = ProcessingStatus::Streaming;
                                     first_event = false;
@@ -973,6 +986,11 @@ When you need to make changes, use the tools directly. Don't just describe what 
 
     pub fn streaming_tokens(&self) -> (u64, u64) {
         (self.streaming_input_tokens, self.streaming_output_tokens)
+    }
+
+    /// Time since last streaming event (for detecting stale connections)
+    pub fn time_since_activity(&self) -> Option<Duration> {
+        self.last_stream_activity.map(|t| t.elapsed())
     }
 
     pub fn streaming_tool_calls(&self) -> &[String] {

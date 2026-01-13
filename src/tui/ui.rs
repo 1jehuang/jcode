@@ -202,9 +202,18 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Auto-scroll to bottom
+    // Calculate scroll position
     let visible_height = area.height as usize;
-    let scroll = lines.len().saturating_sub(visible_height);
+    let max_scroll = lines.len().saturating_sub(visible_height);
+    let user_scroll = app.scroll_offset();
+
+    // Use user's scroll offset, but clamp to valid range
+    // When user_scroll is 0, auto-scroll to bottom
+    let scroll = if user_scroll > 0 {
+        max_scroll.saturating_sub(user_scroll).min(max_scroll)
+    } else {
+        max_scroll
+    };
 
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -216,6 +225,7 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let (input_tokens, output_tokens) = app.streaming_tokens();
     let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
+    let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
 
     let line = if app.is_processing() {
         // Animated spinner based on elapsed time (cycles every 80ms per frame)
@@ -226,13 +236,26 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             ProcessingStatus::Idle => String::new(),
             ProcessingStatus::Sending => format!("sending… {:.1}s", elapsed),
             ProcessingStatus::Streaming => {
-                if input_tokens > 0 || output_tokens > 0 {
-                    format!("↑{} ↓{} {:.1}s", input_tokens, output_tokens, elapsed)
+                let tokens_str = if input_tokens > 0 || output_tokens > 0 {
+                    format!("↑{} ↓{}", input_tokens, output_tokens)
                 } else {
-                    format!("streaming… {:.1}s", elapsed)
-                }
+                    String::new()
+                };
+                // Show stale indicator if no activity for >2s
+                let stale_str = match stale_secs {
+                    Some(s) if s > 2.0 => format!(" (idle {:.0}s)", s),
+                    _ => String::new(),
+                };
+                format!("{}{} {:.1}s", tokens_str, stale_str, elapsed)
             }
-            ProcessingStatus::RunningTool(name) => format!("running {}… {:.1}s", name, elapsed),
+            ProcessingStatus::RunningTool(name) => {
+                let tokens_str = if input_tokens > 0 || output_tokens > 0 {
+                    format!("↑{} ↓{} ", input_tokens, output_tokens)
+                } else {
+                    String::new()
+                };
+                format!("{}{}… {:.1}s", tokens_str, name, elapsed)
+            }
         };
 
         Line::from(vec![
