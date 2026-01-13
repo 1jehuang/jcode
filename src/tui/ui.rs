@@ -65,11 +65,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Calculate input height based on content (max 5 lines to not overwhelm)
     let available_width = area.width.saturating_sub(3) as usize; // prompt chars
     let input_len = app.input().len();
-    let input_height = if available_width > 0 {
+    let base_input_height = if available_width > 0 {
         ((input_len / available_width) + 1).min(5) as u16
     } else {
         1
     };
+    // Add 1 line for command suggestions when typing /
+    let suggestions = app.command_suggestions();
+    let suggestions_height = if !suggestions.is_empty() && !app.is_processing() { 1 } else { 0 };
+    let input_height = base_input_height + suggestions_height;
 
     // Count user messages to show next prompt number
     let user_count = app.display_messages().iter().filter(|m| m.role == "user").count();
@@ -561,6 +565,10 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect, next_prompt: usize) {
     let input_text = app.input();
     let cursor_pos = app.cursor_pos();
 
+    // Check for command suggestions
+    let suggestions = app.command_suggestions();
+    let has_suggestions = !suggestions.is_empty() && !app.is_processing();
+
     // Build prompt parts: number (dim) + caret (colored) + space
     let (prompt_char, caret_color) = if app.is_processing() {
         ("… ", QUEUED_COLOR)
@@ -579,16 +587,31 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect, next_prompt: usize) {
         return;
     }
 
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Show command suggestions if available
+    if has_suggestions {
+        let suggestion_text: String = suggestions
+            .iter()
+            .map(|(cmd, desc)| format!("  {} - {}", cmd, desc))
+            .collect::<Vec<_>>()
+            .join("  │  ");
+        lines.push(Line::from(Span::styled(
+            suggestion_text,
+            Style::default().fg(DIM_COLOR),
+        )));
+    }
+
     // Wrap text into lines
     let chars: Vec<char> = input_text.chars().collect();
-    let mut lines: Vec<Line> = Vec::new();
     let mut pos = 0;
+    let input_start_line = lines.len();
 
-    while pos < chars.len() || lines.is_empty() {
+    while pos < chars.len() || lines.len() == input_start_line {
         let end = (pos + line_width).min(chars.len());
         let line_text: String = chars[pos..end].iter().collect();
 
-        if lines.is_empty() {
+        if lines.len() == input_start_line {
             // First line has prompt: dim number + colored caret
             lines.push(Line::from(vec![
                 Span::styled(num_str.clone(), Style::default().fg(DIM_COLOR)),

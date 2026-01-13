@@ -264,14 +264,44 @@ async fn run_tui(
     result.map(|_| ())
 }
 
-/// Hot-reload: exec into the new binary with session restore
+/// Hot-reload: pull, rebuild, and exec into new binary with session restore
 fn hot_reload(session_id: &str) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
-    let exe = std::env::current_exe()?;
+    let repo_dir = get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
     let cwd = std::env::current_dir()?;
 
     eprintln!("Hot-reloading jcode with session {}...", session_id);
+
+    // Pull latest changes (quiet)
+    eprintln!("Pulling latest changes...");
+    let pull = ProcessCommand::new("git")
+        .args(["pull", "-q"])
+        .current_dir(&repo_dir)
+        .status()?;
+
+    if !pull.success() {
+        eprintln!("Warning: git pull failed, continuing with current version");
+    }
+
+    // Rebuild (show progress)
+    eprintln!("Rebuilding...");
+    let build = ProcessCommand::new("cargo")
+        .args(["build", "--release"])
+        .current_dir(&repo_dir)
+        .status()?;
+
+    if !build.success() {
+        anyhow::bail!("cargo build failed");
+    }
+
+    // Get the binary path - use the known location in the repo
+    let exe = repo_dir.join("target/release/jcode");
+    if !exe.exists() {
+        anyhow::bail!("Binary not found at {:?}", exe);
+    }
+
+    eprintln!("Restarting with session {}...", session_id);
 
     // Build command with --resume flag
     let err = ProcessCommand::new(&exe)

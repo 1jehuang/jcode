@@ -1342,6 +1342,30 @@ impl App {
         &self.input
     }
 
+    /// Get command suggestions based on current input
+    pub fn command_suggestions(&self) -> Vec<(&'static str, &'static str)> {
+        let input = self.input.trim();
+
+        // Only show suggestions when input starts with /
+        if !input.starts_with('/') {
+            return vec![];
+        }
+
+        // Built-in commands
+        let commands: Vec<(&'static str, &'static str)> = vec![
+            ("/help", "Show help and keyboard shortcuts"),
+            ("/reload", "Pull, rebuild, and restart (keeps session)"),
+            ("/clear", "Clear conversation history"),
+        ];
+
+        // Filter by prefix match
+        let prefix = input.to_lowercase();
+        commands
+            .into_iter()
+            .filter(|(cmd, _)| cmd.to_lowercase().starts_with(&prefix))
+            .collect()
+    }
+
     pub fn cursor_pos(&self) -> usize {
         self.cursor_pos
     }
