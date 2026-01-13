@@ -79,12 +79,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
         ])
         .split(area);
 
+    // Count user messages to show next prompt number
+    let user_count = app.display_messages().iter().filter(|m| m.role == "user").count();
+
     draw_messages(frame, app, chunks[0]);
     draw_status(frame, app, chunks[1]);
     if queued_height > 0 {
         draw_queued(frame, app, chunks[2]);
     }
-    draw_input(frame, app, chunks[3]);
+    draw_input(frame, app, chunks[3], user_count + 1);
 }
 
 fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
@@ -116,6 +119,7 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let mut response_num = 0usize;
+    let mut prompt_num = 0usize;
 
     for msg in app.display_messages() {
         // Add spacing between messages
@@ -125,8 +129,10 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
 
         match msg.role.as_str() {
             "user" => {
-                // User messages: blue prefix, then content
+                prompt_num += 1;
+                // User messages: prompt number, blue prefix, then content
                 lines.push(Line::from(vec![
+                    Span::styled(format!("{:>2} ", prompt_num), Style::default().fg(DIM_COLOR)),
                     Span::styled("› ", Style::default().fg(USER_COLOR)),
                     Span::raw(msg.content.clone()),
                 ]));
@@ -170,7 +176,21 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
             "tool" => {
-                // Tool calls are shown inline during streaming, this is kept for backwards compat
+                // Show tool call with full details
+                if let Some(ref tc) = msg.tool_data {
+                    let summary = get_tool_summary(tc);
+                    lines.push(Line::from(vec![
+                        Span::styled("  ◦ ", Style::default().fg(TOOL_COLOR)),
+                        Span::styled(tc.name.clone(), Style::default().fg(TOOL_COLOR)),
+                        Span::styled(format!(" {}", summary), Style::default().fg(DIM_COLOR)),
+                    ]));
+
+                    // Show diff for edit tools
+                    if tc.name == "edit" || tc.name == "Edit" {
+                        let diff_lines = get_edit_diff_lines(tc);
+                        lines.extend(diff_lines);
+                    }
+                }
             }
             "system" => {
                 lines.push(Line::from(vec![
@@ -207,47 +227,7 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                 ]));
             }
         }
-        // Show streaming tool calls with details as they are detected
-        let streaming_tools = app.streaming_tool_calls();
-        let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
-        let active_tool = match app.status() {
-            ProcessingStatus::RunningTool(name) => Some(name),
-            _ => None,
-        };
-
-        for tc in streaming_tools {
-            lines.push(Line::from(""));
-            let summary = get_tool_summary(tc);
-
-            // Check if this tool is actively executing
-            let is_active = active_tool.as_ref().map_or(false, |name| name.as_str() == tc.name);
-
-            if is_active {
-                // Animated color for actively executing tool
-                let anim_color = animated_tool_color(elapsed);
-                let spinner_idx = (elapsed * 12.5) as usize % SPINNER_FRAMES.len();
-                let spinner = SPINNER_FRAMES[spinner_idx];
-
-                lines.push(Line::from(vec![
-                    Span::styled(format!("  {} ", spinner), Style::default().fg(anim_color)),
-                    Span::styled(tc.name.clone(), Style::default().fg(anim_color).bold()),
-                    Span::styled(format!(" {}", summary), Style::default().fg(DIM_COLOR)),
-                ]));
-            } else {
-                // Static color for waiting/completed tools
-                lines.push(Line::from(vec![
-                    Span::styled("  ◦ ", Style::default().fg(TOOL_COLOR)),
-                    Span::styled(tc.name.clone(), Style::default().fg(TOOL_COLOR)),
-                    Span::styled(format!(" {}", summary), Style::default().fg(DIM_COLOR)),
-                ]));
-            }
-
-            // Show diff for edit tools
-            if tc.name == "edit" || tc.name == "Edit" {
-                let diff_lines = get_edit_diff_lines(tc);
-                lines.extend(diff_lines);
-            }
-        }
+        // Tool calls are now shown inline in display_messages
     }
 
     // Wrap lines to fit width (manual wrapping so scroll calculation is accurate)
@@ -388,11 +368,12 @@ fn draw_queued(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_input(frame: &mut Frame, app: &App, area: Rect, next_prompt: usize) {
     let input_text = app.input();
     let cursor_pos = app.cursor_pos();
 
-    // Build prompt
+    // Build prompt with number
+    let prompt_num = format!("{:>2} ", next_prompt);
     let prompt_str = if app.is_processing() {
         "… "
     } else if app.active_skill().is_some() {
@@ -408,7 +389,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(DIM_COLOR)
     };
 
-    let prompt_len = 2;
+    let prompt_len = 5; // "NN > " = 5 chars
     let line_width = (area.width as usize).saturating_sub(prompt_len);
 
     if line_width == 0 {
@@ -425,15 +406,16 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         let line_text: String = chars[pos..end].iter().collect();
 
         if lines.is_empty() {
-            // First line has prompt
+            // First line has prompt number and prompt
             lines.push(Line::from(vec![
+                Span::styled(prompt_num.clone(), Style::default().fg(DIM_COLOR)),
                 Span::styled(prompt_str, prompt_style),
                 Span::raw(line_text),
             ]));
         } else {
-            // Continuation lines have indent
+            // Continuation lines have indent (5 spaces to match "NN > ")
             lines.push(Line::from(vec![
-                Span::raw("  "),
+                Span::raw("     "),
                 Span::raw(line_text),
             ]));
         }

@@ -33,6 +33,8 @@ pub struct DisplayMessage {
     pub tool_calls: Vec<String>,
     pub duration_secs: Option<f32>,
     pub title: Option<String>,
+    /// Full tool call data (for role="tool" messages)
+    pub tool_data: Option<ToolCall>,
 }
 
 /// TUI Application state
@@ -156,6 +158,7 @@ impl App {
                 tool_calls: vec![],
                 duration_secs: None,
                 title: None,
+                tool_data: None,
             });
         }
 
@@ -350,6 +353,7 @@ impl App {
                     tool_calls: vec![],
                     duration_secs: None,
                     title: None,
+                    tool_data: None,
                 });
             } else {
                 self.display_messages.push(DisplayMessage {
@@ -358,6 +362,7 @@ impl App {
                     tool_calls: vec![],
                     duration_secs: None,
                     title: None,
+                    tool_data: None,
                 });
             }
             return;
@@ -370,6 +375,7 @@ impl App {
             tool_calls: vec![],
             duration_secs: None,
             title: None,
+            tool_data: None,
         });
         self.messages.push(Message::user(&input));
         self.session.add_message(
@@ -407,6 +413,7 @@ impl App {
                 tool_calls: vec![],
                 duration_secs: None,
                 title: None,
+                tool_data: None,
             });
 
             self.messages.push(Message::user(&combined));
@@ -429,6 +436,7 @@ impl App {
                     tool_calls: vec![],
                     duration_secs: None,
                     title: None,
+                    tool_data: None,
                 });
             }
             // Loop will check if more messages were queued during this turn
@@ -483,8 +491,30 @@ impl App {
                         if let Some(mut tool) = current_tool.take() {
                             tool.input = serde_json::from_str(&current_tool_input)
                                 .unwrap_or(serde_json::Value::Null);
-                            // Show tool call immediately with details
-                            self.streaming_tool_calls.push(tool.clone());
+
+                            // Commit any pending text as a partial assistant message
+                            if !self.streaming_text.is_empty() {
+                                self.display_messages.push(DisplayMessage {
+                                    role: "assistant".to_string(),
+                                    content: self.streaming_text.clone(),
+                                    tool_calls: vec![],
+                                    duration_secs: None,
+                                    title: None,
+                                    tool_data: None,
+                                });
+                                self.streaming_text.clear();
+                            }
+
+                            // Add tool call as its own display message
+                            self.display_messages.push(DisplayMessage {
+                                role: "tool".to_string(),
+                                content: tool.name.clone(),
+                                tool_calls: vec![],
+                                duration_secs: None,
+                                title: None,
+                                tool_data: Some(tool.clone()),
+                            });
+
                             tool_calls.push(tool);
                             current_tool_input.clear();
                         }
@@ -544,20 +574,19 @@ impl App {
                 None
             };
 
-            // Add to display
-            let tool_strs: Vec<String> = tool_calls
-                .iter()
-                .map(|tc| format!("[{}]", tc.name))
-                .collect();
-
+            // Add remaining text to display (only if not already committed inline with tool calls)
             let duration = self.processing_started.map(|t| t.elapsed().as_secs_f32());
-            self.display_messages.push(DisplayMessage {
-                role: "assistant".to_string(),
-                content: text_content,
-                tool_calls: tool_strs,
-                duration_secs: if tool_calls.is_empty() { duration } else { None },
-                title: None,
-            });
+            // Only add text if there's content that wasn't already shown
+            if !text_content.is_empty() {
+                self.display_messages.push(DisplayMessage {
+                    role: "assistant".to_string(),
+                    content: text_content.clone(),
+                    tool_calls: vec![],
+                    duration_secs: if tool_calls.is_empty() { duration } else { None },
+                    title: None,
+                    tool_data: None,
+                });
+            }
             self.streaming_text.clear();
             self.streaming_tool_calls.clear();
 
@@ -680,6 +709,7 @@ impl App {
                                         tool_calls: vec![],
                                         duration_secs: None,
                                         title: None,
+                                        tool_data: None,
                                     });
                                     return Ok(());
                                 }
@@ -717,8 +747,30 @@ impl App {
                                         if let Some(mut tool) = current_tool.take() {
                                             tool.input = serde_json::from_str(&current_tool_input)
                                                 .unwrap_or(serde_json::Value::Null);
-                                            // Show tool call immediately with details
-                                            self.streaming_tool_calls.push(tool.clone());
+
+                                            // Commit any pending text as a partial assistant message
+                                            if !self.streaming_text.is_empty() {
+                                                self.display_messages.push(DisplayMessage {
+                                                    role: "assistant".to_string(),
+                                                    content: self.streaming_text.clone(),
+                                                    tool_calls: vec![],
+                                                    duration_secs: None,
+                                                    title: None,
+                                                    tool_data: None,
+                                                });
+                                                self.streaming_text.clear();
+                                            }
+
+                                            // Add tool call as its own display message
+                                            self.display_messages.push(DisplayMessage {
+                                                role: "tool".to_string(),
+                                                content: tool.name.clone(),
+                                                tool_calls: vec![],
+                                                duration_secs: None,
+                                                title: None,
+                                                tool_data: Some(tool.clone()),
+                                            });
+
                                             tool_calls.push(tool);
                                             current_tool_input.clear();
                                         }
@@ -781,20 +833,19 @@ impl App {
                 None
             };
 
-            // Add to display
-            let tool_strs: Vec<String> = tool_calls
-                .iter()
-                .map(|tc| format!("[{}]", tc.name))
-                .collect();
-
+            // Add remaining text to display (only if not already committed inline with tool calls)
             let duration = self.processing_started.map(|t| t.elapsed().as_secs_f32());
-            self.display_messages.push(DisplayMessage {
-                role: "assistant".to_string(),
-                content: text_content,
-                tool_calls: tool_strs,
-                duration_secs: if tool_calls.is_empty() { duration } else { None },
-                title: None,
-            });
+            // Only add text if there's content that wasn't already shown
+            if !text_content.is_empty() {
+                self.display_messages.push(DisplayMessage {
+                    role: "assistant".to_string(),
+                    content: text_content.clone(),
+                    tool_calls: vec![],
+                    duration_secs: if tool_calls.is_empty() { duration } else { None },
+                    title: None,
+                    tool_data: None,
+                });
+            }
             self.streaming_text.clear();
             self.streaming_tool_calls.clear();
 
