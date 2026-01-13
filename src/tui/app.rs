@@ -32,6 +32,7 @@ pub struct DisplayMessage {
     pub content: String,
     pub tool_calls: Vec<String>,
     pub duration_secs: Option<f32>,
+    pub title: Option<String>,
 }
 
 /// TUI Application state
@@ -148,6 +149,7 @@ impl App {
                 content: format!("Error: {}", e),
                 tool_calls: vec![],
                 duration_secs: None,
+                title: None,
             });
         }
 
@@ -160,6 +162,36 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+        // Handle Alt combos (readline word movement)
+        if modifiers.contains(KeyModifiers::ALT) {
+            match code {
+                KeyCode::Char('b') => {
+                    // Alt+B: back one word
+                    self.cursor_pos = self.find_word_boundary_back();
+                    return Ok(());
+                }
+                KeyCode::Char('f') => {
+                    // Alt+F: forward one word
+                    self.cursor_pos = self.find_word_boundary_forward();
+                    return Ok(());
+                }
+                KeyCode::Char('d') => {
+                    // Alt+D: delete word forward
+                    let end = self.find_word_boundary_forward();
+                    self.input.drain(self.cursor_pos..end);
+                    return Ok(());
+                }
+                KeyCode::Backspace => {
+                    // Alt+Backspace: delete word backward
+                    let start = self.find_word_boundary_back();
+                    self.input.drain(start..self.cursor_pos);
+                    self.cursor_pos = start;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         // Handle ctrl combos regardless of processing state
         if modifiers.contains(KeyModifiers::CONTROL) {
             match code {
@@ -177,8 +209,45 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Char('u') => {
-                    self.input.clear();
+                    // Ctrl+U: kill to beginning of line
+                    self.input.drain(..self.cursor_pos);
                     self.cursor_pos = 0;
+                    return Ok(());
+                }
+                KeyCode::Char('k') => {
+                    // Ctrl+K: kill to end of line
+                    self.input.truncate(self.cursor_pos);
+                    return Ok(());
+                }
+                KeyCode::Char('a') => {
+                    // Ctrl+A: beginning of line
+                    self.cursor_pos = 0;
+                    return Ok(());
+                }
+                KeyCode::Char('e') => {
+                    // Ctrl+E: end of line
+                    self.cursor_pos = self.input.len();
+                    return Ok(());
+                }
+                KeyCode::Char('b') => {
+                    // Ctrl+B: back one char
+                    if self.cursor_pos > 0 {
+                        self.cursor_pos -= 1;
+                    }
+                    return Ok(());
+                }
+                KeyCode::Char('f') => {
+                    // Ctrl+F: forward one char
+                    if self.cursor_pos < self.input.len() {
+                        self.cursor_pos += 1;
+                    }
+                    return Ok(());
+                }
+                KeyCode::Char('w') => {
+                    // Ctrl+W: delete word backward
+                    let start = self.find_word_boundary_back();
+                    self.input.drain(start..self.cursor_pos);
+                    self.cursor_pos = start;
                     return Ok(());
                 }
                 _ => {}
@@ -261,14 +330,16 @@ impl App {
                     role: "system".to_string(),
                     content: format!("Activated skill: {} - {}", skill.name, skill.description),
                     tool_calls: vec![],
-                duration_secs: None,
+                    duration_secs: None,
+                    title: None,
                 });
             } else {
                 self.display_messages.push(DisplayMessage {
                     role: "error".to_string(),
                     content: format!("Unknown skill: /{}", skill_name),
                     tool_calls: vec![],
-                duration_secs: None,
+                    duration_secs: None,
+                    title: None,
                 });
             }
             return;
@@ -279,7 +350,8 @@ impl App {
             role: "user".to_string(),
             content: input.clone(),
             tool_calls: vec![],
-                duration_secs: None,
+            duration_secs: None,
+            title: None,
         });
         self.messages.push(Message::user(&input));
         self.session.add_message(
@@ -318,6 +390,7 @@ impl App {
             content: combined.clone(),
             tool_calls: vec![],
             duration_secs: None,
+            title: None,
         });
 
         self.messages.push(Message::user(&combined));
@@ -339,6 +412,7 @@ impl App {
                 content: format!("Error: {}", e),
                 tool_calls: vec![],
                 duration_secs: None,
+                title: None,
             });
         }
     }
@@ -460,6 +534,7 @@ impl App {
                 content: text_content,
                 tool_calls: tool_strs,
                 duration_secs: if tool_calls.is_empty() { duration } else { None },
+                title: None,
             });
             self.streaming_text.clear();
             self.streaming_tool_calls.clear();
@@ -525,9 +600,10 @@ impl App {
 
                 self.display_messages.push(DisplayMessage {
                     role: "tool".to_string(),
-                    content: format!("[{}] {}", tc.name, display_output),
+                    content: display_output,
                     tool_calls: vec![],
-                duration_secs: None,
+                    duration_secs: None,
+                    title: Some(tc.name.clone()),
                 });
 
                 self.messages.push(Message::tool_result(&tc.id, &output, is_error));
@@ -692,6 +768,7 @@ impl App {
                 content: text_content,
                 tool_calls: tool_strs,
                 duration_secs: if tool_calls.is_empty() { duration } else { None },
+                title: None,
             });
             self.streaming_text.clear();
             self.streaming_tool_calls.clear();
@@ -758,9 +835,10 @@ impl App {
 
                 self.display_messages.push(DisplayMessage {
                     role: "tool".to_string(),
-                    content: format!("[{}] {}", tc.name, display_output),
+                    content: display_output,
                     tool_calls: vec![],
-                duration_secs: None,
+                    duration_secs: None,
+                    title: Some(tc.name.clone()),
                 });
 
                 self.messages.push(Message::tool_result(&tc.id, &output, is_error));
@@ -812,6 +890,49 @@ When you need to make changes, use the tools directly. Don't just describe what 
     // Getters for UI
     pub fn display_messages(&self) -> &[DisplayMessage] {
         &self.display_messages
+    }
+
+    /// Find word boundary going backward (for Ctrl+W, Alt+B)
+    fn find_word_boundary_back(&self) -> usize {
+        if self.cursor_pos == 0 {
+            return 0;
+        }
+        let bytes = self.input.as_bytes();
+        let mut pos = self.cursor_pos - 1;
+
+        // Skip trailing whitespace
+        while pos > 0 && bytes[pos].is_ascii_whitespace() {
+            pos -= 1;
+        }
+
+        // Skip word characters
+        while pos > 0 && !bytes[pos - 1].is_ascii_whitespace() {
+            pos -= 1;
+        }
+
+        pos
+    }
+
+    /// Find word boundary going forward (for Alt+F, Alt+D)
+    fn find_word_boundary_forward(&self) -> usize {
+        let len = self.input.len();
+        if self.cursor_pos >= len {
+            return len;
+        }
+        let bytes = self.input.as_bytes();
+        let mut pos = self.cursor_pos;
+
+        // Skip current word
+        while pos < len && !bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+
+        // Skip whitespace
+        while pos < len && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+
+        pos
     }
 
     pub fn input(&self) -> &str {

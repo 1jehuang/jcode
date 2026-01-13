@@ -112,31 +112,43 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
             "tool" => {
-                // Tool output with diff coloring
-                for (i, line) in msg.content.lines().take(15).enumerate() {
-                    let (prefix, style) = if line.starts_with('+') && !line.starts_with("++") {
-                        ("    ", Style::default().fg(Color::Green))
+                // Tool header with name/title
+                let tool_name = msg.title.as_deref().unwrap_or("tool");
+                lines.push(Line::from(vec![
+                    Span::styled("  ◦ ", Style::default().fg(TOOL_COLOR)),
+                    Span::styled(tool_name, Style::default().fg(TOOL_COLOR)),
+                ]));
+
+                // Tool output with diff coloring (compact: max 10 lines)
+                let line_count = msg.content.lines().count();
+                let max_lines = 10;
+                for (i, line) in msg.content.lines().take(max_lines).enumerate() {
+                    let style = if line.starts_with('+') && !line.starts_with("++") {
+                        Style::default().fg(Color::Green)
                     } else if line.starts_with('-') && !line.starts_with("--") {
-                        ("    ", Style::default().fg(Color::Red))
-                    } else if line.starts_with("...(truncated)") {
-                        ("    ", Style::default().fg(DIM_COLOR).italic())
+                        Style::default().fg(Color::Red)
+                    } else if line.starts_with("@@") {
+                        Style::default().fg(Color::Cyan).dim()
                     } else {
-                        ("    ", Style::default().fg(TOOL_COLOR).dim())
+                        Style::default().fg(TOOL_COLOR).dim()
                     };
-                    let display_line = if line.len() > 80 {
-                        format!("{}…", &line[..80])
+                    let display_line = if line.len() > 100 {
+                        format!("{}…", &line[..100])
                     } else {
                         line.to_string()
                     };
                     lines.push(Line::from(vec![
-                        Span::raw(prefix),
+                        Span::raw("    "),
                         Span::styled(display_line, style),
                     ]));
                     // Show truncation indicator if we hit the limit
-                    if i == 14 && msg.content.lines().count() > 15 {
+                    if i == max_lines - 1 && line_count > max_lines {
                         lines.push(Line::from(vec![
                             Span::raw("    "),
-                            Span::styled("...(more)", Style::default().fg(DIM_COLOR).italic()),
+                            Span::styled(
+                                format!("...({} more lines)", line_count - max_lines),
+                                Style::default().fg(DIM_COLOR).italic()
+                            ),
                         ]));
                     }
                 }
