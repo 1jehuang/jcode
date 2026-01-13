@@ -74,6 +74,56 @@ jcode -C /path/to/project
 | `lsp` | LSP operations (fallback in jcode) |
 | `invalid` | Report invalid tool calls |
 | `batch` | Execute up to 10 tools in parallel |
+| `mcp` | Manage MCP server connections |
+
+## MCP (Model Context Protocol)
+
+jcode supports MCP servers, allowing you to extend its capabilities with external tools.
+
+### Configuration
+
+Add MCP servers to `.claude/mcp.json` (project-local) or `~/.claude/mcp.json` (global):
+
+```json
+{
+  "servers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@anthropic/mcp-playwright"],
+      "env": {}
+    },
+    "filesystem": {
+      "command": "/path/to/mcp-filesystem",
+      "args": ["--root", "/home/user"],
+      "env": {}
+    }
+  }
+}
+```
+
+Servers are automatically connected on startup and their tools are available with the prefix `mcp__servername__toolname`.
+
+### Managing MCP Servers
+
+The agent can manage MCP servers at runtime using the `mcp` tool:
+
+```
+# List connected servers and their tools
+{"action": "list"}
+
+# Connect to a new server
+{"action": "connect", "server": "my-server", "command": "npx", "args": ["@some/mcp-server"]}
+
+# Disconnect from a server
+{"action": "disconnect", "server": "my-server"}
+
+# Reload from config file
+{"action": "reload"}
+```
+
+### Writing MCP Servers
+
+MCP servers communicate via JSON-RPC 2.0 over stdio. See the [MCP specification](https://modelcontextprotocol.io/) for details on implementing your own servers.
 
 ## Architecture
 

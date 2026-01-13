@@ -112,6 +112,10 @@ impl App {
 
     /// Initialize MCP servers (call after construction)
     pub async fn init_mcp(&mut self) {
+        // Always register the MCP management tool so agent can connect servers
+        let mcp_tool = crate::tool::mcp::McpManagementTool::new(Arc::clone(&self.mcp_manager));
+        self.registry.register("mcp".to_string(), Arc::new(mcp_tool)).await;
+
         let manager = self.mcp_manager.read().await;
         if !manager.config().servers.is_empty() {
             drop(manager);
@@ -123,7 +127,7 @@ impl App {
             self.mcp_server_names = manager.connected_servers().await;
             drop(manager);
 
-            // Register MCP tools
+            // Register MCP server tools
             let tools = crate::mcp::create_mcp_tools(Arc::clone(&self.mcp_manager)).await;
             for (name, tool) in tools {
                 self.registry.register(name, tool).await;

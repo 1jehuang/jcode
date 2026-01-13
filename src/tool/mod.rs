@@ -7,6 +7,7 @@ mod glob;
 mod grep;
 mod invalid;
 mod ls;
+pub mod mcp;
 mod multiedit;
 mod patch;
 mod read;
