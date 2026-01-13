@@ -259,7 +259,9 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
             }
             "assistant" => {
                 // AI messages: render markdown flush left
-                let md_lines = markdown::render_markdown(&msg.content);
+                // Pass width for table rendering (leave some margin)
+                let content_width = area.width.saturating_sub(4) as usize;
+                let md_lines = markdown::render_markdown_with_width(&msg.content, Some(content_width));
                 for md_line in md_lines {
                     lines.push(md_line);
                 }
@@ -370,7 +372,8 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                 lines.push(Line::from(""));
             }
             // Use markdown rendering to match final display
-            let md_lines = markdown::render_markdown(app.streaming_text());
+            let content_width = area.width.saturating_sub(4) as usize;
+            let md_lines = markdown::render_markdown_with_width(app.streaming_text(), Some(content_width));
             lines.extend(md_lines);
         }
         // Tool calls are now shown inline in display_messages

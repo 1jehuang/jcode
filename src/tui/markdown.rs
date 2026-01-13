@@ -20,6 +20,11 @@ const TABLE_COLOR: Color = Color::Rgb(150, 150, 150);     // Table borders/separ
 
 /// Render markdown text to styled ratatui Lines
 pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
+    render_markdown_with_width(text, None)
+}
+
+/// Render markdown with optional width constraint for tables
+pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current_spans: Vec<Span<'static>> = Vec::new();
 
@@ -164,10 +169,12 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
                 table_rows.clear();
             }
             Event::End(TagEnd::Table) => {
-                // Render the collected table
+                // Render the collected table with padding
                 if !table_rows.is_empty() {
-                    let rendered = render_table(&table_rows);
+                    lines.push(Line::from("")); // Padding before table
+                    let rendered = render_table(&table_rows, max_width);
                     lines.extend(rendered);
+                    lines.push(Line::from("")); // Padding after table
                 }
                 in_table = false;
                 table_rows.clear();
@@ -213,7 +220,8 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
 }
 
 /// Render a table as ASCII-style lines
-fn render_table(rows: &[Vec<String>]) -> Vec<Line<'static>> {
+/// max_width: Optional maximum width for the entire table
+fn render_table(rows: &[Vec<String>], max_width: Option<usize>) -> Vec<Line<'static>> {
     if rows.is_empty() {
         return vec![];
     }
@@ -232,13 +240,40 @@ fn render_table(rows: &[Vec<String>]) -> Vec<Line<'static>> {
         }
     }
 
+    // Apply max width constraint if specified
+    if let Some(max_w) = max_width {
+        // Account for separators: " │ " = 3 chars between each column
+        let separator_space = if num_cols > 1 { (num_cols - 1) * 3 } else { 0 };
+        let available = max_w.saturating_sub(separator_space);
+
+        if available > 0 && num_cols > 0 {
+            let total_width: usize = col_widths.iter().sum();
+            if total_width > available {
+                // Shrink columns proportionally, with minimum of 5 chars
+                let min_col_width = 5;
+                let scale = available as f64 / total_width as f64;
+                for width in &mut col_widths {
+                    *width = (*width as f64 * scale).round() as usize;
+                    *width = (*width).max(min_col_width);
+                }
+            }
+        }
+    }
+
     // Render each row
     for (row_idx, row) in rows.iter().enumerate() {
         let mut spans: Vec<Span<'static>> = Vec::new();
 
         for (i, cell) in row.iter().enumerate() {
             let width = col_widths.get(i).copied().unwrap_or(cell.len());
-            let padded = format!("{:<width$}", cell, width = width);
+
+            // Truncate cell content if needed
+            let display_text = if cell.len() > width {
+                format!("{}…", &cell[..width.saturating_sub(1)])
+            } else {
+                cell.clone()
+            };
+            let padded = format!("{:<width$}", display_text, width = width);
 
             // Header row gets bold styling
             let style = if row_idx == 0 {
@@ -267,6 +302,11 @@ fn render_table(rows: &[Vec<String>]) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+/// Render a table with a specific max width constraint
+pub fn render_table_with_width(rows: &[Vec<String>], max_width: usize) -> Vec<Line<'static>> {
+    render_table(rows, Some(max_width))
 }
 
 /// Highlight a code block with syntax highlighting
