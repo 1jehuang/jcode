@@ -2,6 +2,7 @@ mod codesearch;
 mod bash;
 mod apply_patch;
 mod batch;
+mod conversation_search;
 mod edit;
 mod glob;
 mod grep;
@@ -19,6 +20,7 @@ mod webfetch;
 mod websearch;
 mod write;
 
+use crate::compaction::CompactionManager;
 use crate::message::ToolDefinition;
 use crate::provider::Provider;
 use crate::skill::SkillRegistry;
@@ -103,14 +105,17 @@ pub trait Tool: Send + Sync {
 pub struct Registry {
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     skills: Arc<RwLock<SkillRegistry>>,
+    compaction: Arc<RwLock<CompactionManager>>,
 }
 
 impl Registry {
     pub async fn new(provider: Arc<dyn Provider>) -> Self {
         let skills = Arc::new(RwLock::new(SkillRegistry::load().unwrap_or_default()));
+        let compaction = Arc::new(RwLock::new(CompactionManager::new()));
         let registry = Self {
             tools: Arc::new(RwLock::new(HashMap::new())),
             skills: skills.clone(),
+            compaction: compaction.clone(),
         };
 
         let mut tools_map = HashMap::new();
@@ -154,6 +159,10 @@ impl Registry {
         // Add batch with a reference to the registry
         let batch_tool = batch::BatchTool::new(registry.clone());
         tools_map.insert("batch".to_string(), Arc::new(batch_tool) as Arc<dyn Tool>);
+
+        // Conversation search for RAG over compacted history
+        let search_tool = conversation_search::ConversationSearchTool::new(compaction);
+        tools_map.insert("conversation_search".to_string(), Arc::new(search_tool) as Arc<dyn Tool>);
 
         // Populate the registry
         *registry.tools.write().await = tools_map;
@@ -221,5 +230,10 @@ impl Registry {
     /// Get shared access to the skill registry
     pub fn skills(&self) -> Arc<RwLock<SkillRegistry>> {
         self.skills.clone()
+    }
+
+    /// Get shared access to the compaction manager
+    pub fn compaction(&self) -> Arc<RwLock<CompactionManager>> {
+        self.compaction.clone()
     }
 }

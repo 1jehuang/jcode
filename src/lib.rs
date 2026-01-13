@@ -2,6 +2,7 @@ pub mod agent;
 pub mod auth;
 pub mod auto_debug;
 pub mod bus;
+pub mod compaction;
 pub mod id;
 pub mod logging;
 pub mod mcp;

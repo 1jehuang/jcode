@@ -2,6 +2,7 @@ mod agent;
 mod auth;
 mod auto_debug;
 mod bus;
+mod compaction;
 mod id;
 mod logging;
 mod mcp;
