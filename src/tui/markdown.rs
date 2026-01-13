@@ -199,6 +199,89 @@ fn syntect_to_ratatui_style(style: SynStyle) -> Style {
     Style::default().fg(fg)
 }
 
+/// Wrap a line of styled spans to fit within a given width
+/// Returns multiple lines if wrapping is needed
+pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    if width == 0 {
+        return vec![line];
+    }
+
+    let mut result: Vec<Line<'static>> = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let mut current_width = 0;
+
+    for span in line.spans {
+        let style = span.style;
+        let text = span.content.to_string();
+
+        // Process each word/chunk in the span
+        let mut remaining = text.as_str();
+        while !remaining.is_empty() {
+            // Find next break point (space or full chunk if no space)
+            let (chunk, rest) = if let Some(space_idx) = remaining.find(' ') {
+                let (word, after_space) = remaining.split_at(space_idx);
+                // Include the space in the word
+                if after_space.len() > 1 {
+                    (format!("{} ", word), &after_space[1..])
+                } else {
+                    (format!("{} ", word), "")
+                }
+            } else {
+                (remaining.to_string(), "")
+            };
+            remaining = rest;
+
+            let chunk_width = chunk.chars().count();
+
+            // If adding this chunk would exceed width, start new line
+            if current_width + chunk_width > width && current_width > 0 {
+                result.push(Line::from(std::mem::take(&mut current_spans)));
+                current_width = 0;
+            }
+
+            // Handle chunks longer than width (force break)
+            if chunk_width > width {
+                let chars: Vec<char> = chunk.chars().collect();
+                let mut pos = 0;
+                while pos < chars.len() {
+                    let available = width.saturating_sub(current_width);
+                    let take = available.min(chars.len() - pos);
+                    let part: String = chars[pos..pos + take].iter().collect();
+                    current_spans.push(Span::styled(part, style));
+                    current_width += take;
+                    pos += take;
+
+                    if current_width >= width && pos < chars.len() {
+                        result.push(Line::from(std::mem::take(&mut current_spans)));
+                        current_width = 0;
+                    }
+                }
+            } else {
+                current_spans.push(Span::styled(chunk, style));
+                current_width += chunk_width;
+            }
+        }
+    }
+
+    // Don't forget the last line
+    if !current_spans.is_empty() {
+        result.push(Line::from(current_spans));
+    }
+
+    if result.is_empty() {
+        result.push(Line::from(""));
+    }
+
+    result
+}
+
+/// Wrap multiple lines to fit within a given width
+pub fn wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    lines.into_iter()
+        .flat_map(|line| wrap_line(line, width))
+        .collect()
+}
+
 /// Create a progress bar string
 pub fn progress_bar(progress: f32, width: usize) -> String {
     let filled = (progress * width as f32) as usize;
