@@ -78,6 +78,8 @@ pub struct App {
     mcp_server_names: Vec<String>,
     // Semantic stream buffer for chunked output
     stream_buffer: StreamBuffer,
+    // Track thinking start time for extended thinking display
+    thinking_start: Option<Instant>,
 }
 
 impl App {
@@ -111,6 +113,7 @@ impl App {
             cancel_requested: false,
             mcp_server_names: Vec::new(),
             stream_buffer: StreamBuffer::new(),
+            thinking_start: None,
         }
     }
 
@@ -614,6 +617,18 @@ impl App {
                     StreamEvent::Error(e) => {
                         return Err(anyhow::anyhow!("Stream error: {}", e));
                     }
+                    StreamEvent::ThinkingStart => {
+                        // Track thinking start for timing display
+                        self.thinking_start = Some(Instant::now());
+                    }
+                    StreamEvent::ThinkingEnd => {
+                        // Calculate and display thinking duration
+                        if let Some(start) = self.thinking_start.take() {
+                            let elapsed = start.elapsed();
+                            let thinking_msg = format!("Thought for {:.1}s\n\n", elapsed.as_secs_f64());
+                            self.streaming_text.push_str(&thinking_msg);
+                        }
+                    }
                 }
             }
 
@@ -888,6 +903,16 @@ impl App {
                                     }
                                     StreamEvent::Error(e) => {
                                         return Err(anyhow::anyhow!("Stream error: {}", e));
+                                    }
+                                    StreamEvent::ThinkingStart => {
+                                        self.thinking_start = Some(Instant::now());
+                                    }
+                                    StreamEvent::ThinkingEnd => {
+                                        if let Some(start) = self.thinking_start.take() {
+                                            let elapsed = start.elapsed();
+                                            let thinking_msg = format!("Thought for {:.1}s\n\n", elapsed.as_secs_f64());
+                                            self.streaming_text.push_str(&thinking_msg);
+                                        }
                                     }
                                 }
                             }

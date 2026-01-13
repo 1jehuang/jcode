@@ -93,6 +93,10 @@ pub enum StreamEvent {
     ToolInputDelta(String),
     /// Tool use complete
     ToolUseEnd,
+    /// Extended thinking started
+    ThinkingStart,
+    /// Extended thinking ended
+    ThinkingEnd,
     /// Message complete (may have stop reason)
     MessageEnd { stop_reason: Option<String> },
     /// Token usage update

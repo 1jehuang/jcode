@@ -283,12 +283,16 @@ struct ErrorInfo {
 
 struct ClaudeEventTranslator {
     last_stop_reason: Option<String>,
+    in_thinking_block: bool,
+    in_tool_use_block: bool,
 }
 
 impl ClaudeEventTranslator {
     fn new() -> Self {
         Self {
             last_stop_reason: None,
+            in_thinking_block: false,
+            in_tool_use_block: false,
         }
     }
 
@@ -309,12 +313,17 @@ impl ClaudeEventTranslator {
             }
             SseEvent::ContentBlockStart { content_block, .. } => match content_block {
                 ContentBlockInfo::Text { .. } => Vec::new(),
-                ContentBlockInfo::ToolUse { id, name } => vec![StreamEvent::ToolUseStart {
-                    id,
-                    name: to_internal_tool_name(&name),
-                }],
-                // Thinking blocks are internal reasoning - silently consume
-                ContentBlockInfo::Thinking { .. } => Vec::new(),
+                ContentBlockInfo::ToolUse { id, name } => {
+                    self.in_tool_use_block = true;
+                    vec![StreamEvent::ToolUseStart {
+                        id,
+                        name: to_internal_tool_name(&name),
+                    }]
+                }
+                ContentBlockInfo::Thinking { .. } => {
+                    self.in_thinking_block = true;
+                    vec![StreamEvent::ThinkingStart]
+                }
                 ContentBlockInfo::Other => Vec::new(),
             },
             SseEvent::ContentBlockDelta { delta, .. } => match delta {
@@ -327,7 +336,17 @@ impl ClaudeEventTranslator {
                 DeltaInfo::SignatureDelta { .. } => Vec::new(),
                 DeltaInfo::Other => Vec::new(),
             },
-            SseEvent::ContentBlockStop { .. } => vec![StreamEvent::ToolUseEnd],
+            SseEvent::ContentBlockStop { .. } => {
+                if self.in_thinking_block {
+                    self.in_thinking_block = false;
+                    vec![StreamEvent::ThinkingEnd]
+                } else if self.in_tool_use_block {
+                    self.in_tool_use_block = false;
+                    vec![StreamEvent::ToolUseEnd]
+                } else {
+                    Vec::new()
+                }
+            }
             SseEvent::MessageDelta { delta, usage } => {
                 self.last_stop_reason = delta.stop_reason.clone();
                 if let Some(usage) = usage {

@@ -9,6 +9,7 @@ use futures::StreamExt;
 use std::collections::HashSet;
 use std::io::{self, Write};
 use std::sync::Arc;
+use std::time::Instant;
 
 const SYSTEM_PROMPT: &str = r#"You are a coding assistant with access to tools for file operations and shell commands.
 
@@ -217,9 +218,25 @@ impl Agent {
             let mut usage_input: Option<u64> = None;
             let mut usage_output: Option<u64> = None;
             let mut saw_message_end = false;
+            let mut thinking_start: Option<Instant> = None;
 
             while let Some(event) = stream.next().await {
                 match event? {
+                    StreamEvent::ThinkingStart => {
+                        thinking_start = Some(Instant::now());
+                        if print_output {
+                            print!("Thinking");
+                            io::stdout().flush()?;
+                        }
+                    }
+                    StreamEvent::ThinkingEnd => {
+                        if let Some(start) = thinking_start.take() {
+                            let elapsed = start.elapsed();
+                            if print_output {
+                                println!(" ({:.1}s)", elapsed.as_secs_f64());
+                            }
+                        }
+                    }
                     StreamEvent::TextDelta(text) => {
                         if print_output {
                             print!("{}", text);
