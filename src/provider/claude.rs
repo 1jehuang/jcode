@@ -13,7 +13,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
+const DEFAULT_MODEL: &str = "claude-opus-4-5-20251101";
 const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 const BRIDGE_SCRIPT: &str = include_str!("../../scripts/claude_agent_sdk_bridge.py");
 
@@ -94,6 +94,7 @@ struct ClaudeSdkConfig {
     permission_mode: Option<String>,
     cli_path: Option<String>,
     include_partial_messages: bool,
+    max_thinking_tokens: Option<u32>,
 }
 
 impl ClaudeSdkConfig {
@@ -130,6 +131,12 @@ impl ClaudeSdkConfig {
             })
             .unwrap_or(true);
 
+        // Default to max thinking tokens (128k) for Opus models, can be overridden via env
+        let max_thinking_tokens = std::env::var("JCODE_CLAUDE_SDK_THINKING_TOKENS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .or_else(|| Some(128000)); // Max 128k tokens for extended thinking
+
         Self {
             python_bin,
             bridge_script_path,
@@ -137,6 +144,7 @@ impl ClaudeSdkConfig {
             permission_mode,
             cli_path,
             include_partial_messages,
+            max_thinking_tokens,
         }
     }
 }
@@ -158,6 +166,8 @@ struct ClaudeSdkOptions {
     include_partial_messages: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     resume: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_thinking_tokens: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -447,6 +457,7 @@ impl Provider for ClaudeProvider {
                 cwd,
                 include_partial_messages: self.config.include_partial_messages,
                 resume: resume_session_id.map(|s| s.to_string()),
+                max_thinking_tokens: self.config.max_thinking_tokens,
             },
         };
 
@@ -528,6 +539,10 @@ impl Provider for ClaudeProvider {
 
     fn name(&self) -> &str {
         "claude"
+    }
+
+    fn model(&self) -> &str {
+        &self.config.model
     }
 }
 

@@ -131,6 +131,7 @@ async def _run() -> None:
     include_partial_messages = options.get("include_partial_messages", True)
     extra_args = options.get("extra_args") or {}
     resume_session_id = options.get("resume")  # Session ID to resume
+    max_thinking_tokens = options.get("max_thinking_tokens")  # Extended thinking budget
 
     if permission_mode == "bypassPermissions":
         extra_args = dict(extra_args)
@@ -156,6 +157,7 @@ async def _run() -> None:
         include_partial_messages=include_partial_messages,
         extra_args=extra_args,
         resume=resume_session_id,  # Resume previous session if provided
+        max_thinking_tokens=max_thinking_tokens,  # Extended thinking for Opus models
     )
 
     # When resuming, only send the last user message as a simple string

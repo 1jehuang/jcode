@@ -88,9 +88,11 @@ impl Tool for WriteTool {
                 diff
             )).with_title(format!("{}", params.file_path)))
         } else {
+            // For new files, show all lines as additions
+            let diff = generate_diff_summary("", &params.content);
             Ok(ToolOutput::new(format!(
-                "Created {} ({} bytes, {} lines)",
-                params.file_path, new_len, line_count
+                "Created {} ({} lines):\n{}",
+                params.file_path, line_count, diff
             )).with_title(format!("{}", params.file_path)))
         }
     }
@@ -114,25 +116,106 @@ fn generate_diff_summary(old: &str, new: &str) -> String {
                 continue;
             }
             ChangeTag::Delete => {
+                let content = change.value().trim();
+                old_line += 1;
+                // Skip whitespace-only changes
+                if content.is_empty() {
+                    continue;
+                }
                 if lines_shown >= MAX_LINES {
                     output.push_str("...(truncated)\n");
                     break;
                 }
-                output.push_str(&format!("{:>4} - {}\n", old_line, change.value().trim_end()));
-                old_line += 1;
+                output.push_str(&format!("{:>4} - {}\n", old_line - 1, content));
                 lines_shown += 1;
             }
             ChangeTag::Insert => {
+                let content = change.value().trim();
+                new_line += 1;
+                // Skip whitespace-only changes
+                if content.is_empty() {
+                    continue;
+                }
                 if lines_shown >= MAX_LINES {
                     output.push_str("...(truncated)\n");
                     break;
                 }
-                output.push_str(&format!("{:>4} + {}\n", new_line, change.value().trim_end()));
-                new_line += 1;
+                output.push_str(&format!("{:>4} + {}\n", new_line - 1, content));
                 lines_shown += 1;
             }
         }
     }
 
     output.trim_end().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_diff_summary_single_change() {
+        let old = "hello world";
+        let new = "hello rust";
+        let diff = generate_diff_summary(old, new);
+
+        assert!(diff.contains("1 -"), "Should have line number 1 for deletion");
+        assert!(diff.contains("1 +"), "Should have line number 1 for addition");
+        assert!(diff.contains("- hello world"), "Should show deleted line");
+        assert!(diff.contains("+ hello rust"), "Should show added line");
+    }
+
+    #[test]
+    fn test_generate_diff_summary_multi_line() {
+        let old = "line one\nline two\nline three";
+        let new = "line one\nchanged two\nline three";
+        let diff = generate_diff_summary(old, new);
+
+        assert!(diff.contains("2 -"), "Should have line number 2");
+        assert!(diff.contains("- line two"), "Should show deleted line");
+        assert!(diff.contains("+ changed two"), "Should show added line");
+        // Equal lines should not appear
+        assert!(!diff.contains("line one"), "Should not show unchanged lines");
+    }
+
+    #[test]
+    fn test_generate_diff_summary_new_file() {
+        let old = "";
+        let new = "line one\nline two\nline three";
+        let diff = generate_diff_summary(old, new);
+
+        assert!(diff.contains("1 + line one"), "Should show line 1 added");
+        assert!(diff.contains("2 + line two"), "Should show line 2 added");
+        assert!(diff.contains("3 + line three"), "Should show line 3 added");
+    }
+
+    #[test]
+    fn test_generate_diff_summary_truncation() {
+        // Create old and new with more than 20 changed lines
+        let old = (1..=25).map(|i| format!("old line {}", i)).collect::<Vec<_>>().join("\n");
+        let new = (1..=25).map(|i| format!("new line {}", i)).collect::<Vec<_>>().join("\n");
+        let diff = generate_diff_summary(&old, &new);
+
+        assert!(diff.contains("truncated"), "Should truncate after 20 lines");
+    }
+
+    #[test]
+    fn test_generate_diff_summary_line_number_format() {
+        let old = "old";
+        let new = "new";
+        let diff = generate_diff_summary(old, new);
+
+        // Line numbers should be right-aligned in 4 chars
+        assert!(diff.contains("   1 -"), "Line number should be right-aligned");
+        assert!(diff.contains("   1 +"), "Line number should be right-aligned");
+    }
+
+    #[test]
+    fn test_generate_diff_summary_empty_result() {
+        let old = "same content";
+        let new = "same content";
+        let diff = generate_diff_summary(old, new);
+
+        assert!(diff.is_empty(), "No changes should produce empty diff");
+    }
 }

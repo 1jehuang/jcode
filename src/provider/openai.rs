@@ -449,6 +449,10 @@ impl Provider for OpenAIProvider {
     fn name(&self) -> &str {
         "openai"
     }
+
+    fn model(&self) -> &str {
+        API_MODEL_ID
+    }
 }
 
 fn should_refresh_token(status: StatusCode, body: &str) -> bool {

@@ -175,25 +175,97 @@ fn generate_diff_summary(old: &str, new: &str) -> String {
                 continue;
             }
             ChangeTag::Delete => {
+                let content = change.value().trim();
+                old_line += 1;
+                // Skip whitespace-only changes
+                if content.is_empty() {
+                    continue;
+                }
                 if lines_shown >= MAX_LINES {
                     output.push_str("...(truncated)\n");
                     break;
                 }
-                output.push_str(&format!("{:>4} - {}\n", old_line, change.value().trim_end()));
-                old_line += 1;
+                output.push_str(&format!("{:>4} - {}\n", old_line - 1, content));
                 lines_shown += 1;
             }
             ChangeTag::Insert => {
+                let content = change.value().trim();
+                new_line += 1;
+                // Skip whitespace-only changes
+                if content.is_empty() {
+                    continue;
+                }
                 if lines_shown >= MAX_LINES {
                     output.push_str("...(truncated)\n");
                     break;
                 }
-                output.push_str(&format!("{:>4} + {}\n", new_line, change.value().trim_end()));
-                new_line += 1;
+                output.push_str(&format!("{:>4} + {}\n", new_line - 1, content));
                 lines_shown += 1;
             }
         }
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_diff_summary_single_change() {
+        let old = "hello world";
+        let new = "hello rust";
+        let diff = generate_diff_summary(old, new);
+
+        assert!(diff.contains("1 -"), "Should have line number 1 for deletion");
+        assert!(diff.contains("1 +"), "Should have line number 1 for addition");
+        assert!(diff.contains("- hello world"), "Should show deleted line");
+        assert!(diff.contains("+ hello rust"), "Should show added line");
+    }
+
+    #[test]
+    fn test_generate_diff_summary_multi_line() {
+        let old = "line one\nline two\nline three";
+        let new = "line one\nchanged two\nline three";
+        let diff = generate_diff_summary(old, new);
+
+        assert!(diff.contains("2 -"), "Should have line number 2");
+        assert!(diff.contains("- line two"), "Should show deleted line");
+        assert!(diff.contains("+ changed two"), "Should show added line");
+    }
+
+    #[test]
+    fn test_generate_diff_summary_multiple_edits() {
+        let old = "line 1\nline 2\nline 3\nline 4\nline 5";
+        let new = "line 1\nmodified 2\nline 3\nmodified 4\nline 5";
+        let diff = generate_diff_summary(old, new);
+
+        // Should show both changed lines with correct line numbers
+        assert!(diff.contains("2 - line 2"), "Should show line 2 deleted");
+        assert!(diff.contains("2 + modified 2"), "Should show line 2 added");
+        assert!(diff.contains("4 - line 4"), "Should show line 4 deleted");
+        assert!(diff.contains("4 + modified 4"), "Should show line 4 added");
+    }
+
+    #[test]
+    fn test_generate_diff_summary_truncation() {
+        // Create old and new with more than 30 changed lines
+        let old = (1..=35).map(|i| format!("old line {}", i)).collect::<Vec<_>>().join("\n");
+        let new = (1..=35).map(|i| format!("new line {}", i)).collect::<Vec<_>>().join("\n");
+        let diff = generate_diff_summary(&old, &new);
+
+        assert!(diff.contains("truncated"), "Should truncate after 30 lines");
+    }
+
+    #[test]
+    fn test_generate_diff_summary_line_number_format() {
+        let old = "old";
+        let new = "new";
+        let diff = generate_diff_summary(old, new);
+
+        // Line numbers should be right-aligned in 4 chars
+        assert!(diff.contains("   1 -"), "Line number should be right-aligned");
+        assert!(diff.contains("   1 +"), "Line number should be right-aligned");
+    }
 }

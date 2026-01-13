@@ -25,4 +25,9 @@ pub trait Provider: Send + Sync {
 
     /// Get the provider name
     fn name(&self) -> &str;
+
+    /// Get the model identifier being used
+    fn model(&self) -> &str {
+        "unknown"
+    }
 }

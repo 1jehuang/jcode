@@ -1,4 +1,4 @@
-use pulldown_cmark::{Event, Parser, Tag, TagEnd, CodeBlockKind};
+use pulldown_cmark::{Event, Parser, Tag, TagEnd, CodeBlockKind, Options};
 use ratatui::prelude::*;
 use syntect::highlighting::{ThemeSet, Style as SynStyle};
 use syntect::parsing::SyntaxSet;
@@ -12,9 +12,11 @@ static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 // Colors matching ui.rs palette
 const CODE_BG: Color = Color::Rgb(45, 45, 45);
 const CODE_FG: Color = Color::Rgb(180, 180, 180);
-const BOLD_COLOR: Color = Color::Rgb(255, 255, 255);
+const TEXT_COLOR: Color = Color::Rgb(200, 200, 195);      // Soft warm white for AI text
+const BOLD_COLOR: Color = Color::Rgb(240, 240, 235);      // Slightly brighter for bold
 const HEADING_COLOR: Color = Color::Rgb(138, 180, 248);
 const DIM_COLOR: Color = Color::Rgb(100, 100, 100);
+const TABLE_COLOR: Color = Color::Rgb(150, 150, 150);     // Table borders/separators
 
 /// Render markdown text to styled ratatui Lines
 pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
@@ -29,7 +31,17 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
     let mut code_block_content = String::new();
     let mut in_heading = false;
 
-    let parser = Parser::new(text);
+    // Table state
+    let mut in_table = false;
+    let mut table_row: Vec<String> = Vec::new();
+    let mut table_rows: Vec<Vec<String>> = Vec::new();
+    let mut current_cell = String::new();
+    let mut is_header_row = false;
+
+    // Enable table parsing
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    let parser = Parser::new_ext(text, options);
 
     for event in parser {
         match event {
@@ -102,12 +114,14 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
             Event::Text(text) => {
                 if in_code_block {
                     code_block_content.push_str(&text);
+                } else if in_table {
+                    current_cell.push_str(&text);
                 } else {
                     let style = match (bold, italic) {
                         (true, true) => Style::default().fg(BOLD_COLOR).bold().italic(),
                         (true, false) => Style::default().fg(BOLD_COLOR).bold(),
-                        (false, true) => Style::default().italic(),
-                        (false, false) => Style::default(),
+                        (false, true) => Style::default().fg(TEXT_COLOR).italic(),
+                        (false, false) => Style::default().fg(TEXT_COLOR),
                     };
                     current_spans.push(Span::styled(text.to_string(), style));
                 }
@@ -140,6 +154,52 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
                 }
             }
 
+            // Table handling
+            Event::Start(Tag::Table(_)) => {
+                // Flush any pending content
+                if !current_spans.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+                }
+                in_table = true;
+                table_rows.clear();
+            }
+            Event::End(TagEnd::Table) => {
+                // Render the collected table
+                if !table_rows.is_empty() {
+                    let rendered = render_table(&table_rows);
+                    lines.extend(rendered);
+                }
+                in_table = false;
+                table_rows.clear();
+            }
+            Event::Start(Tag::TableHead) => {
+                is_header_row = true;
+                table_row.clear();
+            }
+            Event::End(TagEnd::TableHead) => {
+                if !table_row.is_empty() {
+                    table_rows.push(table_row.clone());
+                }
+                table_row.clear();
+                is_header_row = false;
+            }
+            Event::Start(Tag::TableRow) => {
+                table_row.clear();
+            }
+            Event::End(TagEnd::TableRow) => {
+                if !table_row.is_empty() {
+                    table_rows.push(table_row.clone());
+                }
+                table_row.clear();
+            }
+            Event::Start(Tag::TableCell) => {
+                current_cell.clear();
+            }
+            Event::End(TagEnd::TableCell) => {
+                table_row.push(current_cell.trim().to_string());
+                current_cell.clear();
+            }
+
             _ => {}
         }
     }
@@ -147,6 +207,63 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
     // Flush remaining spans
     if !current_spans.is_empty() {
         lines.push(Line::from(current_spans));
+    }
+
+    lines
+}
+
+/// Render a table as ASCII-style lines
+fn render_table(rows: &[Vec<String>]) -> Vec<Line<'static>> {
+    if rows.is_empty() {
+        return vec![];
+    }
+
+    let mut lines = Vec::new();
+
+    // Calculate column widths
+    let num_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    let mut col_widths: Vec<usize> = vec![0; num_cols];
+
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < col_widths.len() {
+                col_widths[i] = col_widths[i].max(cell.len());
+            }
+        }
+    }
+
+    // Render each row
+    for (row_idx, row) in rows.iter().enumerate() {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+
+        for (i, cell) in row.iter().enumerate() {
+            let width = col_widths.get(i).copied().unwrap_or(cell.len());
+            let padded = format!("{:<width$}", cell, width = width);
+
+            // Header row gets bold styling
+            let style = if row_idx == 0 {
+                Style::default().fg(BOLD_COLOR).bold()
+            } else {
+                Style::default().fg(TEXT_COLOR)
+            };
+
+            if i > 0 {
+                spans.push(Span::styled(" │ ", Style::default().fg(TABLE_COLOR)));
+            }
+            spans.push(Span::styled(padded, style));
+        }
+
+        lines.push(Line::from(spans));
+
+        // Add separator after header row
+        if row_idx == 0 {
+            let separator: String = col_widths
+                .iter()
+                .map(|&w| "─".repeat(w))
+                .collect::<Vec<_>>()
+                .join("─┼─");
+            lines.push(Line::from(Span::styled(separator, Style::default().fg(TABLE_COLOR))));
+        }
     }
 
     lines

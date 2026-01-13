@@ -65,7 +65,7 @@ impl StreamBuffer {
         self.last_flush = Instant::now();
     }
 
-    /// Find a semantic boundary in the buffer, returns position after boundary
+    /// Find a boundary in the buffer (newline-based), returns position after boundary
     fn find_boundary(&self) -> Option<usize> {
         let buf = &self.buffer;
 
@@ -77,51 +77,9 @@ impl StreamBuffer {
             }
         }
 
-        // Paragraph break (double newline)
-        if let Some(pos) = buf.find("\n\n") {
-            return Some(pos + 2);
-        }
-
-        // List item (newline followed by - or * or number.)
-        for pattern in &["\n- ", "\n* ", "\n1. ", "\n2. ", "\n3. "] {
-            if let Some(pos) = buf.find(pattern) {
-                return Some(pos + 1); // Include the newline, stop before list marker
-            }
-        }
-
-        // Sentence end followed by space or newline (but not in middle of number like "1.5")
-        let chars: Vec<char> = buf.chars().collect();
-        for i in 0..chars.len().saturating_sub(1) {
-            let c = chars[i];
-            let next = chars.get(i + 1);
-
-            if matches!(c, '.' | '!' | '?') {
-                if let Some(&next_c) = next {
-                    // Sentence end: punctuation followed by space, newline, or quote+space
-                    if next_c == ' ' || next_c == '\n' {
-                        // Make sure it's not a decimal number (check char before)
-                        if c == '.' && i > 0 {
-                            let prev = chars[i - 1];
-                            if prev.is_ascii_digit() {
-                                continue; // Skip "1.5" etc
-                            }
-                        }
-                        // Find byte position
-                        let byte_pos: usize = chars[..=i].iter().map(|c| c.len_utf8()).sum();
-                        return Some(byte_pos + 1); // Include the space/newline
-                    }
-                }
-            }
-        }
-
-        // Single newline as fallback for shorter chunks
-        if buf.len() > 80 {
-            if let Some(pos) = buf.rfind('\n') {
-                if pos > 40 {
-                    // Only if we have reasonable content
-                    return Some(pos + 1);
-                }
-            }
+        // Any newline - simple and predictable
+        if let Some(pos) = buf.find('\n') {
+            return Some(pos + 1);
         }
 
         None
@@ -133,33 +91,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_paragraph_boundary() {
+    fn test_newline_boundary() {
         let mut buf = StreamBuffer::new();
-        let result = buf.push("First paragraph.\n\nSecond paragraph.");
-        assert_eq!(result, Some("First paragraph.\n\n".to_string()));
-        assert_eq!(buf.buffer, "Second paragraph.");
-    }
-
-    #[test]
-    fn test_sentence_boundary() {
-        let mut buf = StreamBuffer::new();
-        let result = buf.push("Hello world. This is a test.");
-        assert_eq!(result, Some("Hello world. ".to_string()));
+        let result = buf.push("First line\nSecond line");
+        assert_eq!(result, Some("First line\n".to_string()));
+        assert_eq!(buf.buffer, "Second line");
     }
 
     #[test]
     fn test_code_block_boundary() {
         let mut buf = StreamBuffer::new();
-        let result = buf.push("Here's code:\n```rust\nfn main() {}");
-        assert_eq!(result, Some("Here's code:\n```rust\n".to_string()));
+        // Code block marker ``` causes flush to include the whole line
+        let result = buf.push("```rust\nfn main() {}");
+        assert_eq!(result, Some("```rust\n".to_string()));
     }
 
     #[test]
     fn test_no_boundary() {
         let mut buf = StreamBuffer::new();
-        let result = buf.push("partial text");
+        let result = buf.push("partial text without newline");
         assert_eq!(result, None);
-        assert_eq!(buf.buffer, "partial text");
+        assert_eq!(buf.buffer, "partial text without newline");
     }
 
     #[test]
@@ -172,18 +124,13 @@ mod tests {
     }
 
     #[test]
-    fn test_decimal_not_sentence() {
+    fn test_multiple_newlines() {
         let mut buf = StreamBuffer::new();
-        // "1.5" should not be treated as sentence end
-        let result = buf.push("The value is 1.5 meters.");
-        // Should find sentence end at the final period
-        assert!(result.is_none() || !result.as_ref().unwrap().ends_with("1."));
-    }
-
-    #[test]
-    fn test_list_boundary() {
-        let mut buf = StreamBuffer::new();
-        let result = buf.push("Items:\n- First item\n- Second");
-        assert_eq!(result, Some("Items:\n".to_string()));
+        // First push returns first line
+        let result = buf.push("Line one\nLine two\nLine three");
+        assert_eq!(result, Some("Line one\n".to_string()));
+        // Second push returns second line
+        let result = buf.push("");
+        assert_eq!(result, Some("Line two\n".to_string()));
     }
 }

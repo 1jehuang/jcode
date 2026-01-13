@@ -136,16 +136,25 @@ fn generate_diff(old: &str, new: &str, start_line: usize) -> String {
     let mut new_line = start_line;
 
     for change in diff.iter_all_changes() {
-        let (prefix, line_info) = match change.tag() {
+        let content = change.value().trim();
+        let (prefix, line_num) = match change.tag() {
             ChangeTag::Delete => {
-                let info = format!("{:>4} ", old_line);
+                let num = old_line;
                 old_line += 1;
-                ("-", info)
+                // Skip whitespace-only changes
+                if content.is_empty() {
+                    continue;
+                }
+                ("-", num)
             }
             ChangeTag::Insert => {
-                let info = format!("{:>4} ", new_line);
+                let num = new_line;
                 new_line += 1;
-                ("+", info)
+                // Skip whitespace-only changes
+                if content.is_empty() {
+                    continue;
+                }
+                ("+", num)
             }
             ChangeTag::Equal => {
                 old_line += 1;
@@ -154,10 +163,10 @@ fn generate_diff(old: &str, new: &str, start_line: usize) -> String {
             }
         };
 
-        output.push_str(&line_info);
+        output.push_str(&format!("{:>4} ", line_num));
         output.push_str(prefix);
         output.push(' ');
-        output.push_str(change.value().trim_end());
+        output.push_str(content);
         output.push('\n');
     }
 
@@ -202,4 +211,84 @@ fn try_flexible_match(content: &str, old_string: &str, file_path: &str) -> Resul
          Use the read tool to see the current file contents.",
         file_path
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_diff_single_line_change() {
+        let old = "hello world";
+        let new = "hello rust";
+        let diff = generate_diff(old, new, 10);
+
+        assert!(diff.contains("10 "), "Should have line number 10");
+        assert!(diff.contains("- hello world"), "Should show deleted line");
+        assert!(diff.contains("+ hello rust"), "Should show added line");
+    }
+
+    #[test]
+    fn test_generate_diff_multi_line() {
+        let old = "line one\nline two\nline three";
+        let new = "line one\nmodified two\nline three";
+        let diff = generate_diff(old, new, 5);
+
+        // Line 6 should be the changed line (5 + 1 for "line two")
+        assert!(diff.contains("6 "), "Should have line number 6");
+        assert!(diff.contains("- line two"), "Should show deleted line");
+        assert!(diff.contains("+ modified two"), "Should show added line");
+        // Equal lines should not appear
+        assert!(!diff.contains("line one"), "Should not show unchanged lines");
+        assert!(!diff.contains("line three"), "Should not show unchanged lines");
+    }
+
+    #[test]
+    fn test_generate_diff_addition_only() {
+        let old = "first\nthird";
+        let new = "first\nsecond\nthird";
+        let diff = generate_diff(old, new, 1);
+
+        assert!(diff.contains("+ second"), "Should show added line");
+    }
+
+    #[test]
+    fn test_generate_diff_deletion_only() {
+        let old = "first\nsecond\nthird";
+        let new = "first\nthird";
+        let diff = generate_diff(old, new, 1);
+
+        assert!(diff.contains("- second"), "Should show deleted line");
+    }
+
+    #[test]
+    fn test_generate_diff_no_changes() {
+        let old = "same content";
+        let new = "same content";
+        let diff = generate_diff(old, new, 1);
+
+        assert_eq!(diff, "(no visible changes)");
+    }
+
+    #[test]
+    fn test_generate_diff_line_number_format() {
+        let old = "old";
+        let new = "new";
+        let diff = generate_diff(old, new, 42);
+
+        // Line numbers should be right-aligned in 4 chars
+        assert!(diff.contains("  42 -"), "Line number should be right-aligned");
+        assert!(diff.contains("  42 +"), "Line number should be right-aligned");
+    }
+
+    #[test]
+    fn test_find_line_number() {
+        let content = "line 1\nline 2\nline 3\nline 4";
+
+        assert_eq!(find_line_number(content, "line 1"), 1);
+        assert_eq!(find_line_number(content, "line 2"), 2);
+        assert_eq!(find_line_number(content, "line 3"), 3);
+        assert_eq!(find_line_number(content, "line 4"), 4);
+        assert_eq!(find_line_number(content, "not found"), 1);
+    }
 }

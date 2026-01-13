@@ -203,6 +203,7 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
     // Header - always visible
     let age = binary_age().unwrap_or_else(|| "unknown".to_string());
     let provider = app.provider_name();
+    let model = app.provider_model();
 
     // Line 1: Version
     lines.push(Line::from(Span::styled(
@@ -210,9 +211,9 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(DIM_COLOR),
     )));
 
-    // Line 2: Provider/Model
+    // Line 2: Provider/Model (show full model identifier)
     lines.push(Line::from(Span::styled(
-        format!("model: {}", provider),
+        format!("{}: {}", provider, model),
         Style::default().fg(DIM_COLOR),
     )));
 
@@ -293,27 +294,49 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                         Span::styled(format!(" {}", summary), Style::default().fg(DIM_COLOR)),
                     ]));
 
-                    // Show diff for edit tools (from input)
-                    if tc.name == "edit" || tc.name == "Edit" {
-                        let diff_lines = get_edit_diff_lines(tc);
-                        lines.extend(diff_lines);
-                    }
-
-                    // Show output for tools that have diff/detailed output
-                    if matches!(tc.name.as_str(), "write" | "multiedit" | "patch" | "apply_patch") {
-                        // Display tool output content (contains diffs)
-                        for line in msg.content.lines().skip(1) { // Skip first line (already in summary)
+                    // Show diff output for editing tools (from tool output, includes line numbers)
+                    if matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit") {
+                        // Display tool output content (contains diffs with line numbers)
+                        for line in msg.content.lines().skip(1) { // Skip first line (summary)
                             if line.trim().is_empty() {
                                 continue;
                             }
-                            let styled_line = if line.contains(" + ") {
-                                Line::from(Span::styled(format!("    {}", line), Style::default().fg(DIFF_ADD_COLOR)))
-                            } else if line.contains(" - ") {
-                                Line::from(Span::styled(format!("    {}", line), Style::default().fg(DIFF_DEL_COLOR)))
+                            // Color based on +/- at start of line content (after line number)
+                            let styled_line = if line.contains(" + ") || line.trim_start().starts_with('+') {
+                                Line::from(Span::styled(line.to_string(), Style::default().fg(DIFF_ADD_COLOR)))
+                            } else if line.contains(" - ") || line.trim_start().starts_with('-') {
+                                Line::from(Span::styled(line.to_string(), Style::default().fg(DIFF_DEL_COLOR)))
                             } else {
-                                Line::from(Span::styled(format!("    {}", line), Style::default().fg(DIM_COLOR)))
+                                Line::from(Span::styled(line.to_string(), Style::default().fg(DIM_COLOR)))
                             };
                             lines.push(styled_line);
+                        }
+                    }
+
+                    // Show task output (sub-agent result, truncated)
+                    if tc.name == "task" {
+                        let mut line_count = 0;
+                        const MAX_TASK_LINES: usize = 10;
+                        for line in msg.content.lines() {
+                            // Skip metadata section
+                            if line.contains("<task_metadata>") {
+                                break;
+                            }
+                            if line.trim().is_empty() {
+                                continue;
+                            }
+                            if line_count >= MAX_TASK_LINES {
+                                lines.push(Line::from(Span::styled(
+                                    "    ...(truncated)".to_string(),
+                                    Style::default().fg(DIM_COLOR),
+                                )));
+                                break;
+                            }
+                            lines.push(Line::from(Span::styled(
+                                format!("    {}", line),
+                                Style::default().fg(DIM_COLOR),
+                            )));
+                            line_count += 1;
                         }
                     }
                 }
@@ -340,30 +363,30 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Streaming text
+    // Streaming text - render with markdown for consistent formatting
     if app.is_processing() {
         if !app.streaming_text().is_empty() {
             if !lines.is_empty() {
                 lines.push(Line::from(""));
             }
-            for line in app.streaming_text().lines() {
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::raw(line.to_string()),
-                ]));
-            }
+            // Use markdown rendering to match final display
+            let md_lines = markdown::render_markdown(app.streaming_text());
+            lines.extend(md_lines);
         }
         // Tool calls are now shown inline in display_messages
     }
 
     // Wrap lines and track which wrapped indices correspond to user lines
-    let wrap_width = area.width.saturating_sub(2) as usize; // Leave margin for right bar
+    let full_width = area.width as usize;
+    let user_width = area.width.saturating_sub(2) as usize; // Leave margin for right bar
     let mut wrapped_user_indices: Vec<usize> = Vec::new();
     let mut wrapped_idx = 0usize;
 
     let mut wrapped_lines: Vec<Line> = Vec::new();
     for (orig_idx, line) in lines.into_iter().enumerate() {
         let is_user_line = user_line_indices.contains(&orig_idx);
+        // User lines need margin for bar, AI lines use full width
+        let wrap_width = if is_user_line { user_width } else { full_width };
         let new_lines = markdown::wrap_line(line, wrap_width);
         let count = new_lines.len();
 
@@ -594,95 +617,104 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect, next_prompt: usize) {
 const DIFF_ADD_COLOR: Color = Color::Rgb(100, 200, 100);    // Green for additions
 const DIFF_DEL_COLOR: Color = Color::Rgb(200, 100, 100);    // Red for deletions
 
-/// Generate diff lines for an edit tool call
-fn get_edit_diff_lines(tool: &ToolCall) -> Vec<Line<'static>> {
-    let mut diff_lines = Vec::new();
-
-    let old_str = tool.input.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-    let new_str = tool.input.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
-
-    if old_str.is_empty() && new_str.is_empty() {
-        return diff_lines;
-    }
-
-    // Show removed lines (limited to 5 lines)
-    for (i, line) in old_str.lines().take(5).enumerate() {
-        let truncated = if line.len() > 60 {
-            format!("{}...", &line[..60])
-        } else {
-            line.to_string()
-        };
-        diff_lines.push(Line::from(vec![
-            Span::styled("     ", Style::default()),
-            Span::styled(format!("- {}", truncated), Style::default().fg(DIFF_DEL_COLOR)),
-        ]));
-        if i == 4 && old_str.lines().count() > 5 {
-            diff_lines.push(Line::from(vec![
-                Span::styled("     ", Style::default()),
-                Span::styled(format!("  ... ({} more lines)", old_str.lines().count() - 5), Style::default().fg(DIM_COLOR)),
-            ]));
-            break;
-        }
-    }
-
-    // Show added lines (limited to 5 lines)
-    for (i, line) in new_str.lines().take(5).enumerate() {
-        let truncated = if line.len() > 60 {
-            format!("{}...", &line[..60])
-        } else {
-            line.to_string()
-        };
-        diff_lines.push(Line::from(vec![
-            Span::styled("     ", Style::default()),
-            Span::styled(format!("+ {}", truncated), Style::default().fg(DIFF_ADD_COLOR)),
-        ]));
-        if i == 4 && new_str.lines().count() > 5 {
-            diff_lines.push(Line::from(vec![
-                Span::styled("     ", Style::default()),
-                Span::styled(format!("  ... ({} more lines)", new_str.lines().count() - 5), Style::default().fg(DIM_COLOR)),
-            ]));
-            break;
-        }
-    }
-
-    diff_lines
-}
-
 /// Extract a brief summary from a tool call input (file path, command, etc.)
 fn get_tool_summary(tool: &ToolCall) -> String {
+    let truncate = |s: &str, max: usize| {
+        if s.len() > max {
+            format!("{}...", &s[..max])
+        } else {
+            s.to_string()
+        }
+    };
+
     match tool.name.as_str() {
         "bash" => {
-            if let Some(cmd) = tool.input.get("command").and_then(|v| v.as_str()) {
-                let short = if cmd.len() > 50 {
-                    format!("{}...", &cmd[..50])
-                } else {
-                    cmd.to_string()
-                };
-                format!("$ {}", short)
-            } else {
-                String::new()
-            }
+            tool.input.get("command").and_then(|v| v.as_str())
+                .map(|cmd| format!("$ {}", truncate(cmd, 50)))
+                .unwrap_or_default()
         }
         "read" | "write" | "edit" => {
-            if let Some(path) = tool.input.get("file_path").and_then(|v| v.as_str()) {
-                path.to_string()
-            } else {
-                String::new()
-            }
+            tool.input.get("file_path").and_then(|v| v.as_str())
+                .map(|p| p.to_string())
+                .unwrap_or_default()
         }
-        "glob" | "grep" => {
-            if let Some(pattern) = tool.input.get("pattern").and_then(|v| v.as_str()) {
-                format!("'{}'", pattern)
+        "multiedit" => {
+            let path = tool.input.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            let count = tool.input.get("edits").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            format!("{} ({} edits)", path, count)
+        }
+        "glob" => {
+            tool.input.get("pattern").and_then(|v| v.as_str())
+                .map(|p| format!("'{}'", p))
+                .unwrap_or_default()
+        }
+        "grep" => {
+            let pattern = tool.input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+            let path = tool.input.get("path").and_then(|v| v.as_str());
+            if let Some(p) = path {
+                format!("'{}' in {}", truncate(pattern, 30), p)
             } else {
-                String::new()
+                format!("'{}'", truncate(pattern, 40))
             }
         }
         "ls" => {
-            tool.input
-                .get("path")
-                .and_then(|v| v.as_str())
+            tool.input.get("path").and_then(|v| v.as_str())
                 .unwrap_or(".")
                 .to_string()
+        }
+        "task" => {
+            let desc = tool.input.get("description").and_then(|v| v.as_str()).unwrap_or("task");
+            let agent_type = tool.input.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("agent");
+            format!("{} ({})", desc, agent_type)
+        }
+        "patch" | "apply_patch" => {
+            tool.input.get("patch_text").and_then(|v| v.as_str())
+                .map(|p| {
+                    let lines = p.lines().count();
+                    format!("({} lines)", lines)
+                })
+                .unwrap_or_default()
+        }
+        "webfetch" => {
+            tool.input.get("url").and_then(|v| v.as_str())
+                .map(|u| truncate(u, 50))
+                .unwrap_or_default()
+        }
+        "websearch" => {
+            tool.input.get("query").and_then(|v| v.as_str())
+                .map(|q| format!("'{}'", truncate(q, 40)))
+                .unwrap_or_default()
+        }
+        "mcp" => {
+            let action = tool.input.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            let server = tool.input.get("server_name").and_then(|v| v.as_str());
+            if let Some(s) = server {
+                format!("{} {}", action, s)
+            } else {
+                action.to_string()
+            }
+        }
+        "todowrite" | "todoread" => {
+            "todos".to_string()
+        }
+        "skill" => {
+            tool.input.get("skill").and_then(|v| v.as_str())
+                .map(|s| format!("/{}", s))
+                .unwrap_or_default()
+        }
+        "codesearch" => {
+            tool.input.get("query").and_then(|v| v.as_str())
+                .map(|q| format!("'{}'", truncate(q, 40)))
+                .unwrap_or_default()
+        }
+        // MCP tools (prefixed with mcp__)
+        name if name.starts_with("mcp__") => {
+            // Show first string parameter as summary
+            tool.input.as_object()
+                .and_then(|obj| obj.iter().find(|(_, v)| v.is_string()))
+                .and_then(|(_, v)| v.as_str())
+                .map(|s| truncate(s, 40))
+                .unwrap_or_default()
         }
         _ => String::new()
     }

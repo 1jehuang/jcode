@@ -243,6 +243,24 @@ impl App {
             }
         }
 
+        // Handle Ctrl+Shift combos (scrolling)
+        if modifiers.contains(KeyModifiers::CONTROL) && modifiers.contains(KeyModifiers::SHIFT) {
+            let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
+            match code {
+                KeyCode::Char('K') => {
+                    // Ctrl+Shift+K: scroll up
+                    self.scroll_offset = (self.scroll_offset + 3).min(max_estimate);
+                    return Ok(());
+                }
+                KeyCode::Char('J') => {
+                    // Ctrl+Shift+J: scroll down
+                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         // Handle ctrl combos regardless of processing state
         if modifiers.contains(KeyModifiers::CONTROL) {
             match code {
@@ -671,7 +689,7 @@ impl App {
                 }));
 
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
-                let (output, is_error, _tool_title) = match result {
+                let (output, is_error, tool_title) = match result {
                     Ok(o) => {
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
                             session_id: self.session.id.clone(),
@@ -696,7 +714,13 @@ impl App {
                     }
                 };
 
-                // Tool calls shown inline during streaming, no separate display message
+                // Update the tool's DisplayMessage with the output
+                if let Some(dm) = self.display_messages.iter_mut().rev().find(|dm| {
+                    dm.tool_data.as_ref().map(|td| &td.id) == Some(&tc.id)
+                }) {
+                    dm.content = output.clone();
+                    dm.title = tool_title;
+                }
 
                 self.messages.push(Message::tool_result(&tc.id, &output, is_error));
                 self.session.add_message(
@@ -948,7 +972,7 @@ impl App {
                 }));
 
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
-                let (output, is_error, _tool_title) = match result {
+                let (output, is_error, tool_title) = match result {
                     Ok(o) => {
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
                             session_id: self.session.id.clone(),
@@ -973,7 +997,13 @@ impl App {
                     }
                 };
 
-                // Tool calls shown inline during streaming, no separate display message
+                // Update the tool's DisplayMessage with the output
+                if let Some(dm) = self.display_messages.iter_mut().rev().find(|dm| {
+                    dm.tool_data.as_ref().map(|td| &td.id) == Some(&tc.id)
+                }) {
+                    dm.content = output.clone();
+                    dm.title = tool_title;
+                }
 
                 self.messages.push(Message::tool_result(&tc.id, &output, is_error));
                 self.session.add_message(
@@ -1128,6 +1158,10 @@ When you need to make changes, use the tools directly. Don't just describe what 
 
     pub fn provider_name(&self) -> &str {
         self.provider.name()
+    }
+
+    pub fn provider_model(&self) -> &str {
+        self.provider.model()
     }
 
     pub fn mcp_servers(&self) -> &[String] {
