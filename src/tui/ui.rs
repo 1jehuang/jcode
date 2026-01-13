@@ -199,12 +199,14 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     // Calculate scroll position
+    // Note: We don't use Wrap because it makes scroll calculation unpredictable
+    let total_lines = lines.len();
     let visible_height = area.height as usize;
-    let max_scroll = lines.len().saturating_sub(visible_height);
+    let max_scroll = total_lines.saturating_sub(visible_height);
     let user_scroll = app.scroll_offset().min(max_scroll); // Cap to available content
 
-    // Use user's scroll offset, but clamp to valid range
-    // When user_scroll is 0, auto-scroll to bottom
+    // scroll_offset = 0 means bottom (auto-scroll), higher = further up
+    // ratatui scroll = lines from top to hide
     let scroll = if user_scroll > 0 {
         max_scroll.saturating_sub(user_scroll)
     } else {
@@ -212,7 +214,6 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let paragraph = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
         .scroll((scroll as u16, 0));
 
     frame.render_widget(paragraph, area);

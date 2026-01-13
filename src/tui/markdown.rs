@@ -10,11 +10,11 @@ static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(|| SyntaxSet::load_defaul
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
 // Colors matching ui.rs palette
-const CODE_BG: Color = Color::Rgb(40, 40, 40);
-const CODE_FG: Color = Color::Rgb(200, 200, 200);
+const CODE_BG: Color = Color::Rgb(45, 45, 45);
+const CODE_FG: Color = Color::Rgb(180, 180, 180);
 const BOLD_COLOR: Color = Color::Rgb(255, 255, 255);
-const ITALIC_COLOR: Color = Color::Rgb(180, 180, 180);
-const LINK_COLOR: Color = Color::Rgb(138, 180, 248);
+const HEADING_COLOR: Color = Color::Rgb(138, 180, 248);
+const DIM_COLOR: Color = Color::Rgb(100, 100, 100);
 
 /// Render markdown text to styled ratatui Lines
 pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
@@ -24,15 +24,33 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
     // Style stack for nested formatting
     let mut bold = false;
     let mut italic = false;
-    let mut in_code_span = false;
     let mut in_code_block = false;
     let mut code_block_lang: Option<String> = None;
     let mut code_block_content = String::new();
+    let mut in_heading = false;
 
     let parser = Parser::new(text);
 
     for event in parser {
         match event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                if !current_spans.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+                }
+                in_heading = true;
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if !current_spans.is_empty() {
+                    // Style heading spans
+                    let heading_spans: Vec<Span<'static>> = current_spans
+                        .drain(..)
+                        .map(|s| Span::styled(s.content.to_string(), Style::default().fg(HEADING_COLOR).bold()))
+                        .collect();
+                    lines.push(Line::from(heading_spans));
+                }
+                in_heading = false;
+            }
+
             Event::Start(Tag::Strong) => bold = true,
             Event::End(TagEnd::Strong) => bold = false,
 
@@ -49,21 +67,34 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
                     CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.to_string()),
                     _ => None,
                 };
+                // Add code block start indicator
+                let lang_label = code_block_lang.as_deref().unwrap_or("");
+                lines.push(Line::from(Span::styled(
+                    format!("┌─ {} ", lang_label),
+                    Style::default().fg(DIM_COLOR),
+                )));
                 code_block_content.clear();
             }
             Event::End(TagEnd::CodeBlock) => {
                 // Render code block with syntax highlighting
                 let highlighted = highlight_code(&code_block_content, code_block_lang.as_deref());
-                lines.extend(highlighted);
+                for hl_line in highlighted {
+                    // Add left border to code lines
+                    let mut spans = vec![Span::styled("│ ", Style::default().fg(DIM_COLOR))];
+                    spans.extend(hl_line.spans);
+                    lines.push(Line::from(spans));
+                }
+                // Add code block end indicator
+                lines.push(Line::from(Span::styled("└─", Style::default().fg(DIM_COLOR))));
                 in_code_block = false;
                 code_block_lang = None;
                 code_block_content.clear();
             }
 
             Event::Code(code) => {
-                // Inline code
+                // Inline code with subtle background
                 current_spans.push(Span::styled(
-                    format!(" {} ", code),
+                    format!("`{}`", code),
                     Style::default().fg(CODE_FG).bg(CODE_BG),
                 ));
             }
@@ -75,14 +106,19 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
                     let style = match (bold, italic) {
                         (true, true) => Style::default().fg(BOLD_COLOR).bold().italic(),
                         (true, false) => Style::default().fg(BOLD_COLOR).bold(),
-                        (false, true) => Style::default().fg(ITALIC_COLOR).italic(),
+                        (false, true) => Style::default().italic(),
                         (false, false) => Style::default(),
                     };
                     current_spans.push(Span::styled(text.to_string(), style));
                 }
             }
 
-            Event::SoftBreak | Event::HardBreak => {
+            Event::SoftBreak => {
+                if !in_code_block {
+                    current_spans.push(Span::raw(" "));
+                }
+            }
+            Event::HardBreak => {
                 if !in_code_block {
                     lines.push(Line::from(std::mem::take(&mut current_spans)));
                 }
@@ -95,10 +131,14 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
                 }
             }
 
-            Event::Start(Tag::Link { dest_url, .. }) => {
-                // Just show link text in link color
+            Event::Start(Tag::Item) => {
+                current_spans.push(Span::styled("• ", Style::default().fg(DIM_COLOR)));
             }
-            Event::End(TagEnd::Link) => {}
+            Event::End(TagEnd::Item) => {
+                if !current_spans.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+                }
+            }
 
             _ => {}
         }
