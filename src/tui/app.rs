@@ -1,3 +1,4 @@
+use super::stream_buffer::StreamBuffer;
 use crate::bus::{Bus, BusEvent, ToolEvent, ToolStatus};
 use crate::mcp::McpManager;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall};
@@ -75,6 +76,8 @@ pub struct App {
     cancel_requested: bool,
     // Cached MCP server names (updated on connect/disconnect)
     mcp_server_names: Vec<String>,
+    // Semantic stream buffer for chunked output
+    stream_buffer: StreamBuffer,
 }
 
 impl App {
@@ -107,6 +110,7 @@ impl App {
             provider_session_id: None,
             cancel_requested: false,
             mcp_server_names: Vec::new(),
+            stream_buffer: StreamBuffer::new(),
         }
     }
 
@@ -157,7 +161,12 @@ impl App {
                 // Wait for input or redraw tick
                 tokio::select! {
                     _ = redraw_interval.tick() => {
-                        // Just redraw on next iteration
+                        // Flush stream buffer on timeout
+                        if self.stream_buffer.should_flush() {
+                            if let Some(chunk) = self.stream_buffer.flush() {
+                                self.streaming_text.push_str(&chunk);
+                            }
+                        }
                     }
                     event = event_stream.next() => {
                         if let Some(Ok(Event::Key(key))) = event {
@@ -421,6 +430,7 @@ impl App {
         self.is_processing = true;
         self.status = ProcessingStatus::Sending;
         self.streaming_text.clear();
+                self.stream_buffer.clear();
         self.streaming_tool_calls.clear();
         self.streaming_input_tokens = 0;
         self.streaming_output_tokens = 0;
@@ -456,6 +466,7 @@ impl App {
             );
             let _ = self.session.save();
             self.streaming_text.clear();
+                self.stream_buffer.clear();
             self.streaming_tool_calls.clear();
             self.streaming_input_tokens = 0;
             self.streaming_output_tokens = 0;
@@ -506,8 +517,11 @@ impl App {
                 }
                 match event? {
                     StreamEvent::TextDelta(text) => {
-                        self.streaming_text.push_str(&text);
                         text_content.push_str(&text);
+                        // Use semantic buffer for chunked display
+                        if let Some(chunk) = self.stream_buffer.push(&text) {
+                            self.streaming_text.push_str(&chunk);
+                        }
                     }
                     StreamEvent::ToolUseStart { id, name } => {
                         current_tool = Some(ToolCall {
@@ -525,6 +539,11 @@ impl App {
                             tool.input = serde_json::from_str(&current_tool_input)
                                 .unwrap_or(serde_json::Value::Null);
 
+                            // Flush stream buffer before committing
+                            if let Some(chunk) = self.stream_buffer.flush() {
+                                self.streaming_text.push_str(&chunk);
+                            }
+
                             // Commit any pending text as a partial assistant message
                             if !self.streaming_text.is_empty() {
                                 self.display_messages.push(DisplayMessage {
@@ -536,6 +555,7 @@ impl App {
                                     tool_data: None,
                                 });
                                 self.streaming_text.clear();
+                self.stream_buffer.clear();
                             }
 
                             // Add tool call as its own display message
@@ -621,6 +641,7 @@ impl App {
                 });
             }
             self.streaming_text.clear();
+                self.stream_buffer.clear();
             self.streaming_tool_calls.clear();
 
             // If no tool calls, we're done
@@ -726,6 +747,12 @@ impl App {
                 tokio::select! {
                     // Redraw periodically
                     _ = redraw_interval.tick() => {
+                        // Flush stream buffer on timeout
+                        if self.stream_buffer.should_flush() {
+                            if let Some(chunk) = self.stream_buffer.flush() {
+                                self.streaming_text.push_str(&chunk);
+                            }
+                        }
                         terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
                     }
                     // Handle keyboard input
@@ -762,8 +789,11 @@ impl App {
                                 }
                                 match event {
                                     StreamEvent::TextDelta(text) => {
-                                        self.streaming_text.push_str(&text);
                                         text_content.push_str(&text);
+                                        // Use semantic buffer for chunked display
+                                        if let Some(chunk) = self.stream_buffer.push(&text) {
+                                            self.streaming_text.push_str(&chunk);
+                                        }
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
                                         current_tool = Some(ToolCall {
@@ -781,6 +811,11 @@ impl App {
                                             tool.input = serde_json::from_str(&current_tool_input)
                                                 .unwrap_or(serde_json::Value::Null);
 
+                                            // Flush stream buffer before committing
+                                            if let Some(chunk) = self.stream_buffer.flush() {
+                                                self.streaming_text.push_str(&chunk);
+                                            }
+
                                             // Commit any pending text as a partial assistant message
                                             if !self.streaming_text.is_empty() {
                                                 self.display_messages.push(DisplayMessage {
@@ -792,6 +827,7 @@ impl App {
                                                     tool_data: None,
                                                 });
                                                 self.streaming_text.clear();
+                                                self.stream_buffer.clear();
                                             }
 
                                             // Add tool call as its own display message
@@ -880,6 +916,7 @@ impl App {
                 });
             }
             self.streaming_text.clear();
+                self.stream_buffer.clear();
             self.streaming_tool_calls.clear();
 
             // If no tool calls, we're done
