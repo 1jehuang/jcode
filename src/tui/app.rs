@@ -83,6 +83,8 @@ pub struct App {
     stream_buffer: StreamBuffer,
     // Track thinking start time for extended thinking display
     thinking_start: Option<Instant>,
+    // Hot-reload: if set, exec into new binary with this session ID
+    reload_requested: Option<String>,
 }
 
 impl App {
@@ -119,6 +121,7 @@ impl App {
             mcp_server_names: Vec::new(),
             stream_buffer: StreamBuffer::new(),
             thinking_start: None,
+            reload_requested: None,
         }
     }
 
@@ -147,8 +150,53 @@ impl App {
         }
     }
 
+    /// Restore a previous session (for hot-reload)
+    pub fn restore_session(&mut self, session_id: &str) {
+        if let Ok(session) = Session::load(session_id) {
+            // Convert session messages to display messages
+            for stored_msg in &session.messages {
+                let role_str = match stored_msg.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                };
+
+                // Extract text content from ContentBlocks
+                let content: String = stored_msg
+                    .content
+                    .iter()
+                    .filter_map(|c| {
+                        if let ContentBlock::Text { text } = c {
+                            Some(text.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+
+                if !content.is_empty() {
+                    self.display_messages.push(DisplayMessage {
+                        role: role_str.to_string(),
+                        content,
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                    self.messages.push(stored_msg.to_message());
+                }
+            }
+
+            self.session = session;
+            crate::logging::info(&format!("Restored session: {}", session_id));
+        } else {
+            crate::logging::error(&format!("Failed to restore session: {}", session_id));
+        }
+    }
+
     /// Run the TUI application
-    pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
+    /// Returns Some(session_id) if hot-reload was requested
+    pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<Option<String>> {
         let mut event_stream = EventStream::new();
         let mut redraw_interval = interval(Duration::from_millis(50));
 
@@ -187,7 +235,7 @@ impl App {
             }
         }
 
-        Ok(())
+        Ok(self.reload_requested.take())
     }
 
     /// Process turn while still accepting input for queueing
@@ -410,6 +458,60 @@ impl App {
         let input = std::mem::take(&mut self.input);
         self.cursor_pos = 0;
         self.scroll_offset = 0; // Reset to bottom on new input
+
+        // Check for built-in commands
+        let trimmed = input.trim();
+        if trimmed == "/help" || trimmed == "/?" {
+            self.display_messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: format!(
+                    "**Commands:**\n\
+                     • `/help` - Show this help\n\
+                     • `/reload` - Hot-reload with new binary (keeps session)\n\
+                     • `/clear` - Clear conversation (Ctrl+L)\n\
+                     • `/<skill>` - Activate a skill\n\n\
+                     **Available skills:** {}\n\n\
+                     **Keyboard shortcuts:**\n\
+                     • `Ctrl+C` / `Ctrl+D` - Quit\n\
+                     • `Ctrl+L` - Clear conversation\n\
+                     • `PageUp/Down` - Scroll history\n\
+                     • `Ctrl+U` - Clear input line\n\
+                     • `Ctrl+K` - Kill to end of line",
+                    self.skills.list().iter().map(|s| format!("/{}", s.name)).collect::<Vec<_>>().join(", ")
+                ),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            return;
+        }
+
+        if trimmed == "/clear" {
+            self.messages.clear();
+            self.display_messages.clear();
+            self.queued_messages.clear();
+            self.active_skill = None;
+            self.session = Session::create(None, None);
+            self.provider_session_id = None;
+            return;
+        }
+
+        if trimmed == "/reload" {
+            self.display_messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: "Reloading jcode with new binary...".to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            // Save session and set reload flag
+            let _ = self.session.save();
+            self.reload_requested = Some(self.session.id.clone());
+            self.should_quit = true;
+            return;
+        }
 
         // Check for skill invocation
         if let Some(skill_name) = SkillRegistry::parse_invocation(&input) {

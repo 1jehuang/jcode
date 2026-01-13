@@ -53,6 +53,10 @@ struct Args {
     #[arg(long, global = true)]
     trace: bool,
 
+    /// Resume a session (used internally for hot-reload)
+    #[arg(long, global = true, hide = true)]
+    resume: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -156,7 +160,7 @@ async fn run_main(args: Args) -> Result<()> {
         None => {
             // Default: TUI mode
             let (provider, registry) = init_provider_and_registry(&args.provider).await?;
-            run_tui(provider, registry).await?;
+            run_tui(provider, registry, args.resume).await?;
         }
     }
 
@@ -223,13 +227,49 @@ async fn init_provider_and_registry(
     Ok((provider, registry))
 }
 
-async fn run_tui(provider: Arc<dyn provider::Provider>, registry: tool::Registry) -> Result<()> {
+async fn run_tui(
+    provider: Arc<dyn provider::Provider>,
+    registry: tool::Registry,
+    resume_session: Option<String>,
+) -> Result<()> {
     let terminal = ratatui::init();
     let mut app = tui::App::new(provider, registry);
+
+    // Restore session if resuming
+    if let Some(session_id) = resume_session {
+        app.restore_session(&session_id);
+    }
+
     app.init_mcp().await;
     let result = app.run(terminal).await;
     ratatui::restore();
-    result
+
+    // Check for hot-reload request
+    if let Ok(Some(session_id)) = &result {
+        hot_reload(session_id)?;
+    }
+
+    result.map(|_| ())
+}
+
+/// Hot-reload: exec into the new binary with session restore
+fn hot_reload(session_id: &str) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let exe = std::env::current_exe()?;
+    let cwd = std::env::current_dir()?;
+
+    eprintln!("Hot-reloading jcode with session {}...", session_id);
+
+    // Build command with --resume flag
+    let err = ProcessCommand::new(&exe)
+        .arg("--resume")
+        .arg(session_id)
+        .current_dir(cwd)
+        .exec();
+
+    // exec() only returns on error
+    Err(anyhow::anyhow!("Failed to exec: {}", err))
 }
 
 async fn run_login(choice: &ProviderChoice) -> Result<()> {
