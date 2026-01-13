@@ -516,10 +516,15 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
                     .collect();
                 // Use animated color for the tool name
                 let anim_color = animated_tool_color(elapsed);
+                // Show subagent status if available (e.g., "calling API", "running grep")
+                let status_suffix = app.subagent_status()
+                    .map(|s| format!(" ({})", s))
+                    .unwrap_or_default();
                 Line::from(vec![
                     Span::styled(spinner, Style::default().fg(anim_color)),
                     Span::styled(format!(" {}", tokens_str), Style::default().fg(DIM_COLOR)),
                     Span::styled(name.to_string(), Style::default().fg(anim_color).bold()),
+                    Span::styled(status_suffix, Style::default().fg(DIM_COLOR)),
                     Span::styled(format!("… {:.1}s ", elapsed), Style::default().fg(DIM_COLOR)),
                     Span::styled(bar, Style::default().fg(anim_color)),
                 ])

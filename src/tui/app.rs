@@ -1,5 +1,5 @@
 use super::stream_buffer::StreamBuffer;
-use crate::bus::{Bus, BusEvent, ToolEvent, ToolStatus};
+use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
 use crate::mcp::McpManager;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall};
 use crate::provider::Provider;
@@ -68,6 +68,8 @@ pub struct App {
     last_stream_activity: Option<Instant>,
     // Current status
     status: ProcessingStatus,
+    // Subagent status (shown during Task tool execution)
+    subagent_status: Option<String>,
     processing_started: Option<Instant>,
     // Pending turn to process (allows UI to redraw before processing starts)
     pending_turn: bool,
@@ -113,6 +115,7 @@ impl App {
             context_warning_shown: false,
             last_stream_activity: None,
             status: ProcessingStatus::default(),
+            subagent_status: None,
             processing_started: None,
             pending_turn: false,
             streaming_tool_calls: Vec::new(),
@@ -888,16 +891,58 @@ impl App {
             let system_prompt = self.build_system_prompt();
 
             self.status = ProcessingStatus::Sending;
-            // Redraw to show "sending" status
             terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
 
             crate::logging::info(&format!("TUI: API call starting ({} messages)", self.messages.len()));
             let api_start = std::time::Instant::now();
 
-            let mut stream = self
-                .provider
-                .complete(&self.messages, &tools, &system_prompt, self.provider_session_id.as_deref())
-                .await?;
+            // Clone data needed for the API call to avoid borrow issues
+            // The future would hold references across the select! which conflicts with handle_key
+            let provider = self.provider.clone();
+            let messages_clone = self.messages.clone();
+            let session_id_clone = self.provider_session_id.clone();
+
+            // Make API call non-blocking - poll it in select! so we can handle input while waiting
+            let mut api_future = std::pin::pin!(provider.complete(
+                &messages_clone,
+                &tools,
+                &system_prompt,
+                session_id_clone.as_deref()
+            ));
+
+            let mut stream = loop {
+                tokio::select! {
+                    biased;
+                    // Handle keyboard input while waiting for API
+                    event = event_stream.next() => {
+                        if let Some(Ok(Event::Key(key))) = event {
+                            if key.kind == KeyEventKind::Press {
+                                let _ = self.handle_key(key.code, key.modifiers);
+                                if self.cancel_requested {
+                                    self.cancel_requested = false;
+                                    self.display_messages.push(DisplayMessage {
+                                        role: "system".to_string(),
+                                        content: "Interrupted".to_string(),
+                                        tool_calls: vec![],
+                                        duration_secs: None,
+                                        title: None,
+                                        tool_data: None,
+                                    });
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                    // Redraw periodically
+                    _ = redraw_interval.tick() => {
+                        terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
+                    }
+                    // Poll API call
+                    result = &mut api_future => {
+                        break result?;
+                    }
+                }
+            };
 
             crate::logging::info(&format!("TUI: API stream opened in {:.2}s", api_start.elapsed().as_secs_f64()));
 
@@ -1112,7 +1157,7 @@ impl App {
                 break;
             }
 
-            // Execute tools with input handling
+            // Execute tools with input handling (non-blocking)
             for tc in tool_calls {
                 self.status = ProcessingStatus::RunningTool(tc.name.clone());
                 terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
@@ -1135,7 +1180,60 @@ impl App {
                     title: None,
                 }));
 
-                let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
+                // Make tool execution non-blocking - poll in select! so we can handle input
+                // Clone registry to avoid borrow issues
+                let registry = self.registry.clone();
+                let tool_name = tc.name.clone();
+                let tool_input = tc.input.clone();
+                let mut tool_future = std::pin::pin!(
+                    registry.execute(&tool_name, tool_input, ctx)
+                );
+
+                // Subscribe to bus for subagent status updates
+                let mut bus_receiver = Bus::global().subscribe();
+                self.subagent_status = None; // Clear previous status
+
+                let result = loop {
+                    tokio::select! {
+                        biased;
+                        // Handle keyboard input while tool executes
+                        event = event_stream.next() => {
+                            if let Some(Ok(Event::Key(key))) = event {
+                                if key.kind == KeyEventKind::Press {
+                                    let _ = self.handle_key(key.code, key.modifiers);
+                                    if self.cancel_requested {
+                                        self.cancel_requested = false;
+                                        self.display_messages.push(DisplayMessage {
+                                            role: "system".to_string(),
+                                            content: "Interrupted".to_string(),
+                                            tool_calls: vec![],
+                                            duration_secs: None,
+                                            title: None,
+                                            tool_data: None,
+                                        });
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                        }
+                        // Listen for subagent status updates
+                        bus_event = bus_receiver.recv() => {
+                            if let Ok(BusEvent::SubagentStatus(status)) = bus_event {
+                                self.subagent_status = Some(status.status);
+                            }
+                        }
+                        // Redraw periodically
+                        _ = redraw_interval.tick() => {
+                            terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
+                        }
+                        // Poll tool execution
+                        result = &mut tool_future => {
+                            break result;
+                        }
+                    }
+                };
+
+                self.subagent_status = None; // Clear status after tool completes
                 let (output, is_error, tool_title) = match result {
                     Ok(o) => {
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
@@ -1326,6 +1424,10 @@ impl App {
 
     pub fn status(&self) -> &ProcessingStatus {
         &self.status
+    }
+
+    pub fn subagent_status(&self) -> Option<&str> {
+        self.subagent_status.as_deref()
     }
 
     pub fn elapsed(&self) -> Option<Duration> {

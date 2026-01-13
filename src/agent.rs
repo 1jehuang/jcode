@@ -1,4 +1,4 @@
-use crate::bus::{Bus, BusEvent, ToolEvent, ToolStatus};
+use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
 use crate::logging;
 use crate::message::{ContentBlock, Role, StreamEvent, ToolCall};
 use crate::provider::Provider;
@@ -214,6 +214,12 @@ impl Agent {
             ));
             let api_start = Instant::now();
 
+            // Publish status for TUI to show during Task execution
+            Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
+                session_id: self.session.id.clone(),
+                status: "calling API".to_string(),
+            }));
+
             let mut stream = self
                 .provider
                 .complete(&messages, &tools, &system_prompt, self.provider_session_id.as_deref())
@@ -223,6 +229,11 @@ impl Agent {
                 "API stream opened in {:.2}s",
                 api_start.elapsed().as_secs_f64()
             ));
+
+            Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
+                session_id: self.session.id.clone(),
+                status: "streaming".to_string(),
+            }));
 
             let mut text_content = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -436,6 +447,13 @@ impl Agent {
 
                 logging::info(&format!("Tool starting: {}", tc.name));
                 let tool_start = Instant::now();
+
+                // Publish status for TUI to show during Task execution
+                Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
+                    session_id: self.session.id.clone(),
+                    status: format!("running {}", tc.name),
+                }));
+
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
                 let tool_elapsed = tool_start.elapsed();
                 logging::info(&format!(

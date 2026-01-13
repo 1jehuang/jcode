@@ -49,10 +49,18 @@ pub struct ToolSummary {
     pub state: ToolSummaryState,
 }
 
+/// Status update from a subagent (used by Task tool)
+#[derive(Clone, Debug)]
+pub struct SubagentStatus {
+    pub session_id: String,
+    pub status: String, // e.g., "calling API", "running grep", "streaming"
+}
+
 #[derive(Clone, Debug)]
 pub enum BusEvent {
     ToolUpdated(ToolEvent),
     TodoUpdated(TodoEvent),
+    SubagentStatus(SubagentStatus),
 }
 
 pub struct Bus {
