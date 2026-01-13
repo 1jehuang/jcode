@@ -300,7 +300,10 @@ impl App {
             KeyCode::End => self.cursor_pos = self.input.len(),
             KeyCode::Up | KeyCode::PageUp => {
                 // Scroll up (increase offset from bottom)
-                self.scroll_offset += if code == KeyCode::PageUp { 10 } else { 1 };
+                // Cap at roughly estimated max (will be clamped in UI anyway)
+                let max_estimate = self.display_messages.len() * 10 + self.streaming_text.lines().count();
+                let inc = if code == KeyCode::PageUp { 10 } else { 1 };
+                self.scroll_offset = (self.scroll_offset + inc).min(max_estimate);
             }
             KeyCode::Down | KeyCode::PageDown => {
                 // Scroll down (decrease offset, 0 = bottom)

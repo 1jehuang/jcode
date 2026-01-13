@@ -228,12 +228,12 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
     // Calculate scroll position
     let visible_height = area.height as usize;
     let max_scroll = lines.len().saturating_sub(visible_height);
-    let user_scroll = app.scroll_offset();
+    let user_scroll = app.scroll_offset().min(max_scroll); // Cap to available content
 
     // Use user's scroll offset, but clamp to valid range
     // When user_scroll is 0, auto-scroll to bottom
     let scroll = if user_scroll > 0 {
-        max_scroll.saturating_sub(user_scroll).min(max_scroll)
+        max_scroll.saturating_sub(user_scroll)
     } else {
         max_scroll
     };
