@@ -293,10 +293,28 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                         Span::styled(format!(" {}", summary), Style::default().fg(DIM_COLOR)),
                     ]));
 
-                    // Show diff for edit tools
+                    // Show diff for edit tools (from input)
                     if tc.name == "edit" || tc.name == "Edit" {
                         let diff_lines = get_edit_diff_lines(tc);
                         lines.extend(diff_lines);
+                    }
+
+                    // Show output for tools that have diff/detailed output
+                    if matches!(tc.name.as_str(), "write" | "multiedit" | "patch" | "apply_patch") {
+                        // Display tool output content (contains diffs)
+                        for line in msg.content.lines().skip(1) { // Skip first line (already in summary)
+                            if line.trim().is_empty() {
+                                continue;
+                            }
+                            let styled_line = if line.contains(" + ") {
+                                Line::from(Span::styled(format!("    {}", line), Style::default().fg(DIFF_ADD_COLOR)))
+                            } else if line.contains(" - ") {
+                                Line::from(Span::styled(format!("    {}", line), Style::default().fg(DIFF_DEL_COLOR)))
+                            } else {
+                                Line::from(Span::styled(format!("    {}", line), Style::default().fg(DIM_COLOR)))
+                            };
+                            lines.push(styled_line);
+                        }
                     }
                 }
             }
@@ -521,7 +539,8 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect, next_prompt: usize) {
         ("> ", USER_COLOR)
     };
     let num_str = format!("{}", next_prompt);
-    let prompt_len = num_str.len() + prompt_char.len();
+    // Use char count, not byte count (ellipsis is 3 bytes but 1 char)
+    let prompt_len = num_str.chars().count() + prompt_char.chars().count();
 
     let line_width = (area.width as usize).saturating_sub(prompt_len);
 
