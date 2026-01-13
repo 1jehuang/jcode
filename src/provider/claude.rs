@@ -242,6 +242,10 @@ enum ContentBlockInfo {
     Text { text: String },
     #[serde(rename = "tool_use")]
     ToolUse { id: String, name: String },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String },
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Deserialize, Debug)]
@@ -251,6 +255,12 @@ enum DeltaInfo {
     TextDelta { text: String },
     #[serde(rename = "input_json_delta")]
     InputJsonDelta { partial_json: String },
+    #[serde(rename = "thinking_delta")]
+    ThinkingDelta { thinking: String },
+    #[serde(rename = "signature_delta")]
+    SignatureDelta { signature: String },
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Deserialize, Debug)]
@@ -303,12 +313,19 @@ impl ClaudeEventTranslator {
                     id,
                     name: to_internal_tool_name(&name),
                 }],
+                // Thinking blocks are internal reasoning - silently consume
+                ContentBlockInfo::Thinking { .. } => Vec::new(),
+                ContentBlockInfo::Other => Vec::new(),
             },
             SseEvent::ContentBlockDelta { delta, .. } => match delta {
                 DeltaInfo::TextDelta { text } => vec![StreamEvent::TextDelta(text)],
                 DeltaInfo::InputJsonDelta { partial_json } => {
                     vec![StreamEvent::ToolInputDelta(partial_json)]
                 }
+                // Thinking deltas and signatures are internal - silently consume
+                DeltaInfo::ThinkingDelta { .. } => Vec::new(),
+                DeltaInfo::SignatureDelta { .. } => Vec::new(),
+                DeltaInfo::Other => Vec::new(),
             },
             SseEvent::ContentBlockStop { .. } => vec![StreamEvent::ToolUseEnd],
             SseEvent::MessageDelta { delta, usage } => {

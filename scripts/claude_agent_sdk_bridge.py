@@ -72,10 +72,13 @@ def _to_cli_message(message: Dict[str, Any]) -> Dict[str, Any]:
 def _serialize_assistant_message(message: AssistantMessage) -> Dict[str, Any]:
     blocks: List[Dict[str, Any]] = []
     for block in message.content:
-        block_type = getattr(block, "type", None)
-        if block_type == "text":
+        # SDK block objects use class names like TextBlock, ToolUseBlock, ThinkingBlock
+        # Check class name to determine type
+        class_name = type(block).__name__
+
+        if class_name == "TextBlock" or hasattr(block, "text") and not hasattr(block, "thinking"):
             blocks.append({"type": "text", "text": block.text})
-        elif block_type == "tool_use":
+        elif class_name == "ToolUseBlock":
             blocks.append(
                 {
                     "type": "tool_use",
@@ -84,7 +87,7 @@ def _serialize_assistant_message(message: AssistantMessage) -> Dict[str, Any]:
                     "input": block.input,
                 }
             )
-        elif block_type == "tool_result":
+        elif class_name == "ToolResultBlock":
             blocks.append(
                 {
                     "type": "tool_result",
@@ -93,6 +96,32 @@ def _serialize_assistant_message(message: AssistantMessage) -> Dict[str, Any]:
                     "is_error": block.is_error,
                 }
             )
+        elif class_name == "ThinkingBlock":
+            # Thinking blocks are internal reasoning - skip them
+            pass
+        # Also handle legacy type attribute format
+        elif hasattr(block, "type"):
+            block_type = block.type
+            if block_type == "text":
+                blocks.append({"type": "text", "text": block.text})
+            elif block_type == "tool_use":
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    }
+                )
+            elif block_type == "tool_result":
+                blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.tool_use_id,
+                        "content": block.content,
+                        "is_error": block.is_error,
+                    }
+                )
     return {"type": "assistant_message", "content": blocks, "model": message.model}
 
 
