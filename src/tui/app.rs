@@ -891,10 +891,15 @@ impl App {
             // Redraw to show "sending" status
             terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
 
+            crate::logging::info(&format!("TUI: API call starting ({} messages)", self.messages.len()));
+            let api_start = std::time::Instant::now();
+
             let mut stream = self
                 .provider
                 .complete(&self.messages, &tools, &system_prompt, self.provider_session_id.as_deref())
                 .await?;
+
+            crate::logging::info(&format!("TUI: API stream opened in {:.2}s", api_start.elapsed().as_secs_f64()));
 
             let mut text_content = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();

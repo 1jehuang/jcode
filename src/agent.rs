@@ -207,7 +207,7 @@ impl Agent {
 
             let messages = self.session.messages_for_provider();
 
-            logging::debug(&format!(
+            logging::info(&format!(
                 "API call starting: {} messages, {} tools",
                 messages.len(),
                 tools.len()
@@ -219,7 +219,7 @@ impl Agent {
                 .complete(&messages, &tools, &system_prompt, self.provider_session_id.as_deref())
                 .await?;
 
-            logging::debug(&format!(
+            logging::info(&format!(
                 "API stream opened in {:.2}s",
                 api_start.elapsed().as_secs_f64()
             ));
@@ -387,12 +387,15 @@ impl Agent {
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
+                logging::info("Turn complete - no tool calls, returning");
                 if print_output {
                     println!();
                 }
                 final_text = text_content;
                 break;
             }
+
+            logging::info(&format!("Turn has {} tool calls to execute", tool_calls.len()));
 
             // Execute tools and add results
             for tc in tool_calls {
@@ -431,11 +434,11 @@ impl Agent {
                     title: None,
                 }));
 
-                logging::debug(&format!("Tool starting: {}", tc.name));
+                logging::info(&format!("Tool starting: {}", tc.name));
                 let tool_start = Instant::now();
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
                 let tool_elapsed = tool_start.elapsed();
-                logging::debug(&format!(
+                logging::info(&format!(
                     "Tool finished: {} in {:.2}s",
                     tc.name,
                     tool_elapsed.as_secs_f64()
