@@ -110,4 +110,9 @@ pub enum StreamEvent {
     Error(String),
     /// Provider session ID (for conversation resume)
     SessionId(String),
+    /// Compaction occurred (context was summarized)
+    Compaction {
+        trigger: String,
+        pre_tokens: Option<u64>,
+    },
 }

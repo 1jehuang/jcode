@@ -327,6 +327,14 @@ impl Agent {
                             break;
                         }
                     }
+                    StreamEvent::Compaction { trigger, pre_tokens } => {
+                        if print_output {
+                            let tokens_str = pre_tokens
+                                .map(|t| format!(" ({} tokens)", t))
+                                .unwrap_or_default();
+                            println!("📦 Context compacted ({}){}", trigger, tokens_str);
+                        }
+                    }
                     StreamEvent::Error(e) => {
                         if trace {
                             eprintln!("[trace] stream_error {}", e);

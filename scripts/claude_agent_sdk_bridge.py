@@ -282,7 +282,18 @@ async def _run() -> None:
                 sys.stdout.flush()
         elif isinstance(message, ResultMessage):
             payload = _serialize_result_message(message)
-        elif isinstance(message, (SystemMessage, UserMessage)):
+        elif isinstance(message, SystemMessage):
+            # Check for compaction boundary
+            if hasattr(message, 'subtype') and message.subtype == 'compact_boundary':
+                compact_meta = getattr(message, 'compact_metadata', {}) or {}
+                payload = {
+                    "type": "compaction",
+                    "trigger": compact_meta.get("trigger", "unknown"),
+                    "pre_tokens": compact_meta.get("pre_tokens"),
+                }
+            else:
+                payload = None
+        elif isinstance(message, UserMessage):
             payload = None
 
         if payload is not None:

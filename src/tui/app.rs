@@ -630,6 +630,16 @@ impl App {
                         let thinking_msg = format!("Thought for {:.1}s\n\n", duration_secs);
                         self.streaming_text.push_str(&thinking_msg);
                     }
+                    StreamEvent::Compaction { trigger, pre_tokens } => {
+                        let tokens_str = pre_tokens
+                            .map(|t| format!(" ({} tokens)", t))
+                            .unwrap_or_default();
+                        let compact_msg = format!(
+                            "📦 Context compacted ({}){}\n\n",
+                            trigger, tokens_str
+                        );
+                        self.streaming_text.push_str(&compact_msg);
+                    }
                 }
             }
 
@@ -914,6 +924,16 @@ impl App {
                                     StreamEvent::ThinkingDone { duration_secs } => {
                                         let thinking_msg = format!("Thought for {:.1}s\n\n", duration_secs);
                                         self.streaming_text.push_str(&thinking_msg);
+                                    }
+                                    StreamEvent::Compaction { trigger, pre_tokens } => {
+                                        let tokens_str = pre_tokens
+                                            .map(|t| format!(" ({} tokens)", t))
+                                            .unwrap_or_default();
+                                        let compact_msg = format!(
+                                            "📦 Context compacted ({}){}\n\n",
+                                            trigger, tokens_str
+                                        );
+                                        self.streaming_text.push_str(&compact_msg);
                                     }
                                 }
                             }

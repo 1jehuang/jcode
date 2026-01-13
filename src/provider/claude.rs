@@ -188,6 +188,10 @@ enum SdkOutput {
     StreamEvent { event: Value },
     AssistantMessage { content: Vec<SdkContentBlock> },
     ThinkingDone { duration_secs: f64 },
+    Compaction {
+        trigger: String,
+        pre_tokens: Option<u64>,
+    },
     Result {
         is_error: bool,
         usage: Option<UsageInfo>,
@@ -477,6 +481,9 @@ impl OutputParser {
             }
             SdkOutput::ThinkingDone { duration_secs } => {
                 vec![StreamEvent::ThinkingDone { duration_secs }]
+            }
+            SdkOutput::Compaction { trigger, pre_tokens } => {
+                vec![StreamEvent::Compaction { trigger, pre_tokens }]
             }
             SdkOutput::Error { message } => vec![StreamEvent::Error(message)],
             SdkOutput::Other => Vec::new(),
