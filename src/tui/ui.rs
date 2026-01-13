@@ -3,6 +3,7 @@ use ratatui::{
     prelude::*,
     widgets::{Paragraph, Wrap},
 };
+use std::time::SystemTime;
 
 // Minimal color palette
 const USER_COLOR: Color = Color::Rgb(138, 180, 248);    // Soft blue
@@ -14,6 +15,27 @@ const QUEUED_COLOR: Color = Color::Rgb(255, 193, 7);    // Amber/yellow for queu
 
 // Spinner frames for animated status
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Get how long ago the binary was last modified
+fn binary_age() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let metadata = std::fs::metadata(&exe).ok()?;
+    let modified = metadata.modified().ok()?;
+    let elapsed = SystemTime::now().duration_since(modified).ok()?;
+    let secs = elapsed.as_secs();
+
+    let age_str = if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    };
+
+    Some(age_str)
+}
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -46,16 +68,17 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
 
     // Header - minimal
     if app.display_messages().is_empty() && !app.is_processing() {
+        let age = binary_age().unwrap_or_else(|| "unknown".to_string());
         lines.push(Line::from(vec![
             Span::styled(
                 format!("jcode v{}", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(DIM_COLOR),
             ),
+            Span::styled(
+                format!(" (updated {})", age),
+                Style::default().fg(DIM_COLOR).dim(),
+            ),
         ]));
-        lines.push(Line::from(Span::styled(
-            "new: message queueing, live status & tokens",
-            Style::default().fg(DIM_COLOR).italic(),
-        )));
         lines.push(Line::from(""));
 
         // Show skill hint if available
