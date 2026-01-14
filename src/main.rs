@@ -206,8 +206,21 @@ async fn run_main(args: Args) -> Result<()> {
             // Default: TUI mode
             // Try to connect to running server first
             if server::socket_path().exists() {
-                eprintln!("Connecting to running server...");
-                run_tui_client().await?;
+                // Try a quick connection test before committing to client mode
+                match tokio::net::UnixStream::connect(server::socket_path()).await {
+                    Ok(_) => {
+                        eprintln!("Connecting to running server...");
+                        run_tui_client().await?;
+                    }
+                    Err(_) => {
+                        // Socket exists but server not running - clean up stale socket
+                        let _ = std::fs::remove_file(server::socket_path());
+                        let _ = std::fs::remove_file(server::debug_socket_path());
+                        // Fall through to standalone mode
+                        let (provider, registry) = init_provider_and_registry(&args.provider).await?;
+                        run_tui(provider, registry, args.resume).await?;
+                    }
+                }
             } else {
                 // No server running, start standalone TUI
                 let (provider, registry) = init_provider_and_registry(&args.provider).await?;
