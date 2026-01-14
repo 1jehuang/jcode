@@ -432,17 +432,12 @@ async fn handle_client(
 async fn process_message_streaming(
     agent: Arc<Mutex<Agent>>,
     content: &str,
-    _event_tx: broadcast::Sender<ServerEvent>,
+    event_tx: broadcast::Sender<ServerEvent>,
 ) -> Result<()> {
     let mut agent = agent.lock().await;
 
-    // Add user message and get stream
-    // Note: This is a simplified version - full implementation would
-    // need to refactor Agent to expose streaming
-    match agent.run_once(content).await {
-        Ok(()) => Ok(()),
-        Err(e) => Err(e),
-    }
+    // Use streaming version that sends events to broadcast channel
+    agent.run_once_streaming(content, event_tx).await
 }
 
 /// Handle debug socket connections (read-only introspection)
