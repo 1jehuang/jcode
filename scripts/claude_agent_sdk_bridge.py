@@ -161,6 +161,33 @@ def _serialize_result_message(message: ResultMessage) -> Dict[str, Any]:
     }
 
 
+def _serialize_user_message(message: UserMessage) -> Optional[Dict[str, Any]]:
+    """Serialize a UserMessage - mainly for tool_result blocks."""
+    blocks: List[Dict[str, Any]] = []
+
+    for block in message.content:
+        class_name = type(block).__name__
+
+        if class_name == "ToolResultBlock":
+            blocks.append({
+                "type": "tool_result",
+                "tool_use_id": block.tool_use_id,
+                "content": block.content,
+                "is_error": block.is_error,
+            })
+        elif hasattr(block, "type") and block.type == "tool_result":
+            blocks.append({
+                "type": "tool_result",
+                "tool_use_id": block.tool_use_id,
+                "content": block.content,
+                "is_error": getattr(block, "is_error", False),
+            })
+
+    if blocks:
+        return {"type": "user_message", "content": blocks}
+    return None
+
+
 def _serialize_stream_event(message: StreamEvent) -> Dict[str, Any]:
     return {"type": "stream_event", "event": message.event}
 
@@ -337,7 +364,8 @@ async def _run() -> None:
             else:
                 payload = None
         elif isinstance(message, UserMessage):
-            payload = None
+            # UserMessage contains tool_result blocks when SDK executes tools
+            payload = _serialize_user_message(message)
 
         if payload is not None:
             if not _write_output(payload):

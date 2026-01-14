@@ -191,6 +191,7 @@ struct ClaudeSdkOptions {
 enum SdkOutput {
     StreamEvent { event: Value },
     AssistantMessage { content: Vec<SdkContentBlock> },
+    UserMessage { content: Vec<SdkContentBlock> },
     ThinkingDone { duration_secs: f64 },
     Compaction {
         trigger: String,
@@ -428,28 +429,31 @@ impl OutputParser {
                 events
             }
             SdkOutput::AssistantMessage { content } => {
-                if self.saw_stream_events {
-                    return Vec::new();
-                }
-
                 let mut events = Vec::new();
                 for block in content {
                     match block {
                         SdkContentBlock::Text { text } => {
-                            events.push(StreamEvent::TextDelta(text));
+                            // Skip text if we already streamed it
+                            if !self.saw_stream_events {
+                                events.push(StreamEvent::TextDelta(text));
+                            }
                         }
                         SdkContentBlock::ToolUse { id, name, input } => {
-                            events.push(StreamEvent::ToolUseStart {
-                                id,
-                                name: to_internal_tool_name(&name),
-                            });
-                            events.push(StreamEvent::ToolInputDelta(
-                                serde_json::to_string(&input).unwrap_or_default(),
-                            ));
-                            events.push(StreamEvent::ToolUseEnd);
+                            // Skip tool_use if we already streamed it
+                            if !self.saw_stream_events {
+                                events.push(StreamEvent::ToolUseStart {
+                                    id,
+                                    name: to_internal_tool_name(&name),
+                                });
+                                events.push(StreamEvent::ToolInputDelta(
+                                    serde_json::to_string(&input).unwrap_or_default(),
+                                ));
+                                events.push(StreamEvent::ToolUseEnd);
+                            }
                         }
                         SdkContentBlock::ToolResult { tool_use_id, content, is_error } => {
-                            // SDK already executed the tool, emit the result
+                            // Always emit tool results - they contain the actual output/diffs
+                            // and only come through AssistantMessage, not stream events
                             let content_str = content
                                 .map(|v| {
                                     if let Some(s) = v.as_str() {
@@ -474,6 +478,29 @@ impl OutputParser {
                     events.push(StreamEvent::MessageEnd { stop_reason: None });
                 }
 
+                events
+            }
+            SdkOutput::UserMessage { content } => {
+                // UserMessage contains tool results when SDK executes tools
+                let mut events = Vec::new();
+                for block in content {
+                    if let SdkContentBlock::ToolResult { tool_use_id, content, is_error } = block {
+                        let content_str = content
+                            .map(|v| {
+                                if let Some(s) = v.as_str() {
+                                    s.to_string()
+                                } else {
+                                    serde_json::to_string(&v).unwrap_or_default()
+                                }
+                            })
+                            .unwrap_or_default();
+                        events.push(StreamEvent::ToolResult {
+                            tool_use_id,
+                            content: content_str,
+                            is_error: is_error.unwrap_or(false),
+                        });
+                    }
+                }
                 events
             }
             SdkOutput::Result { usage, is_error, session_id } => {
