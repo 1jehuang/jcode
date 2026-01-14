@@ -91,6 +91,10 @@ struct Args {
     #[arg(long, global = true, hide = true)]
     resume: Option<String>,
 
+    /// Run standalone TUI without connecting to server
+    #[arg(long, global = true)]
+    standalone: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -203,46 +207,52 @@ async fn run_main(args: Args) -> Result<()> {
             run_update()?;
         }
         None => {
-            // Default: TUI client mode - start server if needed
-            let server_running = if server::socket_path().exists() {
-                // Test if server is actually responding
-                tokio::net::UnixStream::connect(server::socket_path()).await.is_ok()
+            // Check for --standalone flag
+            if args.standalone {
+                let (provider, registry) = init_provider_and_registry(&args.provider).await?;
+                run_tui(provider, registry, args.resume).await?;
             } else {
-                false
-            };
+                // Default: TUI client mode - start server if needed
+                let server_running = if server::socket_path().exists() {
+                    // Test if server is actually responding
+                    tokio::net::UnixStream::connect(server::socket_path()).await.is_ok()
+                } else {
+                    false
+                };
 
-            if !server_running {
-                // Clean up any stale sockets
-                let _ = std::fs::remove_file(server::socket_path());
-                let _ = std::fs::remove_file(server::debug_socket_path());
+                if !server_running {
+                    // Clean up any stale sockets
+                    let _ = std::fs::remove_file(server::socket_path());
+                    let _ = std::fs::remove_file(server::debug_socket_path());
 
-                // Start server in background
-                eprintln!("Starting server...");
-                let exe = std::env::current_exe()?;
-                let mut child = std::process::Command::new(&exe)
-                    .arg("serve")
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()?;
+                    // Start server in background
+                    eprintln!("Starting server...");
+                    let exe = std::env::current_exe()?;
+                    let mut child = std::process::Command::new(&exe)
+                        .arg("serve")
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()?;
 
-                // Wait for server to be ready (up to 10 seconds)
-                let start = std::time::Instant::now();
-                loop {
-                    if start.elapsed() > std::time::Duration::from_secs(10) {
-                        let _ = child.kill();
-                        anyhow::bail!("Server failed to start within 10 seconds");
-                    }
-                    if server::socket_path().exists() {
-                        if tokio::net::UnixStream::connect(server::socket_path()).await.is_ok() {
-                            break;
+                    // Wait for server to be ready (up to 10 seconds)
+                    let start = std::time::Instant::now();
+                    loop {
+                        if start.elapsed() > std::time::Duration::from_secs(10) {
+                            let _ = child.kill();
+                            anyhow::bail!("Server failed to start within 10 seconds");
                         }
+                        if server::socket_path().exists() {
+                            if tokio::net::UnixStream::connect(server::socket_path()).await.is_ok() {
+                                break;
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
-            }
 
-            eprintln!("Connecting to server...");
-            run_tui_client().await?;
+                eprintln!("Connecting to server...");
+                run_tui_client().await?;
+            }
         }
     }
 
