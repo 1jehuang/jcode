@@ -8,9 +8,20 @@ streams JSON messages to stdout (one per line).
 from __future__ import annotations
 
 import json
+import signal
 import sys
 import time
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
+
+
+def _write_output(payload: dict) -> bool:
+    """Write JSON to stdout, returning False if pipe is broken."""
+    try:
+        sys.stdout.write(json.dumps(payload) + "\n")
+        sys.stdout.flush()
+        return True
+    except BrokenPipeError:
+        return False
 
 import anyio
 from claude_agent_sdk import ClaudeAgentOptions, query
@@ -215,7 +226,10 @@ async def _run() -> None:
     )
 
     # When resuming, only send the last user message as a simple string
-    # When starting fresh, send all messages in streaming format
+    # When starting fresh with history (e.g., after reload), format as context
+    # When starting fresh without history, stream messages normally
+    has_assistant_messages = any(msg.get("role") == "assistant" for msg in messages)
+
     if resume_session_id and messages:
         # Find the last user message for the prompt
         last_user_msg = None
@@ -230,6 +244,35 @@ async def _run() -> None:
                     last_user_msg = "\n\n".join(texts)
                 break
         prompt_value: Any = last_user_msg or ""
+    elif has_assistant_messages:
+        # Can't send assistant messages to SDK without resume - format as context
+        # This happens after reload when we have conversation history but no valid session
+        history_parts = []
+        last_user_msg = ""
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", [])
+            if isinstance(content, str):
+                text = content
+            elif content:
+                texts = [b.get("text", "") for b in content if b.get("type") == "text"]
+                text = "\n\n".join(texts)
+            else:
+                text = ""
+
+            if role == "user":
+                last_user_msg = text
+                history_parts.append(f"User: {text}")
+            elif role == "assistant":
+                history_parts.append(f"Assistant: {text}")
+
+        # Format: provide history as context, then the actual request
+        if len(history_parts) > 1:
+            # Has actual history - format as context
+            history_context = "\n\n".join(history_parts[:-1])  # All but last
+            prompt_value = f"<conversation_history>\n{history_context}\n</conversation_history>\n\n{last_user_msg}"
+        else:
+            prompt_value = last_user_msg
     else:
         prompt_value = _stream_messages(messages)
 
@@ -259,8 +302,8 @@ async def _run() -> None:
                     # Text block started - emit thinking duration
                     elapsed = time.time() - thinking_start
                     thinking_payload = {"type": "thinking_done", "duration_secs": elapsed}
-                    sys.stdout.write(json.dumps(thinking_payload) + "\n")
-                    sys.stdout.flush()
+                    if not _write_output(thinking_payload):
+                        return  # Pipe closed, exit cleanly
                     thinking_done_emitted = True
             elif event_type == "content_block_stop" and in_thinking_block:
                 in_thinking_block = False
@@ -278,8 +321,8 @@ async def _run() -> None:
                 thinking_done_emitted = True
                 # Emit thinking duration event
                 thinking_payload = {"type": "thinking_done", "duration_secs": elapsed}
-                sys.stdout.write(json.dumps(thinking_payload) + "\n")
-                sys.stdout.flush()
+                if not _write_output(thinking_payload):
+                    return  # Pipe closed, exit cleanly
         elif isinstance(message, ResultMessage):
             payload = _serialize_result_message(message)
         elif isinstance(message, SystemMessage):
@@ -297,17 +340,21 @@ async def _run() -> None:
             payload = None
 
         if payload is not None:
-            sys.stdout.write(json.dumps(payload) + "\n")
-            sys.stdout.flush()
+            if not _write_output(payload):
+                return  # Pipe closed, exit cleanly
 
 
 def main() -> None:
+    # Exit cleanly on broken pipe instead of raising exception
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     try:
         anyio.run(_run)
+    except BrokenPipeError:
+        # Parent closed the pipe - exit silently
+        sys.exit(0)
     except Exception as exc:  # pragma: no cover - surfaced to Rust caller
         error_payload = {"type": "error", "message": str(exc), "kind": exc.__class__.__name__}
-        sys.stdout.write(json.dumps(error_payload) + "\n")
-        sys.stdout.flush()
+        _write_output(error_payload)
         raise
 
 

@@ -30,4 +30,10 @@ pub trait Provider: Send + Sync {
     fn model(&self) -> &str {
         "unknown"
     }
+
+    /// Returns true if the provider executes tools internally (e.g., Claude Agent SDK).
+    /// When true, jcode should NOT execute tools locally - just record the tool calls.
+    fn handles_tools_internally(&self) -> bool {
+        false
+    }
 }

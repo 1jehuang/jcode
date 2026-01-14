@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
 mod codesearch;
 mod bash;
 mod apply_patch;

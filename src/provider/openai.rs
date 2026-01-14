@@ -5,7 +5,7 @@ use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;

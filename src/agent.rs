@@ -1,3 +1,7 @@
+#![allow(unused_assignments)]
+
+#![allow(unused_assignments)]
+
 use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
 use crate::logging;
 use crate::message::{ContentBlock, Role, StreamEvent, ToolCall};
@@ -242,17 +246,20 @@ impl Agent {
             let mut usage_input: Option<u64> = None;
             let mut usage_output: Option<u64> = None;
             let mut saw_message_end = false;
-            let mut thinking_start: Option<Instant> = None;
+            let mut _thinking_start: Option<Instant> = None;
+            // Track tool results from SDK (already executed by Claude Agent SDK)
+            let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
+                std::collections::HashMap::new();
 
             while let Some(event) = stream.next().await {
                 match event? {
                     StreamEvent::ThinkingStart => {
                         // Track start but don't print - wait for ThinkingDone
-                        thinking_start = Some(Instant::now());
+                        _thinking_start = Some(Instant::now());
                     }
                     StreamEvent::ThinkingEnd => {
                         // Don't print here - ThinkingDone has accurate timing
-                        thinking_start = None;
+                        _thinking_start = None;
                     }
                     StreamEvent::ThinkingDone { duration_secs } => {
                         // Bridge provides accurate wall-clock timing
@@ -317,6 +324,16 @@ impl Agent {
                             tool_calls.push(tool);
                             current_tool_input.clear();
                         }
+                    }
+                    StreamEvent::ToolResult { tool_use_id, content, is_error } => {
+                        // SDK already executed this tool, store the result
+                        if trace {
+                            eprintln!(
+                                "[trace] sdk_tool_result id={} is_error={} content_len={}",
+                                tool_use_id, is_error, content.len()
+                            );
+                        }
+                        sdk_tool_results.insert(tool_use_id, (content, is_error));
                     }
                     StreamEvent::TokenUsage {
                         input_tokens,
@@ -408,6 +425,14 @@ impl Agent {
 
             logging::info(&format!("Turn has {} tool calls to execute", tool_calls.len()));
 
+            // If provider handles tools internally (like Claude Agent SDK), don't re-execute
+            if self.provider.handles_tools_internally() {
+                logging::info("Provider handles tools internally - task complete");
+                // Don't execute tools - they were already executed by the provider
+                // The SDK completed the task, so we're done
+                break;
+            }
+
             // Execute tools and add results
             for tc in tool_calls {
                 if let Some(allowed) = self.allowed_tools.as_ref() {
@@ -416,14 +441,55 @@ impl Agent {
                     }
                 }
 
+                let message_id = assistant_message_id
+                    .clone()
+                    .unwrap_or_else(|| self.session.id.clone());
+
+                // Check if SDK already executed this tool
+                if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
+                    if trace {
+                        eprintln!(
+                            "[trace] using_sdk_result name={} id={} is_error={}",
+                            tc.name, tc.id, sdk_is_error
+                        );
+                    }
+                    if print_output {
+                        print!("\n  → ");
+                        let preview = if sdk_content.len() > 200 {
+                            format!("{}...", &sdk_content[..200])
+                        } else {
+                            sdk_content.clone()
+                        };
+                        println!("{}", preview.lines().next().unwrap_or("(done via SDK)"));
+                    }
+
+                    Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                        session_id: self.session.id.clone(),
+                        message_id: message_id.clone(),
+                        tool_call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        status: if sdk_is_error { ToolStatus::Error } else { ToolStatus::Completed },
+                        title: None,
+                    }));
+
+                    self.session.add_message(
+                        Role::User,
+                        vec![ContentBlock::ToolResult {
+                            tool_use_id: tc.id,
+                            content: sdk_content,
+                            is_error: if sdk_is_error { Some(true) } else { None },
+                        }],
+                    );
+                    self.session.save()?;
+                    continue;
+                }
+
+                // SDK didn't execute this tool, run it locally
                 if print_output {
                     print!("\n  → ");
                     io::stdout().flush()?;
                 }
 
-                let message_id = assistant_message_id
-                    .clone()
-                    .unwrap_or_else(|| self.session.id.clone());
                 let ctx = ToolContext {
                     session_id: self.session.id.clone(),
                     message_id: message_id.clone(),

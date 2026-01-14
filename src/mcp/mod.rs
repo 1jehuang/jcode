@@ -2,6 +2,9 @@
 //!
 //! Connects to MCP servers that provide tools via JSON-RPC over stdio.
 
+#![allow(dead_code)]
+#![allow(unused_imports)]
+
 mod protocol;
 mod client;
 mod manager;

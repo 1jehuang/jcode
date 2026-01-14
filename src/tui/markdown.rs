@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
 use pulldown_cmark::{Event, Parser, Tag, TagEnd, CodeBlockKind, Options};
 use ratatui::prelude::*;
 use syntect::highlighting::{ThemeSet, Style as SynStyle};
@@ -14,7 +18,11 @@ const CODE_BG: Color = Color::Rgb(45, 45, 45);
 const CODE_FG: Color = Color::Rgb(180, 180, 180);
 const TEXT_COLOR: Color = Color::Rgb(200, 200, 195);      // Soft warm white for AI text
 const BOLD_COLOR: Color = Color::Rgb(240, 240, 235);      // Slightly brighter for bold
-const HEADING_COLOR: Color = Color::Rgb(138, 180, 248);
+// Heading colors - warm gold/amber gradient by level
+const HEADING_H1_COLOR: Color = Color::Rgb(255, 215, 100);   // Bright gold for # H1
+const HEADING_H2_COLOR: Color = Color::Rgb(240, 190, 90);    // Gold for ## H2
+const HEADING_H3_COLOR: Color = Color::Rgb(220, 170, 80);    // Amber for ### H3
+const HEADING_COLOR: Color = Color::Rgb(200, 155, 75);       // Darker amber for #### and below
 const DIM_COLOR: Color = Color::Rgb(100, 100, 100);
 const TABLE_COLOR: Color = Color::Rgb(150, 150, 150);     // Table borders/separators
 
@@ -34,14 +42,14 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
     let mut in_code_block = false;
     let mut code_block_lang: Option<String> = None;
     let mut code_block_content = String::new();
-    let mut in_heading = false;
+    let mut heading_level: Option<u8> = None;
 
     // Table state
     let mut in_table = false;
     let mut table_row: Vec<String> = Vec::new();
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     let mut current_cell = String::new();
-    let mut is_header_row = false;
+    let mut _is_header_row = false;
 
     // Enable table parsing
     let mut options = Options::empty();
@@ -54,18 +62,25 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                 if !current_spans.is_empty() {
                     lines.push(Line::from(std::mem::take(&mut current_spans)));
                 }
-                in_heading = true;
+                heading_level = Some(level as u8);
             }
             Event::End(TagEnd::Heading(_)) => {
                 if !current_spans.is_empty() {
-                    // Style heading spans
+                    // Choose color based on heading level
+                    let color = match heading_level {
+                        Some(1) => HEADING_H1_COLOR,
+                        Some(2) => HEADING_H2_COLOR,
+                        Some(3) => HEADING_H3_COLOR,
+                        _ => HEADING_COLOR,
+                    };
+
                     let heading_spans: Vec<Span<'static>> = current_spans
                         .drain(..)
-                        .map(|s| Span::styled(s.content.to_string(), Style::default().fg(HEADING_COLOR).bold()))
+                        .map(|s| Span::styled(s.content.to_string(), Style::default().fg(color).bold()))
                         .collect();
                     lines.push(Line::from(heading_spans));
                 }
-                in_heading = false;
+                heading_level = None;
             }
 
             Event::Start(Tag::Strong) => bold = true,
@@ -180,7 +195,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                 table_rows.clear();
             }
             Event::Start(Tag::TableHead) => {
-                is_header_row = true;
+                _is_header_row = true;
                 table_row.clear();
             }
             Event::End(TagEnd::TableHead) => {
@@ -188,7 +203,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     table_rows.push(table_row.clone());
                 }
                 table_row.clear();
-                is_header_row = false;
+                _is_header_row = false;
             }
             Event::Start(Tag::TableRow) => {
                 table_row.clear();
@@ -265,11 +280,13 @@ fn render_table(rows: &[Vec<String>], max_width: Option<usize>) -> Vec<Line<'sta
         let mut spans: Vec<Span<'static>> = Vec::new();
 
         for (i, cell) in row.iter().enumerate() {
-            let width = col_widths.get(i).copied().unwrap_or(cell.len());
+            let char_count = cell.chars().count();
+            let width = col_widths.get(i).copied().unwrap_or(char_count);
 
-            // Truncate cell content if needed
-            let display_text = if cell.len() > width {
-                format!("{}…", &cell[..width.saturating_sub(1)])
+            // Truncate cell content if needed (use char boundaries, not bytes)
+            let display_text = if char_count > width {
+                let truncated: String = cell.chars().take(width.saturating_sub(1)).collect();
+                format!("{}…", truncated)
             } else {
                 cell.clone()
             };
@@ -354,6 +371,65 @@ fn highlight_code(code: &str, lang: Option<&str>) -> Vec<Line<'static>> {
 fn syntect_to_ratatui_style(style: SynStyle) -> Style {
     let fg = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
     Style::default().fg(fg)
+}
+
+/// Highlight a single line of code (for diff display)
+/// Returns styled spans for the line, or None if highlighting fails
+/// `ext` is the file extension (e.g., "rs", "py", "js")
+pub fn highlight_line(code: &str, ext: Option<&str>) -> Vec<Span<'static>> {
+    let syntax = ext
+        .and_then(|e| SYNTAX_SET.find_syntax_by_extension(e))
+        .or_else(|| ext.and_then(|e| SYNTAX_SET.find_syntax_by_token(e)))
+        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+
+    let theme = &THEME_SET.themes["base16-ocean.dark"];
+    let mut highlighter = HighlightLines::new(syntax, theme);
+
+    match highlighter.highlight_line(code, &SYNTAX_SET) {
+        Ok(ranges) => {
+            ranges
+                .into_iter()
+                .map(|(style, text)| {
+                    Span::styled(text.to_string(), syntect_to_ratatui_style(style))
+                })
+                .collect()
+        }
+        Err(_) => {
+            vec![Span::raw(code.to_string())]
+        }
+    }
+}
+
+/// Highlight a full file and return spans for specific line numbers (1-indexed)
+/// Used for comparison logging with single-line approach
+pub fn highlight_file_lines(content: &str, ext: Option<&str>, line_numbers: &[usize]) -> Vec<(usize, Vec<Span<'static>>)> {
+    let syntax = ext
+        .and_then(|e| SYNTAX_SET.find_syntax_by_extension(e))
+        .or_else(|| ext.and_then(|e| SYNTAX_SET.find_syntax_by_token(e)))
+        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+
+    let theme = &THEME_SET.themes["base16-ocean.dark"];
+    let mut highlighter = HighlightLines::new(syntax, theme);
+
+    let mut results = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+
+    for (i, line) in lines.iter().enumerate() {
+        let line_num = i + 1; // 1-indexed
+        if let Ok(ranges) = highlighter.highlight_line(line, &SYNTAX_SET) {
+            if line_numbers.contains(&line_num) {
+                let spans: Vec<Span<'static>> = ranges
+                    .into_iter()
+                    .map(|(style, text)| {
+                        Span::styled(text.to_string(), syntect_to_ratatui_style(style))
+                    })
+                    .collect();
+                results.push((line_num, spans));
+            }
+        }
+    }
+
+    results
 }
 
 /// Wrap a line of styled spans to fit within a given width

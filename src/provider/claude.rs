@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
 use super::{EventStream, Provider};
 use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::storage;
@@ -444,6 +448,23 @@ impl OutputParser {
                             ));
                             events.push(StreamEvent::ToolUseEnd);
                         }
+                        SdkContentBlock::ToolResult { tool_use_id, content, is_error } => {
+                            // SDK already executed the tool, emit the result
+                            let content_str = content
+                                .map(|v| {
+                                    if let Some(s) = v.as_str() {
+                                        s.to_string()
+                                    } else {
+                                        serde_json::to_string(&v).unwrap_or_default()
+                                    }
+                                })
+                                .unwrap_or_default();
+                            events.push(StreamEvent::ToolResult {
+                                tool_use_id,
+                                content: content_str,
+                                is_error: is_error.unwrap_or(false),
+                            });
+                        }
                         _ => {}
                     }
                 }
@@ -603,6 +624,11 @@ impl Provider for ClaudeProvider {
 
     fn model(&self) -> &str {
         &self.config.model
+    }
+
+    fn handles_tools_internally(&self) -> bool {
+        // Claude Agent SDK executes tools internally - jcode should not re-execute them
+        true
     }
 }
 

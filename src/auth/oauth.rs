@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
 use anyhow::Result;
 use crate::auth::claude as claude_auth;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -104,7 +108,7 @@ fn wait_for_callback(port: u16, expected_state: &str) -> Result<String> {
 /// Perform OAuth login for Claude
 pub async fn login_claude() -> Result<OAuthTokens> {
     let (verifier, challenge) = generate_pkce();
-    let state = generate_state();
+    let _state = generate_state();
 
     // Build authorization URL (matching OpenCode's format)
     let auth_url = format!(

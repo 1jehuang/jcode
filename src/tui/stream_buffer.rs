@@ -1,5 +1,7 @@
 //! Semantic stream buffer - chunks streaming text at natural boundaries
 
+#![allow(dead_code)]
+
 use std::time::{Duration, Instant};
 
 /// Buffer that accumulates streaming text and flushes at semantic boundaries

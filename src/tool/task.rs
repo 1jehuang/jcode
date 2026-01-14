@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
 use super::{Registry, Tool, ToolContext, ToolOutput};
 use crate::agent::Agent;
 use crate::bus::{Bus, BusEvent, ToolSummary, ToolSummaryState};

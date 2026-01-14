@@ -66,6 +66,7 @@ bytes = "1"
 # TUI
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
+arboard = "3"              # Clipboard support
 
 # Markdown & syntax highlighting
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
