@@ -19,9 +19,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::time::interval;
 
-/// Check if client-side diffs are enabled via JCODE_SHOW_DIFFS env var
+/// Check if client-side diffs are enabled (default: true, disable with JCODE_SHOW_DIFFS=0)
 fn show_diffs_enabled() -> bool {
-    std::env::var("JCODE_SHOW_DIFFS").map(|v| v == "1" || v == "true").unwrap_or(false)
+    std::env::var("JCODE_SHOW_DIFFS").map(|v| v != "0" && v != "false").unwrap_or(true)
 }
 
 /// Display message for client TUI
