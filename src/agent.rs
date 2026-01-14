@@ -5,6 +5,7 @@
 use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
 use crate::logging;
 use crate::message::{ContentBlock, Role, StreamEvent, ToolCall};
+use crate::protocol::HistoryMessage;
 use crate::provider::Provider;
 use crate::session::Session;
 use crate::skill::SkillRegistry;
@@ -115,6 +116,37 @@ impl Agent {
         self.session = Session::create(None, None);
         self.active_skill = None;
         self.provider_session_id = None;
+    }
+
+    /// Get conversation history for sync
+    pub fn get_history(&self) -> Vec<HistoryMessage> {
+        self.session
+            .messages
+            .iter()
+            .map(|msg| {
+                let role = match msg.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                };
+                let content = msg
+                    .content
+                    .iter()
+                    .filter_map(|c| {
+                        if let ContentBlock::Text { text } = c {
+                            Some(text.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                HistoryMessage {
+                    role: role.to_string(),
+                    content,
+                    tool_calls: None,
+                }
+            })
+            .collect()
     }
 
     /// Start an interactive REPL
