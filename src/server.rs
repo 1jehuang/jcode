@@ -3,12 +3,13 @@
 #![allow(dead_code)]
 
 use crate::agent::Agent;
-use crate::protocol::{decode_request, encode_event, Request, ServerEvent};
+use crate::protocol::{decode_request, encode_event, HistoryMessage, Request, ServerEvent};
 use crate::provider::Provider;
 use crate::tool::Registry;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -616,4 +617,101 @@ impl Client {
         self.writer.write_all(json.as_bytes()).await?;
         Ok(())
     }
+
+    pub async fn get_history(&mut self) -> Result<Vec<HistoryMessage>> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::GetHistory { id };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+
+        let mut line = String::new();
+        self.reader.read_line(&mut line).await?;
+        let event: ServerEvent = serde_json::from_str(&line)?;
+
+        match event {
+            ServerEvent::History { messages, .. } => Ok(messages),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    pub async fn reload(&mut self) -> Result<()> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::Reload { id };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+        Ok(())
+    }
+}
+
+/// Get the jcode repository directory
+fn get_repo_dir() -> Option<PathBuf> {
+    // Try CARGO_MANIFEST_DIR first (works when running from source)
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let path = PathBuf::from(manifest_dir);
+    if path.join(".git").exists() {
+        return Some(path);
+    }
+
+    // Fallback: check relative to executable
+    if let Ok(exe) = std::env::current_exe() {
+        // Assume structure: repo/target/release/jcode
+        if let Some(repo) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+            if repo.join(".git").exists() {
+                return Some(repo.to_path_buf());
+            }
+        }
+    }
+
+    None
+}
+
+/// Server hot-reload: pull, build, and exec into new binary
+fn do_server_reload() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let repo_dir = get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
+
+    eprintln!("Server hot-reload starting...");
+
+    // Pull latest changes
+    eprintln!("Pulling latest changes...");
+    let pull = ProcessCommand::new("git")
+        .args(["pull", "-q"])
+        .current_dir(&repo_dir)
+        .status()?;
+
+    if !pull.success() {
+        eprintln!("Warning: git pull failed, continuing with current code");
+    }
+
+    // Build release
+    eprintln!("Building...");
+    let build = ProcessCommand::new("cargo")
+        .args(["build", "--release"])
+        .current_dir(&repo_dir)
+        .status()?;
+
+    if !build.success() {
+        anyhow::bail!("Build failed");
+    }
+
+    eprintln!("✓ Build complete, restarting server...");
+
+    // Find the new executable
+    let exe = repo_dir.join("target/release/jcode");
+    if !exe.exists() {
+        anyhow::bail!("Built executable not found at {:?}", exe);
+    }
+
+    // Exec into new binary with serve command
+    let err = ProcessCommand::new(&exe)
+        .arg("serve")
+        .exec();
+
+    // exec() only returns on error
+    Err(anyhow::anyhow!("Failed to exec: {}", err))
 }

@@ -204,8 +204,15 @@ async fn run_main(args: Args) -> Result<()> {
         }
         None => {
             // Default: TUI mode
-            let (provider, registry) = init_provider_and_registry(&args.provider).await?;
-            run_tui(provider, registry, args.resume).await?;
+            // Try to connect to running server first
+            if server::socket_path().exists() {
+                eprintln!("Connecting to running server...");
+                run_tui_client().await?;
+            } else {
+                // No server running, start standalone TUI
+                let (provider, registry) = init_provider_and_registry(&args.provider).await?;
+                run_tui(provider, registry, args.resume).await?;
+            }
         }
     }
 
@@ -453,6 +460,20 @@ async fn run_client() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Run TUI client connected to server
+async fn run_tui_client() -> Result<()> {
+    let terminal = ratatui::init();
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
+
+    let app = tui::ClientApp::new();
+    let result = app.run(terminal).await;
+
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
+    ratatui::restore();
+
+    result
 }
 
 /// Get the jcode repository directory (where the source code lives)
