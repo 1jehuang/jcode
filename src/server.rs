@@ -339,6 +339,45 @@ async fn handle_client(
                 let _ = event_tx.send(ServerEvent::Done { id });
             }
 
+            Request::GetHistory { id } => {
+                let current_session_id = session_id.read().await.clone();
+                let agent = {
+                    let sessions = sessions.read().await;
+                    sessions.get(&current_session_id).cloned()
+                };
+
+                let messages = if let Some(agent) = agent {
+                    let agent = agent.lock().await;
+                    agent.get_history()
+                } else {
+                    Vec::new()
+                };
+
+                let event = ServerEvent::History {
+                    id,
+                    session_id: current_session_id,
+                    messages,
+                };
+                let json = encode_event(&event);
+                let mut w = writer.lock().await;
+                w.write_all(json.as_bytes()).await?;
+            }
+
+            Request::Reload { id } => {
+                // Notify all clients that server is reloading
+                let _ = event_tx.send(ServerEvent::Reloading { new_socket: None });
+                let _ = event_tx.send(ServerEvent::Done { id });
+
+                // Spawn reload process (will exec into new binary)
+                tokio::spawn(async move {
+                    // Give clients time to receive the notification
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if let Err(e) = do_server_reload() {
+                        eprintln!("Reload failed: {}", e);
+                    }
+                });
+            }
+
             // Agent-to-agent communication
             Request::AgentRegister { id, .. } => {
                 // TODO: Implement agent registration
