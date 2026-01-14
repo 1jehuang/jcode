@@ -12,16 +12,29 @@ use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
+use similar::TextDiff;
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::time::interval;
+
+/// Check if client-side diffs are enabled via JCODE_SHOW_DIFFS env var
+fn show_diffs_enabled() -> bool {
+    std::env::var("JCODE_SHOW_DIFFS").map(|v| v == "1" || v == "true").unwrap_or(false)
+}
 
 /// Display message for client TUI
 #[derive(Clone)]
 pub struct DisplayMessage {
     pub role: String,
     pub content: String,
+}
+
+/// Tracks a pending file edit for diff generation
+struct PendingFileDiff {
+    file_path: String,
+    original_content: String,
 }
 
 /// Client TUI state
@@ -36,6 +49,11 @@ pub struct ClientApp {
     next_request_id: u64,
     server_disconnected: bool,
     has_loaded_history: bool,
+    // For client-side diff generation (when JCODE_SHOW_DIFFS=1)
+    pending_diffs: HashMap<String, PendingFileDiff>,  // tool_id -> pending diff info
+    current_tool_id: Option<String>,
+    current_tool_name: Option<String>,
+    current_tool_input: String,
 }
 
 impl ClientApp {
@@ -51,6 +69,10 @@ impl ClientApp {
             next_request_id: 1,
             server_disconnected: false,
             has_loaded_history: false,
+            pending_diffs: HashMap::new(),
+            current_tool_id: None,
+            current_tool_name: None,
+            current_tool_input: String::new(),
         }
     }
 
@@ -230,6 +252,52 @@ impl ClientApp {
             ServerEvent::TextDelta { text } => {
                 self.streaming_text.push_str(&text);
             }
+            ServerEvent::ToolStart { id, name } => {
+                // Start tracking this tool for potential diff generation
+                self.current_tool_id = Some(id);
+                self.current_tool_name = Some(name);
+                self.current_tool_input.clear();
+            }
+            ServerEvent::ToolInput { delta } => {
+                // Accumulate tool input JSON
+                self.current_tool_input.push_str(&delta);
+            }
+            ServerEvent::ToolExec { id, name } => {
+                // Tool is about to execute - if it's edit/write, cache the file content
+                if show_diffs_enabled() && (name == "edit" || name == "write") {
+                    if let Ok(input) = serde_json::from_str::<serde_json::Value>(&self.current_tool_input) {
+                        if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
+                            // Read current file content (sync is fine here, it's quick)
+                            let original = std::fs::read_to_string(file_path).unwrap_or_default();
+                            self.pending_diffs.insert(id.clone(), PendingFileDiff {
+                                file_path: file_path.to_string(),
+                                original_content: original,
+                            });
+                        }
+                    }
+                }
+                // Clear tracking state
+                self.current_tool_id = None;
+                self.current_tool_name = None;
+                self.current_tool_input.clear();
+            }
+            ServerEvent::ToolDone { id, name, output, .. } => {
+                // Check if we have a pending diff for this tool
+                if let Some(pending) = self.pending_diffs.remove(&id) {
+                    // Read the file again and generate diff
+                    let new_content = std::fs::read_to_string(&pending.file_path).unwrap_or_default();
+                    let diff = generate_unified_diff(&pending.original_content, &new_content, &pending.file_path);
+                    if !diff.is_empty() {
+                        self.streaming_text.push_str(&format!("\n[{}] {}\n{}\n", name, pending.file_path, diff));
+                    } else {
+                        // No changes or couldn't generate diff, show original output
+                        self.streaming_text.push_str(&format!("\n[{}] {}\n", name, output));
+                    }
+                } else {
+                    // No pending diff, just show the output
+                    self.streaming_text.push_str(&format!("\n[{}] {}\n", name, output));
+                }
+            }
             ServerEvent::Done { .. } => {
                 if !self.streaming_text.is_empty() {
                     self.display_messages.push(DisplayMessage {
@@ -238,6 +306,8 @@ impl ClientApp {
                     });
                 }
                 self.is_processing = false;
+                // Clear any leftover diff tracking state
+                self.pending_diffs.clear();
             }
             ServerEvent::Error { message, .. } => {
                 self.display_messages.push(DisplayMessage {
@@ -245,6 +315,7 @@ impl ClientApp {
                     content: message,
                 });
                 self.is_processing = false;
+                self.pending_diffs.clear();
             }
             ServerEvent::SessionId { session_id } => {
                 self.session_id = Some(session_id);
@@ -428,4 +499,21 @@ impl ClientApp {
             ));
         }
     }
+}
+
+/// Generate a unified diff between two strings
+fn generate_unified_diff(old: &str, new: &str, file_path: &str) -> String {
+    let diff = TextDiff::from_lines(old, new);
+    let mut output = String::new();
+
+    // Header
+    output.push_str(&format!("--- a/{}\n", file_path));
+    output.push_str(&format!("+++ b/{}\n", file_path));
+
+    // Generate hunks
+    for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
+        output.push_str(&format!("{}", hunk));
+    }
+
+    output
 }
