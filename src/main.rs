@@ -203,29 +203,46 @@ async fn run_main(args: Args) -> Result<()> {
             run_update()?;
         }
         None => {
-            // Default: TUI mode
-            // Try to connect to running server first
-            if server::socket_path().exists() {
-                // Try a quick connection test before committing to client mode
-                match tokio::net::UnixStream::connect(server::socket_path()).await {
-                    Ok(_) => {
-                        eprintln!("Connecting to running server...");
-                        run_tui_client().await?;
-                    }
-                    Err(_) => {
-                        // Socket exists but server not running - clean up stale socket
-                        let _ = std::fs::remove_file(server::socket_path());
-                        let _ = std::fs::remove_file(server::debug_socket_path());
-                        // Fall through to standalone mode
-                        let (provider, registry) = init_provider_and_registry(&args.provider).await?;
-                        run_tui(provider, registry, args.resume).await?;
-                    }
-                }
+            // Default: TUI client mode - start server if needed
+            let server_running = if server::socket_path().exists() {
+                // Test if server is actually responding
+                tokio::net::UnixStream::connect(server::socket_path()).await.is_ok()
             } else {
-                // No server running, start standalone TUI
-                let (provider, registry) = init_provider_and_registry(&args.provider).await?;
-                run_tui(provider, registry, args.resume).await?;
+                false
+            };
+
+            if !server_running {
+                // Clean up any stale sockets
+                let _ = std::fs::remove_file(server::socket_path());
+                let _ = std::fs::remove_file(server::debug_socket_path());
+
+                // Start server in background
+                eprintln!("Starting server...");
+                let exe = std::env::current_exe()?;
+                let mut child = std::process::Command::new(&exe)
+                    .arg("serve")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()?;
+
+                // Wait for server to be ready (up to 10 seconds)
+                let start = std::time::Instant::now();
+                loop {
+                    if start.elapsed() > std::time::Duration::from_secs(10) {
+                        let _ = child.kill();
+                        anyhow::bail!("Server failed to start within 10 seconds");
+                    }
+                    if server::socket_path().exists() {
+                        if tokio::net::UnixStream::connect(server::socket_path()).await.is_ok() {
+                            break;
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
             }
+
+            eprintln!("Connecting to server...");
+            run_tui_client().await?;
         }
     }
 
