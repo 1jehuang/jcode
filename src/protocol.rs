@@ -9,6 +9,15 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A message in conversation history (for sync)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryMessage {
+    pub role: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<String>>,
+}
+
 /// Client request to server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -36,6 +45,14 @@ pub enum Request {
     /// Subscribe to events (for TUI clients)
     #[serde(rename = "subscribe")]
     Subscribe { id: u64 },
+
+    /// Get full conversation history (for TUI sync on connect)
+    #[serde(rename = "get_history")]
+    GetHistory { id: u64 },
+
+    /// Trigger server hot reload (build new version, restart)
+    #[serde(rename = "reload")]
+    Reload { id: u64 },
 
     // === Agent-to-agent communication ===
 
@@ -134,6 +151,22 @@ pub enum ServerEvent {
     /// Session ID assigned
     #[serde(rename = "session")]
     SessionId { session_id: String },
+
+    /// Full conversation history (response to GetHistory)
+    #[serde(rename = "history")]
+    History {
+        id: u64,
+        session_id: String,
+        messages: Vec<HistoryMessage>,
+    },
+
+    /// Server is reloading (clients should reconnect)
+    #[serde(rename = "reloading")]
+    Reloading {
+        /// New socket path to connect to (if different)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        new_socket: Option<String>,
+    },
 }
 
 impl Request {
@@ -145,6 +178,8 @@ impl Request {
             Request::Ping { id } => *id,
             Request::GetState { id } => *id,
             Request::Subscribe { id } => *id,
+            Request::GetHistory { id } => *id,
+            Request::Reload { id } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,
             Request::AgentCapabilities { id } => *id,
