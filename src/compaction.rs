@@ -4,11 +4,12 @@
 //! User continues chatting while summary is generated. When ready, seamlessly
 //! swaps in the compacted context.
 
+#![allow(dead_code)]
+
 use crate::message::{ContentBlock, Message, Role};
 use crate::provider::Provider;
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 /// Default token budget (100k tokens)

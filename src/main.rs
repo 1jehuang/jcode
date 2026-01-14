@@ -21,8 +21,38 @@ mod tui;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::io::{self, Write};
+use std::panic;
 use std::process::Command as ProcessCommand;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// Global session ID for panic recovery
+static CURRENT_SESSION_ID: Mutex<Option<String>> = Mutex::new(None);
+
+/// Set the current session ID for panic recovery
+pub fn set_current_session(session_id: &str) {
+    if let Ok(mut guard) = CURRENT_SESSION_ID.lock() {
+        *guard = Some(session_id.to_string());
+    }
+}
+
+/// Install panic hook that prints session recovery command
+fn install_panic_hook() {
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        // Call default hook first (prints backtrace, etc.)
+        default_hook(info);
+
+        // Print recovery command if we have a session
+        if let Ok(guard) = CURRENT_SESSION_ID.lock() {
+            if let Some(session_id) = guard.as_ref() {
+                eprintln!();
+                eprintln!("\x1b[33mTo restore this session, run:\x1b[0m");
+                eprintln!("  jcode --resume {}", session_id);
+                eprintln!();
+            }
+        }
+    }));
+}
 
 #[derive(Debug, Clone, ValueEnum)]
 enum ProviderChoice {
@@ -91,6 +121,9 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install panic hook for session recovery
+    install_panic_hook();
+
     // Initialize logging
     logging::init();
     logging::cleanup_old_logs();
@@ -245,6 +278,8 @@ async fn run_tui(
     resume_session: Option<String>,
 ) -> Result<()> {
     let terminal = ratatui::init();
+    // Enable bracketed paste mode for proper paste handling in terminals like Kitty
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
     let mut app = tui::App::new(provider, registry);
 
     // Restore session if resuming
@@ -252,8 +287,13 @@ async fn run_tui(
         app.restore_session(&session_id);
     }
 
+    // Set current session for panic recovery
+    set_current_session(app.session_id());
+
     app.init_mcp().await;
     let result = app.run(terminal).await;
+    // Disable bracketed paste before restoring terminal
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
     ratatui::restore();
 
     // Check for hot-reload request
@@ -264,7 +304,7 @@ async fn run_tui(
     result.map(|_| ())
 }
 
-/// Hot-reload: pull, rebuild, and exec into new binary with session restore
+/// Hot-reload: pull, rebuild, test, and exec into new binary with session restore
 fn hot_reload(session_id: &str) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
@@ -285,15 +325,30 @@ fn hot_reload(session_id: &str) -> Result<()> {
     }
 
     // Rebuild (show progress)
-    eprintln!("Rebuilding...");
+    eprintln!("Building...");
     let build = ProcessCommand::new("cargo")
         .args(["build", "--release"])
         .current_dir(&repo_dir)
         .status()?;
 
     if !build.success() {
-        anyhow::bail!("cargo build failed");
+        anyhow::bail!("Build failed - staying on current version");
     }
+
+    // Run tests to check for breaking changes
+    eprintln!("Running tests...");
+    let test = ProcessCommand::new("cargo")
+        .args(["test", "--release", "--", "--test-threads=1"])
+        .current_dir(&repo_dir)
+        .status()?;
+
+    if !test.success() {
+        eprintln!("\n⚠️  Tests failed! Aborting reload to protect your session.");
+        eprintln!("Fix the failing tests and try /reload again.");
+        anyhow::bail!("Tests failed - staying on current version");
+    }
+
+    eprintln!("✓ All tests passed");
 
     // Get the binary path - use the known location in the repo
     let exe = repo_dir.join("target/release/jcode");

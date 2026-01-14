@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
 use crate::id::new_id;
 use crate::message::{ContentBlock, Message, Role};
 use crate::storage;
@@ -30,6 +34,9 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub messages: Vec<StoredMessage>,
+    /// Provider-specific session ID (e.g., Claude SDK session for resume)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
 }
 
 impl Session {
@@ -42,6 +49,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             messages: Vec::new(),
+            provider_session_id: None,
         }
     }
 
@@ -54,6 +62,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             messages: Vec::new(),
+            provider_session_id: None,
         }
     }
 

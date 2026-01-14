@@ -1,5 +1,7 @@
 //! MCP Tool - wraps MCP server tools for jcode's tool system
 
+#![allow(dead_code)]
+
 use super::manager::McpManager;
 use super::protocol::{ContentBlock, McpToolDef};
 use crate::tool::{Tool, ToolContext, ToolOutput};

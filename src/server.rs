@@ -1,10 +1,12 @@
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
 use crate::agent::Agent;
-use crate::message::StreamEvent;
 use crate::protocol::{decode_request, encode_event, Request, ServerEvent};
 use crate::provider::Provider;
 use crate::tool::Registry;
 use anyhow::Result;
-use futures::StreamExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -311,7 +313,7 @@ async fn handle_client(
 
             Request::GetState { id } => {
                 let current_session_id = session_id.read().await.clone();
-                let sessions = sessions.read().await;
+                let _sessions = sessions.read().await;
                 let message_count = 0; // TODO: Get actual count
 
                 let event = ServerEvent::State {
@@ -390,7 +392,7 @@ async fn handle_client(
 async fn process_message_streaming(
     agent: Arc<Mutex<Agent>>,
     content: &str,
-    event_tx: broadcast::Sender<ServerEvent>,
+    _event_tx: broadcast::Sender<ServerEvent>,
 ) -> Result<()> {
     let mut agent = agent.lock().await;
 

@@ -1,5 +1,7 @@
 //! MCP Manager - manages multiple MCP server connections
 
+#![allow(dead_code)]
+
 use super::client::McpClient;
 use super::protocol::{McpConfig, McpServerConfig, McpToolDef};
 use anyhow::{Context, Result};

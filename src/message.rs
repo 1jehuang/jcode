@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 
 /// Role in conversation
@@ -93,6 +97,12 @@ pub enum StreamEvent {
     ToolInputDelta(String),
     /// Tool use complete
     ToolUseEnd,
+    /// Tool result from provider (SDK already executed the tool)
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        is_error: bool,
+    },
     /// Extended thinking started
     ThinkingStart,
     /// Extended thinking ended

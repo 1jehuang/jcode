@@ -110,9 +110,14 @@ impl Tool for EditTool {
         // Generate a diff with line numbers
         let diff = generate_diff(&params.old_string, &params.new_string, start_line);
 
+        // Extract context around the edit to help with consecutive edits
+        let end_line = start_line + params.new_string.lines().count().saturating_sub(1);
+        let context = extract_context(&new_content, start_line, end_line, 3);
+
         Ok(ToolOutput::new(format!(
-            "Edited {}: replaced {} occurrence(s)\n{}",
-            params.file_path, occurrences, diff
+            "Edited {}: replaced {} occurrence(s)\n{}\n\nContext after edit (lines {}-{}):\n{}",
+            params.file_path, occurrences, diff,
+            context.0, context.1, context.2
         )).with_title(format!("{}", params.file_path)))
     }
 }
@@ -126,12 +131,11 @@ fn find_line_number(content: &str, substring: &str) -> usize {
     }
 }
 
-/// Generate a diff with line numbers, left-aligned
+/// Generate a compact diff: "42- old" / "42+ new"
 fn generate_diff(old: &str, new: &str, start_line: usize) -> String {
     let diff = TextDiff::from_lines(old, new);
     let mut output = String::new();
 
-    // Track line numbers for old and new content
     let mut old_line = start_line;
     let mut new_line = start_line;
 
@@ -141,40 +145,49 @@ fn generate_diff(old: &str, new: &str, start_line: usize) -> String {
             ChangeTag::Delete => {
                 let num = old_line;
                 old_line += 1;
-                // Skip whitespace-only changes
-                if content.is_empty() {
-                    continue;
-                }
+                if content.is_empty() { continue; }
                 ("-", num)
             }
             ChangeTag::Insert => {
                 let num = new_line;
                 new_line += 1;
-                // Skip whitespace-only changes
-                if content.is_empty() {
-                    continue;
-                }
+                if content.is_empty() { continue; }
                 ("+", num)
             }
             ChangeTag::Equal => {
                 old_line += 1;
                 new_line += 1;
-                continue; // Skip equal lines in output
+                continue;
             }
         };
 
-        output.push_str(&format!("{:>4} ", line_num));
-        output.push_str(prefix);
-        output.push(' ');
-        output.push_str(content);
-        output.push('\n');
+        // Compact format: "42- content" (no spaces)
+        output.push_str(&format!("{}{} {}\n", line_num, prefix, content));
     }
 
     if output.is_empty() {
-        "(no visible changes)".to_string()
+        String::new()
     } else {
         output.trim_end().to_string()
     }
+}
+
+/// Extract lines around the edited region, returns (start_line, end_line, content)
+fn extract_context(content: &str, edit_start: usize, edit_end: usize, padding: usize) -> (usize, usize, String) {
+    let lines: Vec<&str> = content.lines().collect();
+    let total_lines = lines.len();
+
+    // Calculate range with padding (1-indexed to 0-indexed)
+    let start = edit_start.saturating_sub(padding + 1);
+    let end = (edit_end + padding).min(total_lines);
+
+    let context_lines: Vec<String> = lines[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, line)| format!("{:>4}│ {}", start + i + 1, line))
+        .collect();
+
+    (start + 1, end, context_lines.join("\n"))
 }
 
 fn try_flexible_match(content: &str, old_string: &str, file_path: &str) -> Result<ToolOutput> {
@@ -223,9 +236,9 @@ mod tests {
         let new = "hello rust";
         let diff = generate_diff(old, new, 10);
 
-        assert!(diff.contains("10 "), "Should have line number 10");
-        assert!(diff.contains("- hello world"), "Should show deleted line");
-        assert!(diff.contains("+ hello rust"), "Should show added line");
+        // Compact format: "10- content" / "10+ content"
+        assert!(diff.contains("10- hello world"), "Should show deleted line");
+        assert!(diff.contains("10+ hello rust"), "Should show added line");
     }
 
     #[test]
@@ -235,9 +248,8 @@ mod tests {
         let diff = generate_diff(old, new, 5);
 
         // Line 6 should be the changed line (5 + 1 for "line two")
-        assert!(diff.contains("6 "), "Should have line number 6");
-        assert!(diff.contains("- line two"), "Should show deleted line");
-        assert!(diff.contains("+ modified two"), "Should show added line");
+        assert!(diff.contains("6- line two"), "Should show deleted line");
+        assert!(diff.contains("6+ modified two"), "Should show added line");
         // Equal lines should not appear
         assert!(!diff.contains("line one"), "Should not show unchanged lines");
         assert!(!diff.contains("line three"), "Should not show unchanged lines");
@@ -267,7 +279,7 @@ mod tests {
         let new = "same content";
         let diff = generate_diff(old, new, 1);
 
-        assert_eq!(diff, "(no visible changes)");
+        assert!(diff.is_empty(), "No changes should produce empty diff");
     }
 
     #[test]
@@ -276,9 +288,9 @@ mod tests {
         let new = "new";
         let diff = generate_diff(old, new, 42);
 
-        // Line numbers should be right-aligned in 4 chars
-        assert!(diff.contains("  42 -"), "Line number should be right-aligned");
-        assert!(diff.contains("  42 +"), "Line number should be right-aligned");
+        // Compact format: no padding
+        assert!(diff.contains("42- old"), "Should have line number directly before minus");
+        assert!(diff.contains("42+ new"), "Should have line number directly before plus");
     }
 
     #[test]
@@ -290,5 +302,45 @@ mod tests {
         assert_eq!(find_line_number(content, "line 3"), 3);
         assert_eq!(find_line_number(content, "line 4"), 4);
         assert_eq!(find_line_number(content, "not found"), 1);
+    }
+
+    #[test]
+    fn test_extract_context() {
+        let content = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10";
+
+        // Edit at line 5, with 2 lines padding
+        let (start, end, ctx) = extract_context(content, 5, 5, 2);
+
+        assert_eq!(start, 3, "Should start at line 3 (5 - 2)");
+        assert_eq!(end, 7, "Should end at line 7 (5 + 2)");
+        assert!(ctx.contains("line 3"), "Should include line 3");
+        assert!(ctx.contains("line 5"), "Should include edited line 5");
+        assert!(ctx.contains("line 7"), "Should include line 7");
+        assert!(!ctx.contains("line 2"), "Should not include line 2");
+        assert!(!ctx.contains("line 8"), "Should not include line 8");
+    }
+
+    #[test]
+    fn test_extract_context_at_start() {
+        let content = "line 1\nline 2\nline 3\nline 4\nline 5";
+
+        // Edit at line 1, with 2 lines padding - shouldn't go negative
+        let (start, end, ctx) = extract_context(content, 1, 1, 2);
+
+        assert_eq!(start, 1, "Should start at line 1 (can't go before)");
+        assert!(ctx.contains("line 1"), "Should include line 1");
+        assert!(ctx.contains("line 3"), "Should include line 3");
+    }
+
+    #[test]
+    fn test_extract_context_at_end() {
+        let content = "line 1\nline 2\nline 3\nline 4\nline 5";
+
+        // Edit at line 5, with 2 lines padding - shouldn't go past end
+        let (start, end, ctx) = extract_context(content, 5, 5, 2);
+
+        assert_eq!(end, 5, "Should end at line 5 (can't go past)");
+        assert!(ctx.contains("line 5"), "Should include line 5");
+        assert!(ctx.contains("line 3"), "Should include line 3");
     }
 }

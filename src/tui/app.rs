@@ -1,5 +1,9 @@
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
 use super::stream_buffer::StreamBuffer;
-use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
+use crate::bus::{Bus, BusEvent, ToolEvent, ToolStatus};
 use crate::mcp::McpManager;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall};
 use crate::provider::Provider;
@@ -12,8 +16,19 @@ use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::path::PathBuf;
 use tokio::sync::RwLock;
 use tokio::time::interval;
+
+/// Debug command file path
+fn debug_cmd_path() -> PathBuf {
+    std::env::temp_dir().join("jcode_debug_cmd")
+}
+
+/// Debug response file path
+fn debug_response_path() -> PathBuf {
+    std::env::temp_dir().join("jcode_debug_response")
+}
 
 /// Current processing status
 #[derive(Clone, Default)]
@@ -87,6 +102,8 @@ pub struct App {
     thinking_start: Option<Instant>,
     // Hot-reload: if set, exec into new binary with this session ID
     reload_requested: Option<String>,
+    // Pasted content storage (displayed as placeholders, expanded on submit)
+    pasted_contents: Vec<String>,
 }
 
 impl App {
@@ -125,7 +142,13 @@ impl App {
             stream_buffer: StreamBuffer::new(),
             thinking_start: None,
             reload_requested: None,
+            pasted_contents: Vec::new(),
         }
+    }
+
+    /// Get the current session ID
+    pub fn session_id(&self) -> &str {
+        &self.session.id
     }
 
     /// Initialize MCP servers (call after construction)
@@ -137,7 +160,7 @@ impl App {
         let manager = self.mcp_manager.read().await;
         if !manager.config().servers.is_empty() {
             drop(manager);
-            let mut manager = self.mcp_manager.write().await;
+            let manager = self.mcp_manager.write().await;
             if let Err(e) = manager.connect_all().await {
                 eprintln!("MCP init error: {}", e);
             }
@@ -190,11 +213,77 @@ impl App {
                 }
             }
 
+            // Don't restore provider_session_id - Claude sessions don't persist across
+            // process restarts. The messages are restored, so Claude will get full context.
+            self.provider_session_id = None;
             self.session = session;
+            // Clear the saved provider_session_id since it's no longer valid
+            self.session.provider_session_id = None;
             crate::logging::info(&format!("Restored session: {}", session_id));
+
+            // Add success message to display
+            self.display_messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: "✓ jcode reloaded successfully. Session restored.".to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
         } else {
             crate::logging::error(&format!("Failed to restore session: {}", session_id));
         }
+    }
+
+    /// Check for and process debug commands from file
+    /// Commands: "message:<text>", "reload", "state", "quit"
+    fn check_debug_command(&mut self) -> Option<String> {
+        let cmd_path = debug_cmd_path();
+        if let Ok(cmd) = std::fs::read_to_string(&cmd_path) {
+            // Remove command file immediately
+            let _ = std::fs::remove_file(&cmd_path);
+            let cmd = cmd.trim();
+
+            let response = if cmd.starts_with("message:") {
+                let msg = cmd.strip_prefix("message:").unwrap_or("");
+                // Inject the message as if user typed it
+                self.input = msg.to_string();
+                self.submit_input();
+                format!("OK: queued message '{}'", msg)
+            } else if cmd == "reload" {
+                // Trigger reload
+                self.input = "/reload".to_string();
+                self.submit_input();
+                "OK: reload triggered".to_string()
+            } else if cmd == "state" {
+                // Return current state
+                format!(
+                    "state: processing={}, messages={}, display={}, provider_session={:?}",
+                    self.is_processing,
+                    self.messages.len(),
+                    self.display_messages.len(),
+                    self.provider_session_id
+                )
+            } else if cmd == "quit" {
+                self.should_quit = true;
+                "OK: quitting".to_string()
+            } else if cmd == "last_response" {
+                // Get last assistant message
+                self.display_messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "assistant" || m.role == "error")
+                    .map(|m| format!("last_response: [{}] {}", m.role, m.content))
+                    .unwrap_or_else(|| "last_response: none".to_string())
+            } else {
+                format!("ERROR: unknown command '{}'", cmd)
+            };
+
+            // Write response
+            let _ = std::fs::write(debug_response_path(), &response);
+            return Some(response);
+        }
+        None
     }
 
     /// Run the TUI application
@@ -226,12 +315,21 @@ impl App {
                                 self.streaming_text.push_str(&chunk);
                             }
                         }
+                        // Check for debug commands
+                        self.check_debug_command();
                     }
                     event = event_stream.next() => {
-                        if let Some(Ok(Event::Key(key))) = event {
-                            if key.kind == KeyEventKind::Press {
-                                self.handle_key(key.code, key.modifiers)?;
+                        match event {
+                            Some(Ok(Event::Key(key))) => {
+                                if key.kind == KeyEventKind::Press {
+                                    self.handle_key(key.code, key.modifiers)?;
+                                }
                             }
+                            Some(Ok(Event::Paste(text))) => {
+                                // Handle bracketed paste from terminal
+                                self.handle_paste(text);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -247,8 +345,6 @@ impl App {
         terminal: &mut DefaultTerminal,
         event_stream: &mut EventStream,
     ) {
-        use tokio::select;
-
         // We need to run the turn logic step by step, checking for input between steps
         // For now, run the turn but poll for input during streaming
 
@@ -331,6 +427,7 @@ impl App {
                     self.messages.clear();
                     self.display_messages.clear();
                     self.queued_messages.clear();
+                    self.pasted_contents.clear();
                     self.active_skill = None;
                     self.session = Session::create(None, None);
                     self.provider_session_id = None;
@@ -343,8 +440,21 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Char('k') => {
-                    // Ctrl+K: kill to end of line
-                    self.input.truncate(self.cursor_pos);
+                    if self.input.is_empty() {
+                        // Ctrl+K with empty input: scroll up to previous prompt
+                        self.scroll_to_prev_prompt();
+                    } else {
+                        // Ctrl+K: kill to end of line
+                        self.input.truncate(self.cursor_pos);
+                    }
+                    return Ok(());
+                }
+                KeyCode::Char('j') => {
+                    if self.input.is_empty() {
+                        // Ctrl+J with empty input: scroll down to next prompt
+                        self.scroll_to_next_prompt();
+                    }
+                    // Note: Ctrl+J with text is ignored (traditionally newline)
                     return Ok(());
                 }
                 KeyCode::Char('a') => {
@@ -376,6 +486,15 @@ impl App {
                     let start = self.find_word_boundary_back();
                     self.input.drain(start..self.cursor_pos);
                     self.cursor_pos = start;
+                    return Ok(());
+                }
+                KeyCode::Char('v') => {
+                    // Ctrl+V: paste from clipboard
+                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                        if let Ok(text) = clipboard.get_text() {
+                            self.handle_paste(text);
+                        }
+                    }
                     return Ok(());
                 }
                 _ => {}
@@ -450,15 +569,43 @@ impl App {
     }
 
     /// Queue a message to be sent later
+    /// Handle paste: store content and insert placeholder
+    fn handle_paste(&mut self, text: String) {
+        let line_count = text.lines().count().max(1);
+        self.pasted_contents.push(text);
+        let placeholder = format!("[pasted {} line{}]", line_count, if line_count == 1 { "" } else { "s" });
+        self.input.insert_str(self.cursor_pos, &placeholder);
+        self.cursor_pos += placeholder.len();
+    }
+
+    /// Expand paste placeholders in input with actual content
+    fn expand_paste_placeholders(&mut self, input: &str) -> String {
+        let mut result = input.to_string();
+        // Replace placeholders in reverse order to preserve indices
+        for content in self.pasted_contents.iter().rev() {
+            let line_count = content.lines().count().max(1);
+            let placeholder = format!("[pasted {} line{}]", line_count, if line_count == 1 { "" } else { "s" });
+            // Only replace first occurrence for this index
+            if let Some(pos) = result.find(&placeholder) {
+                result.replace_range(pos..pos + placeholder.len(), content);
+            }
+        }
+        result
+    }
+
     fn queue_message(&mut self) {
         let content = std::mem::take(&mut self.input);
+        let expanded = self.expand_paste_placeholders(&content);
+        self.pasted_contents.clear();
         self.cursor_pos = 0;
-        self.queued_messages.push(content);
+        self.queued_messages.push(expanded);
     }
 
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
     fn submit_input(&mut self) {
-        let input = std::mem::take(&mut self.input);
+        let raw_input = std::mem::take(&mut self.input);
+        let input = self.expand_paste_placeholders(&raw_input);
+        self.pasted_contents.clear();
         self.cursor_pos = 0;
         self.scroll_offset = 0; // Reset to bottom on new input
 
@@ -494,6 +641,7 @@ impl App {
             self.messages.clear();
             self.display_messages.clear();
             self.queued_messages.clear();
+            self.pasted_contents.clear();
             self.active_skill = None;
             self.session = Session::create(None, None);
             self.provider_session_id = None;
@@ -509,6 +657,8 @@ impl App {
                 title: None,
                 tool_data: None,
             });
+            // Save provider session ID for resume after reload
+            self.session.provider_session_id = self.provider_session_id.clone();
             // Save session and set reload flag
             let _ = self.session.save();
             self.reload_requested = Some(self.session.id.clone());
@@ -637,6 +787,9 @@ impl App {
             let mut current_tool_input = String::new();
             let mut first_event = true;
             let mut saw_message_end = false;
+            // Track tool results from SDK (already executed by Claude Agent SDK)
+            let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
+                std::collections::HashMap::new();
 
             while let Some(event) = stream.next().await {
                 // Track activity for status display
@@ -738,11 +891,19 @@ impl App {
                         self.thinking_start = None;
                     }
                     StreamEvent::ThinkingDone { duration_secs } => {
+                        // Flush any pending buffered text first
+                        if let Some(chunk) = self.stream_buffer.flush() {
+                            self.streaming_text.push_str(&chunk);
+                        }
                         // Bridge provides accurate wall-clock timing
                         let thinking_msg = format!("Thought for {:.1}s\n\n", duration_secs);
                         self.streaming_text.push_str(&thinking_msg);
                     }
                     StreamEvent::Compaction { trigger, pre_tokens } => {
+                        // Flush any pending buffered text first
+                        if let Some(chunk) = self.stream_buffer.flush() {
+                            self.streaming_text.push_str(&chunk);
+                        }
                         let tokens_str = pre_tokens
                             .map(|t| format!(" ({} tokens)", t))
                             .unwrap_or_default();
@@ -753,6 +914,10 @@ impl App {
                         self.streaming_text.push_str(&compact_msg);
                         // Reset warning so it can appear again
                         self.context_warning_shown = false;
+                    }
+                    StreamEvent::ToolResult { tool_use_id, content, is_error } => {
+                        // SDK already executed this tool, store result for later
+                        sdk_tool_results.insert(tool_use_id, (content, is_error));
                     }
                 }
             }
@@ -785,25 +950,52 @@ impl App {
                 None
             };
 
-            // Add remaining text to display (only if not already committed inline with tool calls)
+            // Add remaining text to display
             let duration = self.processing_started.map(|t| t.elapsed().as_secs_f32());
-            // Only add text if there's content that wasn't already shown
-            if !text_content.is_empty() {
-                self.display_messages.push(DisplayMessage {
-                    role: "assistant".to_string(),
-                    content: text_content.clone(),
-                    tool_calls: vec![],
-                    duration_secs: if tool_calls.is_empty() { duration } else { None },
-                    title: None,
-                    tool_data: None,
-                });
+
+            // Flush any remaining buffered text
+            if let Some(chunk) = self.stream_buffer.flush() {
+                self.streaming_text.push_str(&chunk);
+            }
+
+            if tool_calls.is_empty() {
+                // No tool calls - display full text_content
+                if !text_content.is_empty() {
+                    self.display_messages.push(DisplayMessage {
+                        role: "assistant".to_string(),
+                        content: text_content.clone(),
+                        tool_calls: vec![],
+                        duration_secs: duration,
+                        title: None,
+                        tool_data: None,
+                    });
+                }
+            } else {
+                // Had tool calls - only display text that came AFTER the last tool
+                // (text before each tool was already committed in ToolUseEnd handler)
+                if !self.streaming_text.is_empty() {
+                    self.display_messages.push(DisplayMessage {
+                        role: "assistant".to_string(),
+                        content: self.streaming_text.clone(),
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                }
             }
             self.streaming_text.clear();
-                self.stream_buffer.clear();
+            self.stream_buffer.clear();
             self.streaming_tool_calls.clear();
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
+                break;
+            }
+
+            // If provider handles tools internally (like Claude Agent SDK), don't re-execute
+            if self.provider.handles_tools_internally() {
+                // Tools were already executed by the SDK - task complete
                 break;
             }
 
@@ -813,44 +1005,60 @@ impl App {
                 let message_id = assistant_message_id
                     .clone()
                     .unwrap_or_else(|| self.session.id.clone());
-                let ctx = ToolContext {
-                    session_id: self.session.id.clone(),
-                    message_id: message_id.clone(),
-                    tool_call_id: tc.id.clone(),
-                };
 
-                Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                    session_id: self.session.id.clone(),
-                    message_id: message_id.clone(),
-                    tool_call_id: tc.id.clone(),
-                    tool_name: tc.name.clone(),
-                    status: ToolStatus::Running,
-                    title: None,
-                }));
+                // Check if SDK already executed this tool
+                let (output, is_error, tool_title) = if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
+                    // Use SDK result
+                    Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                        session_id: self.session.id.clone(),
+                        message_id: message_id.clone(),
+                        tool_call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        status: if sdk_is_error { ToolStatus::Error } else { ToolStatus::Completed },
+                        title: None,
+                    }));
+                    (sdk_content, sdk_is_error, None)
+                } else {
+                    // Execute locally
+                    let ctx = ToolContext {
+                        session_id: self.session.id.clone(),
+                        message_id: message_id.clone(),
+                        tool_call_id: tc.id.clone(),
+                    };
 
-                let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
-                let (output, is_error, tool_title) = match result {
-                    Ok(o) => {
-                        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                            session_id: self.session.id.clone(),
-                            message_id: message_id.clone(),
-                            tool_call_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            status: ToolStatus::Completed,
-                            title: o.title.clone(),
-                        }));
-                        (o.output, false, o.title)
-                    }
-                    Err(e) => {
-                        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                            session_id: self.session.id.clone(),
-                            message_id: message_id.clone(),
-                            tool_call_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            status: ToolStatus::Error,
-                            title: None,
-                        }));
-                        (format!("Error: {}", e), true, None)
+                    Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                        session_id: self.session.id.clone(),
+                        message_id: message_id.clone(),
+                        tool_call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        status: ToolStatus::Running,
+                        title: None,
+                    }));
+
+                    let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
+                    match result {
+                        Ok(o) => {
+                            Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                                session_id: self.session.id.clone(),
+                                message_id: message_id.clone(),
+                                tool_call_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                status: ToolStatus::Completed,
+                                title: o.title.clone(),
+                            }));
+                            (o.output, false, o.title)
+                        }
+                        Err(e) => {
+                            Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                                session_id: self.session.id.clone(),
+                                message_id: message_id.clone(),
+                                tool_call_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                status: ToolStatus::Error,
+                                title: None,
+                            }));
+                            (format!("Error: {}", e), true, None)
+                        }
                     }
                 };
 
@@ -915,22 +1123,28 @@ impl App {
                     biased;
                     // Handle keyboard input while waiting for API
                     event = event_stream.next() => {
-                        if let Some(Ok(Event::Key(key))) = event {
-                            if key.kind == KeyEventKind::Press {
-                                let _ = self.handle_key(key.code, key.modifiers);
-                                if self.cancel_requested {
-                                    self.cancel_requested = false;
-                                    self.display_messages.push(DisplayMessage {
-                                        role: "system".to_string(),
-                                        content: "Interrupted".to_string(),
-                                        tool_calls: vec![],
-                                        duration_secs: None,
-                                        title: None,
-                                        tool_data: None,
-                                    });
-                                    return Ok(());
+                        match event {
+                            Some(Ok(Event::Key(key))) => {
+                                if key.kind == KeyEventKind::Press {
+                                    let _ = self.handle_key(key.code, key.modifiers);
+                                    if self.cancel_requested {
+                                        self.cancel_requested = false;
+                                        self.display_messages.push(DisplayMessage {
+                                            role: "system".to_string(),
+                                            content: "Interrupted".to_string(),
+                                            tool_calls: vec![],
+                                            duration_secs: None,
+                                            title: None,
+                                            tool_data: None,
+                                        });
+                                        return Ok(());
+                                    }
                                 }
                             }
+                            Some(Ok(Event::Paste(text))) => {
+                                self.handle_paste(text);
+                            }
+                            _ => {}
                         }
                     }
                     // Redraw periodically
@@ -952,6 +1166,9 @@ impl App {
             let mut current_tool_input = String::new();
             let mut first_event = true;
             let mut saw_message_end = false;
+            // Track tool results from SDK (already executed by Claude Agent SDK)
+            let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
+                std::collections::HashMap::new();
 
             // Stream with input handling
             loop {
@@ -968,23 +1185,29 @@ impl App {
                     }
                     // Handle keyboard input
                     event = event_stream.next() => {
-                        if let Some(Ok(Event::Key(key))) = event {
-                            if key.kind == KeyEventKind::Press {
-                                let _ = self.handle_key(key.code, key.modifiers);
-                                // Check for cancel request
-                                if self.cancel_requested {
-                                    self.cancel_requested = false;
-                                    self.display_messages.push(DisplayMessage {
-                                        role: "system".to_string(),
-                                        content: "Interrupted".to_string(),
-                                        tool_calls: vec![],
-                                        duration_secs: None,
-                                        title: None,
-                                        tool_data: None,
-                                    });
-                                    return Ok(());
+                        match event {
+                            Some(Ok(Event::Key(key))) => {
+                                if key.kind == KeyEventKind::Press {
+                                    let _ = self.handle_key(key.code, key.modifiers);
+                                    // Check for cancel request
+                                    if self.cancel_requested {
+                                        self.cancel_requested = false;
+                                        self.display_messages.push(DisplayMessage {
+                                            role: "system".to_string(),
+                                            content: "Interrupted".to_string(),
+                                            tool_calls: vec![],
+                                            duration_secs: None,
+                                            title: None,
+                                            tool_data: None,
+                                        });
+                                        return Ok(());
+                                    }
                                 }
                             }
+                            Some(Ok(Event::Paste(text))) => {
+                                self.handle_paste(text);
+                            }
+                            _ => {}
                         }
                     }
                     // Handle stream events
@@ -1084,10 +1307,18 @@ impl App {
                                         self.thinking_start = None;
                                     }
                                     StreamEvent::ThinkingDone { duration_secs } => {
+                                        // Flush any pending buffered text first
+                                        if let Some(chunk) = self.stream_buffer.flush() {
+                                            self.streaming_text.push_str(&chunk);
+                                        }
                                         let thinking_msg = format!("Thought for {:.1}s\n\n", duration_secs);
                                         self.streaming_text.push_str(&thinking_msg);
                                     }
                                     StreamEvent::Compaction { trigger, pre_tokens } => {
+                                        // Flush any pending buffered text first
+                                        if let Some(chunk) = self.stream_buffer.flush() {
+                                            self.streaming_text.push_str(&chunk);
+                                        }
                                         let tokens_str = pre_tokens
                                             .map(|t| format!(" ({} tokens)", t))
                                             .unwrap_or_default();
@@ -1097,6 +1328,10 @@ impl App {
                                         );
                                         self.streaming_text.push_str(&compact_msg);
                                         self.context_warning_shown = false;
+                                    }
+                                    StreamEvent::ToolResult { tool_use_id, content, is_error } => {
+                                        // SDK already executed this tool, store result for later
+                                        sdk_tool_results.insert(tool_use_id, (content, is_error));
                                     }
                                 }
                             }
@@ -1135,25 +1370,52 @@ impl App {
                 None
             };
 
-            // Add remaining text to display (only if not already committed inline with tool calls)
+            // Add remaining text to display
             let duration = self.processing_started.map(|t| t.elapsed().as_secs_f32());
-            // Only add text if there's content that wasn't already shown
-            if !text_content.is_empty() {
-                self.display_messages.push(DisplayMessage {
-                    role: "assistant".to_string(),
-                    content: text_content.clone(),
-                    tool_calls: vec![],
-                    duration_secs: if tool_calls.is_empty() { duration } else { None },
-                    title: None,
-                    tool_data: None,
-                });
+
+            // Flush any remaining buffered text
+            if let Some(chunk) = self.stream_buffer.flush() {
+                self.streaming_text.push_str(&chunk);
+            }
+
+            if tool_calls.is_empty() {
+                // No tool calls - display full text_content
+                if !text_content.is_empty() {
+                    self.display_messages.push(DisplayMessage {
+                        role: "assistant".to_string(),
+                        content: text_content.clone(),
+                        tool_calls: vec![],
+                        duration_secs: duration,
+                        title: None,
+                        tool_data: None,
+                    });
+                }
+            } else {
+                // Had tool calls - only display text that came AFTER the last tool
+                // (text before each tool was already committed in ToolUseEnd handler)
+                if !self.streaming_text.is_empty() {
+                    self.display_messages.push(DisplayMessage {
+                        role: "assistant".to_string(),
+                        content: self.streaming_text.clone(),
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                }
             }
             self.streaming_text.clear();
-                self.stream_buffer.clear();
+            self.stream_buffer.clear();
             self.streaming_tool_calls.clear();
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
+                break;
+            }
+
+            // If provider handles tools internally (like Claude Agent SDK), don't re-execute
+            if self.provider.handles_tools_internally() {
+                // Tools were already executed by the SDK - task complete
                 break;
             }
 
@@ -1165,6 +1427,48 @@ impl App {
                 let message_id = assistant_message_id
                     .clone()
                     .unwrap_or_else(|| self.session.id.clone());
+
+                // Check if SDK already executed this tool
+                if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
+                    // Use SDK result
+                    Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                        session_id: self.session.id.clone(),
+                        message_id: message_id.clone(),
+                        tool_call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        status: if sdk_is_error { ToolStatus::Error } else { ToolStatus::Completed },
+                        title: None,
+                    }));
+
+                    // Update the tool's DisplayMessage with the output
+                    if let Some(dm) = self.display_messages.iter_mut().rev().find(|dm| {
+                        dm.tool_data.as_ref().map(|td| &td.id) == Some(&tc.id)
+                    }) {
+                        dm.content = sdk_content.clone();
+                        dm.title = None;
+                    }
+
+                    self.messages.push(Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::ToolResult {
+                            tool_use_id: tc.id.clone(),
+                            content: sdk_content,
+                            is_error: if sdk_is_error { Some(true) } else { None },
+                        }],
+                    });
+                    self.session.add_message(
+                        Role::User,
+                        vec![ContentBlock::ToolResult {
+                            tool_use_id: tc.id,
+                            content: String::new(), // Already added to messages above
+                            is_error: if sdk_is_error { Some(true) } else { None },
+                        }],
+                    );
+                    self.session.save()?;
+                    continue;
+                }
+
+                // Execute locally
                 let ctx = ToolContext {
                     session_id: self.session.id.clone(),
                     message_id: message_id.clone(),
@@ -1198,22 +1502,28 @@ impl App {
                         biased;
                         // Handle keyboard input while tool executes
                         event = event_stream.next() => {
-                            if let Some(Ok(Event::Key(key))) = event {
-                                if key.kind == KeyEventKind::Press {
-                                    let _ = self.handle_key(key.code, key.modifiers);
-                                    if self.cancel_requested {
-                                        self.cancel_requested = false;
-                                        self.display_messages.push(DisplayMessage {
-                                            role: "system".to_string(),
-                                            content: "Interrupted".to_string(),
-                                            tool_calls: vec![],
-                                            duration_secs: None,
-                                            title: None,
-                                            tool_data: None,
-                                        });
-                                        return Ok(());
+                            match event {
+                                Some(Ok(Event::Key(key))) => {
+                                    if key.kind == KeyEventKind::Press {
+                                        let _ = self.handle_key(key.code, key.modifiers);
+                                        if self.cancel_requested {
+                                            self.cancel_requested = false;
+                                            self.display_messages.push(DisplayMessage {
+                                                role: "system".to_string(),
+                                                content: "Interrupted".to_string(),
+                                                tool_calls: vec![],
+                                                duration_secs: None,
+                                                title: None,
+                                                tool_data: None,
+                                            });
+                                            return Ok(());
+                                        }
                                     }
                                 }
+                                Some(Ok(Event::Paste(text))) => {
+                                    self.handle_paste(text);
+                                }
+                                _ => {}
                             }
                         }
                         // Listen for subagent status updates
@@ -1469,6 +1779,95 @@ impl App {
     pub fn mcp_servers(&self) -> &[String] {
         &self.mcp_server_names
     }
+
+    /// Calculate approximate line heights for each message (from bottom to top)
+    /// Returns vec of (is_user, cumulative_lines_from_bottom)
+    fn message_line_positions(&self, width: usize) -> Vec<(bool, usize)> {
+        let width = width.max(40); // Minimum width estimate
+        let mut positions = Vec::new();
+        let mut cumulative = 0usize;
+
+        // Process messages from bottom to top (reverse order)
+        for msg in self.display_messages.iter().rev() {
+            let is_user = msg.role == "user";
+
+            // Estimate height of this message
+            let height = match msg.role.as_str() {
+                "user" => {
+                    // User messages: "N› content" format
+                    let msg_len = msg.content.len() + 4;
+                    (msg_len / width).max(1) + 1 // +1 for spacing
+                }
+                "assistant" => {
+                    // Assistant: count lines + wrap estimate
+                    let content_lines = msg.content.lines().count().max(1);
+                    let avg_line_len = msg.content.len() / content_lines.max(1);
+                    let wrap_factor = if avg_line_len > width { (avg_line_len / width) + 1 } else { 1 };
+                    let mut h = content_lines * wrap_factor;
+                    if !msg.tool_calls.is_empty() { h += 1; }
+                    if msg.duration_secs.is_some() { h += 1; }
+                    h + 1 // +1 for spacing
+                }
+                "tool" => 2, // Tool result line + spacing
+                _ => 1,
+            };
+
+            cumulative += height;
+            positions.push((is_user, cumulative));
+        }
+
+        positions
+    }
+
+    /// Scroll to the previous user prompt (scroll up)
+    pub fn scroll_to_prev_prompt(&mut self) {
+        let positions = self.message_line_positions(100); // Approximate width
+
+        // Find user messages above current scroll position
+        let current = self.scroll_offset;
+
+        // Find the next user message position above current scroll
+        for (is_user, pos) in &positions {
+            if *is_user && *pos > current + 3 {
+                // Scroll to put this message near top of view
+                self.scroll_offset = *pos;
+                return;
+            }
+        }
+
+        // If no more user messages above, scroll to top
+        if let Some((_, max_pos)) = positions.last() {
+            self.scroll_offset = *max_pos;
+        }
+    }
+
+    /// Scroll to the next user prompt (scroll down)
+    pub fn scroll_to_next_prompt(&mut self) {
+        let positions = self.message_line_positions(100);
+
+        if self.scroll_offset == 0 {
+            return; // Already at bottom
+        }
+
+        let current = self.scroll_offset;
+
+        // Find user messages, going from bottom up (positions is already reversed)
+        // We want the first user message position that's LESS than current
+        let mut prev_user_pos = 0usize;
+        for (is_user, pos) in &positions {
+            if *is_user {
+                if *pos >= current {
+                    // This user message is at or above current - use the previous one
+                    self.scroll_offset = prev_user_pos;
+                    return;
+                }
+                prev_user_pos = *pos;
+            }
+        }
+
+        // No user message found below, go to bottom
+        self.scroll_offset = 0;
+    }
 }
 
 #[cfg(test)]
@@ -1703,5 +2102,102 @@ mod tests {
         // Should have an error message about unknown skill
         assert_eq!(app.display_messages().len(), 1);
         assert_eq!(app.display_messages()[0].role, "error");
+    }
+
+    #[test]
+    fn test_handle_paste_single_line() {
+        let mut app = create_test_app();
+
+        app.handle_paste("hello world".to_string());
+
+        assert_eq!(app.input(), "[pasted 1 line]");
+        assert_eq!(app.cursor_pos(), 15);
+        assert_eq!(app.pasted_contents.len(), 1);
+        assert_eq!(app.pasted_contents[0], "hello world");
+    }
+
+    #[test]
+    fn test_handle_paste_multi_line() {
+        let mut app = create_test_app();
+
+        app.handle_paste("line 1\nline 2\nline 3".to_string());
+
+        assert_eq!(app.input(), "[pasted 3 lines]");
+        assert_eq!(app.cursor_pos(), 16);
+        assert_eq!(app.pasted_contents.len(), 1);
+    }
+
+    #[test]
+    fn test_paste_expansion_on_submit() {
+        let mut app = create_test_app();
+
+        // Type prefix, paste, type suffix
+        app.handle_key(KeyCode::Char('A'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char(':'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char(' '), KeyModifiers::empty()).unwrap();
+        app.handle_paste("pasted content".to_string());
+        app.handle_key(KeyCode::Char(' '), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('B'), KeyModifiers::empty()).unwrap();
+
+        // Input shows placeholder
+        assert_eq!(app.input(), "A: [pasted 1 line] B");
+
+        // Submit expands placeholder
+        app.submit_input();
+
+        // Check expanded message
+        assert_eq!(app.display_messages().len(), 1);
+        assert_eq!(app.display_messages()[0].content, "A: pasted content B");
+
+        // Pasted contents should be cleared
+        assert!(app.pasted_contents.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_pastes() {
+        let mut app = create_test_app();
+
+        app.handle_paste("first".to_string());
+        app.handle_key(KeyCode::Char(' '), KeyModifiers::empty()).unwrap();
+        app.handle_paste("second\nline".to_string());
+
+        assert_eq!(app.input(), "[pasted 1 line] [pasted 2 lines]");
+        assert_eq!(app.pasted_contents.len(), 2);
+
+        app.submit_input();
+        assert_eq!(app.display_messages()[0].content, "first second\nline");
+    }
+
+    #[test]
+    fn test_restore_session_adds_reload_message() {
+        use crate::session::Session;
+
+        let mut app = create_test_app();
+
+        // Create and save a session with a fake provider_session_id
+        let mut session = Session::create(None, None);
+        session.add_message(Role::User, vec![ContentBlock::Text { text: "test message".to_string() }]);
+        session.provider_session_id = Some("fake-uuid".to_string());
+        let session_id = session.id.clone();
+        session.save().unwrap();
+
+        // Restore the session
+        app.restore_session(&session_id);
+
+        // Should have the original message + reload success message in display
+        assert_eq!(app.display_messages().len(), 2);
+        assert_eq!(app.display_messages()[0].role, "user");
+        assert_eq!(app.display_messages()[0].content, "test message");
+        assert_eq!(app.display_messages()[1].role, "system");
+        assert!(app.display_messages()[1].content.contains("reloaded successfully"));
+
+        // Messages for API should only have the original message (no reload msg to avoid breaking alternation)
+        assert_eq!(app.messages.len(), 1);
+
+        // Provider session ID should be cleared (Claude sessions don't persist across restarts)
+        assert!(app.provider_session_id.is_none());
+
+        // Clean up
+        let _ = std::fs::remove_file(crate::session::session_path(&session_id).unwrap());
     }
 }

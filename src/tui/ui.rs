@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+
+#![allow(dead_code)]
+
 use super::app::{App, ProcessingStatus};
 use super::markdown;
 use crate::message::ToolCall;
@@ -20,6 +24,40 @@ const AI_TEXT: Color = Color::Rgb(220, 220, 215);       // Softer warm white (AI
 
 // Spinner frames for animated status
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Calculate rainbow color for prompt index with exponential decay to gray.
+/// `distance` is how many prompts back from the most recent (0 = most recent).
+fn rainbow_prompt_color(distance: usize) -> Color {
+    // Rainbow colors (hue progression): red -> orange -> yellow -> green -> cyan -> blue -> violet
+    const RAINBOW: [(u8, u8, u8); 7] = [
+        (255, 80, 80),   // Red (softened)
+        (255, 160, 80),  // Orange
+        (255, 230, 80),  // Yellow
+        (80, 220, 100),  // Green
+        (80, 200, 220),  // Cyan
+        (100, 140, 255), // Blue
+        (180, 100, 255), // Violet
+    ];
+
+    // Gray target (DIM_COLOR)
+    const GRAY: (u8, u8, u8) = (80, 80, 80);
+
+    // Exponential decay factor - how quickly we fade to gray
+    // decay = e^(-distance * rate), rate of ~0.4 gives nice falloff
+    let decay = (-0.4 * distance as f32).exp();
+
+    // Select rainbow color based on distance (cycle through)
+    let rainbow_idx = distance.min(RAINBOW.len() - 1);
+    let (r, g, b) = RAINBOW[rainbow_idx];
+
+    // Blend rainbow color with gray based on decay
+    // At distance 0: 100% rainbow, as distance increases: approaches gray
+    let blend = |rainbow: u8, gray: u8| -> u8 {
+        (rainbow as f32 * decay + gray as f32 * (1.0 - decay)) as u8
+    };
+
+    Color::Rgb(blend(r, GRAY.0), blend(g, GRAY.1), blend(b, GRAY.2))
+}
 
 /// Generate an animated color that pulses between two colors
 fn animated_tool_color(elapsed: f32) -> Color {
@@ -243,6 +281,13 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from(""));
 
     let mut prompt_num = 0usize;
+    // Count total user prompts and queued messages for rainbow coloring
+    // The input prompt is distance 0, queued messages are 1..queued_count,
+    // existing messages continue from there
+    let total_prompts = app.display_messages().iter().filter(|m| m.role == "user").count();
+    let queued_count = app.queued_messages().len();
+    // Input prompt number is total_prompts + queued_count + 1, so distance for
+    // existing prompt N is: (total_prompts + queued_count + 1) - N
 
     for msg in app.display_messages() {
         // Add spacing between messages
@@ -254,9 +299,12 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
             "user" => {
                 prompt_num += 1;
                 user_line_indices.push(lines.len()); // Track this line index
-                // User messages: dim number, blue caret, bright text
+                // Calculate distance from input prompt (distance 0)
+                let distance = total_prompts + queued_count + 1 - prompt_num;
+                let num_color = rainbow_prompt_color(distance);
+                // User messages: rainbow number, blue caret, bright text
                 lines.push(Line::from(vec![
-                    Span::styled(format!("{}", prompt_num), Style::default().fg(DIM_COLOR)),
+                    Span::styled(format!("{}", prompt_num), Style::default().fg(num_color)),
                     Span::styled("› ", Style::default().fg(USER_COLOR)),
                     Span::styled(msg.content.clone(), Style::default().fg(USER_TEXT)),
                 ]));
@@ -294,28 +342,71 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                 // Show tool call with full details
                 if let Some(ref tc) = msg.tool_data {
                     let summary = get_tool_summary(tc);
+
+                    // Determine status: error if content starts with error prefix
+                    // Be specific to avoid false positives (e.g., "No matches found" is not an error)
+                    let is_error = msg.content.starts_with("Error:")
+                        || msg.content.starts_with("error:")
+                        || msg.content.starts_with("Failed:");
+
+                    let (icon, icon_color) = if is_error {
+                        ("✗", Color::Rgb(220, 100, 100)) // Red for errors
+                    } else {
+                        ("✓", Color::Rgb(100, 180, 100)) // Green for success
+                    };
+
                     lines.push(Line::from(vec![
-                        Span::styled("  ◦ ", Style::default().fg(TOOL_COLOR)),
+                        Span::styled(format!("  {} ", icon), Style::default().fg(icon_color)),
                         Span::styled(tc.name.clone(), Style::default().fg(TOOL_COLOR)),
                         Span::styled(format!(" {}", summary), Style::default().fg(DIM_COLOR)),
                     ]));
 
-                    // Show diff output for editing tools (from tool output, includes line numbers)
+                    // Show diff output for editing tools with syntax highlighting
                     if matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit") {
-                        // Display tool output content (contains diffs with line numbers)
-                        for line in msg.content.lines().skip(1) { // Skip first line (summary)
-                            if line.trim().is_empty() {
+                        // Extract file extension for syntax highlighting
+                        let file_ext = tc.input.get("file_path")
+                            .and_then(|v| v.as_str())
+                            .and_then(|p| std::path::Path::new(p).extension())
+                            .and_then(|e| e.to_str());
+
+                        let diff_lines: Vec<&str> = msg.content.lines().skip(1).collect();
+                        for line in diff_lines {
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() || trimmed == "..." {
                                 continue;
                             }
-                            // Color based on +/- at start of line content (after line number)
-                            let styled_line = if line.contains(" + ") || line.trim_start().starts_with('+') {
-                                Line::from(Span::styled(line.to_string(), Style::default().fg(DIFF_ADD_COLOR)))
-                            } else if line.contains(" - ") || line.trim_start().starts_with('-') {
-                                Line::from(Span::styled(line.to_string(), Style::default().fg(DIFF_DEL_COLOR)))
+
+                            // Determine if addition or deletion
+                            let is_add = trimmed.contains("+ ");
+                            let is_del = trimmed.contains("- ");
+                            let base_color = if is_add {
+                                DIFF_ADD_COLOR
+                            } else if is_del {
+                                DIFF_DEL_COLOR
                             } else {
-                                Line::from(Span::styled(line.to_string(), Style::default().fg(DIM_COLOR)))
+                                DIM_COLOR
                             };
-                            lines.push(styled_line);
+
+                            // Extract prefix (line number + sign) and content
+                            let (prefix, content) = extract_diff_prefix_and_content(trimmed);
+
+                            // Build the line with syntax-highlighted content
+                            let mut spans: Vec<Span<'static>> = vec![
+                                Span::styled("    ", Style::default()),
+                                Span::styled(prefix.to_string(), Style::default().fg(base_color)),
+                            ];
+
+                            // Apply syntax highlighting to content
+                            if !content.is_empty() {
+                                let highlighted = markdown::highlight_line(content, file_ext);
+                                // Tint the highlighted spans with the diff color
+                                for span in highlighted {
+                                    let tinted = tint_span_with_diff_color(span, base_color);
+                                    spans.push(tinted);
+                                }
+                            }
+
+                            lines.push(Line::from(spans));
                         }
                     }
 
@@ -545,12 +636,17 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_queued(frame: &mut Frame, app: &App, area: Rect, start_num: usize) {
     let queued = app.queued_messages();
+    let queued_count = queued.len();
     let lines: Vec<Line> = queued.iter()
         .take(3)
         .enumerate()
         .map(|(i, msg)| {
+            // Distance from input prompt: queued_count - i (first queued is furthest from input)
+            // +1 because the input prompt itself is distance 0
+            let distance = queued_count.saturating_sub(i);
+            let num_color = rainbow_prompt_color(distance);
             Line::from(vec![
-                Span::styled(format!("{}", start_num + i), Style::default().fg(DIM_COLOR)),
+                Span::styled(format!("{}", start_num + i), Style::default().fg(num_color)),
                 Span::styled("… ", Style::default().fg(QUEUED_COLOR)),
                 Span::styled(msg.as_str(), Style::default().fg(QUEUED_COLOR).dim()),
             ])
@@ -612,9 +708,10 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect, next_prompt: usize) {
         let line_text: String = chars[pos..end].iter().collect();
 
         if lines.len() == input_start_line {
-            // First line has prompt: dim number + colored caret
+            // First line has prompt: rainbow number (most recent = distance 0) + colored caret
+            let num_color = rainbow_prompt_color(0);
             lines.push(Line::from(vec![
-                Span::styled(num_str.clone(), Style::default().fg(DIM_COLOR)),
+                Span::styled(num_str.clone(), Style::default().fg(num_color)),
                 Span::styled(prompt_char, Style::default().fg(caret_color)),
                 Span::raw(line_text),
             ]));
@@ -647,6 +744,101 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect, next_prompt: usize) {
 // Colors for diff display
 const DIFF_ADD_COLOR: Color = Color::Rgb(100, 200, 100);    // Green for additions
 const DIFF_DEL_COLOR: Color = Color::Rgb(200, 100, 100);    // Red for deletions
+const DIFF_HIGHLIGHT_ADD: Color = Color::Rgb(150, 255, 150); // Brighter green for changed parts
+const DIFF_HIGHLIGHT_DEL: Color = Color::Rgb(255, 130, 130); // Brighter red for changed parts
+
+/// Extract prefix (line number + sign) and content from diff line
+/// "42- content" -> ("42- ", "content")
+fn extract_diff_prefix_and_content(line: &str) -> (&str, &str) {
+    // Format is "42- content" or "42+ content"
+    if let Some(pos) = line.find("- ") {
+        (&line[..pos + 2], &line[pos + 2..])
+    } else if let Some(pos) = line.find("+ ") {
+        (&line[..pos + 2], &line[pos + 2..])
+    } else {
+        (line, "")
+    }
+}
+
+/// Tint a syntax-highlighted span with a diff color (green/red)
+/// Blends the syntax color with the diff color for a subtle tint
+fn tint_span_with_diff_color(span: Span<'static>, diff_color: Color) -> Span<'static> {
+    let (dr, dg, db) = match diff_color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => return span,
+    };
+
+    // Get the span's foreground color
+    let fg = span.style.fg.unwrap_or(Color::White);
+    let (sr, sg, sb) = match fg {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::White => (255, 255, 255),
+        Color::Black => (0, 0, 0),
+        _ => return span, // Can't tint indexed colors easily
+    };
+
+    // Blend: 70% syntax color + 30% diff color
+    let blend = |s: u8, d: u8| -> u8 {
+        ((s as u16 * 70 + d as u16 * 30) / 100) as u8
+    };
+
+    let tinted = Color::Rgb(blend(sr, dr), blend(sg, dg), blend(sb, db));
+    Span::styled(span.content, span.style.fg(tinted))
+}
+
+/// Render a diff line with word-level highlighting for changed parts
+fn render_diff_line_with_highlights(
+    full_line: &str,
+    this_content: &str,
+    other_content: &str,
+    is_deletion: bool,
+) -> Line<'static> {
+    use similar::{ChangeTag, TextDiff};
+
+    let (base_color, highlight_color) = if is_deletion {
+        (DIFF_DEL_COLOR, DIFF_HIGHLIGHT_DEL)
+    } else {
+        (DIFF_ADD_COLOR, DIFF_HIGHLIGHT_ADD)
+    };
+
+    // Get prefix (line number and +/-)
+    let prefix = if let Some(pos) = full_line.find(if is_deletion { "- " } else { "+ " }) {
+        &full_line[..pos + 2]
+    } else {
+        ""
+    };
+
+    // Do word-level diff
+    let diff = TextDiff::from_words(
+        if is_deletion { this_content } else { other_content },
+        if is_deletion { other_content } else { this_content },
+    );
+
+    let mut spans: Vec<Span<'static>> = vec![
+        Span::styled("    ".to_string(), Style::default()),
+        Span::styled(prefix.to_string(), Style::default().fg(base_color)),
+    ];
+
+    // Build spans with highlighting for changed words
+    for change in diff.iter_all_changes() {
+        let text = change.value().to_string();
+        let style = match change.tag() {
+            ChangeTag::Equal => Style::default().fg(base_color),
+            ChangeTag::Insert if !is_deletion => {
+                // This is a new word in the addition - highlight it
+                Style::default().fg(highlight_color).bold()
+            }
+            ChangeTag::Delete if is_deletion => {
+                // This is a removed word in the deletion - highlight it
+                Style::default().fg(highlight_color).bold()
+            }
+            _ => Style::default().fg(base_color),
+        };
+        spans.push(Span::styled(text, style));
+    }
+
+    Line::from(spans)
+}
 
 /// Extract a brief summary from a tool call input (file path, command, etc.)
 fn get_tool_summary(tool: &ToolCall) -> String {

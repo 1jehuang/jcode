@@ -61,7 +61,7 @@ impl Tool for GlobTool {
         }
 
         // Combine base path with pattern
-        let full_pattern = if params.pattern.starts_with('/') {
+        let _full_pattern = if params.pattern.starts_with('/') {
             params.pattern.clone()
         } else {
             format!("{}/{}", base_path, params.pattern)

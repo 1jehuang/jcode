@@ -71,7 +71,7 @@ impl Tool for WriteTool {
         // Write the file
         tokio::fs::write(path, &params.content).await?;
 
-        let new_len = params.content.len();
+        let _new_len = params.content.len();
         let line_count = params.content.lines().count();
 
         if existed {
@@ -98,7 +98,7 @@ impl Tool for WriteTool {
     }
 }
 
-/// Generate a compact diff summary with line numbers (max 20 lines shown)
+/// Generate a compact diff: "42- old" / "42+ new" (max 20 lines)
 fn generate_diff_summary(old: &str, new: &str) -> String {
     let diff = TextDiff::from_lines(old, new);
     let mut output = String::new();
@@ -118,29 +118,23 @@ fn generate_diff_summary(old: &str, new: &str) -> String {
             ChangeTag::Delete => {
                 let content = change.value().trim();
                 old_line += 1;
-                // Skip whitespace-only changes
-                if content.is_empty() {
-                    continue;
-                }
+                if content.is_empty() { continue; }
                 if lines_shown >= MAX_LINES {
-                    output.push_str("...(truncated)\n");
+                    output.push_str("...\n");
                     break;
                 }
-                output.push_str(&format!("{:>4} - {}\n", old_line - 1, content));
+                output.push_str(&format!("{}- {}\n", old_line - 1, content));
                 lines_shown += 1;
             }
             ChangeTag::Insert => {
                 let content = change.value().trim();
                 new_line += 1;
-                // Skip whitespace-only changes
-                if content.is_empty() {
-                    continue;
-                }
+                if content.is_empty() { continue; }
                 if lines_shown >= MAX_LINES {
-                    output.push_str("...(truncated)\n");
+                    output.push_str("...\n");
                     break;
                 }
-                output.push_str(&format!("{:>4} + {}\n", new_line - 1, content));
+                output.push_str(&format!("{}+ {}\n", new_line - 1, content));
                 lines_shown += 1;
             }
         }
@@ -159,10 +153,9 @@ mod tests {
         let new = "hello rust";
         let diff = generate_diff_summary(old, new);
 
-        assert!(diff.contains("1 -"), "Should have line number 1 for deletion");
-        assert!(diff.contains("1 +"), "Should have line number 1 for addition");
-        assert!(diff.contains("- hello world"), "Should show deleted line");
-        assert!(diff.contains("+ hello rust"), "Should show added line");
+        // Compact format: "1- content" / "1+ content"
+        assert!(diff.contains("1- hello world"), "Should show deleted line");
+        assert!(diff.contains("1+ hello rust"), "Should show added line");
     }
 
     #[test]
@@ -171,9 +164,8 @@ mod tests {
         let new = "line one\nchanged two\nline three";
         let diff = generate_diff_summary(old, new);
 
-        assert!(diff.contains("2 -"), "Should have line number 2");
-        assert!(diff.contains("- line two"), "Should show deleted line");
-        assert!(diff.contains("+ changed two"), "Should show added line");
+        assert!(diff.contains("2- line two"), "Should show deleted line");
+        assert!(diff.contains("2+ changed two"), "Should show added line");
         // Equal lines should not appear
         assert!(!diff.contains("line one"), "Should not show unchanged lines");
     }
@@ -184,9 +176,9 @@ mod tests {
         let new = "line one\nline two\nline three";
         let diff = generate_diff_summary(old, new);
 
-        assert!(diff.contains("1 + line one"), "Should show line 1 added");
-        assert!(diff.contains("2 + line two"), "Should show line 2 added");
-        assert!(diff.contains("3 + line three"), "Should show line 3 added");
+        assert!(diff.contains("1+ line one"), "Should show line 1 added");
+        assert!(diff.contains("2+ line two"), "Should show line 2 added");
+        assert!(diff.contains("3+ line three"), "Should show line 3 added");
     }
 
     #[test]
@@ -196,7 +188,7 @@ mod tests {
         let new = (1..=25).map(|i| format!("new line {}", i)).collect::<Vec<_>>().join("\n");
         let diff = generate_diff_summary(&old, &new);
 
-        assert!(diff.contains("truncated"), "Should truncate after 20 lines");
+        assert!(diff.contains("..."), "Should truncate after 20 lines");
     }
 
     #[test]
@@ -205,9 +197,9 @@ mod tests {
         let new = "new";
         let diff = generate_diff_summary(old, new);
 
-        // Line numbers should be right-aligned in 4 chars
-        assert!(diff.contains("   1 -"), "Line number should be right-aligned");
-        assert!(diff.contains("   1 +"), "Line number should be right-aligned");
+        // Compact format: no padding
+        assert!(diff.contains("1- old"), "Should have line number directly before minus");
+        assert!(diff.contains("1+ new"), "Should have line number directly before plus");
     }
 
     #[test]
