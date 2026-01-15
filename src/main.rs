@@ -400,20 +400,27 @@ async fn run_tui(
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
     ratatui::restore();
 
+    let run_result = result?;
+
+    // Check for special exit code (canary wrapper communication)
+    if let Some(code) = run_result.exit_code {
+        std::process::exit(code);
+    }
+
     // Check for hot-reload request
-    if let Ok(Some(reload_session_id)) = &result {
+    if let Some(ref reload_session_id) = run_result.reload_session {
         hot_reload(reload_session_id)?;
     }
 
     // Print resume command for normal exits (not hot-reload)
-    if matches!(&result, Ok(None)) {
+    if run_result.reload_session.is_none() {
         eprintln!();
         eprintln!("\x1b[33mTo restore this session, run:\x1b[0m");
         eprintln!("  jcode --resume {}", session_id);
         eprintln!();
     }
 
-    result.map(|_| ())
+    Ok(())
 }
 
 /// Hot-reload: pull, rebuild, test, and exec into new binary with session restore
@@ -607,24 +614,12 @@ async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
 
 /// Get the jcode repository directory (where the source code lives)
 fn get_repo_dir() -> Option<std::path::PathBuf> {
-    // First try: compile-time directory
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let path = std::path::PathBuf::from(manifest_dir);
-    if path.join(".git").exists() {
-        return Some(path);
-    }
+    build::get_repo_dir()
+}
 
-    // Fallback: check relative to executable
-    if let Ok(exe) = std::env::current_exe() {
-        // Assume structure: repo/target/release/jcode
-        if let Some(repo) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
-            if repo.join(".git").exists() {
-                return Some(repo.to_path_buf());
-            }
-        }
-    }
-
-    None
+/// Public accessor for repo dir (used by TUI)
+pub fn main_get_repo_dir() -> Option<std::path::PathBuf> {
+    build::get_repo_dir()
 }
 
 /// Check if updates are available (returns None if unable to check)
@@ -861,19 +856,24 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
     Err(anyhow::anyhow!("Failed to exec wrapper: {}", err))
 }
 
-/// Wrapper that runs canary binary and handles crashes
-async fn run_canary_wrapper(session_id: &str, binary: &str) -> Result<()> {
-    use std::process::Stdio;
+// Exit codes for canary wrapper communication
+const EXIT_RELOAD_REQUESTED: i32 = 100; // Agent wants to reload to new canary build
+const EXIT_DONE: i32 = 0;               // Clean exit, stop wrapper
 
-    let binary_path = std::path::PathBuf::from(binary);
-    if !binary_path.exists() {
-        anyhow::bail!("Canary binary not found: {}", binary);
-    }
+/// Wrapper that runs canary binary and handles crashes
+async fn run_canary_wrapper(session_id: &str, _binary: &str) -> Result<()> {
+    use std::process::Stdio;
 
     let cwd = std::env::current_dir()?;
     let repo_dir = get_repo_dir();
 
     loop {
+        // Always read canary path fresh - allows agent to rebuild and update symlink
+        let binary_path = build::canary_binary_path()?;
+        if !binary_path.exists() {
+            anyhow::bail!("Canary binary not found: {:?}", binary_path);
+        }
+
         eprintln!("Launching canary session {}...", session_id);
 
         // Run the canary binary
@@ -887,11 +887,24 @@ async fn run_canary_wrapper(session_id: &str, binary: &str) -> Result<()> {
             .spawn()?;
 
         let status = child.wait()?;
+        let exit_code = status.code().unwrap_or(-1);
 
-        if status.success() {
-            // Clean exit
+        if exit_code == EXIT_DONE {
+            // Clean exit - done with self-dev
             eprintln!("Canary session exited cleanly");
             build::clear_migration_context(session_id)?;
+            break;
+        }
+
+        if exit_code == EXIT_RELOAD_REQUESTED {
+            // Agent requested reload to new canary build - loop and respawn
+            eprintln!("Reload requested, respawning with new canary build...");
+            continue;
+        }
+
+        // Any other exit code is a crash
+        if status.success() {
+            // Shouldn't happen but handle gracefully
             break;
         }
 

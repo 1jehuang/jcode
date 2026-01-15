@@ -8,7 +8,7 @@ mod ui;
 #[deprecated(note = "Use App::new_for_remote().run_remote() instead")]
 pub mod client;
 
-pub use app::{App, DisplayMessage, ProcessingStatus};
+pub use app::{App, DisplayMessage, ProcessingStatus, RunResult};
 pub use backend::{DebugEvent, DebugMessage, RemoteConnection};
 
 use crate::message::ToolCall;

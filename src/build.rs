@@ -5,6 +5,28 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Get the jcode repository directory
+pub fn get_repo_dir() -> Option<PathBuf> {
+    // First try: compile-time directory
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let path = PathBuf::from(manifest_dir);
+    if path.join(".git").exists() {
+        return Some(path);
+    }
+
+    // Fallback: check relative to executable
+    if let Ok(exe) = std::env::current_exe() {
+        // Assume structure: repo/target/release/jcode
+        if let Some(repo) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+            if repo.join(".git").exists() {
+                return Some(repo.to_path_buf());
+            }
+        }
+    }
+
+    None
+}
+
 /// Status of a canary build being tested
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -402,6 +424,52 @@ pub fn update_canary_symlink(hash: &str) -> Result<()> {
     std::os::unix::fs::symlink(&target, &link_path)?;
 
     Ok(())
+}
+
+/// Rebuild canary binary from current working tree
+/// Returns the new git hash
+pub fn rebuild_canary(repo_dir: &std::path::Path) -> Result<String> {
+    // Build release binary
+    eprintln!("Building release binary...");
+    let status = Command::new("cargo")
+        .args(["build", "--release"])
+        .current_dir(repo_dir)
+        .status()?;
+
+    if !status.success() {
+        anyhow::bail!("Build failed");
+    }
+
+    // Run tests
+    eprintln!("Running tests...");
+    let status = Command::new("cargo")
+        .args(["test", "--release"])
+        .current_dir(repo_dir)
+        .status()?;
+
+    if !status.success() {
+        anyhow::bail!("Tests failed - not updating canary");
+    }
+
+    // Get build info
+    let info = current_build_info(repo_dir)?;
+    let hash = info.hash.clone();
+
+    // Install to versions directory
+    eprintln!("Installing version {}...", hash);
+    install_version(repo_dir, &hash)?;
+
+    // Update canary symlink
+    update_canary_symlink(&hash)?;
+
+    // Update manifest
+    let mut manifest = BuildManifest::load()?;
+    manifest.canary = Some(hash.clone());
+    manifest.canary_status = Some(CanaryStatus::Testing);
+    manifest.add_to_history(info)?;
+
+    eprintln!("Canary updated to {}", hash);
+    Ok(hash)
 }
 
 #[cfg(test)]
