@@ -88,8 +88,8 @@ struct Args {
     #[arg(long, global = true)]
     trace: bool,
 
-    /// Resume a session (used internally for hot-reload)
-    #[arg(long, global = true, hide = true)]
+    /// Resume a session by ID, or list sessions if no ID provided
+    #[arg(long, global = true, num_args = 0..=1, default_missing_value = "")]
     resume: Option<String>,
 
     /// Run standalone TUI without connecting to server
@@ -213,6 +213,12 @@ async fn main() -> Result<()> {
 }
 
 async fn run_main(args: Args) -> Result<()> {
+    // Handle --resume without session ID: list available sessions
+    if let Some(ref resume_id) = args.resume {
+        if resume_id.is_empty() {
+            return list_sessions();
+        }
+    }
 
     match args.command {
         Some(Command::Serve) => {
@@ -757,6 +763,67 @@ fn run_update() -> Result<()> {
 
     let hash = String::from_utf8_lossy(&hash.stdout);
     eprintln!("Successfully updated to {}", hash.trim());
+
+    Ok(())
+}
+
+/// List available sessions for resume
+fn list_sessions() -> Result<()> {
+    let sessions_dir = storage::jcode_dir()?.join("sessions");
+
+    if !sessions_dir.exists() {
+        eprintln!("No sessions found.");
+        return Ok(());
+    }
+
+    let mut sessions: Vec<(String, session::Session)> = Vec::new();
+
+    for entry in std::fs::read_dir(&sessions_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().map(|e| e == "json").unwrap_or(false) {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if let Ok(session) = session::Session::load(stem) {
+                    sessions.push((stem.to_string(), session));
+                }
+            }
+        }
+    }
+
+    if sessions.is_empty() {
+        eprintln!("No sessions found.");
+        return Ok(());
+    }
+
+    // Sort by updated_at descending (most recent first)
+    sessions.sort_by(|a, b| b.1.updated_at.cmp(&a.1.updated_at));
+
+    eprintln!("\n\x1b[1mAvailable sessions:\x1b[0m\n");
+
+    for (id, session) in sessions.iter().take(20) {
+        let title = session.title.as_deref().unwrap_or("Untitled");
+        let age = chrono::Utc::now().signed_duration_since(session.updated_at);
+        let age_str = if age.num_days() > 0 {
+            format!("{}d ago", age.num_days())
+        } else if age.num_hours() > 0 {
+            format!("{}h ago", age.num_hours())
+        } else {
+            format!("{}m ago", age.num_minutes())
+        };
+
+        let canary_marker = if session.is_canary { " \x1b[33m[self-dev]\x1b[0m" } else { "" };
+        let msg_count = session.messages.len();
+
+        eprintln!("  \x1b[36m{}\x1b[0m", id);
+        eprintln!("    {} ({} msgs, {}){}", title, msg_count, age_str, canary_marker);
+        eprintln!();
+    }
+
+    if sessions.len() > 20 {
+        eprintln!("  ... and {} more sessions", sessions.len() - 20);
+    }
+
+    eprintln!("\x1b[2mTo resume: jcode --resume <session_id>\x1b[0m\n");
 
     Ok(())
 }
