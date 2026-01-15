@@ -476,10 +476,10 @@ impl App {
             if let Ok(_hash) = std::fs::read_to_string(&rebuild_path) {
                 // Remove signal file
                 let _ = std::fs::remove_file(&rebuild_path);
-                // Save session and trigger exit with code 100
+                // Save session and trigger exit with code 42 (reload requested)
                 self.session.provider_session_id = self.provider_session_id.clone();
                 let _ = self.session.save();
-                self.requested_exit_code = Some(100);
+                self.requested_exit_code = Some(42);
                 self.should_quit = true;
             }
         }
@@ -490,13 +490,10 @@ impl App {
             if let Ok(_hash) = std::fs::read_to_string(&rollback_path) {
                 // Remove signal file
                 let _ = std::fs::remove_file(&rollback_path);
-                // For rollback, we exit cleanly - wrapper will spawn stable
-                // But first we need to crash intentionally so wrapper catches it
-                // Actually, let's just exit with a different code
+                // Save session and trigger exit with code 43 (rollback requested)
                 self.session.provider_session_id = self.provider_session_id.clone();
                 let _ = self.session.save();
-                // Exit with code 101 = rollback requested
-                self.requested_exit_code = Some(101);
+                self.requested_exit_code = Some(43);
                 self.should_quit = true;
             }
         }
@@ -1507,8 +1504,8 @@ impl App {
                         // Save session
                         self.session.provider_session_id = self.provider_session_id.clone();
                         let _ = self.session.save();
-                        // Exit with code 100 to signal wrapper to respawn with new canary
-                        self.requested_exit_code = Some(100);
+                        // Exit with code 42 to signal wrapper to respawn with new canary
+                        self.requested_exit_code = Some(42);
                         self.should_quit = true;
                     }
                     Err(e) => {

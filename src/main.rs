@@ -898,9 +898,10 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
 }
 
 // Exit codes for canary wrapper communication
+// Note: Rust panic exits with 101, so we avoid that for our signals
 const EXIT_DONE: i32 = 0;               // Clean exit, stop wrapper
-const EXIT_RELOAD_REQUESTED: i32 = 100; // Agent wants to reload to new canary build
-const EXIT_ROLLBACK_REQUESTED: i32 = 101; // Agent wants to rollback to stable
+const EXIT_RELOAD_REQUESTED: i32 = 42;  // Agent wants to reload to new canary build
+const EXIT_ROLLBACK_REQUESTED: i32 = 43; // Agent wants to rollback to stable
 
 /// Wrapper that runs canary binary and handles crashes
 async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()> {
