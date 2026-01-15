@@ -391,6 +391,9 @@ async fn run_tui(
     // Set current session for panic recovery
     set_current_session(app.session_id());
 
+    // Save session ID before running (for resume message)
+    let session_id = app.session_id().to_string();
+
     app.init_mcp().await;
     let result = app.run(terminal).await;
     // Disable bracketed paste before restoring terminal
@@ -398,8 +401,16 @@ async fn run_tui(
     ratatui::restore();
 
     // Check for hot-reload request
-    if let Ok(Some(session_id)) = &result {
-        hot_reload(session_id)?;
+    if let Ok(Some(reload_session_id)) = &result {
+        hot_reload(reload_session_id)?;
+    }
+
+    // Print resume command for normal exits (not hot-reload)
+    if matches!(&result, Ok(None)) {
+        eprintln!();
+        eprintln!("\x1b[33mTo restore this session, run:\x1b[0m");
+        eprintln!("  jcode --resume {}", session_id);
+        eprintln!();
     }
 
     result.map(|_| ())

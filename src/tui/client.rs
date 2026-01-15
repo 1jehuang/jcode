@@ -472,8 +472,21 @@ impl ClientApp {
                 }
             }
             KeyCode::Esc => {
-                self.input.clear();
-                self.cursor_pos = 0;
+                if self.is_processing {
+                    // Send cancel request to server
+                    let request = Request::Cancel {
+                        id: self.next_request_id,
+                    };
+                    self.next_request_id += 1;
+                    let json = serde_json::to_string(&request)? + "\n";
+                    let mut w = writer.lock().await;
+                    w.write_all(json.as_bytes()).await?;
+                } else {
+                    // Reset scroll to bottom and clear input
+                    self.scroll_offset = 0;
+                    self.input.clear();
+                    self.cursor_pos = 0;
+                }
             }
             _ => {}
         }
@@ -586,5 +599,21 @@ impl TuiState for ClientApp {
 
     fn total_session_tokens(&self) -> Option<(u64, u64)> {
         None // Deprecated client doesn't track total tokens
+    }
+
+    fn is_remote_mode(&self) -> bool {
+        true // ClientApp is always remote mode
+    }
+
+    fn current_session_id(&self) -> Option<String> {
+        self.session_id.clone()
+    }
+
+    fn server_sessions(&self) -> Vec<String> {
+        Vec::new() // Deprecated client doesn't track server sessions
+    }
+
+    fn connected_clients(&self) -> Option<usize> {
+        None // Deprecated client doesn't track client count
     }
 }
