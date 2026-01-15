@@ -1860,13 +1860,9 @@ impl App {
                 break;
             }
 
-            // If provider handles tools internally (like Claude Agent SDK), don't re-execute
-            if self.provider.handles_tools_internally() {
-                // Tools were already executed by the SDK - task complete
-                break;
-            }
-
-            // Execute tools
+            // Execute tools - SDK may have executed some, but custom tools need local execution
+            // Note: handles_tools_internally() means SDK handled KNOWN tools, but custom tools like
+            // selfdev are not known to the SDK and need to be executed locally.
             for tc in tool_calls {
                 self.status = ProcessingStatus::RunningTool(tc.name.clone());
                 let message_id = assistant_message_id
@@ -2335,13 +2331,8 @@ impl App {
                 break;
             }
 
-            // If provider handles tools internally (like Claude Agent SDK), don't re-execute
-            if self.provider.handles_tools_internally() {
-                // Tools were already executed by the SDK - task complete
-                break;
-            }
-
             // Execute tools with input handling (non-blocking)
+            // SDK may have executed some tools, but custom tools need local execution
             for tc in tool_calls {
                 self.status = ProcessingStatus::RunningTool(tc.name.clone());
                 terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
