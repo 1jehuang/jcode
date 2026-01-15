@@ -358,6 +358,8 @@ async fn handle_client(
                     id,
                     session_id: current_session_id,
                     messages,
+                    provider_name: Some(provider.name().to_string()),
+                    provider_model: Some(provider.model().to_string()),
                 };
                 let json = encode_event(&event);
                 let mut w = writer.lock().await;

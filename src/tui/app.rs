@@ -106,6 +106,9 @@ pub struct App {
     pasted_contents: Vec<String>,
     // Debug socket broadcast channel (if enabled)
     debug_tx: Option<tokio::sync::broadcast::Sender<super::backend::DebugEvent>>,
+    // Remote provider info (set when running in remote mode)
+    remote_provider_name: Option<String>,
+    remote_provider_model: Option<String>,
 }
 
 /// A placeholder provider for remote mode (never actually called)
@@ -165,6 +168,8 @@ impl App {
             reload_requested: None,
             pasted_contents: Vec::new(),
             debug_tx: None,
+            remote_provider_name: None,
+            remote_provider_model: None,
         }
     }
 
@@ -597,8 +602,15 @@ impl App {
                     tool_data: None,
                 });
             }
-            ServerEvent::History { messages, session_id, .. } => {
+            ServerEvent::History { messages, session_id, provider_name, provider_model, .. } => {
                 remote.set_session_id(session_id);
+                // Store provider info for UI display
+                if let Some(name) = provider_name {
+                    self.remote_provider_name = Some(name);
+                }
+                if let Some(model) = provider_model {
+                    self.remote_provider_model = Some(model);
+                }
                 if !remote.has_loaded_history() {
                     remote.mark_history_loaded();
                     for msg in messages {
@@ -2548,11 +2560,13 @@ impl super::TuiState for App {
     }
 
     fn provider_name(&self) -> String {
-        self.provider.name().to_string()
+        self.remote_provider_name.clone()
+            .unwrap_or_else(|| self.provider.name().to_string())
     }
 
     fn provider_model(&self) -> String {
-        self.provider.model().to_string()
+        self.remote_provider_model.clone()
+            .unwrap_or_else(|| self.provider.model().to_string())
     }
 
     fn mcp_servers(&self) -> Vec<String> {
