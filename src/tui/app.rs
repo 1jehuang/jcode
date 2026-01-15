@@ -133,6 +133,8 @@ pub struct App {
     last_version_check: Option<Instant>,
     // Pending migration to new stable version
     pending_migration: Option<String>,
+    // Session to resume on connect (remote mode)
+    resume_session_id: Option<String>,
 }
 
 /// A placeholder provider for remote mode (never actually called)
@@ -207,15 +209,17 @@ impl App {
             last_version_check: Some(Instant::now()),
             pending_migration: None,
             remote_client_count: None,
+            resume_session_id: None,
         }
     }
 
     /// Create an App instance for remote mode (connecting to server)
-    pub async fn new_for_remote() -> Self {
+    pub async fn new_for_remote(resume_session: Option<String>) -> Self {
         let provider: Arc<dyn Provider> = Arc::new(NullProvider);
         let registry = Registry::new(Arc::clone(&provider)).await;
         let mut app = Self::new(provider, registry);
         app.is_remote = true;
+        app.resume_session_id = resume_session;
         app
     }
 
@@ -552,6 +556,22 @@ impl App {
                     title: None,
                     tool_data: None,
                 });
+            }
+
+            // Resume session if requested (only on first connect, not reconnect)
+            if reconnect_attempts == 0 {
+                if let Some(session_id) = self.resume_session_id.take() {
+                    if let Err(e) = remote.resume_session(&session_id).await {
+                        self.display_messages.push(DisplayMessage {
+                            role: "error".to_string(),
+                            content: format!("Failed to resume session: {}", e),
+                            tool_calls: Vec::new(),
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
+                        });
+                    }
+                }
             }
 
             // Main event loop
@@ -1394,15 +1414,16 @@ impl App {
             return;
         }
 
-        // Add user message to display immediately
+        // Add user message to display immediately (show placeholder, not full paste)
         self.display_messages.push(DisplayMessage {
             role: "user".to_string(),
-            content: input.clone(),
+            content: raw_input.clone(),
             tool_calls: vec![],
             duration_secs: None,
             title: None,
             tool_data: None,
         });
+        // Send expanded content (with actual pasted text) to model
         self.messages.push(Message::user(&input));
         self.session.add_message(
             Role::User,
@@ -3141,9 +3162,18 @@ mod tests {
         // Submit expands placeholder
         app.submit_input();
 
-        // Check expanded message
+        // Display shows placeholder (user sees condensed view)
         assert_eq!(app.display_messages().len(), 1);
-        assert_eq!(app.display_messages()[0].content, "A: pasted content B");
+        assert_eq!(app.display_messages()[0].content, "A: [pasted 1 line] B");
+
+        // Model receives expanded content (actual pasted text)
+        assert_eq!(app.messages.len(), 1);
+        match &app.messages[0].content[0] {
+            crate::message::ContentBlock::Text { text } => {
+                assert_eq!(text, "A: pasted content B");
+            }
+            _ => panic!("Expected Text content block"),
+        }
 
         // Pasted contents should be cleared
         assert!(app.pasted_contents.is_empty());
@@ -3161,7 +3191,15 @@ mod tests {
         assert_eq!(app.pasted_contents.len(), 2);
 
         app.submit_input();
-        assert_eq!(app.display_messages()[0].content, "first second\nline");
+        // Display shows placeholders (user sees condensed view)
+        assert_eq!(app.display_messages()[0].content, "[pasted 1 line] [pasted 2 lines]");
+        // Model receives expanded content
+        match &app.messages[0].content[0] {
+            crate::message::ContentBlock::Text { text } => {
+                assert_eq!(text, "first second\nline");
+            }
+            _ => panic!("Expected Text content block"),
+        }
     }
 
     #[test]
