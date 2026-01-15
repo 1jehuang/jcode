@@ -73,9 +73,12 @@ pub struct App {
     should_quit: bool,
     // Message queueing
     queued_messages: Vec<String>,
-    // Live token usage
+    // Live token usage (per turn)
     streaming_input_tokens: u64,
     streaming_output_tokens: u64,
+    // Total session token usage (accumulated across all turns)
+    total_input_tokens: u64,
+    total_output_tokens: u64,
     // Context limit tracking (for compaction warning)
     context_limit: u64,
     context_warning_shown: bool,
@@ -109,6 +112,13 @@ pub struct App {
     // Remote provider info (set when running in remote mode)
     remote_provider_name: Option<String>,
     remote_provider_model: Option<String>,
+    // Remote MCP servers and skills (set from server in remote mode)
+    remote_mcp_servers: Vec<String>,
+    remote_skills: Vec<String>,
+    // Total session token usage (from server in remote mode)
+    remote_total_tokens: Option<(u64, u64)>,
+    // Current message request ID (for remote mode - to match Done events)
+    current_message_id: Option<u64>,
 }
 
 /// A placeholder provider for remote mode (never actually called)
@@ -152,6 +162,8 @@ impl App {
             queued_messages: Vec::new(),
             streaming_input_tokens: 0,
             streaming_output_tokens: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
             context_limit: 200_000, // Claude's context window
             context_warning_shown: false,
             last_stream_activity: None,
@@ -170,6 +182,10 @@ impl App {
             debug_tx: None,
             remote_provider_name: None,
             remote_provider_model: None,
+            remote_mcp_servers: Vec::new(),
+            remote_skills: Vec::new(),
+            remote_total_tokens: None,
+            current_message_id: None,
         }
     }
 
@@ -501,6 +517,10 @@ impl App {
 
         match event {
             ServerEvent::TextDelta { text } => {
+                // Update status from Sending to Streaming on first text
+                if matches!(self.status, ProcessingStatus::Sending) {
+                    self.status = ProcessingStatus::Streaming;
+                }
                 if let Some(chunk) = self.stream_buffer.push(&text) {
                     self.streaming_text.push_str(&chunk);
                 }
@@ -566,26 +586,31 @@ impl App {
                 self.streaming_input_tokens = input;
                 self.streaming_output_tokens = output;
             }
-            ServerEvent::Done { .. } => {
-                // Flush stream buffer
-                if let Some(chunk) = self.stream_buffer.flush() {
-                    self.streaming_text.push_str(&chunk);
+            ServerEvent::Done { id } => {
+                // Only process Done for our current message request
+                // (ignore Done events for Subscribe, GetHistory, etc.)
+                if self.current_message_id == Some(id) {
+                    // Flush stream buffer
+                    if let Some(chunk) = self.stream_buffer.flush() {
+                        self.streaming_text.push_str(&chunk);
+                    }
+                    if !self.streaming_text.is_empty() {
+                        self.display_messages.push(DisplayMessage {
+                            role: "assistant".to_string(),
+                            content: std::mem::take(&mut self.streaming_text),
+                            tool_calls: vec![],
+                            duration_secs: self.processing_started.map(|s| s.elapsed().as_secs_f32()),
+                            title: None,
+                            tool_data: None,
+                        });
+                    }
+                    self.is_processing = false;
+                    self.status = ProcessingStatus::Idle;
+                    self.processing_started = None;
+                    self.streaming_tool_calls.clear();
+                    self.current_message_id = None;
+                    remote.clear_pending();
                 }
-                if !self.streaming_text.is_empty() {
-                    self.display_messages.push(DisplayMessage {
-                        role: "assistant".to_string(),
-                        content: std::mem::take(&mut self.streaming_text),
-                        tool_calls: vec![],
-                        duration_secs: self.processing_started.map(|s| s.elapsed().as_secs_f32()),
-                        title: None,
-                        tool_data: None,
-                    });
-                }
-                self.is_processing = false;
-                self.status = ProcessingStatus::Idle;
-                self.processing_started = None;
-                self.streaming_tool_calls.clear();
-                remote.clear_pending();
             }
             ServerEvent::Error { message, .. } => {
                 self.display_messages.push(DisplayMessage {
@@ -793,8 +818,9 @@ impl App {
                             title: None,
                             tool_data: None,
                         });
-                        // Send to server
-                        remote.send_message(input).await?;
+                        // Send to server and track the message ID
+                        let msg_id = remote.send_message(input).await?;
+                        self.current_message_id = Some(msg_id);
                         self.is_processing = true;
                         self.status = ProcessingStatus::Sending;
                         self.processing_started = Some(Instant::now());
@@ -845,6 +871,10 @@ impl App {
 
         // Process any queued messages
         self.process_queued_messages(terminal, event_stream).await;
+
+        // Accumulate turn tokens into session totals
+        self.total_input_tokens += self.streaming_input_tokens;
+        self.total_output_tokens += self.streaming_output_tokens;
 
         self.is_processing = false;
         self.status = ProcessingStatus::Idle;
@@ -2618,6 +2648,12 @@ impl super::TuiState for App {
 
     fn time_since_activity(&self) -> Option<std::time::Duration> {
         self.last_stream_activity.map(|t| t.elapsed())
+    }
+
+    fn total_session_tokens(&self) -> Option<(u64, u64)> {
+        // In remote mode, use tokens from server
+        // Standalone mode doesn't currently track total tokens
+        self.remote_total_tokens
     }
 }
 

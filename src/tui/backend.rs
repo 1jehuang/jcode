@@ -244,13 +244,16 @@ impl RemoteConnection {
     }
 
     /// Send a message to the server
-    pub async fn send_message(&mut self, content: String) -> Result<()> {
+    /// Send a message to the server and return the request ID
+    pub async fn send_message(&mut self, content: String) -> Result<u64> {
+        let id = self.next_request_id;
         let request = Request::Message {
-            id: self.next_request_id,
+            id,
             content,
         };
         self.next_request_id += 1;
-        self.send_request(request).await
+        self.send_request(request).await?;
+        Ok(id)
     }
 
     /// Request server reload
