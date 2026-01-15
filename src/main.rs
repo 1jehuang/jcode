@@ -856,13 +856,28 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
     };
     build::save_migration_context(&ctx)?;
 
-    // Get canary binary path
+    // Ensure canary binary exists - wrapper reads from canary symlink
     let canary_binary = build::canary_binary_path()?;
-    let binary_path = if canary_binary.exists() {
-        canary_binary
-    } else {
-        repo_dir.join("target/release/jcode")
-    };
+    if !canary_binary.exists() {
+        // No canary binary yet - install current binary as canary
+        let current_exe = std::env::current_exe()?;
+        let canary_dir = canary_binary.parent().unwrap();
+        std::fs::create_dir_all(canary_dir)?;
+        std::fs::copy(&current_exe, &canary_binary)?;
+
+        // Make executable
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&canary_binary)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&canary_binary, perms)?;
+        }
+
+        eprintln!("Installed current binary as initial canary");
+    }
+
+    let binary_path = canary_binary;
 
     // Launch wrapper process
     eprintln!("Starting self-dev session with canary {}...", hash);
@@ -888,18 +903,24 @@ const EXIT_RELOAD_REQUESTED: i32 = 100; // Agent wants to reload to new canary b
 const EXIT_ROLLBACK_REQUESTED: i32 = 101; // Agent wants to rollback to stable
 
 /// Wrapper that runs canary binary and handles crashes
-async fn run_canary_wrapper(session_id: &str, _binary: &str) -> Result<()> {
+async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()> {
     use std::process::Stdio;
 
     let cwd = std::env::current_dir()?;
     let repo_dir = get_repo_dir();
+    let initial_binary_path = std::path::PathBuf::from(initial_binary);
 
     loop {
         // Always read canary path fresh - allows agent to rebuild and update symlink
-        let binary_path = build::canary_binary_path()?;
-        if !binary_path.exists() {
-            anyhow::bail!("Canary binary not found: {:?}", binary_path);
-        }
+        // Fall back to initial binary (usually target/release/jcode) if canary not set up yet
+        let canary_path = build::canary_binary_path()?;
+        let binary_path = if canary_path.exists() {
+            canary_path
+        } else if initial_binary_path.exists() {
+            initial_binary_path.clone()
+        } else {
+            anyhow::bail!("No binary found: canary at {:?} or initial at {:?}", canary_path, initial_binary_path);
+        };
 
         eprintln!("Launching canary session {}...", session_id);
 
