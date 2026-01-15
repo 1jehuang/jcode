@@ -250,6 +250,23 @@ async fn run_main(args: Args) -> Result<()> {
             run_canary_wrapper(&session_id, &binary).await?;
         }
         None => {
+            // Auto-detect jcode repo and enable self-dev mode
+            let cwd = std::env::current_dir()?;
+            let in_jcode_repo = build::is_jcode_repo(&cwd);
+            let already_in_selfdev = std::env::var("JCODE_SELFDEV_MODE").is_ok();
+
+            if in_jcode_repo && !already_in_selfdev && !args.standalone {
+                // Auto-start self-dev mode with wrapper
+                eprintln!("📍 Detected jcode repository - enabling self-dev mode");
+                eprintln!("   (use --standalone to disable auto-detection)\n");
+
+                // Set env var to prevent infinite loop
+                std::env::set_var("JCODE_SELFDEV_MODE", "1");
+
+                // Re-exec into self-dev mode
+                return run_self_dev(false, args.resume).await;
+            }
+
             // Check for --standalone flag
             if args.standalone {
                 let (provider, registry) = init_provider_and_registry(&args.provider).await?;
@@ -748,11 +765,20 @@ fn run_update() -> Result<()> {
 async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Result<()> {
     let repo_dir = get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
-    // Get or create session
+    // Get or create session and mark as canary
     let session_id = if let Some(id) = resume_session {
+        // Load existing session and ensure it's marked as canary
+        if let Ok(mut session) = session::Session::load(&id) {
+            if !session.is_canary {
+                session.set_canary("self-dev");
+                let _ = session.save();
+            }
+        }
         id
     } else {
-        let session = session::Session::create(None, Some("Self-development session".to_string()));
+        let mut session = session::Session::create(None, Some("Self-development session".to_string()));
+        session.set_canary("self-dev");
+        let _ = session.save();
         session.id.clone()
     };
 
