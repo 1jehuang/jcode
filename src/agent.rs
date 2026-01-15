@@ -39,6 +39,25 @@ const SYSTEM_PROMPT: &str = r#"You are a coding assistant with access to tools f
 
 When you need to make changes, use the tools directly. Don't just describe what to do."#;
 
+const SELFDEV_PROMPT: &str = r#"
+## Self-Development Mode
+
+You are working on the jcode codebase itself. You have the `selfdev` tool available:
+
+- `selfdev { action: "rebuild" }` - Build and test your changes, then restart with new code
+- `selfdev { action: "status" }` - Check build versions and crash history
+- `selfdev { action: "promote" }` - Mark current build as stable for other sessions
+- `selfdev { action: "rollback" }` - Switch back to stable build
+
+**Workflow:**
+1. Make code changes using edit/write tools
+2. Use `selfdev { action: "rebuild" }` to build, test, and restart with new code
+3. The session continues automatically in the new build
+4. If the build crashes, you'll wake up in the stable version with crash context
+5. Once satisfied, use `selfdev { action: "promote" }` to make it stable
+
+Use this to iterate quickly on jcode features and fixes."#;
+
 pub struct Agent {
     provider: Arc<dyn Provider>,
     registry: Registry,
@@ -145,6 +164,26 @@ impl Agent {
         self.session = Session::create(None, None);
         self.active_skill = None;
         self.provider_session_id = None;
+    }
+
+    /// Build the system prompt, including skill and self-dev context
+    fn build_system_prompt(&self) -> String {
+        let mut prompt = SYSTEM_PROMPT.to_string();
+
+        // Add self-dev context if in canary mode
+        if self.session.is_canary {
+            prompt.push_str(SELFDEV_PROMPT);
+        }
+
+        // Add active skill prompt
+        if let Some(ref skill_name) = self.active_skill {
+            if let Some(skill) = self.skills.get(skill_name) {
+                prompt.push_str("\n\n");
+                prompt.push_str(&skill.get_prompt());
+            }
+        }
+
+        prompt
     }
 
     /// Restore a session by ID (loads from disk)
@@ -269,16 +308,7 @@ impl Agent {
         loop {
             let tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
 
-            // Build system prompt with active skill
-            let system_prompt = if let Some(ref skill_name) = self.active_skill {
-                if let Some(skill) = self.skills.get(skill_name) {
-                    format!("{}\n\n{}", SYSTEM_PROMPT, skill.get_prompt())
-                } else {
-                    SYSTEM_PROMPT.to_string()
-                }
-            } else {
-                SYSTEM_PROMPT.to_string()
-            };
+            let system_prompt = self.build_system_prompt();
 
             let messages = self.session.messages_for_provider();
 
@@ -686,16 +716,7 @@ impl Agent {
         loop {
             let tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
 
-            // Build system prompt with active skill
-            let system_prompt = if let Some(ref skill_name) = self.active_skill {
-                if let Some(skill) = self.skills.get(skill_name) {
-                    format!("{}\n\n{}", SYSTEM_PROMPT, skill.get_prompt())
-                } else {
-                    SYSTEM_PROMPT.to_string()
-                }
-            } else {
-                SYSTEM_PROMPT.to_string()
-            };
+            let system_prompt = self.build_system_prompt();
 
             let messages = self.session.messages_for_provider();
 

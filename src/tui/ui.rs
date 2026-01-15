@@ -638,12 +638,20 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 let status_suffix = app.subagent_status()
                     .map(|s| format!(" ({})", s))
                     .unwrap_or_default();
+                // Get tool details (command, file path, etc.) from the current tool call
+                let tool_detail = app.streaming_tool_calls()
+                    .last()
+                    .map(|tc| get_tool_summary(tc))
+                    .filter(|s| !s.is_empty())
+                    .map(|s| format!(" {}", s))
+                    .unwrap_or_default();
                 Line::from(vec![
                     Span::styled(spinner, Style::default().fg(anim_color)),
                     Span::styled(format!(" {}", tokens_str), Style::default().fg(DIM_COLOR)),
                     Span::styled(name.to_string(), Style::default().fg(anim_color).bold()),
                     Span::styled(status_suffix, Style::default().fg(DIM_COLOR)),
-                    Span::styled(format!("… {:.1}s ", elapsed), Style::default().fg(DIM_COLOR)),
+                    Span::styled(tool_detail, Style::default().fg(DIM_COLOR)),
+                    Span::styled(format!(" {:.1}s ", elapsed), Style::default().fg(DIM_COLOR)),
                     Span::styled(bar, Style::default().fg(anim_color)),
                 ])
             }

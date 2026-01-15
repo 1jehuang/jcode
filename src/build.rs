@@ -27,6 +27,30 @@ pub fn get_repo_dir() -> Option<PathBuf> {
     None
 }
 
+/// Check if a directory is the jcode repository
+pub fn is_jcode_repo(dir: &std::path::Path) -> bool {
+    // Check for Cargo.toml with name = "jcode"
+    let cargo_toml = dir.join("Cargo.toml");
+    if !cargo_toml.exists() {
+        return false;
+    }
+
+    // Check for .git directory
+    if !dir.join(".git").exists() {
+        return false;
+    }
+
+    // Read Cargo.toml and check package name
+    if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
+        // Simple check - look for 'name = "jcode"' in [package] section
+        if content.contains("name = \"jcode\"") {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Status of a canary build being tested
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
