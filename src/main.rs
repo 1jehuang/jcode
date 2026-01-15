@@ -1213,3 +1213,134 @@ mod tests {
         }
     }
 }
+
+
+#[cfg(test)]
+mod selfdev_integration_tests {
+    use super::*;
+    
+    // Simple null provider for testing
+    struct TestProvider;
+    
+    #[async_trait::async_trait]
+    impl provider::Provider for TestProvider {
+        fn name(&self) -> &str { "test" }
+        fn model(&self) -> String { "test".to_string() }
+        fn available_models(&self) -> Vec<&'static str> { vec![] }
+        fn set_model(&self, _model: &str) -> anyhow::Result<()> { Ok(()) }
+        fn handles_tools_internally(&self) -> bool { false }
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _session_id: Option<&str>,
+        ) -> anyhow::Result<crate::provider::EventStream> {
+            unimplemented!()
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_selfdev_tool_registration() {
+        // Create a canary session
+        let mut session = session::Session::create(None, Some("Test".to_string()));
+        session.set_canary("test");
+        
+        // Verify session is canary
+        assert!(session.is_canary, "Session should be marked as canary");
+        
+        // Create registry
+        let provider = Arc::new(TestProvider) as Arc<dyn provider::Provider>;
+        let registry = tool::Registry::new(provider).await;
+        
+        // Get tool names before
+        let tools_before: Vec<String> = registry.tool_names().await;
+        let has_selfdev_before = tools_before.contains(&"selfdev".to_string());
+        
+        // Register selfdev tools
+        registry.register_selfdev_tools().await;
+        
+        // Get tool names after
+        let tools_after: Vec<String> = registry.tool_names().await;
+        let has_selfdev_after = tools_after.contains(&"selfdev".to_string());
+        
+        println!("Before: selfdev={}, tools={:?}", has_selfdev_before, tools_before.len());
+        println!("After: selfdev={}, tools={:?}", has_selfdev_after, tools_after.len());
+        
+        assert!(has_selfdev_after, "selfdev should be registered");
+    }
+}
+
+#[cfg(test)]
+mod selfdev_e2e_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_selfdev_session_and_registry() {
+        // 1. Create a canary session
+        let mut session = session::Session::create(None, Some("Test E2E".to_string()));
+        session.set_canary("test-build");
+        let session_id = session.id.clone();
+        session.save().expect("Failed to save session");
+
+        // Verify session was saved correctly
+        let loaded = session::Session::load(&session_id).expect("Failed to load session");
+        assert!(loaded.is_canary, "Loaded session should be canary");
+
+        // 2. Create registry
+        struct TestProvider;
+        #[async_trait::async_trait]
+        impl provider::Provider for TestProvider {
+            fn name(&self) -> &str { "test" }
+            fn model(&self) -> String { "test".to_string() }
+            fn available_models(&self) -> Vec<&'static str> { vec![] }
+            fn set_model(&self, _model: &str) -> anyhow::Result<()> { Ok(()) }
+            fn handles_tools_internally(&self) -> bool { false }
+            async fn complete(
+                &self,
+                _messages: &[crate::message::Message],
+                _tools: &[crate::message::ToolDefinition],
+                _system: &str,
+                _session_id: Option<&str>,
+            ) -> anyhow::Result<crate::provider::EventStream> {
+                unimplemented!()
+            }
+        }
+
+        let provider = Arc::new(TestProvider) as Arc<dyn provider::Provider>;
+        let registry = tool::Registry::new(provider.clone()).await;
+
+        // 3. Check tools before selfdev registration
+        let tools_before = registry.tool_names().await;
+        assert!(!tools_before.contains(&"selfdev".to_string()),
+            "selfdev should NOT be registered initially");
+
+        // 4. Register selfdev (simulating what init_mcp does when session.is_canary=true)
+        registry.register_selfdev_tools().await;
+
+        // 5. Check tools after
+        let tools_after = registry.tool_names().await;
+        assert!(tools_after.contains(&"selfdev".to_string()),
+            "selfdev SHOULD be registered after register_selfdev_tools");
+
+        // 6. Test that the tool is executable
+        let ctx = tool::ToolContext {
+            session_id: session_id.clone(),
+            message_id: "test".to_string(),
+            tool_call_id: "test".to_string(),
+        };
+        let result = registry.execute(
+            "selfdev",
+            serde_json::json!({"action": "status"}),
+            ctx
+        ).await;
+
+        println!("selfdev status result: {:?}", result);
+        assert!(result.is_ok(), "selfdev tool should execute successfully");
+
+        // 7. Cleanup
+        let _ = std::fs::remove_file(
+            crate::storage::jcode_dir().unwrap().join("sessions").join(format!("{}.json", session_id))
+        );
+    }
+}
