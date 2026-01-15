@@ -38,4 +38,12 @@ pub trait TuiState {
     fn time_since_activity(&self) -> Option<Duration>;
     /// Total session token usage (input, output) - used for high usage warnings
     fn total_session_tokens(&self) -> Option<(u64, u64)>;
+    /// Whether running in remote (client-server) mode
+    fn is_remote_mode(&self) -> bool;
+    /// Current session ID (if available)
+    fn current_session_id(&self) -> Option<String>;
+    /// List of all session IDs on the server (remote mode only)
+    fn server_sessions(&self) -> Vec<String>;
+    /// Number of connected clients (remote mode only)
+    fn connected_clients(&self) -> Option<usize>;
 }

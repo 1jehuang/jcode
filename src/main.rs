@@ -294,7 +294,7 @@ async fn run_main(args: Args) -> Result<()> {
                 }
 
                 eprintln!("Connecting to server...");
-                run_tui_client().await?;
+                run_tui_client(args.resume).await?;
             }
         }
     }
@@ -586,12 +586,12 @@ async fn run_client() -> Result<()> {
 }
 
 /// Run TUI client connected to server
-async fn run_tui_client() -> Result<()> {
+async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
     let terminal = ratatui::init();
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
 
     // Use App in remote mode - same UI, connects to server
-    let app = tui::App::new_for_remote().await;
+    let app = tui::App::new_for_remote(resume_session).await;
     let result = app.run_remote(terminal).await;
 
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
