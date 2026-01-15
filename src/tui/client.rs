@@ -609,6 +609,10 @@ impl TuiState for ClientApp {
         false // Deprecated client doesn't support canary mode
     }
 
+    fn show_diffs(&self) -> bool {
+        true // Always show diffs in deprecated client
+    }
+
     fn current_session_id(&self) -> Option<String> {
         self.session_id.clone()
     }

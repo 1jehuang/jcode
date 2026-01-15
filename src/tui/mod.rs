@@ -1,5 +1,6 @@
 mod app;
 pub mod backend;
+mod core;
 mod markdown;
 mod stream_buffer;
 mod ui;
@@ -10,6 +11,7 @@ pub mod client;
 
 pub use app::{App, DisplayMessage, ProcessingStatus, RunResult};
 pub use backend::{DebugEvent, DebugMessage, RemoteConnection};
+pub use core::TuiCore;
 
 use crate::message::ToolCall;
 use std::time::Duration;
@@ -42,6 +44,8 @@ pub trait TuiState {
     fn is_remote_mode(&self) -> bool;
     /// Whether running in canary/self-dev mode
     fn is_canary(&self) -> bool;
+    /// Whether to show diffs for edit/write tools
+    fn show_diffs(&self) -> bool;
     /// Current session ID (if available)
     fn current_session_id(&self) -> Option<String>;
     /// List of all session IDs on the server (remote mode only)
