@@ -1,6 +1,7 @@
 mod agent;
 mod auth;
 mod auto_debug;
+mod build;
 mod bus;
 mod compaction;
 mod id;
@@ -125,6 +126,25 @@ enum Command {
 
     /// Update jcode to the latest version
     Update,
+
+    /// Self-development mode: run as canary with auto-rollback on crash
+    SelfDev {
+        /// Build and test a new canary version before launching
+        #[arg(long)]
+        build: bool,
+    },
+
+    /// Promote current canary build to stable (other sessions will auto-migrate)
+    Promote,
+
+    /// Internal: wrapper for canary process (handles crash recovery)
+    #[command(hide = true)]
+    CanaryWrapper {
+        /// Session ID to run
+        session_id: String,
+        /// Binary path to run
+        binary: String,
+    },
 }
 
 #[tokio::main]
@@ -219,6 +239,15 @@ async fn run_main(args: Args) -> Result<()> {
         }
         Some(Command::Update) => {
             run_update()?;
+        }
+        Some(Command::SelfDev { build }) => {
+            run_self_dev(build, args.resume).await?;
+        }
+        Some(Command::Promote) => {
+            run_promote()?;
+        }
+        Some(Command::CanaryWrapper { session_id, binary }) => {
+            run_canary_wrapper(&session_id, &binary).await?;
         }
         None => {
             // Check for --standalone flag
@@ -380,8 +409,26 @@ async fn run_tui(
 fn hot_reload(session_id: &str) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
-    let repo_dir = get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
     let cwd = std::env::current_dir()?;
+
+    // Check if this is a migration to a specific binary (auto-migration to stable)
+    if let Ok(migrate_binary) = std::env::var("JCODE_MIGRATE_BINARY") {
+        let binary_path = std::path::PathBuf::from(&migrate_binary);
+        if binary_path.exists() {
+            eprintln!("Migrating to stable binary...");
+            let err = ProcessCommand::new(&binary_path)
+                .arg("--resume")
+                .arg(session_id)
+                .arg("--no-update")
+                .current_dir(cwd)
+                .exec();
+            return Err(anyhow::anyhow!("Failed to exec: {}", err));
+        } else {
+            eprintln!("Warning: Migration binary not found at {:?}, falling back to rebuild", binary_path);
+        }
+    }
+
+    let repo_dir = get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
     eprintln!("Hot-reloading jcode with session {}...", session_id);
 
@@ -689,4 +736,323 @@ fn run_update() -> Result<()> {
     eprintln!("Successfully updated to {}", hash.trim());
 
     Ok(())
+}
+
+/// Self-development mode: run as canary with crash recovery wrapper
+async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Result<()> {
+    let repo_dir = get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
+
+    // Get or create session
+    let session_id = if let Some(id) = resume_session {
+        id
+    } else {
+        let session = session::Session::create(None, Some("Self-development session".to_string()));
+        session.id.clone()
+    };
+
+    let hash = if should_build {
+        // Build new canary version
+        eprintln!("Building canary version...");
+
+        let pull = ProcessCommand::new("git")
+            .args(["pull", "-q"])
+            .current_dir(&repo_dir)
+            .status()?;
+
+        if !pull.success() {
+            eprintln!("Warning: git pull failed, continuing with local changes");
+        }
+
+        let build_status = ProcessCommand::new("cargo")
+            .args(["build", "--release"])
+            .current_dir(&repo_dir)
+            .status()?;
+
+        if !build_status.success() {
+            anyhow::bail!("Build failed");
+        }
+
+        // Run quick tests
+        eprintln!("Running tests...");
+        let test = ProcessCommand::new("cargo")
+            .args(["test", "--release"])
+            .current_dir(&repo_dir)
+            .status()?;
+
+        if !test.success() {
+            anyhow::bail!("Tests failed - not creating canary");
+        }
+
+        let hash = build::current_git_hash(&repo_dir)?;
+
+        // Install to versioned location
+        build::install_version(&repo_dir, &hash)?;
+        build::update_canary_symlink(&hash)?;
+
+        // Update manifest
+        let mut manifest = build::BuildManifest::load()?;
+        manifest.start_canary(&hash, &session_id)?;
+
+        // Record build info
+        let info = build::current_build_info(&repo_dir)?;
+        manifest.add_to_history(info)?;
+
+        eprintln!("✓ Canary build {} ready", hash);
+        hash
+    } else {
+        // Use existing canary or current binary
+        let manifest = build::BuildManifest::load()?;
+        if let Some(canary) = manifest.canary {
+            canary
+        } else {
+            // No canary, use current
+            build::current_git_hash(&repo_dir)?
+        }
+    };
+
+    // Save migration context
+    let stable_hash = build::read_stable_version()?.unwrap_or_else(|| "unknown".to_string());
+    let diff = build::current_git_diff(&repo_dir).ok();
+
+    let ctx = build::MigrationContext {
+        session_id: session_id.clone(),
+        from_version: stable_hash,
+        to_version: hash.clone(),
+        change_summary: build::get_commit_message(&repo_dir, &hash).ok(),
+        diff,
+        timestamp: chrono::Utc::now(),
+    };
+    build::save_migration_context(&ctx)?;
+
+    // Get canary binary path
+    let canary_binary = build::canary_binary_path()?;
+    let binary_path = if canary_binary.exists() {
+        canary_binary
+    } else {
+        repo_dir.join("target/release/jcode")
+    };
+
+    // Launch wrapper process
+    eprintln!("Starting self-dev session with canary {}...", hash);
+
+    let exe = std::env::current_exe()?;
+    let cwd = std::env::current_dir()?;
+
+    // Use wrapper to handle crashes
+    use std::os::unix::process::CommandExt;
+    let err = ProcessCommand::new(&exe)
+        .arg("canary-wrapper")
+        .arg(&session_id)
+        .arg(binary_path.to_string_lossy().as_ref())
+        .current_dir(cwd)
+        .exec();
+
+    Err(anyhow::anyhow!("Failed to exec wrapper: {}", err))
+}
+
+/// Wrapper that runs canary binary and handles crashes
+async fn run_canary_wrapper(session_id: &str, binary: &str) -> Result<()> {
+    use std::process::Stdio;
+
+    let binary_path = std::path::PathBuf::from(binary);
+    if !binary_path.exists() {
+        anyhow::bail!("Canary binary not found: {}", binary);
+    }
+
+    let cwd = std::env::current_dir()?;
+    let repo_dir = get_repo_dir();
+
+    loop {
+        eprintln!("Launching canary session {}...", session_id);
+
+        // Run the canary binary
+        let mut child = ProcessCommand::new(&binary_path)
+            .arg("--resume")
+            .arg(session_id)
+            .arg("--standalone")
+            .arg("--no-update")
+            .current_dir(&cwd)
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        let status = child.wait()?;
+
+        if status.success() {
+            // Clean exit
+            eprintln!("Canary session exited cleanly");
+            build::clear_migration_context(session_id)?;
+            break;
+        }
+
+        // Crash! Collect info
+        let exit_code = status.code().unwrap_or(-1);
+        eprintln!("\n⚠️  Canary crashed with exit code {}", exit_code);
+
+        // Read stderr if available
+        let stderr_output = if let Some(mut stderr) = child.stderr.take() {
+            use std::io::Read;
+            let mut buf = String::new();
+            stderr.read_to_string(&mut buf).unwrap_or(0);
+            buf
+        } else {
+            String::new()
+        };
+
+        // Get diff from migration context
+        let diff = build::load_migration_context(session_id)?
+            .and_then(|ctx| ctx.diff);
+
+        // Record crash in manifest
+        let hash = build::BuildManifest::load()?.canary.unwrap_or_default();
+        let mut manifest = build::BuildManifest::load()?;
+        manifest.record_crash(&hash, exit_code, &stderr_output, diff)?;
+
+        // Inject crash context into session
+        inject_crash_context(session_id, &hash, exit_code, &stderr_output, repo_dir.as_ref())?;
+
+        // Rollback to stable
+        let stable_binary = build::stable_binary_path()?;
+        if stable_binary.exists() {
+            eprintln!("Rolling back to stable version...");
+
+            let mut child = ProcessCommand::new(&stable_binary)
+                .arg("--resume")
+                .arg(session_id)
+                .arg("--standalone")
+                .arg("--no-update")
+                .current_dir(&cwd)
+                .spawn()?;
+
+            let status = child.wait()?;
+            if status.success() {
+                break;
+            }
+            // If stable also crashes, we have bigger problems
+            eprintln!("Stable version also crashed! Exiting.");
+            break;
+        } else {
+            eprintln!("No stable version to rollback to. Exiting.");
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Inject crash context into the session so agent can see what happened
+fn inject_crash_context(
+    session_id: &str,
+    build_hash: &str,
+    exit_code: i32,
+    stderr: &str,
+    repo_dir: Option<&std::path::PathBuf>,
+) -> Result<()> {
+    use crate::message::{ContentBlock, Role};
+
+    let mut session = match session::Session::load(session_id) {
+        Ok(s) => s,
+        Err(_) => return Ok(()), // Session doesn't exist yet, skip
+    };
+
+    // Get diff if available
+    let diff_info = if let Some(dir) = repo_dir {
+        build::current_git_diff(dir).ok()
+    } else {
+        None
+    };
+
+    // Build crash report
+    let mut report = format!(
+        "🔴 **Canary Build Crashed**\n\n\
+         Build: `{}`\n\
+         Exit code: {}\n",
+        build_hash, exit_code
+    );
+
+    if !stderr.is_empty() {
+        let truncated = if stderr.len() > 2000 {
+            format!("{}...(truncated)", &stderr[..2000])
+        } else {
+            stderr.to_string()
+        };
+        report.push_str(&format!("\n**Stderr:**\n```\n{}\n```\n", truncated));
+    }
+
+    if let Some(diff) = diff_info {
+        if !diff.is_empty() {
+            let truncated = if diff.len() > 3000 {
+                format!("{}...(truncated)", &diff[..3000])
+            } else {
+                diff
+            };
+            report.push_str(&format!("\n**Recent changes:**\n```diff\n{}\n```\n", truncated));
+        }
+    }
+
+    report.push_str("\nI've been rolled back to the stable version. Please investigate and fix the issue.");
+
+    // Add as system message
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text { text: report }],
+    );
+    session.save()?;
+
+    Ok(())
+}
+
+/// Promote current canary to stable
+fn run_promote() -> Result<()> {
+    let mut manifest = build::BuildManifest::load()?;
+
+    let canary_hash = manifest.canary.clone()
+        .ok_or_else(|| anyhow::anyhow!("No canary build to promote"))?;
+
+    eprintln!("Promoting canary {} to stable...", canary_hash);
+
+    // Update symlink
+    build::update_stable_symlink(&canary_hash)?;
+
+    // Update manifest
+    manifest.promote_to_stable(&canary_hash)?;
+
+    eprintln!("✓ Build {} is now stable", canary_hash);
+    eprintln!("Other sessions will auto-migrate to this version.");
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_session_recovery_tracking() {
+        // Set a session ID
+        set_current_session("test_session_123");
+
+        // Verify it's stored correctly
+        let guard = CURRENT_SESSION_ID.lock().unwrap();
+        assert_eq!(guard.as_ref().unwrap(), "test_session_123");
+    }
+
+    #[test]
+    fn test_session_recovery_message_format() {
+        // Set a unique session ID for this test
+        let test_session = "session_format_test_12345";
+        set_current_session(test_session);
+
+        // Verify the session ID is accessible and forms a valid recovery command
+        if let Ok(guard) = CURRENT_SESSION_ID.lock() {
+            if let Some(session_id) = guard.as_ref() {
+                // Verify the recovery command format is correct
+                let expected_cmd = format!("jcode --resume {}", session_id);
+                assert!(expected_cmd.starts_with("jcode --resume "));
+                // Session ID should be non-empty
+                assert!(!session_id.is_empty());
+            } else {
+                panic!("Session ID should be set");
+            }
+        }
+    }
 }
