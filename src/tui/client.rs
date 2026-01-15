@@ -583,4 +583,8 @@ impl TuiState for ClientApp {
     fn time_since_activity(&self) -> Option<Duration> {
         self.last_activity.map(|t| t.elapsed())
     }
+
+    fn total_session_tokens(&self) -> Option<(u64, u64)> {
+        None // Deprecated client doesn't track total tokens
+    }
 }

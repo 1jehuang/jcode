@@ -176,6 +176,16 @@ async fn main() -> Result<()> {
             auto_debug::analyze_error(&error_str, "main execution");
         }
 
+        // Print session recovery command if we have a session
+        if let Ok(guard) = CURRENT_SESSION_ID.lock() {
+            if let Some(session_id) = guard.as_ref() {
+                eprintln!();
+                eprintln!("\x1b[33mTo restore this session, run:\x1b[0m");
+                eprintln!("  jcode --resume {}", session_id);
+                eprintln!();
+            }
+        }
+
         return Err(e);
     }
 
