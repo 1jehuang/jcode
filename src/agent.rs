@@ -7,7 +7,7 @@ use crate::logging;
 use crate::message::{ContentBlock, Role, StreamEvent, ToolCall};
 use crate::protocol::{HistoryMessage, ServerEvent};
 use crate::provider::Provider;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use crate::session::Session;
 use crate::skill::SkillRegistry;
 use crate::tool::{Registry, ToolContext};
@@ -126,11 +126,35 @@ impl Agent {
         self.run_turn_streaming(event_tx).await
     }
 
+    /// Run one conversation turn with streaming events via mpsc channel (per-client)
+    pub async fn run_once_streaming_mpsc(
+        &mut self,
+        user_message: &str,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+    ) -> Result<()> {
+        self.session
+            .add_message(Role::User, vec![ContentBlock::Text {
+                text: user_message.to_string(),
+            }]);
+        self.session.save()?;
+        self.run_turn_streaming_mpsc(event_tx).await
+    }
+
     /// Clear conversation history
     pub fn clear(&mut self) {
         self.session = Session::create(None, None);
         self.active_skill = None;
         self.provider_session_id = None;
+    }
+
+    /// Restore a session by ID (loads from disk)
+    pub fn restore_session(&mut self, session_id: &str) -> Result<()> {
+        let session = Session::load(session_id)?;
+        self.session = session;
+        self.active_skill = None;
+        // Don't restore provider_session_id - it's not valid across process restarts
+        self.provider_session_id = None;
+        Ok(())
     }
 
     /// Get conversation history for sync
@@ -839,6 +863,239 @@ impl Agent {
                 }
 
                 // SDK didn't execute this tool, run it locally
+                let ctx = ToolContext {
+                    session_id: self.session.id.clone(),
+                    message_id: message_id.clone(),
+                    tool_call_id: tc.id.clone(),
+                };
+
+                if trace {
+                    eprintln!("[trace] tool_exec_start name={} id={}", tc.name, tc.id);
+                }
+
+                let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
+
+                match result {
+                    Ok(output) => {
+                        let _ = event_tx.send(ServerEvent::ToolDone {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            output: output.output.clone(),
+                            error: None,
+                        });
+
+                        self.session.add_message(
+                            Role::User,
+                            vec![ContentBlock::ToolResult {
+                                tool_use_id: tc.id,
+                                content: output.output,
+                                is_error: None,
+                            }],
+                        );
+                        self.session.save()?;
+                    }
+                    Err(e) => {
+                        let error_msg = format!("Error: {}", e);
+                        let _ = event_tx.send(ServerEvent::ToolDone {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            output: error_msg.clone(),
+                            error: Some(error_msg.clone()),
+                        });
+
+                        self.session.add_message(
+                            Role::User,
+                            vec![ContentBlock::ToolResult {
+                                tool_use_id: tc.id,
+                                content: error_msg,
+                                is_error: Some(true),
+                            }],
+                        );
+                        self.session.save()?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Run turns with events streamed to an mpsc channel (for per-client server mode)
+    async fn run_turn_streaming_mpsc(
+        &mut self,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+    ) -> Result<()> {
+        let trace = trace_enabled();
+
+        loop {
+            let tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
+
+            let system_prompt = if let Some(ref skill_name) = self.active_skill {
+                if let Some(skill) = self.skills.get(skill_name) {
+                    format!("{}\n\n{}", SYSTEM_PROMPT, skill.get_prompt())
+                } else {
+                    SYSTEM_PROMPT.to_string()
+                }
+            } else {
+                SYSTEM_PROMPT.to_string()
+            };
+
+            let messages = self.session.messages_for_provider();
+
+            let mut stream = self
+                .provider
+                .complete(&messages, &tools, &system_prompt, self.provider_session_id.as_deref())
+                .await?;
+
+            let mut text_content = String::new();
+            let mut tool_calls: Vec<ToolCall> = Vec::new();
+            let mut current_tool: Option<ToolCall> = None;
+            let mut current_tool_input = String::new();
+            let mut usage_input: Option<u64> = None;
+            let mut usage_output: Option<u64> = None;
+            let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
+                std::collections::HashMap::new();
+            let mut tool_id_to_name: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+
+            while let Some(event) = stream.next().await {
+                match event? {
+                    StreamEvent::ThinkingStart | StreamEvent::ThinkingEnd => {}
+                    StreamEvent::ThinkingDone { duration_secs } => {
+                        let _ = event_tx.send(ServerEvent::TextDelta {
+                            text: format!("Thought for {:.1}s\n", duration_secs),
+                        });
+                    }
+                    StreamEvent::TextDelta(text) => {
+                        let _ = event_tx.send(ServerEvent::TextDelta { text: text.clone() });
+                        text_content.push_str(&text);
+                    }
+                    StreamEvent::ToolUseStart { id, name } => {
+                        let _ = event_tx.send(ServerEvent::ToolStart {
+                            id: id.clone(),
+                            name: name.clone(),
+                        });
+                        tool_id_to_name.insert(id.clone(), name.clone());
+                        current_tool = Some(ToolCall {
+                            id,
+                            name,
+                            input: serde_json::Value::Null,
+                        });
+                        current_tool_input.clear();
+                    }
+                    StreamEvent::ToolInputDelta(delta) => {
+                        let _ = event_tx.send(ServerEvent::ToolInput { delta: delta.clone() });
+                        current_tool_input.push_str(&delta);
+                    }
+                    StreamEvent::ToolUseEnd => {
+                        if let Some(mut tool) = current_tool.take() {
+                            let tool_input = serde_json::from_str::<serde_json::Value>(
+                                &current_tool_input,
+                            )
+                            .unwrap_or(serde_json::Value::Null);
+                            tool.input = tool_input;
+
+                            let _ = event_tx.send(ServerEvent::ToolExec {
+                                id: tool.id.clone(),
+                                name: tool.name.clone(),
+                            });
+
+                            tool_calls.push(tool);
+                            current_tool_input.clear();
+                        }
+                    }
+                    StreamEvent::ToolResult { tool_use_id, content, is_error } => {
+                        let tool_name = tool_id_to_name
+                            .get(&tool_use_id)
+                            .cloned()
+                            .unwrap_or_default();
+                        let _ = event_tx.send(ServerEvent::ToolDone {
+                            id: tool_use_id.clone(),
+                            name: tool_name,
+                            output: content.clone(),
+                            error: if is_error { Some("Tool error".to_string()) } else { None },
+                        });
+                        sdk_tool_results.insert(tool_use_id, (content, is_error));
+                    }
+                    StreamEvent::TokenUsage { input_tokens, output_tokens } => {
+                        if let Some(input) = input_tokens {
+                            usage_input = Some(input);
+                        }
+                        if let Some(output) = output_tokens {
+                            usage_output = Some(output);
+                        }
+                    }
+                    StreamEvent::MessageEnd { .. } => {}
+                    StreamEvent::SessionId(sid) => {
+                        self.provider_session_id = Some(sid.clone());
+                        let _ = event_tx.send(ServerEvent::SessionId { session_id: sid });
+                    }
+                    StreamEvent::Compaction { .. } => {}
+                    StreamEvent::Error(e) => {
+                        return Err(anyhow::anyhow!("Stream error: {}", e));
+                    }
+                }
+            }
+
+            if usage_input.is_some() || usage_output.is_some() {
+                let _ = event_tx.send(ServerEvent::TokenUsage {
+                    input: usage_input.unwrap_or(0),
+                    output: usage_output.unwrap_or(0),
+                });
+            }
+
+            let mut content_blocks = Vec::new();
+            if !text_content.is_empty() {
+                content_blocks.push(ContentBlock::Text { text: text_content.clone() });
+            }
+            for tc in &tool_calls {
+                content_blocks.push(ContentBlock::ToolUse {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    input: tc.input.clone(),
+                });
+            }
+
+            let assistant_message_id = if !content_blocks.is_empty() {
+                let message_id = self.session.add_message(Role::Assistant, content_blocks);
+                self.session.save()?;
+                Some(message_id)
+            } else {
+                None
+            };
+
+            if tool_calls.is_empty() {
+                break;
+            }
+
+            if self.provider.handles_tools_internally() {
+                break;
+            }
+
+            for tc in tool_calls {
+                if let Some(allowed) = self.allowed_tools.as_ref() {
+                    if !allowed.contains(&tc.name) {
+                        return Err(anyhow::anyhow!("Tool '{}' is not allowed", tc.name));
+                    }
+                }
+
+                let message_id = assistant_message_id
+                    .clone()
+                    .unwrap_or_else(|| self.session.id.clone());
+
+                if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
+                    self.session.add_message(
+                        Role::User,
+                        vec![ContentBlock::ToolResult {
+                            tool_use_id: tc.id,
+                            content: sdk_content,
+                            is_error: if sdk_is_error { Some(true) } else { None },
+                        }],
+                    );
+                    self.session.save()?;
+                    continue;
+                }
+
                 let ctx = ToolContext {
                     session_id: self.session.id.clone(),
                     message_id: message_id.clone(),
