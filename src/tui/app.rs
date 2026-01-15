@@ -55,6 +55,15 @@ pub struct DisplayMessage {
     pub tool_data: Option<ToolCall>,
 }
 
+/// Result from running the TUI
+#[derive(Debug, Default)]
+pub struct RunResult {
+    /// Session ID to reload (hot-reload)
+    pub reload_session: Option<String>,
+    /// Exit code to use (for canary wrapper communication)
+    pub exit_code: Option<i32>,
+}
+
 /// TUI Application state
 pub struct App {
     provider: Arc<dyn Provider>,
@@ -135,6 +144,8 @@ pub struct App {
     pending_migration: Option<String>,
     // Session to resume on connect (remote mode)
     resume_session_id: Option<String>,
+    // Exit code to use when quitting (for canary wrapper communication)
+    requested_exit_code: Option<i32>,
 }
 
 /// A placeholder provider for remote mode (never actually called)
@@ -210,6 +221,7 @@ impl App {
             pending_migration: None,
             remote_client_count: None,
             resume_session_id: None,
+            requested_exit_code: None,
         }
     }
 
@@ -439,7 +451,7 @@ impl App {
 
     /// Run the TUI application
     /// Returns Some(session_id) if hot-reload was requested
-    pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<Option<String>> {
+    pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<RunResult> {
         let mut event_stream = EventStream::new();
         let mut redraw_interval = interval(Duration::from_millis(50));
 
@@ -493,7 +505,10 @@ impl App {
             }
         }
 
-        Ok(self.reload_requested.take())
+        Ok(RunResult {
+            reload_session: self.reload_requested.take(),
+            exit_code: self.requested_exit_code,
+        })
     }
 
     /// Run the TUI in remote mode, connecting to a server
@@ -1282,6 +1297,7 @@ impl App {
                      • `/model` - List available models\n\
                      • `/model <name>` - Switch to a different model\n\
                      • `/reload` - Hot-reload with new binary (keeps session)\n\
+                     • `/rebuild` - Build and test new canary (self-dev mode only)\n\
                      • `/clear` - Clear conversation (Ctrl+L)\n\
                      • `/<skill>` - Activate a skill\n\n\
                      **Available skills:** {}\n\n\
@@ -1386,6 +1402,72 @@ impl App {
             let _ = self.session.save();
             self.reload_requested = Some(self.session.id.clone());
             self.should_quit = true;
+            return;
+        }
+
+        // /rebuild - Build and test new canary, restart (only in canary/self-dev mode)
+        if trimmed == "/rebuild" {
+            if !self.session.is_canary {
+                self.display_messages.push(DisplayMessage {
+                    role: "error".to_string(),
+                    content: "/rebuild is only available in self-dev mode (jcode self-dev)".to_string(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+                return;
+            }
+
+            self.display_messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: "Building and testing new canary...".to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+
+            // Find jcode repo directory
+            if let Some(repo_dir) = crate::build::get_repo_dir() {
+                match crate::build::rebuild_canary(&repo_dir) {
+                    Ok(hash) => {
+                        self.display_messages.push(DisplayMessage {
+                            role: "system".to_string(),
+                            content: format!("Build successful ({}). Restarting with new canary...", hash),
+                            tool_calls: vec![],
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
+                        });
+                        // Save session
+                        self.session.provider_session_id = self.provider_session_id.clone();
+                        let _ = self.session.save();
+                        // Exit with code 100 to signal wrapper to respawn with new canary
+                        self.requested_exit_code = Some(100);
+                        self.should_quit = true;
+                    }
+                    Err(e) => {
+                        self.display_messages.push(DisplayMessage {
+                            role: "error".to_string(),
+                            content: format!("Build failed: {}", e),
+                            tool_calls: vec![],
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
+                        });
+                    }
+                }
+            } else {
+                self.display_messages.push(DisplayMessage {
+                    role: "error".to_string(),
+                    content: "Could not find jcode repository directory".to_string(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+            }
             return;
         }
 
@@ -2441,11 +2523,15 @@ impl App {
         }
 
         // Built-in commands
-        let commands: Vec<(&'static str, &'static str)> = vec![
+        let mut commands: Vec<(&'static str, &'static str)> = vec![
             ("/help", "Show help and keyboard shortcuts"),
             ("/reload", "Pull, rebuild, and restart (keeps session)"),
             ("/clear", "Clear conversation history"),
         ];
+        // Add /rebuild only in canary/self-dev mode
+        if self.session.is_canary {
+            commands.insert(2, ("/rebuild", "Build, test, and restart with new canary"));
+        }
 
         // Filter by prefix match
         let prefix = input.to_lowercase();
