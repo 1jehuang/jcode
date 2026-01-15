@@ -253,11 +253,31 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let provider = app.provider_name();
     let model = app.provider_model();
 
-    // Line 1: Version
-    lines.push(Line::from(Span::styled(
-        format!("jcode {} (built {})", env!("JCODE_VERSION"), age),
-        Style::default().fg(DIM_COLOR),
-    )));
+    // Line 1: Version + Mode indicators
+    let mut mode_parts: Vec<Span> = vec![
+        Span::styled(
+            format!("jcode {} (built {})", env!("JCODE_VERSION"), age),
+            Style::default().fg(DIM_COLOR),
+        ),
+    ];
+
+    // Add mode badges
+    if app.is_canary() {
+        mode_parts.push(Span::styled(" ", Style::default()));
+        mode_parts.push(Span::styled(
+            " self-dev ",
+            Style::default().fg(Color::Black).bg(Color::Rgb(255, 193, 7)), // Amber badge
+        ));
+    }
+    if app.is_remote_mode() {
+        mode_parts.push(Span::styled(" ", Style::default()));
+        mode_parts.push(Span::styled(
+            " remote ",
+            Style::default().fg(Color::Black).bg(Color::Rgb(100, 149, 237)), // Cornflower blue badge
+        ));
+    }
+
+    lines.push(Line::from(mode_parts));
 
     // Line 2: Provider/Model (show full model identifier)
     lines.push(Line::from(Span::styled(
@@ -657,47 +677,55 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             }
         }
     } else {
-        // Idle - show session info (remote mode) or token warning
-        if app.is_remote_mode() {
-            // Show session ID only (client/session counts are in header)
-            if let Some(session_id) = app.current_session_id() {
-                let short_id = if session_id.len() > 8 {
-                    format!("{}…", &session_id[..8])
-                } else {
-                    session_id
-                };
-                Line::from(vec![
-                    Span::styled("⚡ ", Style::default().fg(ACCENT_COLOR)),
-                    Span::styled(short_id, Style::default().fg(DIM_COLOR)),
-                ])
-            } else {
-                Line::from(Span::styled("", Style::default().fg(DIM_COLOR)))
-            }
-        } else if let Some((total_in, total_out)) = app.total_session_tokens() {
-            let total = total_in + total_out;
-            if total > 100_000 {
-                // High usage warning (>100k tokens)
-                let warning_color = if total > 150_000 {
-                    Color::Rgb(255, 100, 100) // Red for very high
-                } else {
-                    Color::Rgb(255, 193, 7) // Amber for high
-                };
-                Line::from(vec![
-                    Span::styled("⚠ ", Style::default().fg(warning_color)),
-                    Span::styled(
-                        format!("Session: {}k tokens ", total / 1000),
-                        Style::default().fg(warning_color)
-                    ),
-                    Span::styled(
-                        "(consider /clear for fresh context)",
-                        Style::default().fg(DIM_COLOR)
-                    ),
-                ])
-            } else {
-                Line::from(Span::styled("", Style::default().fg(DIM_COLOR)))
-            }
+        // Idle - show model info and session stats
+        let model = app.provider_model();
+        let msg_count = app.display_messages().len();
+        let (total_in, total_out) = app.total_session_tokens().unwrap_or((0, 0));
+        let total_tokens = total_in + total_out;
+
+        // Format token count nicely
+        let tokens_str = if total_tokens >= 1000 {
+            format!("{}k", total_tokens / 1000)
         } else {
-            Line::from(Span::styled("", Style::default().fg(DIM_COLOR)))
+            format!("{}", total_tokens)
+        };
+
+        // Calculate approximate cost (rough estimate based on typical Claude pricing)
+        // Input: ~$3/1M tokens, Output: ~$15/1M tokens for Opus
+        let cost_estimate = (total_in as f64 * 3.0 + total_out as f64 * 15.0) / 1_000_000.0;
+
+        // High usage warning color
+        let (token_color, warning) = if total_tokens > 150_000 {
+            (Color::Rgb(255, 100, 100), " ⚠ consider /clear")
+        } else if total_tokens > 100_000 {
+            (Color::Rgb(255, 193, 7), "")
+        } else {
+            (DIM_COLOR, "")
+        };
+
+        if app.is_remote_mode() {
+            // Remote mode: show session ID + stats
+            let session_part = app.current_session_id()
+                .map(|id| if id.len() > 8 { format!("{}… ", &id[..8]) } else { format!("{} ", id) })
+                .unwrap_or_default();
+            Line::from(vec![
+                Span::styled("⚡ ", Style::default().fg(ACCENT_COLOR)),
+                Span::styled(session_part, Style::default().fg(DIM_COLOR)),
+                Span::styled(format!("{} ", model), Style::default().fg(DIM_COLOR)),
+                Span::styled(format!("{}msg ", msg_count), Style::default().fg(DIM_COLOR)),
+                Span::styled(format!("{}tok ", tokens_str), Style::default().fg(token_color)),
+                Span::styled(format!("${:.2}", cost_estimate), Style::default().fg(DIM_COLOR)),
+                Span::styled(warning, Style::default().fg(token_color)),
+            ])
+        } else {
+            // Local mode: show model + session stats
+            Line::from(vec![
+                Span::styled(format!("{} ", model), Style::default().fg(DIM_COLOR)),
+                Span::styled(format!("{}msg ", msg_count), Style::default().fg(DIM_COLOR)),
+                Span::styled(format!("{}tok ", tokens_str), Style::default().fg(token_color)),
+                Span::styled(format!("${:.2}", cost_estimate), Style::default().fg(DIM_COLOR)),
+                Span::styled(warning, Style::default().fg(token_color)),
+            ])
         }
     };
 

@@ -605,6 +605,10 @@ impl TuiState for ClientApp {
         true // ClientApp is always remote mode
     }
 
+    fn is_canary(&self) -> bool {
+        false // Deprecated client doesn't support canary mode
+    }
+
     fn current_session_id(&self) -> Option<String> {
         self.session_id.clone()
     }

@@ -40,6 +40,8 @@ pub trait TuiState {
     fn total_session_tokens(&self) -> Option<(u64, u64)>;
     /// Whether running in remote (client-server) mode
     fn is_remote_mode(&self) -> bool;
+    /// Whether running in canary/self-dev mode
+    fn is_canary(&self) -> bool;
     /// Current session ID (if available)
     fn current_session_id(&self) -> Option<String>;
     /// List of all session IDs on the server (remote mode only)
