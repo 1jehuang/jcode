@@ -119,6 +119,20 @@ pub struct App {
     remote_total_tokens: Option<(u64, u64)>,
     // Current message request ID (for remote mode - to match Done events)
     current_message_id: Option<u64>,
+    // Whether running in remote mode
+    is_remote: bool,
+    // Current session ID (from server in remote mode)
+    remote_session_id: Option<String>,
+    // All sessions on the server (remote mode only)
+    remote_sessions: Vec<String>,
+    // Number of connected clients (remote mode only)
+    remote_client_count: Option<usize>,
+    // Build version tracking for auto-migration
+    known_stable_version: Option<String>,
+    // Last time we checked for stable version
+    last_version_check: Option<Instant>,
+    // Pending migration to new stable version
+    pending_migration: Option<String>,
 }
 
 /// A placeholder provider for remote mode (never actually called)
@@ -127,7 +141,7 @@ struct NullProvider;
 #[async_trait::async_trait]
 impl Provider for NullProvider {
     fn name(&self) -> &str { "remote" }
-    fn model(&self) -> &str { "unknown" }
+    fn model(&self) -> String { "unknown".to_string() }
 
     async fn complete(
         &self,
@@ -186,6 +200,13 @@ impl App {
             remote_skills: Vec::new(),
             remote_total_tokens: None,
             current_message_id: None,
+            is_remote: false,
+            remote_session_id: None,
+            remote_sessions: Vec::new(),
+            known_stable_version: crate::build::read_stable_version().ok().flatten(),
+            last_version_check: Some(Instant::now()),
+            pending_migration: None,
+            remote_client_count: None,
         }
     }
 
@@ -193,7 +214,9 @@ impl App {
     pub async fn new_for_remote() -> Self {
         let provider: Arc<dyn Provider> = Arc::new(NullProvider);
         let registry = Registry::new(Arc::clone(&provider)).await;
-        Self::new(provider, registry)
+        let mut app = Self::new(provider, registry);
+        app.is_remote = true;
+        app
     }
 
     /// Get the current session ID
@@ -287,6 +310,80 @@ impl App {
 
     /// Check for and process debug commands from file
     /// Commands: "message:<text>", "reload", "state", "quit"
+    /// Check for new stable version and trigger migration if at safe point
+    fn check_stable_version(&mut self) {
+        // Only check every 5 seconds to avoid excessive file reads
+        let should_check = self.last_version_check
+            .map(|t| t.elapsed() > Duration::from_secs(5))
+            .unwrap_or(true);
+
+        if !should_check {
+            return;
+        }
+
+        self.last_version_check = Some(Instant::now());
+
+        // Don't migrate if we're a canary session (we test changes, not receive them)
+        if self.session.is_canary {
+            return;
+        }
+
+        // Read current stable version
+        let current_stable = match crate::build::read_stable_version() {
+            Ok(Some(v)) => v,
+            _ => return,
+        };
+
+        // Check if it changed
+        let version_changed = self.known_stable_version
+            .as_ref()
+            .map(|v| v != &current_stable)
+            .unwrap_or(true);
+
+        if !version_changed {
+            return;
+        }
+
+        // New stable version detected
+        self.known_stable_version = Some(current_stable.clone());
+
+        // Check if we're at a safe point to migrate
+        let at_safe_point = !self.is_processing && self.queued_messages.is_empty();
+
+        if at_safe_point {
+            // Trigger migration
+            self.pending_migration = Some(current_stable);
+        }
+    }
+
+    /// Execute pending migration to new stable version
+    fn execute_migration(&mut self) -> bool {
+        if let Some(ref version) = self.pending_migration.take() {
+            let stable_binary = match crate::build::stable_binary_path() {
+                Ok(p) if p.exists() => p,
+                _ => return false,
+            };
+
+            // Save session before migration
+            if let Err(e) = self.session.save() {
+                eprintln!("Failed to save session before migration: {}", e);
+                return false;
+            }
+
+            // Request reload to stable version
+            self.reload_requested = Some(self.session.id.clone());
+
+            // The actual exec happens in main.rs when run() returns
+            // We store the binary path in an env var for the reload handler
+            std::env::set_var("JCODE_MIGRATE_BINARY", stable_binary);
+
+            eprintln!("Migrating to stable version {}...", version);
+            self.should_quit = true;
+            return true;
+        }
+        false
+    }
+
     fn check_debug_command(&mut self) -> Option<String> {
         let cmd_path = debug_cmd_path();
         if let Ok(cmd) = std::fs::read_to_string(&cmd_path) {
@@ -367,6 +464,12 @@ impl App {
                         }
                         // Check for debug commands
                         self.check_debug_command();
+                        // Check for new stable version (auto-migration)
+                        self.check_stable_version();
+                        // Execute pending migration if ready
+                        if self.pending_migration.is_some() && !self.is_processing {
+                            self.execute_migration();
+                        }
                     }
                     event = event_stream.next() => {
                         match event {
@@ -488,6 +591,25 @@ impl App {
                             }
                             Some(server_event) => {
                                 self.handle_server_event(server_event, &mut remote);
+
+                                // Process queued messages after turn completes
+                                if !self.is_processing && !self.queued_messages.is_empty() {
+                                    let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
+                                    self.display_messages.push(DisplayMessage {
+                                        role: "user".to_string(),
+                                        content: combined.clone(),
+                                        tool_calls: vec![],
+                                        duration_secs: None,
+                                        title: None,
+                                        tool_data: None,
+                                    });
+                                    if let Ok(msg_id) = remote.send_message(combined).await {
+                                        self.current_message_id = Some(msg_id);
+                                        self.is_processing = true;
+                                        self.status = ProcessingStatus::Sending;
+                                        self.processing_started = Some(Instant::now());
+                                    }
+                                }
                             }
                         }
                     }
@@ -626,7 +748,8 @@ impl App {
                 remote.clear_pending();
             }
             ServerEvent::SessionId { session_id } => {
-                remote.set_session_id(session_id);
+                remote.set_session_id(session_id.clone());
+                self.remote_session_id = Some(session_id);
             }
             ServerEvent::Reloading { .. } => {
                 self.display_messages.push(DisplayMessage {
@@ -638,8 +761,9 @@ impl App {
                     tool_data: None,
                 });
             }
-            ServerEvent::History { messages, session_id, provider_name, provider_model, .. } => {
-                remote.set_session_id(session_id);
+            ServerEvent::History { messages, session_id, provider_name, provider_model, all_sessions, client_count, .. } => {
+                remote.set_session_id(session_id.clone());
+                self.remote_session_id = Some(session_id);
                 // Store provider info for UI display
                 if let Some(name) = provider_name {
                     self.remote_provider_name = Some(name);
@@ -647,6 +771,10 @@ impl App {
                 if let Some(model) = provider_model {
                     self.remote_provider_model = Some(model);
                 }
+                // Store session list and client count
+                self.remote_sessions = all_sessions;
+                self.remote_client_count = client_count;
+
                 if !remote.has_loaded_history() {
                     remote.mark_history_loaded();
                     for msg in messages {
@@ -1131,6 +1259,8 @@ impl App {
                 content: format!(
                     "**Commands:**\n\
                      • `/help` - Show this help\n\
+                     • `/model` - List available models\n\
+                     • `/model <name>` - Switch to a different model\n\
                      • `/reload` - Hot-reload with new binary (keeps session)\n\
                      • `/clear` - Clear conversation (Ctrl+L)\n\
                      • `/<skill>` - Activate a skill\n\n\
@@ -1159,6 +1289,65 @@ impl App {
             self.active_skill = None;
             self.session = Session::create(None, None);
             self.provider_session_id = None;
+            return;
+        }
+
+        // Handle /model command
+        if trimmed == "/model" || trimmed == "/models" {
+            // List available models
+            let models = self.provider.available_models();
+            let current = self.provider.model();
+            let model_list = models
+                .iter()
+                .map(|m| {
+                    if *m == current {
+                        format!("  • **{}** (current)", m)
+                    } else {
+                        format!("  • {}", m)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            self.display_messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: format!(
+                    "**Available models for {}:**\n{}\n\nUse `/model <name>` to switch.",
+                    self.provider.name(),
+                    model_list
+                ),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            return;
+        }
+
+        if let Some(model_name) = trimmed.strip_prefix("/model ") {
+            let model_name = model_name.trim();
+            match self.provider.set_model(model_name) {
+                Ok(()) => {
+                    self.display_messages.push(DisplayMessage {
+                        role: "system".to_string(),
+                        content: format!("✓ Switched to model: {}", model_name),
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                }
+                Err(e) => {
+                    self.display_messages.push(DisplayMessage {
+                        role: "error".to_string(),
+                        content: format!("Failed to switch model: {}", e),
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                }
+            }
             return;
         }
 
@@ -2341,7 +2530,7 @@ impl App {
         self.provider.name()
     }
 
-    pub fn provider_model(&self) -> &str {
+    pub fn provider_model(&self) -> String {
         self.provider.model()
     }
 
@@ -2654,6 +2843,26 @@ impl super::TuiState for App {
         // In remote mode, use tokens from server
         // Standalone mode doesn't currently track total tokens
         self.remote_total_tokens
+    }
+
+    fn is_remote_mode(&self) -> bool {
+        self.is_remote
+    }
+
+    fn current_session_id(&self) -> Option<String> {
+        if self.is_remote {
+            self.remote_session_id.clone()
+        } else {
+            Some(self.session.id.clone())
+        }
+    }
+
+    fn server_sessions(&self) -> Vec<String> {
+        self.remote_sessions.clone()
+    }
+
+    fn connected_clients(&self) -> Option<usize> {
+        self.remote_client_count
     }
 }
 

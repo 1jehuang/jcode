@@ -37,6 +37,15 @@ pub struct Session {
     /// Provider-specific session ID (e.g., Claude SDK session for resume)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_id: Option<String>,
+    /// Whether this session is a canary session (testing new builds)
+    #[serde(default)]
+    pub is_canary: bool,
+    /// Build hash this session is testing (if canary)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub testing_build: Option<String>,
+    /// Working directory (for self-dev detection)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
 }
 
 impl Session {
@@ -50,6 +59,9 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             provider_session_id: None,
+            is_canary: false,
+            testing_build: None,
+            working_dir: std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
         }
     }
 
@@ -63,6 +75,36 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             provider_session_id: None,
+            is_canary: false,
+            testing_build: None,
+            working_dir: std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
+        }
+    }
+
+    /// Mark this session as a canary tester
+    pub fn set_canary(&mut self, build_hash: &str) {
+        self.is_canary = true;
+        self.testing_build = Some(build_hash.to_string());
+    }
+
+    /// Clear canary status
+    pub fn clear_canary(&mut self) {
+        self.is_canary = false;
+        self.testing_build = None;
+    }
+
+    /// Check if this session is working on the jcode repository
+    pub fn is_self_dev(&self) -> bool {
+        if let Some(ref dir) = self.working_dir {
+            // Check if working dir contains jcode source
+            let path = std::path::Path::new(dir);
+            path.join("Cargo.toml").exists() &&
+            path.join("src/main.rs").exists() &&
+            std::fs::read_to_string(path.join("Cargo.toml"))
+                .map(|s| s.contains("name = \"jcode\""))
+                .unwrap_or(false)
+        } else {
+            false
         }
     }
 
