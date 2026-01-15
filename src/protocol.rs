@@ -158,6 +158,12 @@ pub enum ServerEvent {
         id: u64,
         session_id: String,
         messages: Vec<HistoryMessage>,
+        /// Provider name (e.g. "anthropic", "openai")
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider_name: Option<String>,
+        /// Model name (e.g. "claude-sonnet-4-20250514")
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider_model: Option<String>,
     },
 
     /// Server is reloading (clients should reconnect)
