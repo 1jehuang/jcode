@@ -146,6 +146,8 @@ pub struct App {
     resume_session_id: Option<String>,
     // Exit code to use when quitting (for canary wrapper communication)
     requested_exit_code: Option<i32>,
+    // Show diffs for edit/write tool outputs (toggle with Alt+D)
+    show_diffs: bool,
 }
 
 /// A placeholder provider for remote mode (never actually called)
@@ -222,6 +224,7 @@ impl App {
             remote_client_count: None,
             resume_session_id: None,
             requested_exit_code: None,
+            show_diffs: true, // Default to showing diffs
         }
     }
 
@@ -588,14 +591,7 @@ impl App {
                     }
                     reconnect_attempts += 1;
                     if reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
-                        self.display_messages.push(DisplayMessage {
-                            role: "error".to_string(),
-                            content: "Failed to reconnect after 30 seconds. Press Ctrl+C to quit.".to_string(),
-                            tool_calls: Vec::new(),
-                            duration_secs: None,
-                            title: None,
-                            tool_data: None,
-                        });
+                        self.display_messages.push(DisplayMessage::error("Failed to reconnect after 30 seconds. Press Ctrl+C to quit."));
                         terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
                         loop {
                             if let Some(Ok(Event::Key(key))) = event_stream.next().await {
@@ -615,28 +611,14 @@ impl App {
 
             // Show reconnection message if applicable
             if reconnect_attempts > 0 {
-                self.display_messages.push(DisplayMessage {
-                    role: "system".to_string(),
-                    content: "Reconnected to server.".to_string(),
-                    tool_calls: Vec::new(),
-                    duration_secs: None,
-                    title: None,
-                    tool_data: None,
-                });
+                self.display_messages.push(DisplayMessage::system("Reconnected to server."));
             }
 
             // Resume session if requested (only on first connect, not reconnect)
             if reconnect_attempts == 0 {
                 if let Some(session_id) = self.resume_session_id.take() {
                     if let Err(e) = remote.resume_session(&session_id).await {
-                        self.display_messages.push(DisplayMessage {
-                            role: "error".to_string(),
-                            content: format!("Failed to resume session: {}", e),
-                            tool_calls: Vec::new(),
-                            duration_secs: None,
-                            title: None,
-                            tool_data: None,
-                        });
+                        self.display_messages.push(DisplayMessage::error(format!("Failed to resume session: {}", e)));
                     }
                 }
             }
@@ -914,6 +896,30 @@ impl App {
             }
         }
 
+        // Handle Ctrl+Shift combos
+        if modifiers.contains(KeyModifiers::CONTROL) && modifiers.contains(KeyModifiers::SHIFT) {
+            let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
+            match code {
+                KeyCode::Char('K') => {
+                    // Ctrl+Shift+K: scroll up
+                    self.scroll_offset = (self.scroll_offset + 3).min(max_estimate);
+                    return Ok(());
+                }
+                KeyCode::Char('J') => {
+                    // Ctrl+Shift+J: scroll down
+                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
+        // Shift+Tab: toggle diff view
+        if code == KeyCode::BackTab {
+            self.show_diffs = !self.show_diffs;
+            return Ok(());
+        }
+
         // Ctrl combos
         if modifiers.contains(KeyModifiers::CONTROL) {
             match code {
@@ -1143,6 +1149,12 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        // Shift+Tab: toggle diff view
+        if code == KeyCode::BackTab {
+            self.show_diffs = !self.show_diffs;
+            return Ok(());
         }
 
         // Handle ctrl combos regardless of processing state
@@ -3010,6 +3022,10 @@ impl super::TuiState for App {
 
     fn is_canary(&self) -> bool {
         self.session.is_canary
+    }
+
+    fn show_diffs(&self) -> bool {
+        self.show_diffs
     }
 
     fn current_session_id(&self) -> Option<String> {

@@ -211,10 +211,12 @@ fn estimate_content_height(app: &dyn TuiState, width: u16) -> u16 {
             }
             "tool" => {
                 lines += 1;
-                // Diff lines for edit tools
-                if let Some(ref tc) = msg.tool_data {
-                    if tc.name == "edit" || tc.name == "Edit" {
-                        lines += 10; // Rough estimate for diff
+                // Diff lines for edit tools (only if diffs are shown)
+                if app.show_diffs() {
+                    if let Some(ref tc) = msg.tool_data {
+                        if tc.name == "edit" || tc.name == "Edit" {
+                            lines += 10; // Rough estimate for diff
+                        }
                     }
                 }
             }
@@ -405,7 +407,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                     ]));
 
                     // Show diff output for editing tools with syntax highlighting
-                    if matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit") {
+                    if app.show_diffs() && matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit") {
                         // Extract file extension for syntax highlighting
                         let file_ext = tc.input.get("file_path")
                             .and_then(|v| v.as_str())
