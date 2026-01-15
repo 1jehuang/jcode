@@ -54,6 +54,10 @@ pub enum Request {
     #[serde(rename = "reload")]
     Reload { id: u64 },
 
+    /// Resume a specific session by ID
+    #[serde(rename = "resume_session")]
+    ResumeSession { id: u64, session_id: String },
+
     // === Agent-to-agent communication ===
 
     /// Register as an external agent
@@ -164,6 +168,21 @@ pub enum ServerEvent {
         /// Model name (e.g. "claude-sonnet-4-20250514")
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_model: Option<String>,
+        /// Connected MCP server names
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mcp_servers: Vec<String>,
+        /// Available skill names
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skills: Vec<String>,
+        /// Total session token usage (input, output)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        total_tokens: Option<(u64, u64)>,
+        /// All session IDs on the server
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        all_sessions: Vec<String>,
+        /// Number of connected clients
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_count: Option<usize>,
     },
 
     /// Server is reloading (clients should reconnect)
@@ -186,6 +205,7 @@ impl Request {
             Request::Subscribe { id } => *id,
             Request::GetHistory { id } => *id,
             Request::Reload { id } => *id,
+            Request::ResumeSession { id, .. } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,
             Request::AgentCapabilities { id } => *id,

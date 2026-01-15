@@ -27,8 +27,18 @@ pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
 
     /// Get the model identifier being used
-    fn model(&self) -> &str {
-        "unknown"
+    fn model(&self) -> String {
+        "unknown".to_string()
+    }
+
+    /// Set the model to use (returns error if model not supported)
+    fn set_model(&self, _model: &str) -> Result<()> {
+        Err(anyhow::anyhow!("This provider does not support model switching"))
+    }
+
+    /// List available models for this provider
+    fn available_models(&self) -> Vec<&'static str> {
+        vec![]
     }
 
     /// Returns true if the provider executes tools internally (e.g., Claude Agent SDK).
