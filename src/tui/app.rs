@@ -31,7 +31,7 @@ fn debug_response_path() -> PathBuf {
 }
 
 /// Current processing status
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub enum ProcessingStatus {
     #[default]
     Idle,
@@ -104,6 +104,27 @@ pub struct App {
     reload_requested: Option<String>,
     // Pasted content storage (displayed as placeholders, expanded on submit)
     pasted_contents: Vec<String>,
+    // Debug socket broadcast channel (if enabled)
+    debug_tx: Option<tokio::sync::broadcast::Sender<super::backend::DebugEvent>>,
+}
+
+/// A placeholder provider for remote mode (never actually called)
+struct NullProvider;
+
+#[async_trait::async_trait]
+impl Provider for NullProvider {
+    fn name(&self) -> &str { "remote" }
+    fn model(&self) -> &str { "unknown" }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _session_id: Option<&str>,
+    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
+        Err(anyhow::anyhow!("NullProvider cannot be used for completion"))
+    }
 }
 
 impl App {
@@ -143,7 +164,15 @@ impl App {
             thinking_start: None,
             reload_requested: None,
             pasted_contents: Vec::new(),
+            debug_tx: None,
         }
+    }
+
+    /// Create an App instance for remote mode (connecting to server)
+    pub async fn new_for_remote() -> Self {
+        let provider: Arc<dyn Provider> = Arc::new(NullProvider);
+        let registry = Registry::new(Arc::clone(&provider)).await;
+        Self::new(provider, registry)
     }
 
     /// Get the current session ID
@@ -337,6 +366,438 @@ impl App {
         }
 
         Ok(self.reload_requested.take())
+    }
+
+    /// Run the TUI in remote mode, connecting to a server
+    pub async fn run_remote(mut self, mut terminal: DefaultTerminal) -> Result<Option<String>> {
+        use super::backend::RemoteConnection;
+
+        let mut event_stream = EventStream::new();
+        let mut redraw_interval = interval(Duration::from_millis(50));
+        let mut reconnect_attempts = 0u32;
+        const MAX_RECONNECT_ATTEMPTS: u32 = 30;
+
+        'outer: loop {
+            // Connect to server
+            let mut remote = match RemoteConnection::connect().await {
+                Ok(r) => {
+                    reconnect_attempts = 0;
+                    r
+                }
+                Err(e) => {
+                    if reconnect_attempts == 0 {
+                        return Err(anyhow::anyhow!(
+                            "Failed to connect to server. Is `jcode serve` running? Error: {}",
+                            e
+                        ));
+                    }
+                    reconnect_attempts += 1;
+                    if reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
+                        self.display_messages.push(DisplayMessage {
+                            role: "error".to_string(),
+                            content: "Failed to reconnect after 30 seconds. Press Ctrl+C to quit.".to_string(),
+                            tool_calls: Vec::new(),
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
+                        });
+                        terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
+                        loop {
+                            if let Some(Ok(Event::Key(key))) = event_stream.next().await {
+                                if key.kind == KeyEventKind::Press {
+                                    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                                        break 'outer;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
+                    continue;
+                }
+            };
+
+            // Show reconnection message if applicable
+            if reconnect_attempts > 0 {
+                self.display_messages.push(DisplayMessage {
+                    role: "system".to_string(),
+                    content: "Reconnected to server.".to_string(),
+                    tool_calls: Vec::new(),
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+            }
+
+            // Main event loop
+            loop {
+                terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
+
+                if self.should_quit {
+                    break 'outer;
+                }
+
+                tokio::select! {
+                    _ = redraw_interval.tick() => {
+                        // Flush stream buffer
+                        if self.stream_buffer.should_flush() {
+                            if let Some(chunk) = self.stream_buffer.flush() {
+                                self.streaming_text.push_str(&chunk);
+                            }
+                        }
+                    }
+                    event = remote.next_event() => {
+                        match event {
+                            None => {
+                                // Server disconnected
+                                self.is_processing = false;
+                                self.display_messages.push(DisplayMessage {
+                                    role: "system".to_string(),
+                                    content: "Server disconnected. Reconnecting...".to_string(),
+                                    tool_calls: Vec::new(),
+                                    duration_secs: None,
+                                    title: None,
+                                    tool_data: None,
+                                });
+                                terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
+                                reconnect_attempts = 1;
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                                continue 'outer;
+                            }
+                            Some(server_event) => {
+                                self.handle_server_event(server_event, &mut remote);
+                            }
+                        }
+                    }
+                    event = event_stream.next() => {
+                        match event {
+                            Some(Ok(Event::Key(key))) => {
+                                if key.kind == KeyEventKind::Press {
+                                    self.handle_remote_key(key.code, key.modifiers, &mut remote).await?;
+                                }
+                            }
+                            Some(Ok(Event::Paste(text))) => {
+                                self.handle_paste(text);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(self.reload_requested.take())
+    }
+
+    /// Handle a server event in remote mode
+    fn handle_server_event(&mut self, event: crate::protocol::ServerEvent, remote: &mut super::backend::RemoteConnection) {
+        use crate::protocol::ServerEvent;
+
+        match event {
+            ServerEvent::TextDelta { text } => {
+                if let Some(chunk) = self.stream_buffer.push(&text) {
+                    self.streaming_text.push_str(&chunk);
+                }
+                self.last_stream_activity = Some(Instant::now());
+            }
+            ServerEvent::ToolStart { id, name } => {
+                remote.handle_tool_start(&id, &name);
+                self.status = ProcessingStatus::RunningTool(name.clone());
+                self.streaming_tool_calls.push(ToolCall {
+                    id,
+                    name,
+                    input: serde_json::Value::Null,
+                });
+            }
+            ServerEvent::ToolInput { delta } => {
+                remote.handle_tool_input(&delta);
+            }
+            ServerEvent::ToolExec { id, name } => {
+                remote.handle_tool_exec(&id, &name);
+            }
+            ServerEvent::ToolDone { id, name, output, error } => {
+                let _ = error; // Currently unused
+                let display_output = remote.handle_tool_done(&id, &name, &output);
+                // Flush stream buffer
+                if let Some(chunk) = self.stream_buffer.flush() {
+                    self.streaming_text.push_str(&chunk);
+                }
+                // Commit streaming text as assistant message
+                if !self.streaming_text.is_empty() {
+                    self.display_messages.push(DisplayMessage {
+                        role: "assistant".to_string(),
+                        content: std::mem::take(&mut self.streaming_text),
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                }
+                // Add tool result message
+                self.display_messages.push(DisplayMessage {
+                    role: "tool".to_string(),
+                    content: display_output,
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: Some(ToolCall { id, name, input: serde_json::Value::Null }),
+                });
+                self.streaming_tool_calls.clear();
+                self.status = ProcessingStatus::Streaming;
+            }
+            ServerEvent::TokenUsage { input, output } => {
+                self.streaming_input_tokens = input;
+                self.streaming_output_tokens = output;
+            }
+            ServerEvent::Done { .. } => {
+                // Flush stream buffer
+                if let Some(chunk) = self.stream_buffer.flush() {
+                    self.streaming_text.push_str(&chunk);
+                }
+                if !self.streaming_text.is_empty() {
+                    self.display_messages.push(DisplayMessage {
+                        role: "assistant".to_string(),
+                        content: std::mem::take(&mut self.streaming_text),
+                        tool_calls: vec![],
+                        duration_secs: self.processing_started.map(|s| s.elapsed().as_secs_f32()),
+                        title: None,
+                        tool_data: None,
+                    });
+                }
+                self.is_processing = false;
+                self.status = ProcessingStatus::Idle;
+                self.processing_started = None;
+                self.streaming_tool_calls.clear();
+                remote.clear_pending();
+            }
+            ServerEvent::Error { message, .. } => {
+                self.display_messages.push(DisplayMessage {
+                    role: "error".to_string(),
+                    content: message,
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+                self.is_processing = false;
+                self.status = ProcessingStatus::Idle;
+                remote.clear_pending();
+            }
+            ServerEvent::SessionId { session_id } => {
+                remote.set_session_id(session_id);
+            }
+            ServerEvent::Reloading { .. } => {
+                self.display_messages.push(DisplayMessage {
+                    role: "system".to_string(),
+                    content: "Server is reloading... Will reconnect shortly.".to_string(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+            }
+            ServerEvent::History { messages, session_id, .. } => {
+                remote.set_session_id(session_id);
+                if !remote.has_loaded_history() {
+                    remote.mark_history_loaded();
+                    for msg in messages {
+                        self.display_messages.push(DisplayMessage {
+                            role: msg.role,
+                            content: msg.content,
+                            tool_calls: vec![],
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle keyboard input in remote mode
+    async fn handle_remote_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        remote: &mut super::backend::RemoteConnection,
+    ) -> Result<()> {
+        // Most key handling is the same as local mode
+        // Handle Alt combos
+        if modifiers.contains(KeyModifiers::ALT) {
+            match code {
+                KeyCode::Char('b') => {
+                    self.cursor_pos = self.find_word_boundary_back();
+                    return Ok(());
+                }
+                KeyCode::Char('f') => {
+                    self.cursor_pos = self.find_word_boundary_forward();
+                    return Ok(());
+                }
+                KeyCode::Char('d') => {
+                    let end = self.find_word_boundary_forward();
+                    self.input.drain(self.cursor_pos..end);
+                    return Ok(());
+                }
+                KeyCode::Backspace => {
+                    let start = self.find_word_boundary_back();
+                    self.input.drain(start..self.cursor_pos);
+                    self.cursor_pos = start;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
+        // Ctrl combos
+        if modifiers.contains(KeyModifiers::CONTROL) {
+            match code {
+                KeyCode::Char('c') | KeyCode::Char('d') => {
+                    self.should_quit = true;
+                    return Ok(());
+                }
+                KeyCode::Char('l') if !self.is_processing => {
+                    self.display_messages.clear();
+                    self.queued_messages.clear();
+                    return Ok(());
+                }
+                KeyCode::Char('u') => {
+                    self.input.drain(..self.cursor_pos);
+                    self.cursor_pos = 0;
+                    return Ok(());
+                }
+                KeyCode::Char('k') => {
+                    self.input.truncate(self.cursor_pos);
+                    return Ok(());
+                }
+                KeyCode::Char('a') => {
+                    self.cursor_pos = 0;
+                    return Ok(());
+                }
+                KeyCode::Char('e') => {
+                    self.cursor_pos = self.input.len();
+                    return Ok(());
+                }
+                KeyCode::Char('w') => {
+                    let start = self.find_word_boundary_back();
+                    self.input.drain(start..self.cursor_pos);
+                    self.cursor_pos = start;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
+        // Scroll with Ctrl+Shift
+        if modifiers.contains(KeyModifiers::CONTROL) && modifiers.contains(KeyModifiers::SHIFT) {
+            let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
+            match code {
+                KeyCode::Char('K') => {
+                    self.scroll_offset = (self.scroll_offset + 3).min(max_estimate);
+                    return Ok(());
+                }
+                KeyCode::Char('J') => {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
+        // Regular keys
+        match code {
+            KeyCode::Char(c) => {
+                self.input.insert(self.cursor_pos, c);
+                self.cursor_pos += 1;
+                self.scroll_offset = 0;
+            }
+            KeyCode::Backspace => {
+                if self.cursor_pos > 0 {
+                    self.cursor_pos -= 1;
+                    self.input.remove(self.cursor_pos);
+                }
+            }
+            KeyCode::Delete => {
+                if self.cursor_pos < self.input.len() {
+                    self.input.remove(self.cursor_pos);
+                }
+            }
+            KeyCode::Left => {
+                if self.cursor_pos > 0 {
+                    self.cursor_pos -= 1;
+                }
+            }
+            KeyCode::Right => {
+                if self.cursor_pos < self.input.len() {
+                    self.cursor_pos += 1;
+                }
+            }
+            KeyCode::Home => {
+                self.cursor_pos = 0;
+            }
+            KeyCode::End => {
+                self.cursor_pos = self.input.len();
+            }
+            KeyCode::Enter => {
+                if !self.input.is_empty() {
+                    let input = std::mem::take(&mut self.input);
+                    self.cursor_pos = 0;
+
+                    // Handle /reload
+                    if input.trim() == "/reload" {
+                        remote.reload().await?;
+                        return Ok(());
+                    }
+
+                    // Handle /quit
+                    if input.trim() == "/quit" {
+                        self.should_quit = true;
+                        return Ok(());
+                    }
+
+                    // Queue message if processing, otherwise send
+                    if self.is_processing {
+                        self.queued_messages.push(input);
+                    } else {
+                        // Add user message to display
+                        self.display_messages.push(DisplayMessage {
+                            role: "user".to_string(),
+                            content: input.clone(),
+                            tool_calls: vec![],
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
+                        });
+                        // Send to server
+                        remote.send_message(input).await?;
+                        self.is_processing = true;
+                        self.status = ProcessingStatus::Sending;
+                        self.processing_started = Some(Instant::now());
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                self.input.clear();
+                self.cursor_pos = 0;
+            }
+            KeyCode::Up => {
+                self.scroll_offset = self.scroll_offset.saturating_add(1);
+            }
+            KeyCode::Down => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(1);
+            }
+            KeyCode::PageUp => {
+                self.scroll_offset = self.scroll_offset.saturating_add(10);
+            }
+            KeyCode::PageDown => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(10);
+            }
+            _ => {}
+        }
+
+        Ok(())
     }
 
     /// Process turn while still accepting input for queueing
@@ -1227,9 +1688,24 @@ impl App {
                                         // Use semantic buffer for chunked display
                                         if let Some(chunk) = self.stream_buffer.push(&text) {
                                             self.streaming_text.push_str(&chunk);
+                                            // Broadcast buffered text
+                                            self.broadcast_debug(super::backend::DebugEvent::TextDelta {
+                                                text: chunk.clone()
+                                            });
                                         }
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
+                                        self.broadcast_debug(super::backend::DebugEvent::ToolStart {
+                                            id: id.clone(),
+                                            name: name.clone(),
+                                        });
+                                        // Update status to show tool in progress
+                                        self.status = ProcessingStatus::RunningTool(name.clone());
+                                        self.streaming_tool_calls.push(ToolCall {
+                                            id: id.clone(),
+                                            name: name.clone(),
+                                            input: serde_json::Value::Null,
+                                        });
                                         current_tool = Some(ToolCall {
                                             id,
                                             name,
@@ -1238,12 +1714,19 @@ impl App {
                                         current_tool_input.clear();
                                     }
                                     StreamEvent::ToolInputDelta(delta) => {
+                                        self.broadcast_debug(super::backend::DebugEvent::ToolInput {
+                                            delta: delta.clone()
+                                        });
                                         current_tool_input.push_str(&delta);
                                     }
                                     StreamEvent::ToolUseEnd => {
                                         if let Some(mut tool) = current_tool.take() {
                                             tool.input = serde_json::from_str(&current_tool_input)
                                                 .unwrap_or(serde_json::Value::Null);
+                                            self.broadcast_debug(super::backend::DebugEvent::ToolExec {
+                                                id: tool.id.clone(),
+                                                name: tool.name.clone(),
+                                            });
 
                                             // Flush stream buffer before committing
                                             if let Some(chunk) = self.stream_buffer.flush() {
@@ -1286,6 +1769,10 @@ impl App {
                                         if let Some(output) = output_tokens {
                                             self.streaming_output_tokens = output;
                                         }
+                                        self.broadcast_debug(super::backend::DebugEvent::TokenUsage {
+                                            input_tokens: self.streaming_input_tokens,
+                                            output_tokens: self.streaming_output_tokens,
+                                        });
                                     }
                                     StreamEvent::MessageEnd { .. } => {
                                         saw_message_end = true;
@@ -1302,9 +1789,11 @@ impl App {
                                     }
                                     StreamEvent::ThinkingStart => {
                                         self.thinking_start = Some(Instant::now());
+                                        self.broadcast_debug(super::backend::DebugEvent::ThinkingStart);
                                     }
                                     StreamEvent::ThinkingEnd => {
                                         self.thinking_start = None;
+                                        self.broadcast_debug(super::backend::DebugEvent::ThinkingEnd);
                                     }
                                     StreamEvent::ThinkingDone { duration_secs } => {
                                         // Flush any pending buffered text first
@@ -1330,7 +1819,34 @@ impl App {
                                         self.context_warning_shown = false;
                                     }
                                     StreamEvent::ToolResult { tool_use_id, content, is_error } => {
-                                        // SDK already executed this tool, store result for later
+                                        // SDK already executed this tool
+                                        // Find the tool name from our tracking
+                                        let tool_name = self.streaming_tool_calls
+                                            .iter()
+                                            .find(|tc| tc.id == tool_use_id)
+                                            .map(|tc| tc.name.clone())
+                                            .unwrap_or_default();
+
+                                        self.broadcast_debug(super::backend::DebugEvent::ToolDone {
+                                            id: tool_use_id.clone(),
+                                            name: tool_name.clone(),
+                                            output: content.clone(),
+                                            is_error,
+                                        });
+
+                                        // Update the tool's DisplayMessage with the output (if it exists)
+                                        if let Some(dm) = self.display_messages.iter_mut().rev().find(|dm| {
+                                            dm.tool_data.as_ref().map(|td| &td.id) == Some(&tool_use_id)
+                                        }) {
+                                            dm.content = content.clone();
+                                        }
+
+                                        // Clear this tool from streaming_tool_calls
+                                        self.streaming_tool_calls.retain(|tc| tc.id != tool_use_id);
+
+                                        // Reset status back to Streaming
+                                        self.status = ProcessingStatus::Streaming;
+
                                         sdk_tool_results.insert(tool_use_id, (content, is_error));
                                     }
                                 }
@@ -1867,6 +2383,216 @@ impl App {
 
         // No user message found below, go to bottom
         self.scroll_offset = 0;
+    }
+
+    // ==================== Debug Socket Methods ====================
+
+    /// Enable debug socket and return the broadcast receiver
+    /// Call this before run() to enable debug event broadcasting
+    pub fn enable_debug_socket(&mut self) -> tokio::sync::broadcast::Receiver<super::backend::DebugEvent> {
+        let (tx, rx) = tokio::sync::broadcast::channel(256);
+        self.debug_tx = Some(tx);
+        rx
+    }
+
+    /// Broadcast a debug event to connected clients (if debug socket enabled)
+    fn broadcast_debug(&self, event: super::backend::DebugEvent) {
+        if let Some(ref tx) = self.debug_tx {
+            let _ = tx.send(event); // Ignore errors (no receivers)
+        }
+    }
+
+    /// Create a full state snapshot for debug socket
+    pub fn create_debug_snapshot(&self) -> super::backend::DebugEvent {
+        use super::backend::{DebugEvent, DebugMessage};
+
+        DebugEvent::StateSnapshot {
+            display_messages: self.display_messages.iter().map(|m| DebugMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+                tool_calls: m.tool_calls.clone(),
+                duration_secs: m.duration_secs,
+                title: m.title.clone(),
+                tool_data: m.tool_data.clone(),
+            }).collect(),
+            streaming_text: self.streaming_text.clone(),
+            streaming_tool_calls: self.streaming_tool_calls.clone(),
+            input: self.input.clone(),
+            cursor_pos: self.cursor_pos,
+            is_processing: self.is_processing,
+            scroll_offset: self.scroll_offset,
+            status: format!("{:?}", self.status),
+            provider_name: self.provider.name().to_string(),
+            provider_model: self.provider.model().to_string(),
+            mcp_servers: self.mcp_server_names.clone(),
+            skills: self.skills.list().iter().map(|s| s.name.clone()).collect(),
+            session_id: self.provider_session_id.clone(),
+            input_tokens: self.streaming_input_tokens,
+            output_tokens: self.streaming_output_tokens,
+            queued_messages: self.queued_messages.clone(),
+        }
+    }
+
+    /// Start debug socket listener task
+    /// Returns a JoinHandle for the listener task
+    pub fn start_debug_socket_listener(
+        &self,
+        mut rx: tokio::sync::broadcast::Receiver<super::backend::DebugEvent>,
+    ) -> tokio::task::JoinHandle<()> {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::UnixListener;
+
+        let socket_path = Self::debug_socket_path();
+        let initial_snapshot = self.create_debug_snapshot();
+
+        tokio::spawn(async move {
+            // Clean up old socket
+            let _ = std::fs::remove_file(&socket_path);
+
+            let listener = match UnixListener::bind(&socket_path) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("Failed to bind debug socket: {}", e);
+                    return;
+                }
+            };
+
+            // Accept connections and forward events
+            let clients: std::sync::Arc<tokio::sync::Mutex<Vec<tokio::net::unix::OwnedWriteHalf>>> =
+                std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+            let clients_clone = clients.clone();
+
+            // Spawn event broadcaster
+            let broadcast_handle = tokio::spawn(async move {
+                while let Ok(event) = rx.recv().await {
+                    let json = match serde_json::to_string(&event) {
+                        Ok(j) => j + "\n",
+                        Err(_) => continue,
+                    };
+                    let bytes = json.as_bytes();
+
+                    let mut clients = clients_clone.lock().await;
+                    let mut to_remove = Vec::new();
+
+                    for (i, writer) in clients.iter_mut().enumerate() {
+                        if writer.write_all(bytes).await.is_err() {
+                            to_remove.push(i);
+                        }
+                    }
+
+                    // Remove disconnected clients (reverse order to preserve indices)
+                    for i in to_remove.into_iter().rev() {
+                        clients.swap_remove(i);
+                    }
+                }
+            });
+
+            // Accept new connections
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let (_, writer) = stream.into_split();
+                        let mut writer = writer;
+
+                        // Send initial snapshot
+                        let snapshot_json = serde_json::to_string(&initial_snapshot).unwrap_or_default() + "\n";
+                        if writer.write_all(snapshot_json.as_bytes()).await.is_ok() {
+                            clients.lock().await.push(writer);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            broadcast_handle.abort();
+            let _ = std::fs::remove_file(&socket_path);
+        })
+    }
+
+    /// Get the debug socket path
+    pub fn debug_socket_path() -> std::path::PathBuf {
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+            .unwrap_or_else(|_| "/tmp".to_string());
+        std::path::PathBuf::from(runtime_dir).join("jcode-debug.sock")
+    }
+}
+
+impl super::TuiState for App {
+    fn display_messages(&self) -> &[DisplayMessage] {
+        &self.display_messages
+    }
+
+    fn streaming_text(&self) -> &str {
+        &self.streaming_text
+    }
+
+    fn input(&self) -> &str {
+        &self.input
+    }
+
+    fn cursor_pos(&self) -> usize {
+        self.cursor_pos
+    }
+
+    fn is_processing(&self) -> bool {
+        self.is_processing
+    }
+
+    fn queued_messages(&self) -> &[String] {
+        &self.queued_messages
+    }
+
+    fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    fn provider_name(&self) -> String {
+        self.provider.name().to_string()
+    }
+
+    fn provider_model(&self) -> String {
+        self.provider.model().to_string()
+    }
+
+    fn mcp_servers(&self) -> Vec<String> {
+        self.mcp_server_names.clone()
+    }
+
+    fn available_skills(&self) -> Vec<String> {
+        self.skills.list().iter().map(|s| s.name.clone()).collect()
+    }
+
+    fn streaming_tokens(&self) -> (u64, u64) {
+        (self.streaming_input_tokens, self.streaming_output_tokens)
+    }
+
+    fn streaming_tool_calls(&self) -> Vec<ToolCall> {
+        self.streaming_tool_calls.clone()
+    }
+
+    fn elapsed(&self) -> Option<std::time::Duration> {
+        self.processing_started.map(|t| t.elapsed())
+    }
+
+    fn status(&self) -> ProcessingStatus {
+        self.status.clone()
+    }
+
+    fn command_suggestions(&self) -> Vec<(&'static str, &'static str)> {
+        App::command_suggestions(self)
+    }
+
+    fn active_skill(&self) -> Option<String> {
+        self.active_skill.clone()
+    }
+
+    fn subagent_status(&self) -> Option<String> {
+        self.subagent_status.clone()
+    }
+
+    fn time_since_activity(&self) -> Option<std::time::Duration> {
+        self.last_stream_activity.map(|t| t.elapsed())
     }
 }
 

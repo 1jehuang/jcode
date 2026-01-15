@@ -95,6 +95,10 @@ struct Args {
     #[arg(long, global = true)]
     standalone: bool,
 
+    /// Enable debug socket (broadcasts all TUI state changes)
+    #[arg(long, global = true)]
+    debug_socket: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -210,7 +214,7 @@ async fn run_main(args: Args) -> Result<()> {
             // Check for --standalone flag
             if args.standalone {
                 let (provider, registry) = init_provider_and_registry(&args.provider).await?;
-                run_tui(provider, registry, args.resume).await?;
+                run_tui(provider, registry, args.resume, args.debug_socket).await?;
             } else {
                 // Default: TUI client mode - start server if needed
                 let server_running = if server::socket_path().exists() {
@@ -323,11 +327,22 @@ async fn run_tui(
     provider: Arc<dyn provider::Provider>,
     registry: tool::Registry,
     resume_session: Option<String>,
+    debug_socket: bool,
 ) -> Result<()> {
     let terminal = ratatui::init();
     // Enable bracketed paste mode for proper paste handling in terminals like Kitty
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
     let mut app = tui::App::new(provider, registry);
+
+    // Enable debug socket if requested
+    let _debug_handle = if debug_socket {
+        let rx = app.enable_debug_socket();
+        let handle = app.start_debug_socket_listener(rx);
+        eprintln!("Debug socket enabled at: {:?}", tui::App::debug_socket_path());
+        Some(handle)
+    } else {
+        None
+    };
 
     // Restore session if resuming
     if let Some(session_id) = resume_session {
@@ -507,13 +522,19 @@ async fn run_tui_client() -> Result<()> {
     let terminal = ratatui::init();
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
 
-    let app = tui::ClientApp::new();
-    let result = app.run(terminal).await;
+    // Use App in remote mode - same UI, connects to server
+    let app = tui::App::new_for_remote().await;
+    let result = app.run_remote(terminal).await;
 
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
     ratatui::restore();
 
-    result
+    // Handle reload request
+    if let Ok(Some(_reload_session)) = &result {
+        // TODO: Implement client-side reload if needed
+    }
+
+    result.map(|_| ())
 }
 
 /// Get the jcode repository directory (where the source code lives)
