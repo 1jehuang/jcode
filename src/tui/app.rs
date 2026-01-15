@@ -3008,6 +3008,10 @@ impl super::TuiState for App {
         self.is_remote
     }
 
+    fn is_canary(&self) -> bool {
+        self.session.is_canary
+    }
+
     fn current_session_id(&self) -> Option<String> {
         if self.is_remote {
             self.remote_session_id.clone()
