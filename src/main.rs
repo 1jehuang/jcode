@@ -857,8 +857,9 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
 }
 
 // Exit codes for canary wrapper communication
-const EXIT_RELOAD_REQUESTED: i32 = 100; // Agent wants to reload to new canary build
 const EXIT_DONE: i32 = 0;               // Clean exit, stop wrapper
+const EXIT_RELOAD_REQUESTED: i32 = 100; // Agent wants to reload to new canary build
+const EXIT_ROLLBACK_REQUESTED: i32 = 101; // Agent wants to rollback to stable
 
 /// Wrapper that runs canary binary and handles crashes
 async fn run_canary_wrapper(session_id: &str, _binary: &str) -> Result<()> {
@@ -900,6 +901,23 @@ async fn run_canary_wrapper(session_id: &str, _binary: &str) -> Result<()> {
             // Agent requested reload to new canary build - loop and respawn
             eprintln!("Reload requested, respawning with new canary build...");
             continue;
+        }
+
+        if exit_code == EXIT_ROLLBACK_REQUESTED {
+            // Agent requested rollback to stable - spawn stable instead
+            eprintln!("Rollback requested, switching to stable build...");
+            let stable_binary = build::stable_binary_path()?;
+            if stable_binary.exists() {
+                let mut child = ProcessCommand::new(&stable_binary)
+                    .arg("--resume")
+                    .arg(session_id)
+                    .arg("--standalone")
+                    .arg("--no-update")
+                    .current_dir(&cwd)
+                    .spawn()?;
+                let _ = child.wait();
+            }
+            break;
         }
 
         // Any other exit code is a crash

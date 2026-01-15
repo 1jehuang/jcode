@@ -23,6 +23,7 @@ mod todo;
 mod webfetch;
 mod websearch;
 mod write;
+pub mod selfdev;
 
 use crate::compaction::CompactionManager;
 use crate::message::ToolDefinition;
@@ -209,6 +210,12 @@ impl Registry {
     pub async fn register(&self, name: String, tool: Arc<dyn Tool>) {
         let mut tools = self.tools.write().await;
         tools.insert(name, tool);
+    }
+
+    /// Register self-dev tools (only for canary/self-dev sessions)
+    pub async fn register_selfdev_tools(&self) {
+        let tool = selfdev::SelfDevTool::new();
+        self.register("selfdev".to_string(), Arc::new(tool) as Arc<dyn Tool>).await;
     }
 
     /// Unregister a tool
