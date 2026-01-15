@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use super::app::{App, ProcessingStatus};
+use super::{ProcessingStatus, TuiState};
 use super::markdown;
 use crate::message::ToolCall;
 use ratatui::{
@@ -93,7 +93,7 @@ fn binary_age() -> Option<String> {
     Some(age_str)
 }
 
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     let area = frame.area();
 
     // Calculate queued messages (full count for numbering)
@@ -154,7 +154,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 /// Estimate how many lines the message content will take
-fn estimate_content_height(app: &App, width: u16) -> u16 {
+fn estimate_content_height(app: &dyn TuiState, width: u16) -> u16 {
     let width = width as usize;
     if width == 0 {
         return 1;
@@ -238,7 +238,7 @@ fn estimate_content_height(app: &App, width: u16) -> u16 {
     lines
 }
 
-fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     let mut user_line_indices: Vec<usize> = Vec::new(); // Track which lines are user prompts
 
@@ -562,7 +562,7 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let (input_tokens, output_tokens) = app.streaming_tokens();
     let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
     let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
@@ -634,7 +634,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_queued(frame: &mut Frame, app: &App, area: Rect, start_num: usize) {
+fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usize) {
     let queued = app.queued_messages();
     let queued_count = queued.len();
     let lines: Vec<Line> = queued.iter()
@@ -657,7 +657,7 @@ fn draw_queued(frame: &mut Frame, app: &App, area: Rect, start_num: usize) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_input(frame: &mut Frame, app: &App, area: Rect, next_prompt: usize) {
+fn draw_input(frame: &mut Frame, app: &dyn TuiState, area: Rect, next_prompt: usize) {
     let input_text = app.input();
     let cursor_pos = app.cursor_pos();
 

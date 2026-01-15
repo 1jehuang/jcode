@@ -6,6 +6,8 @@
 //! - Can hot-reload server without losing TUI
 //! - TUI can reconnect after server restart
 
+use super::{DisplayMessage, ProcessingStatus, TuiState};
+use crate::message::ToolCall;
 use crate::protocol::{Request, ServerEvent};
 use crate::server;
 use anyhow::Result;
@@ -14,7 +16,7 @@ use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use similar::TextDiff;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::time::interval;
@@ -22,13 +24,6 @@ use tokio::time::interval;
 /// Check if client-side diffs are enabled (default: true, disable with JCODE_SHOW_DIFFS=0)
 fn show_diffs_enabled() -> bool {
     std::env::var("JCODE_SHOW_DIFFS").map(|v| v != "0" && v != "false").unwrap_or(true)
-}
-
-/// Display message for client TUI
-#[derive(Clone)]
-pub struct DisplayMessage {
-    pub role: String,
-    pub content: String,
 }
 
 /// Tracks a pending file edit for diff generation
@@ -39,18 +34,32 @@ struct PendingFileDiff {
 
 /// Client TUI state
 pub struct ClientApp {
+    // Display state (matching App for TuiState)
     display_messages: Vec<DisplayMessage>,
     input: String,
     cursor_pos: usize,
     is_processing: bool,
     streaming_text: String,
+    queued_messages: Vec<String>,
+    scroll_offset: usize,
+    status: ProcessingStatus,
+    streaming_tool_calls: Vec<ToolCall>,
+    streaming_input_tokens: u64,
+    streaming_output_tokens: u64,
+    processing_started: Option<Instant>,
+    last_activity: Option<Instant>,
+
+    // Client-specific state
     should_quit: bool,
     session_id: Option<String>,
     next_request_id: u64,
     server_disconnected: bool,
     has_loaded_history: bool,
-    // For client-side diff generation (when JCODE_SHOW_DIFFS=1)
-    pending_diffs: HashMap<String, PendingFileDiff>,  // tool_id -> pending diff info
+    provider_name: String,
+    provider_model: String,
+
+    // For client-side diff generation
+    pending_diffs: HashMap<String, PendingFileDiff>,
     current_tool_id: Option<String>,
     current_tool_name: Option<String>,
     current_tool_input: String,
@@ -59,16 +68,31 @@ pub struct ClientApp {
 impl ClientApp {
     pub fn new() -> Self {
         Self {
+            // Display state
             display_messages: Vec::new(),
             input: String::new(),
             cursor_pos: 0,
             is_processing: false,
             streaming_text: String::new(),
+            queued_messages: Vec::new(),
+            scroll_offset: 0,
+            status: ProcessingStatus::Idle,
+            streaming_tool_calls: Vec::new(),
+            streaming_input_tokens: 0,
+            streaming_output_tokens: 0,
+            processing_started: None,
+            last_activity: None,
+
+            // Client-specific state
             should_quit: false,
             session_id: None,
             next_request_id: 1,
             server_disconnected: false,
             has_loaded_history: false,
+            provider_name: "unknown".to_string(),
+            provider_model: "unknown".to_string(),
+
+            // Diff tracking
             pending_diffs: HashMap::new(),
             current_tool_id: None,
             current_tool_name: None,
@@ -107,6 +131,10 @@ impl ClientApp {
                 self.display_messages.push(DisplayMessage {
                     role: msg.role,
                     content: msg.content,
+                    tool_calls: Vec::new(),
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
                 });
             }
         }
@@ -142,8 +170,12 @@ impl ClientApp {
                         self.display_messages.push(DisplayMessage {
                             role: "error".to_string(),
                             content: "Failed to reconnect after 30 seconds. Press Ctrl+C to quit.".to_string(),
+                            tool_calls: Vec::new(),
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
                         });
-                        terminal.draw(|frame| self.draw(frame))?;
+                        terminal.draw(|frame| super::ui::draw(frame, &self))?;
                         // Wait for quit
                         loop {
                             if let Some(Ok(Event::Key(key))) = event_stream.next().await {
@@ -157,7 +189,7 @@ impl ClientApp {
                     }
                     // Wait and retry
                     tokio::time::sleep(Duration::from_secs(1)).await;
-                    terminal.draw(|frame| self.draw(frame))?;
+                    terminal.draw(|frame| super::ui::draw(frame, &self))?;
                     continue;
                 }
             };
@@ -167,6 +199,10 @@ impl ClientApp {
                 self.display_messages.push(DisplayMessage {
                     role: "system".to_string(),
                     content: "Reconnected to server.".to_string(),
+                    tool_calls: Vec::new(),
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
                 });
             }
 
@@ -195,7 +231,7 @@ impl ClientApp {
             // Main event loop
             loop {
                 // Draw UI
-                terminal.draw(|frame| self.draw(frame))?;
+                terminal.draw(|frame| super::ui::draw(frame, &self))?;
 
                 if self.should_quit {
                     break 'outer;
@@ -215,8 +251,12 @@ impl ClientApp {
                                 self.display_messages.push(DisplayMessage {
                                     role: "system".to_string(),
                                     content: "Server disconnected. Reconnecting...".to_string(),
+                                    tool_calls: Vec::new(),
+                                    duration_secs: None,
+                                    title: None,
+                                    tool_data: None,
                                 });
-                                terminal.draw(|frame| self.draw(frame))?;
+                                terminal.draw(|frame| super::ui::draw(frame, &self))?;
                                 reconnect_attempts = 1;
                                 tokio::time::sleep(Duration::from_millis(500)).await;
                                 continue 'outer;
@@ -303,6 +343,10 @@ impl ClientApp {
                     self.display_messages.push(DisplayMessage {
                         role: "assistant".to_string(),
                         content: std::mem::take(&mut self.streaming_text),
+                        tool_calls: Vec::new(),
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
                     });
                 }
                 self.is_processing = false;
@@ -313,6 +357,10 @@ impl ClientApp {
                 self.display_messages.push(DisplayMessage {
                     role: "error".to_string(),
                     content: message,
+                    tool_calls: Vec::new(),
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
                 });
                 self.is_processing = false;
                 self.pending_diffs.clear();
@@ -324,6 +372,10 @@ impl ClientApp {
                 self.display_messages.push(DisplayMessage {
                     role: "system".to_string(),
                     content: "Server is reloading... Will reconnect shortly.".to_string(),
+                    tool_calls: Vec::new(),
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
                 });
             }
             ServerEvent::History { messages, session_id, .. } => {
@@ -336,6 +388,10 @@ impl ClientApp {
                         self.display_messages.push(DisplayMessage {
                             role: msg.role,
                             content: msg.content,
+                            tool_calls: Vec::new(),
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
                         });
                     }
                 }
@@ -396,6 +452,10 @@ impl ClientApp {
                     self.display_messages.push(DisplayMessage {
                         role: "user".to_string(),
                         content: input.clone(),
+                        tool_calls: Vec::new(),
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
                     });
 
                     // Send to server
@@ -420,85 +480,6 @@ impl ClientApp {
         Ok(())
     }
 
-    fn draw(&self, frame: &mut ratatui::Frame) {
-        use ratatui::layout::{Constraint, Direction, Layout};
-        use ratatui::style::{Color, Style};
-        use ratatui::text::{Line, Span};
-        use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),  // Header
-                Constraint::Min(1),     // Messages
-                Constraint::Length(3),  // Input
-            ])
-            .split(frame.area());
-
-        // Header
-        let status = if self.server_disconnected {
-            "Reconnecting..."
-        } else if self.is_processing {
-            "Processing..."
-        } else {
-            "Connected"
-        };
-        let header = Paragraph::new(format!("jcode client | {} | session: {}",
-            status,
-            self.session_id.as_deref().unwrap_or("none")
-        ))
-        .style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(header, chunks[0]);
-
-        // Messages
-        let mut lines: Vec<Line> = Vec::new();
-        for msg in &self.display_messages {
-            let style = match msg.role.as_str() {
-                "user" => Style::default().fg(Color::Cyan),
-                "assistant" => Style::default().fg(Color::White),
-                "system" => Style::default().fg(Color::Yellow),
-                "error" => Style::default().fg(Color::Red),
-                _ => Style::default(),
-            };
-            lines.push(Line::from(Span::styled(
-                format!("[{}] {}", msg.role, msg.content),
-                style,
-            )));
-        }
-        if !self.streaming_text.is_empty() {
-            lines.push(Line::from(Span::styled(
-                format!("[assistant] {}", self.streaming_text),
-                Style::default().fg(Color::White),
-            )));
-        }
-        let messages = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::NONE));
-        frame.render_widget(messages, chunks[1]);
-
-        // Input
-        let input_text = if self.input.is_empty() && !self.is_processing {
-            "Type a message...".to_string()
-        } else {
-            self.input.clone()
-        };
-        let input = Paragraph::new(input_text)
-            .style(if self.input.is_empty() {
-                Style::default().fg(Color::DarkGray)
-            } else {
-                Style::default()
-            })
-            .block(Block::default().borders(Borders::ALL).title("Input"));
-        frame.render_widget(input, chunks[2]);
-
-        // Cursor
-        if !self.is_processing {
-            frame.set_cursor_position((
-                chunks[2].x + 1 + self.cursor_pos as u16,
-                chunks[2].y + 1,
-            ));
-        }
-    }
 }
 
 /// Generate a unified diff between two strings
@@ -516,4 +497,90 @@ fn generate_unified_diff(old: &str, new: &str, file_path: &str) -> String {
     }
 
     output
+}
+
+impl TuiState for ClientApp {
+    fn display_messages(&self) -> &[DisplayMessage] {
+        &self.display_messages
+    }
+
+    fn streaming_text(&self) -> &str {
+        &self.streaming_text
+    }
+
+    fn input(&self) -> &str {
+        &self.input
+    }
+
+    fn cursor_pos(&self) -> usize {
+        self.cursor_pos
+    }
+
+    fn is_processing(&self) -> bool {
+        self.is_processing
+    }
+
+    fn queued_messages(&self) -> &[String] {
+        &self.queued_messages
+    }
+
+    fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    fn provider_name(&self) -> String {
+        self.provider_name.clone()
+    }
+
+    fn provider_model(&self) -> String {
+        self.provider_model.clone()
+    }
+
+    fn mcp_servers(&self) -> Vec<String> {
+        Vec::new() // Client doesn't track MCP servers yet
+    }
+
+    fn available_skills(&self) -> Vec<String> {
+        Vec::new() // Client doesn't track skills yet
+    }
+
+    fn streaming_tokens(&self) -> (u64, u64) {
+        (self.streaming_input_tokens, self.streaming_output_tokens)
+    }
+
+    fn streaming_tool_calls(&self) -> Vec<ToolCall> {
+        self.streaming_tool_calls.clone()
+    }
+
+    fn elapsed(&self) -> Option<Duration> {
+        self.processing_started.map(|t| t.elapsed())
+    }
+
+    fn status(&self) -> ProcessingStatus {
+        self.status.clone()
+    }
+
+    fn command_suggestions(&self) -> Vec<(&'static str, &'static str)> {
+        // Basic command suggestions for client
+        if self.input.starts_with('/') {
+            vec![
+                ("/reload", "Reload server code"),
+                ("/quit", "Quit client"),
+            ]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn active_skill(&self) -> Option<String> {
+        None // Client doesn't track active skill yet
+    }
+
+    fn subagent_status(&self) -> Option<String> {
+        None // Client doesn't track subagent status yet
+    }
+
+    fn time_since_activity(&self) -> Option<Duration> {
+        self.last_activity.map(|t| t.elapsed())
+    }
 }
