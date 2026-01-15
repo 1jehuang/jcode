@@ -401,8 +401,8 @@ async fn run_tui(
     };
 
     // Restore session if resuming
-    if let Some(session_id) = resume_session {
-        app.restore_session(&session_id);
+    if let Some(ref session_id) = resume_session {
+        app.restore_session(session_id);
     }
 
     // Set current session for panic recovery
