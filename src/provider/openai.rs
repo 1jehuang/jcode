@@ -18,21 +18,36 @@ use tokio::sync::RwLock;
 const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
 const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const RESPONSES_PATH: &str = "responses";
-const CHATGPT_MODEL_ID: &str = "gpt-5.1-codex-max";
-const API_MODEL_ID: &str = "gpt-5.1-codex-max";
+const DEFAULT_MODEL: &str = "gpt-5.2-codex";
 const ORIGINATOR: &str = "codex_cli_rs";
 const CHATGPT_INSTRUCTIONS: &str = include_str!("../prompts/gpt-5.1-codex-max_prompt.md");
+
+/// Available OpenAI/Codex models
+const AVAILABLE_MODELS: &[&str] = &[
+    "gpt-5.2-codex",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex",
+    "gpt-5-codex",
+    "o3",
+    "o3-pro",
+];
 
 pub struct OpenAIProvider {
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
+    model: Arc<RwLock<String>>,
 }
 
 impl OpenAIProvider {
     pub fn new(credentials: CodexCredentials) -> Self {
+        // Check for model override from environment
+        let model = std::env::var("JCODE_OPENAI_MODEL")
+            .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+
         Self {
             client: Client::new(),
             credentials: Arc::new(RwLock::new(credentials)),
+            model: Arc::new(RwLock::new(model)),
         }
     }
 
@@ -87,12 +102,8 @@ impl OpenAIProvider {
         format!("{}/{}", base.trim_end_matches('/'), RESPONSES_PATH)
     }
 
-    fn model_id(credentials: &CodexCredentials) -> &'static str {
-        if Self::is_chatgpt_mode(credentials) {
-            CHATGPT_MODEL_ID
-        } else {
-            API_MODEL_ID
-        }
+    async fn model_id(&self) -> String {
+        self.model.read().await.clone()
     }
 
     async fn send_request(&self, request: &Value, access_token: &str) -> Result<reqwest::Response> {
@@ -399,15 +410,14 @@ impl Provider for OpenAIProvider {
     ) -> Result<EventStream> {
         let input = build_responses_input(messages);
         let api_tools = build_tools(tools);
-        let (model_id, instructions) = {
+        let model_id = self.model_id().await;
+        let instructions = {
             let credentials = self.credentials.read().await;
-            let model_id = Self::model_id(&credentials);
-            let instructions = if Self::is_chatgpt_mode(&credentials) {
+            if Self::is_chatgpt_mode(&credentials) {
                 CHATGPT_INSTRUCTIONS.to_string()
             } else {
                 system.to_string()
-            };
-            (model_id, instructions)
+            }
         };
 
         let request = serde_json::json!({
@@ -450,8 +460,30 @@ impl Provider for OpenAIProvider {
         "openai"
     }
 
-    fn model(&self) -> &str {
-        API_MODEL_ID
+    fn model(&self) -> String {
+        // Use try_read to avoid blocking - fall back to default if locked
+        self.model
+            .try_read()
+            .map(|m| m.clone())
+            .unwrap_or_else(|_| DEFAULT_MODEL.to_string())
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        // Allow any model (OpenAI may have models we don't know about)
+        // But warn if it's not in our known list
+        if !AVAILABLE_MODELS.contains(&model) {
+            eprintln!("Warning: '{}' is not in the known model list, but will try anyway", model);
+        }
+        if let Ok(mut current) = self.model.try_write() {
+            *current = model.to_string();
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Cannot change model while a request is in progress"))
+        }
+    }
+
+    fn available_models(&self) -> Vec<&'static str> {
+        AVAILABLE_MODELS.to_vec()
     }
 }
 

@@ -21,15 +21,27 @@ const DEFAULT_MODEL: &str = "claude-opus-4-5-20251101";
 const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 const BRIDGE_SCRIPT: &str = include_str!("../../scripts/claude_agent_sdk_bridge.py");
 
+/// Available Claude models
+const AVAILABLE_MODELS: &[&str] = &[
+    "claude-opus-4-5-20251101",
+    "claude-sonnet-4-5-20250929",
+    "claude-sonnet-4-20250514",
+    "claude-haiku-3-5-20241022",
+];
+
 #[derive(Clone)]
 pub struct ClaudeProvider {
     config: ClaudeSdkConfig,
+    model: std::sync::Arc<std::sync::RwLock<String>>,
 }
 
 impl ClaudeProvider {
     pub fn new() -> Self {
+        let config = ClaudeSdkConfig::from_env();
+        let model = config.model.clone();
         Self {
-            config: ClaudeSdkConfig::from_env(),
+            config,
+            model: std::sync::Arc::new(std::sync::RwLock::new(model)),
         }
     }
 
@@ -553,12 +565,17 @@ impl Provider for ClaudeProvider {
             .ok()
             .map(|path| path.display().to_string());
 
+        // Get current model (using runtime value, not config)
+        let current_model = self.model.read()
+            .map(|m| m.clone())
+            .unwrap_or_else(|_| self.config.model.clone());
+
         let request = ClaudeSdkRequest {
             system,
             messages,
             tools: tool_names,
             options: ClaudeSdkOptions {
-                model: self.config.model.clone(),
+                model: current_model,
                 permission_mode: self.config.permission_mode.clone(),
                 cli_path: self.config.cli_path.clone(),
                 cwd,
@@ -649,8 +666,27 @@ impl Provider for ClaudeProvider {
         "claude"
     }
 
-    fn model(&self) -> &str {
-        &self.config.model
+    fn model(&self) -> String {
+        self.model
+            .read()
+            .map(|m| m.clone())
+            .unwrap_or_else(|_| DEFAULT_MODEL.to_string())
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        if !AVAILABLE_MODELS.contains(&model) {
+            eprintln!("Warning: '{}' is not in the known model list, but will try anyway", model);
+        }
+        if let Ok(mut current) = self.model.write() {
+            *current = model.to_string();
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Cannot change model while a request is in progress"))
+        }
+    }
+
+    fn available_models(&self) -> Vec<&'static str> {
+        AVAILABLE_MODELS.to_vec()
     }
 
     fn handles_tools_internally(&self) -> bool {
