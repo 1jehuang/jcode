@@ -263,6 +263,16 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Resume a specific session by ID
+    pub async fn resume_session(&mut self, session_id: &str) -> Result<()> {
+        let request = Request::ResumeSession {
+            id: self.next_request_id,
+            session_id: session_id.to_string(),
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
     /// Read the next event from the server (returns None on disconnect)
     pub async fn next_event(&mut self) -> Option<ServerEvent> {
         self.line_buffer.clear();

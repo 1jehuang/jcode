@@ -172,6 +172,12 @@ fn estimate_content_height(app: &dyn TuiState, width: u16) -> u16 {
     if !app.available_skills().is_empty() {
         lines += 1;
     }
+    // Plus optional server stats line
+    let client_count = app.connected_clients().unwrap_or(0);
+    let session_count = app.server_sessions().len();
+    if client_count > 0 || session_count > 1 {
+        lines += 1;
+    }
 
     for msg in app.display_messages() {
         // Spacing between messages
@@ -273,6 +279,23 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     if !skills.is_empty() {
         lines.push(Line::from(Span::styled(
             format!("skills: {}", skills.iter().map(|s| format!("/{}", s)).collect::<Vec<_>>().join(" ")),
+            Style::default().fg(DIM_COLOR),
+        )));
+    }
+
+    // Line 5: Server stats (if running as server with clients)
+    let client_count = app.connected_clients().unwrap_or(0);
+    let session_count = app.server_sessions().len();
+    if client_count > 0 || session_count > 1 {
+        let mut parts = Vec::new();
+        if client_count > 0 {
+            parts.push(format!("{} client{}", client_count, if client_count == 1 { "" } else { "s" }));
+        }
+        if session_count > 1 {
+            parts.push(format!("{} sessions", session_count));
+        }
+        lines.push(Line::from(Span::styled(
+            format!("server: {}", parts.join(", ")),
             Style::default().fg(DIM_COLOR),
         )));
     }
@@ -626,8 +649,48 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             }
         }
     } else {
-        // Idle - show nothing or minimal info
-        Line::from(Span::styled("", Style::default().fg(DIM_COLOR)))
+        // Idle - show session info (remote mode) or token warning
+        if app.is_remote_mode() {
+            // Show session ID only (client/session counts are in header)
+            if let Some(session_id) = app.current_session_id() {
+                let short_id = if session_id.len() > 8 {
+                    format!("{}…", &session_id[..8])
+                } else {
+                    session_id
+                };
+                Line::from(vec![
+                    Span::styled("⚡ ", Style::default().fg(ACCENT_COLOR)),
+                    Span::styled(short_id, Style::default().fg(DIM_COLOR)),
+                ])
+            } else {
+                Line::from(Span::styled("", Style::default().fg(DIM_COLOR)))
+            }
+        } else if let Some((total_in, total_out)) = app.total_session_tokens() {
+            let total = total_in + total_out;
+            if total > 100_000 {
+                // High usage warning (>100k tokens)
+                let warning_color = if total > 150_000 {
+                    Color::Rgb(255, 100, 100) // Red for very high
+                } else {
+                    Color::Rgb(255, 193, 7) // Amber for high
+                };
+                Line::from(vec![
+                    Span::styled("⚠ ", Style::default().fg(warning_color)),
+                    Span::styled(
+                        format!("Session: {}k tokens ", total / 1000),
+                        Style::default().fg(warning_color)
+                    ),
+                    Span::styled(
+                        "(consider /clear for fresh context)",
+                        Style::default().fg(DIM_COLOR)
+                    ),
+                ])
+            } else {
+                Line::from(Span::styled("", Style::default().fg(DIM_COLOR)))
+            }
+        } else {
+            Line::from(Span::styled("", Style::default().fg(DIM_COLOR)))
+        }
     };
 
     let paragraph = Paragraph::new(line);
