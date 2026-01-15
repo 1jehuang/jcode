@@ -519,11 +519,22 @@ impl App {
                 remote.handle_tool_input(&delta);
             }
             ServerEvent::ToolExec { id, name } => {
+                // Update streaming_tool_calls with parsed input before clearing
+                let parsed_input = remote.get_current_tool_input();
+                if let Some(tc) = self.streaming_tool_calls.iter_mut().find(|tc| tc.id == id) {
+                    tc.input = parsed_input.clone();
+                }
                 remote.handle_tool_exec(&id, &name);
             }
             ServerEvent::ToolDone { id, name, output, error } => {
                 let _ = error; // Currently unused
                 let display_output = remote.handle_tool_done(&id, &name, &output);
+                // Get the tool input from streaming_tool_calls (stored in ToolExec)
+                let tool_input = self.streaming_tool_calls
+                    .iter()
+                    .find(|tc| tc.id == id)
+                    .map(|tc| tc.input.clone())
+                    .unwrap_or(serde_json::Value::Null);
                 // Flush stream buffer
                 if let Some(chunk) = self.stream_buffer.flush() {
                     self.streaming_text.push_str(&chunk);
@@ -546,7 +557,7 @@ impl App {
                     tool_calls: vec![],
                     duration_secs: None,
                     title: None,
-                    tool_data: Some(ToolCall { id, name, input: serde_json::Value::Null }),
+                    tool_data: Some(ToolCall { id, name, input: tool_input }),
                 });
                 self.streaming_tool_calls.clear();
                 self.status = ProcessingStatus::Streaming;

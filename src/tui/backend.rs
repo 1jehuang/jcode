@@ -307,6 +307,12 @@ impl RemoteConnection {
         self.current_tool_input.push_str(delta);
     }
 
+    /// Get parsed current tool input (before it's cleared in handle_tool_exec)
+    pub fn get_current_tool_input(&self) -> serde_json::Value {
+        serde_json::from_str(&self.current_tool_input)
+            .unwrap_or(serde_json::Value::Null)
+    }
+
     /// Handle tool exec - cache file content if edit/write
     pub fn handle_tool_exec(&mut self, id: &str, name: &str) {
         if show_diffs_enabled() && (name == "edit" || name == "write") {
