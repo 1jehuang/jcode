@@ -137,11 +137,17 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                 } else if in_table {
                     current_cell.push_str(&text);
                 } else {
-                    let style = match (bold, italic) {
-                        (true, true) => Style::default().fg(BOLD_COLOR).bold().italic(),
-                        (true, false) => Style::default().fg(BOLD_COLOR).bold(),
-                        (false, true) => Style::default().fg(TEXT_COLOR).italic(),
-                        (false, false) => Style::default().fg(TEXT_COLOR),
+                    // Check for "Thought for X.Xs" pattern and render dimmed
+                    let is_thinking_duration = text.starts_with("Thought for ") && text.ends_with('s');
+                    let style = if is_thinking_duration {
+                        Style::default().fg(DIM_COLOR).italic()
+                    } else {
+                        match (bold, italic) {
+                            (true, true) => Style::default().fg(BOLD_COLOR).bold().italic(),
+                            (true, false) => Style::default().fg(BOLD_COLOR).bold(),
+                            (false, true) => Style::default().fg(TEXT_COLOR).italic(),
+                            (false, false) => Style::default().fg(TEXT_COLOR),
+                        }
                     };
                     current_spans.push(Span::styled(text.to_string(), style));
                 }

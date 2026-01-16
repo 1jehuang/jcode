@@ -93,6 +93,29 @@ fn binary_age() -> Option<String> {
     Some(age_str)
 }
 
+/// Calculate the number of visual lines an input string will occupy
+/// when wrapped to a given width, accounting for explicit newlines.
+fn calculate_input_lines(input: &str, line_width: usize) -> usize {
+    if line_width == 0 {
+        return 1;
+    }
+    if input.is_empty() {
+        return 1;
+    }
+
+    let mut total_lines = 0;
+    for line in input.split('\n') {
+        let chars: Vec<char> = line.chars().collect();
+        if chars.is_empty() {
+            total_lines += 1;
+        } else {
+            // Calculate wrapped lines for this segment
+            total_lines += (chars.len() + line_width - 1) / line_width;
+        }
+    }
+    total_lines.max(1)
+}
+
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     let area = frame.area();
 
@@ -100,14 +123,9 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     let queued_count = app.queued_messages().len();
     let queued_height = queued_count.min(3) as u16;
 
-    // Calculate input height based on content (max 5 lines to not overwhelm)
+    // Calculate input height based on content (max 10 lines visible, scrolls if more)
     let available_width = area.width.saturating_sub(3) as usize; // prompt chars
-    let input_len = app.input().len();
-    let base_input_height = if available_width > 0 {
-        ((input_len / available_width) + 1).min(5) as u16
-    } else {
-        1
-    };
+    let base_input_height = calculate_input_lines(app.input(), available_width).min(10) as u16;
     // Add 1 line for command suggestions when typing /
     let suggestions = app.command_suggestions();
     let suggestions_height = if !suggestions.is_empty() && !app.is_processing() { 1 } else { 0 };
@@ -251,17 +269,25 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let mut user_line_indices: Vec<usize> = Vec::new(); // Track which lines are user prompts
 
     // Header - always visible
-    let age = binary_age().unwrap_or_else(|| "unknown".to_string());
     let provider = app.provider_name();
     let model = app.provider_model();
 
-    // Line 1: Version + Mode indicators
+    // Line 1: Version + Session name + Mode indicators
     let mut mode_parts: Vec<Span> = vec![
         Span::styled(
-            format!("jcode {} (built {})", env!("JCODE_VERSION"), age),
+            format!("jcode {}", env!("JCODE_VERSION")),
             Style::default().fg(DIM_COLOR),
         ),
     ];
+
+    // Add session name with icon
+    if let Some(name) = app.session_display_name() {
+        let icon = crate::id::session_icon(&name);
+        mode_parts.push(Span::styled(
+            format!("  {} {}", icon, name),
+            Style::default().fg(ACCENT_COLOR),
+        ));
+    }
 
     // Add mode badges
     if app.is_canary() {
@@ -414,23 +440,52 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                             .and_then(|p| std::path::Path::new(p).extension())
                             .and_then(|e| e.to_str());
 
-                        let diff_lines: Vec<&str> = msg.content.lines().skip(1).collect();
-                        for line in diff_lines {
-                            let trimmed = line.trim();
-                            if trimmed.is_empty() || trimmed == "..." {
-                                continue;
+                        // Collect only actual change lines (+ and -)
+                        let change_lines: Vec<&str> = msg.content.lines()
+                            .skip(1)
+                            .filter(|line| {
+                                let trimmed = line.trim();
+                                !trimmed.is_empty() &&
+                                trimmed != "..." &&
+                                (trimmed.contains("+ ") || trimmed.contains("- "))
+                            })
+                            .collect();
+
+                        const MAX_DIFF_LINES: usize = 12;
+                        let total_changes = change_lines.len();
+
+                        // Count additions and deletions for summary
+                        let additions = change_lines.iter().filter(|l| l.contains("+ ")).count();
+                        let deletions = change_lines.iter().filter(|l| l.contains("- ")).count();
+
+                        // Determine which lines to show
+                        let (display_lines, truncated): (Vec<&str>, bool) = if total_changes <= MAX_DIFF_LINES {
+                            (change_lines, false)
+                        } else {
+                            // Show first half and last half, with truncation indicator
+                            let half = MAX_DIFF_LINES / 2;
+                            let mut result: Vec<&str> = change_lines.iter().take(half).copied().collect();
+                            result.extend(change_lines.iter().skip(total_changes - half).copied());
+                            (result, true)
+                        };
+
+                        let mut shown_truncation = false;
+                        let half_point = if truncated { MAX_DIFF_LINES / 2 } else { usize::MAX };
+
+                        for (i, line) in display_lines.iter().enumerate() {
+                            // Show truncation marker at the midpoint
+                            if truncated && !shown_truncation && i >= half_point {
+                                let skipped = total_changes - MAX_DIFF_LINES;
+                                lines.push(Line::from(Span::styled(
+                                    format!("    ... {} more changes ...", skipped),
+                                    Style::default().fg(DIM_COLOR),
+                                )));
+                                shown_truncation = true;
                             }
 
-                            // Determine if addition or deletion
+                            let trimmed = line.trim();
                             let is_add = trimmed.contains("+ ");
-                            let is_del = trimmed.contains("- ");
-                            let base_color = if is_add {
-                                DIFF_ADD_COLOR
-                            } else if is_del {
-                                DIFF_DEL_COLOR
-                            } else {
-                                DIM_COLOR
-                            };
+                            let base_color = if is_add { DIFF_ADD_COLOR } else { DIFF_DEL_COLOR };
 
                             // Extract prefix (line number + sign) and content
                             let (prefix, content) = extract_diff_prefix_and_content(trimmed);
@@ -444,7 +499,6 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                             // Apply syntax highlighting to content
                             if !content.is_empty() {
                                 let highlighted = markdown::highlight_line(content, file_ext);
-                                // Tint the highlighted spans with the diff color
                                 for span in highlighted {
                                     let tinted = tint_span_with_diff_color(span, base_color);
                                     spans.push(tinted);
@@ -452,6 +506,14 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                             }
 
                             lines.push(Line::from(spans));
+                        }
+
+                        // Show summary if there were changes
+                        if total_changes > 0 && truncated {
+                            lines.push(Line::from(Span::styled(
+                                format!("    (+{} -{} total)", additions, deletions),
+                                Style::default().fg(DIM_COLOR),
+                            )));
                         }
                     }
 
@@ -612,9 +674,8 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
     let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
 
-    let line = if let Some(notice) = app.model_switch_notice() {
+    let line = if let Some(notice) = app.status_notice() {
         Line::from(vec![
-            Span::styled("🔁 ", Style::default().fg(ACCENT_COLOR)),
             Span::styled(notice, Style::default().fg(ACCENT_COLOR)),
         ])
     } else if app.is_processing() {
@@ -686,16 +747,11 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     } else {
         // Idle - show session info (remote mode) or token warning
         if app.is_remote_mode() {
-            // Show session ID only (client/session counts are in header)
-            if let Some(session_id) = app.current_session_id() {
-                let short_id = if session_id.len() > 8 {
-                    format!("{}…", &session_id[..8])
-                } else {
-                    session_id
-                };
+            // Show session display name (memorable name like "fox" or "oak")
+            if let Some(name) = app.session_display_name() {
                 Line::from(vec![
                     Span::styled("⚡ ", Style::default().fg(ACCENT_COLOR)),
-                    Span::styled(short_id, Style::default().fg(DIM_COLOR)),
+                    Span::styled(name, Style::default().fg(DIM_COLOR)),
                 ])
             } else {
                 Line::from(Span::styled("", Style::default().fg(DIM_COLOR)))
@@ -781,9 +837,19 @@ fn draw_input(frame: &mut Frame, app: &dyn TuiState, area: Rect, next_prompt: us
         return;
     }
 
-    let mut lines: Vec<Line> = Vec::new();
+    // Build all wrapped lines with cursor tracking
+    let (all_lines, cursor_line, cursor_col) = wrap_input_text(
+        input_text,
+        cursor_pos,
+        line_width,
+        &num_str,
+        prompt_char,
+        caret_color,
+        prompt_len,
+    );
 
-    // Show command suggestions if available
+    // Show command suggestions if available (prepended to lines)
+    let mut lines: Vec<Line> = Vec::new();
     if has_suggestions {
         let suggestion_text: String = suggestions
             .iter()
@@ -794,49 +860,169 @@ fn draw_input(frame: &mut Frame, app: &dyn TuiState, area: Rect, next_prompt: us
             suggestion_text,
             Style::default().fg(DIM_COLOR),
         )));
+    } else if app.is_processing() && !input_text.is_empty() {
+        // Show hint for Shift+Enter when processing and user has typed something
+        lines.push(Line::from(Span::styled(
+            "  Shift+Enter to send now",
+            Style::default().fg(DIM_COLOR),
+        )));
+    } else if input_text.is_empty() && !app.is_processing() {
+        // Show session name with icon as placeholder when input is empty
+        if let Some(name) = app.session_display_name() {
+            let icon = crate::id::session_icon(&name);
+            lines.push(Line::from(Span::styled(
+                format!("  {} {}", icon, name),
+                Style::default().fg(DIM_COLOR),
+            )));
+        }
     }
 
-    // Wrap text into lines
-    let chars: Vec<char> = input_text.chars().collect();
-    let mut pos = 0;
-    let input_start_line = lines.len();
+    let suggestions_offset = lines.len();
+    let total_input_lines = all_lines.len();
+    let visible_height = area.height as usize;
 
-    while pos < chars.len() || lines.len() == input_start_line {
-        let end = (pos + line_width).min(chars.len());
-        let line_text: String = chars[pos..end].iter().collect();
-
-        if lines.len() == input_start_line {
-            // First line has prompt: rainbow number (most recent = distance 0) + colored caret
-            let num_color = rainbow_prompt_color(0);
-            lines.push(Line::from(vec![
-                Span::styled(num_str.clone(), Style::default().fg(num_color)),
-                Span::styled(prompt_char, Style::default().fg(caret_color)),
-                Span::raw(line_text),
-            ]));
+    // Calculate scroll offset to keep cursor visible
+    // The cursor_line is relative to input lines (0-indexed)
+    let scroll_offset = if total_input_lines + suggestions_offset <= visible_height {
+        // Everything fits, no scrolling needed
+        0
+    } else {
+        // Need to scroll - ensure cursor line is visible
+        let available_for_input = visible_height.saturating_sub(suggestions_offset);
+        if cursor_line < available_for_input {
+            0
         } else {
-            // Continuation lines have indent to match prompt length
-            lines.push(Line::from(vec![
-                Span::raw(" ".repeat(prompt_len)),
-                Span::raw(line_text),
-            ]));
+            // Scroll so cursor is near the bottom of visible area
+            cursor_line.saturating_sub(available_for_input.saturating_sub(1))
         }
+    };
 
-        if end == pos {
-            break; // Empty input case
+    // Add visible input lines (after scroll offset)
+    for line in all_lines.into_iter().skip(scroll_offset) {
+        lines.push(line);
+        if lines.len() >= visible_height {
+            break;
         }
-        pos = end;
     }
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, area);
 
-    // Calculate cursor position in wrapped text
-    let cursor_line = cursor_pos / line_width;
-    let cursor_col = cursor_pos % line_width;
-    let cursor_y = area.y + (cursor_line as u16).min(area.height.saturating_sub(1));
+    // Calculate cursor screen position
+    let cursor_screen_line = cursor_line.saturating_sub(scroll_offset) + suggestions_offset;
+    let cursor_y = area.y + (cursor_screen_line as u16).min(area.height.saturating_sub(1));
     let cursor_x = area.x + prompt_len as u16 + cursor_col as u16;
 
     frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+}
+
+/// Wrap input text into lines, handling explicit newlines and tracking cursor position.
+/// Returns (lines, cursor_line, cursor_col) where cursor_line/col are in wrapped coordinates.
+fn wrap_input_text<'a>(
+    input: &str,
+    cursor_pos: usize,
+    line_width: usize,
+    num_str: &str,
+    prompt_char: &'a str,
+    caret_color: Color,
+    prompt_len: usize,
+) -> (Vec<Line<'a>>, usize, usize) {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut cursor_line = 0;
+    let mut cursor_col = 0;
+    let mut char_count = 0;
+    let mut found_cursor = false;
+
+    let chars: Vec<char> = input.chars().collect();
+
+    // Handle empty input
+    if chars.is_empty() {
+        let num_color = rainbow_prompt_color(0);
+        lines.push(Line::from(vec![
+            Span::styled(num_str.to_string(), Style::default().fg(num_color)),
+            Span::styled(prompt_char.to_string(), Style::default().fg(caret_color)),
+        ]));
+        return (lines, 0, 0);
+    }
+
+    // Split by newlines first, then wrap each segment
+    let mut pos = 0;
+    while pos <= chars.len() {
+        // Find next newline or end
+        let newline_pos = chars[pos..].iter().position(|&c| c == '\n');
+        let segment_end = match newline_pos {
+            Some(rel_pos) => pos + rel_pos,
+            None => chars.len(),
+        };
+
+        let segment: Vec<char> = chars[pos..segment_end].to_vec();
+
+        // Wrap this segment
+        let mut seg_pos = 0;
+        loop {
+            let end = (seg_pos + line_width).min(segment.len());
+            let line_text: String = segment[seg_pos..end].iter().collect();
+
+            // Track cursor position
+            let line_start_char = char_count;
+            let line_end_char = char_count + (end - seg_pos);
+
+            if !found_cursor && cursor_pos >= line_start_char && cursor_pos <= line_end_char {
+                cursor_line = lines.len();
+                cursor_col = cursor_pos - line_start_char;
+                found_cursor = true;
+            }
+            char_count = line_end_char;
+
+            if lines.is_empty() {
+                // First line has prompt
+                let num_color = rainbow_prompt_color(0);
+                lines.push(Line::from(vec![
+                    Span::styled(num_str.to_string(), Style::default().fg(num_color)),
+                    Span::styled(prompt_char.to_string(), Style::default().fg(caret_color)),
+                    Span::raw(line_text),
+                ]));
+            } else {
+                // Continuation lines
+                lines.push(Line::from(vec![
+                    Span::raw(" ".repeat(prompt_len)),
+                    Span::raw(line_text),
+                ]));
+            }
+
+            if end >= segment.len() {
+                break;
+            }
+            seg_pos = end;
+        }
+
+        // Account for the newline character itself in cursor tracking
+        if newline_pos.is_some() {
+            if !found_cursor && cursor_pos == char_count {
+                cursor_line = lines.len().saturating_sub(1);
+                cursor_col = lines.last().map(|l| {
+                    l.spans.iter().skip(1).map(|s| s.content.chars().count()).sum::<usize>()
+                }).unwrap_or(0);
+                found_cursor = true;
+            }
+            char_count += 1; // newline char
+            pos = segment_end + 1;
+        } else {
+            break;
+        }
+    }
+
+    // Handle cursor at very end
+    if !found_cursor {
+        cursor_line = lines.len().saturating_sub(1);
+        cursor_col = lines.last().map(|l| {
+            // Skip the prompt spans and count content
+            l.spans.iter().skip(if cursor_line == 0 { 2 } else { 1 })
+                .map(|s| s.content.chars().count()).sum::<usize>()
+        }).unwrap_or(0);
+    }
+
+    (lines, cursor_line, cursor_col)
 }
 
 // Colors for diff display
@@ -1038,5 +1224,134 @@ fn get_tool_summary(tool: &ToolCall) -> String {
                 .unwrap_or_default()
         }
         _ => String::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calculate_input_lines_empty() {
+        assert_eq!(calculate_input_lines("", 80), 1);
+    }
+
+    #[test]
+    fn test_calculate_input_lines_single_line() {
+        assert_eq!(calculate_input_lines("hello", 80), 1);
+        assert_eq!(calculate_input_lines("hello world", 80), 1);
+    }
+
+    #[test]
+    fn test_calculate_input_lines_wrapped() {
+        // 10 chars with width 5 = 2 lines
+        assert_eq!(calculate_input_lines("aaaaaaaaaa", 5), 2);
+        // 15 chars with width 5 = 3 lines
+        assert_eq!(calculate_input_lines("aaaaaaaaaaaaaaa", 5), 3);
+    }
+
+    #[test]
+    fn test_calculate_input_lines_with_newlines() {
+        // Two lines separated by newline
+        assert_eq!(calculate_input_lines("hello\nworld", 80), 2);
+        // Three lines
+        assert_eq!(calculate_input_lines("a\nb\nc", 80), 3);
+        // Trailing newline
+        assert_eq!(calculate_input_lines("hello\n", 80), 2);
+    }
+
+    #[test]
+    fn test_calculate_input_lines_newlines_and_wrapping() {
+        // First line wraps (10 chars / 5 = 2), second line is short (1)
+        assert_eq!(calculate_input_lines("aaaaaaaaaa\nb", 5), 3);
+    }
+
+    #[test]
+    fn test_calculate_input_lines_zero_width() {
+        assert_eq!(calculate_input_lines("hello", 0), 1);
+    }
+
+    #[test]
+    fn test_wrap_input_text_empty() {
+        let (lines, cursor_line, cursor_col) = wrap_input_text(
+            "", 0, 80, "1", "> ", USER_COLOR, 3
+        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(cursor_line, 0);
+        assert_eq!(cursor_col, 0);
+    }
+
+    #[test]
+    fn test_wrap_input_text_simple() {
+        let (lines, cursor_line, cursor_col) = wrap_input_text(
+            "hello", 5, 80, "1", "> ", USER_COLOR, 3
+        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(cursor_line, 0);
+        assert_eq!(cursor_col, 5); // cursor at end
+    }
+
+    #[test]
+    fn test_wrap_input_text_cursor_middle() {
+        let (lines, cursor_line, cursor_col) = wrap_input_text(
+            "hello world", 6, 80, "1", "> ", USER_COLOR, 3
+        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(cursor_line, 0);
+        assert_eq!(cursor_col, 6); // cursor at 'w'
+    }
+
+    #[test]
+    fn test_wrap_input_text_wrapping() {
+        // 10 chars with width 5 = 2 lines
+        let (lines, cursor_line, cursor_col) = wrap_input_text(
+            "aaaaaaaaaa", 7, 5, "1", "> ", USER_COLOR, 3
+        );
+        assert_eq!(lines.len(), 2);
+        assert_eq!(cursor_line, 1); // second line
+        assert_eq!(cursor_col, 2);  // 7 - 5 = 2
+    }
+
+    #[test]
+    fn test_wrap_input_text_with_newlines() {
+        let (lines, cursor_line, cursor_col) = wrap_input_text(
+            "hello\nworld", 6, 80, "1", "> ", USER_COLOR, 3
+        );
+        assert_eq!(lines.len(), 2);
+        assert_eq!(cursor_line, 1); // second line (after newline)
+        assert_eq!(cursor_col, 0);  // at start of 'world'
+    }
+
+    #[test]
+    fn test_wrap_input_text_cursor_at_end_of_wrapped() {
+        // 10 chars with width 5, cursor at position 10 (end)
+        let (lines, cursor_line, cursor_col) = wrap_input_text(
+            "aaaaaaaaaa", 10, 5, "1", "> ", USER_COLOR, 3
+        );
+        assert_eq!(lines.len(), 2);
+        assert_eq!(cursor_line, 1);
+        assert_eq!(cursor_col, 5);
+    }
+
+    #[test]
+    fn test_wrap_input_text_many_lines() {
+        // Create text that spans 15 lines when wrapped to width 10
+        let text = "a".repeat(150);
+        let (lines, cursor_line, cursor_col) = wrap_input_text(
+            &text, 145, 10, "1", "> ", USER_COLOR, 3
+        );
+        assert_eq!(lines.len(), 15);
+        assert_eq!(cursor_line, 14); // last line
+        assert_eq!(cursor_col, 5);   // 145 % 10 = 5
+    }
+
+    #[test]
+    fn test_wrap_input_text_multiple_newlines() {
+        let (lines, cursor_line, cursor_col) = wrap_input_text(
+            "a\nb\nc\nd", 6, 80, "1", "> ", USER_COLOR, 3
+        );
+        assert_eq!(lines.len(), 4);
+        assert_eq!(cursor_line, 3); // on 'd' line
+        assert_eq!(cursor_col, 0);
     }
 }
