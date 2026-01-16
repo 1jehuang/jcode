@@ -1,19 +1,23 @@
-# J-Code Project Instructions
+# jcode Development Guidelines
 
-## After Making Code Changes
+## Workflow
 
-Always rebuild the release binary after making changes so the user has the updated version. Run cargo build as a background task to avoid blocking:
+- **Commit as you go** - Make small, focused commits after completing each feature or fix
+- **Push when done** - Push all commits to remote when finishing a task or session
+- **Test before committing** - Run `cargo test` and `cargo build --release`
 
-```fish
-cargo build --release  # Run this in background
-```
+## Testing Changes
 
-The `jcode` command is symlinked to `target/release/jcode`, so rebuilding automatically updates it.
+This repo has self-dev mode. When running `jcode` in this directory:
+- It auto-detects the jcode repo and enables self-dev mode
+- Builds and tests a canary version before running
+- Use `/reload` to hot-reload after making changes
 
-## Running Tests
+## Commands
 
-```fish
-cargo test              # Run all tests (unit + e2e)
+```bash
+cargo build --release   # Build (auto-updates jcode symlink)
+cargo test              # Run all tests
 cargo test --test e2e   # Run only e2e tests
 ```
 
@@ -21,6 +25,14 @@ cargo test --test e2e   # Run only e2e tests
 
 The Claude provider requires the Claude Agent SDK Python bridge:
 
-```fish
-set -x JCODE_CLAUDE_SDK_PYTHON ~/.venv/bin/python3
+```bash
+export JCODE_CLAUDE_SDK_PYTHON=~/.venv/bin/python3
 ```
+
+## Key Files
+
+- `src/main.rs` - Entry point, CLI, self-dev mode
+- `src/tui/app.rs` - TUI application state and logic
+- `src/tui/ui.rs` - UI rendering
+- `src/tool/` - Tool implementations
+- `src/id.rs` - Session naming and IDs
