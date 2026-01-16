@@ -289,11 +289,22 @@ impl App {
     /// Restore a previous session (for hot-reload)
     pub fn restore_session(&mut self, session_id: &str) {
         if let Ok(session) = Session::load(session_id) {
+            // Count stats before restoring
+            let mut user_turns = 0;
+            let mut assistant_turns = 0;
+            let mut total_chars = 0;
+
             // Convert session messages to display messages
             for stored_msg in &session.messages {
                 let role_str = match stored_msg.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
+                    Role::User => {
+                        user_turns += 1;
+                        "user"
+                    }
+                    Role::Assistant => {
+                        assistant_turns += 1;
+                        "assistant"
+                    }
                 };
 
                 // Extract text content from ContentBlocks
@@ -309,6 +320,8 @@ impl App {
                     })
                     .collect::<Vec<_>>()
                     .join("");
+
+                total_chars += content.len();
 
                 if !content.is_empty() {
                     self.display_messages.push(DisplayMessage {
@@ -331,10 +344,23 @@ impl App {
             self.session.provider_session_id = None;
             crate::logging::info(&format!("Restored session: {}", session_id));
 
-            // Add success message to display
+            // Build stats message
+            let total_turns = user_turns + assistant_turns;
+            let estimated_tokens = total_chars / 4; // Rough estimate: ~4 chars per token
+            let stats = if total_turns > 0 {
+                format!(
+                    " ({} turns, ~{}k tokens)",
+                    total_turns,
+                    estimated_tokens / 1000
+                )
+            } else {
+                String::new()
+            };
+
+            // Add success message with stats
             self.display_messages.push(DisplayMessage {
                 role: "system".to_string(),
-                content: "✓ jcode reloaded successfully. Session restored.".to_string(),
+                content: format!("✓ JCode reloaded. Session restored{}", stats),
                 tool_calls: vec![],
                 duration_secs: None,
                 title: None,
@@ -3594,7 +3620,7 @@ mod tests {
         assert_eq!(app.display_messages()[0].role, "user");
         assert_eq!(app.display_messages()[0].content, "test message");
         assert_eq!(app.display_messages()[1].role, "system");
-        assert!(app.display_messages()[1].content.contains("reloaded successfully"));
+        assert!(app.display_messages()[1].content.contains("reloaded"));
 
         // Messages for API should only have the original message (no reload msg to avoid breaking alternation)
         assert_eq!(app.messages.len(), 1);
