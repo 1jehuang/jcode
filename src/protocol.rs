@@ -66,8 +66,11 @@ pub enum Request {
         direction: i8,
     },
 
-    // === Agent-to-agent communication ===
+    /// Set the active model by name
+    #[serde(rename = "set_model")]
+    SetModel { id: u64, model: String },
 
+    // === Agent-to-agent communication ===
     /// Register as an external agent
     #[serde(rename = "agent_register")]
     AgentRegister {
@@ -176,6 +179,9 @@ pub enum ServerEvent {
         /// Model name (e.g. "claude-sonnet-4-20250514")
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_model: Option<String>,
+        /// Available models for this provider
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        available_models: Vec<String>,
         /// Connected MCP server names
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mcp_servers: Vec<String>,
@@ -224,6 +230,7 @@ impl Request {
             Request::Reload { id } => *id,
             Request::ResumeSession { id, .. } => *id,
             Request::CycleModel { id, .. } => *id,
+            Request::SetModel { id, .. } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,
             Request::AgentCapabilities { id } => *id,
