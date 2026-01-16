@@ -284,8 +284,8 @@ fn estimate_content_height(app: &dyn TuiState, width: u16) -> u16 {
 
     let mut lines = 0u16;
 
-    // Header is always visible: agent name + model/build + changelog + blank = 4 lines minimum
-    lines += 4;
+    // Header is always visible: agent name + model/build + changelog box (3 lines) + blank = 6 lines minimum
+    lines += 6;
     // Plus optional MCP line
     if !app.mcp_servers().is_empty() {
         lines += 1;
@@ -423,14 +423,36 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         Style::default().fg(DIM_COLOR),
     )));
 
-    // Line 3: Recent changes (from git log, embedded at build time)
+    // Line 3: Recent changes in a box (from git log, embedded at build time)
     let changelog = env!("JCODE_CHANGELOG");
     if !changelog.is_empty() {
-        // Show first commit message (most recent change)
         if let Some(first_line) = changelog.lines().next() {
+            // Calculate box width based on content
+            let content = format!(" {} ", first_line);
+            let content_width = content.chars().count();
+            let box_width = content_width + 2; // +2 for side borders
+
+            // Top border with title
+            let title = " Updates ";
+            let title_len = title.chars().count();
+            let remaining = box_width.saturating_sub(title_len + 2); // -2 for corners
+            let right_border = "─".repeat(remaining);
             lines.push(Line::from(Span::styled(
-                format!("› {}", first_line),
-                Style::default().fg(DIM_COLOR).italic(),
+                format!("┌{}{}┐", title, right_border),
+                Style::default().fg(DIM_COLOR),
+            )));
+
+            // Content line
+            lines.push(Line::from(Span::styled(
+                format!("│{}│", content),
+                Style::default().fg(DIM_COLOR),
+            )));
+
+            // Bottom border
+            let bottom_border = "─".repeat(box_width - 2);
+            lines.push(Line::from(Span::styled(
+                format!("└{}┘", bottom_border),
+                Style::default().fg(DIM_COLOR),
             )));
         }
     }
