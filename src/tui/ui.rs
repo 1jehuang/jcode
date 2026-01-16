@@ -25,103 +25,75 @@ const AI_TEXT: Color = Color::Rgb(220, 220, 215);       // Softer warm white (AI
 // Spinner frames for animated status
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-// Animation colors for startup gradient (cyan → purple → pink)
-const ANIM_COLOR_1: (f32, f32, f32) = (80.0, 200.0, 220.0);   // Cyan
-const ANIM_COLOR_2: (f32, f32, f32) = (186.0, 139.0, 255.0);  // Purple
-const ANIM_COLOR_3: (f32, f32, f32) = (255.0, 120.0, 180.0);  // Pink
-
 /// Duration of the startup header animation in seconds
-const HEADER_ANIM_DURATION: f32 = 2.0;
+const HEADER_ANIM_DURATION: f32 = 1.5;
 
-/// Calculate animated gradient color for a character at a given position.
-/// Returns (color, completed) where completed is true if animation is done.
-fn header_animation_color(char_pos: usize, total_chars: usize, elapsed: f32) -> (Color, bool) {
+/// Calculate smooth animated color for the header.
+/// Uses a gentle shimmer effect that pulses through colors uniformly.
+fn header_animation_color(elapsed: f32) -> Color {
     if elapsed >= HEADER_ANIM_DURATION {
-        // Animation complete - return final color (accent purple)
-        return (ACCENT_COLOR, true);
+        return ACCENT_COLOR;
     }
 
-    // Animation progress 0.0 -> 1.0
+    // Smooth easing function (ease-out cubic)
     let progress = elapsed / HEADER_ANIM_DURATION;
+    let eased = 1.0 - (1.0 - progress).powi(3);
 
-    // Wave moves across the text, completing by the end of the animation
-    // Position in the gradient based on char position and time
-    let wave_speed = 2.0; // How fast the wave moves
-    let wave_width = 0.5; // Width of the gradient transition
+    // Color journey: cyan -> purple (accent)
+    // Start bright cyan, smoothly transition to accent purple
+    let start = (100.0, 220.0, 255.0);  // Bright cyan
+    let end = (186.0, 139.0, 255.0);    // Accent purple
 
-    // Normalized position (0.0 to 1.0)
-    let norm_pos = if total_chars > 1 {
-        char_pos as f32 / (total_chars - 1) as f32
-    } else {
-        0.5
-    };
+    // Add a subtle pulse/shimmer during transition
+    let pulse = (elapsed * 8.0).sin() * 0.15 * (1.0 - eased);
 
-    // Wave position moves from left (-wave_width) to right (1.0 + wave_width)
-    let wave_center = -wave_width + (1.0 + 2.0 * wave_width) * (progress * wave_speed).min(1.0);
+    let r = start.0 + (end.0 - start.0) * eased + pulse * 50.0;
+    let g = start.1 + (end.1 - start.1) * eased - pulse * 30.0;
+    let b = start.2 + (end.2 - start.2) * eased;
 
-    // Distance from wave center, normalized
-    let dist = (norm_pos - wave_center).abs();
-
-    // Calculate gradient position (0.0 = color1, 0.5 = color2, 1.0 = color3)
-    let gradient_pos = if dist < wave_width {
-        // Inside the wave - cycle through colors
-        let local_pos = (norm_pos - (wave_center - wave_width)) / (wave_width * 2.0);
-        local_pos.clamp(0.0, 1.0)
-    } else if norm_pos < wave_center {
-        // Behind the wave - settled to final color
-        1.0
-    } else {
-        // Ahead of the wave - starting color
-        0.0
-    };
-
-    // Interpolate through the 3 colors
-    let (r, g, b) = if gradient_pos < 0.5 {
-        // Blend color1 -> color2
-        let t = gradient_pos * 2.0;
-        (
-            ANIM_COLOR_1.0 + (ANIM_COLOR_2.0 - ANIM_COLOR_1.0) * t,
-            ANIM_COLOR_1.1 + (ANIM_COLOR_2.1 - ANIM_COLOR_1.1) * t,
-            ANIM_COLOR_1.2 + (ANIM_COLOR_2.2 - ANIM_COLOR_1.2) * t,
-        )
-    } else {
-        // Blend color2 -> color3
-        let t = (gradient_pos - 0.5) * 2.0;
-        (
-            ANIM_COLOR_2.0 + (ANIM_COLOR_3.0 - ANIM_COLOR_2.0) * t,
-            ANIM_COLOR_2.1 + (ANIM_COLOR_3.1 - ANIM_COLOR_2.1) * t,
-            ANIM_COLOR_2.2 + (ANIM_COLOR_3.2 - ANIM_COLOR_2.2) * t,
-        )
-    };
-
-    // Fade to final color as animation ends
-    let fade_to_final = (progress * 1.5 - 0.5).clamp(0.0, 1.0);
-    let final_r = 186.0; // ACCENT_COLOR
-    let final_g = 139.0;
-    let final_b = 255.0;
-
-    let blended_r = r + (final_r - r) * fade_to_final;
-    let blended_g = g + (final_g - g) * fade_to_final;
-    let blended_b = b + (final_b - b) * fade_to_final;
-
-    (Color::Rgb(blended_r as u8, blended_g as u8, blended_b as u8), false)
+    Color::Rgb(
+        r.clamp(0.0, 255.0) as u8,
+        g.clamp(0.0, 255.0) as u8,
+        b.clamp(0.0, 255.0) as u8,
+    )
 }
 
-/// Create animated spans for the header text during startup
-fn animated_header_spans(text: &str, elapsed: f32) -> Vec<Span<'static>> {
-    let chars: Vec<char> = text.chars().collect();
-    let total_chars = chars.len();
+/// Create animated span for the header text during startup
+fn animated_header_span(text: &str, elapsed: f32) -> Span<'static> {
+    let color = header_animation_color(elapsed);
+    Span::styled(text.to_string(), Style::default().fg(color))
+}
 
-    if elapsed >= HEADER_ANIM_DURATION {
-        // Animation done - return single styled span
-        return vec![Span::styled(text.to_string(), Style::default().fg(ACCENT_COLOR))];
+/// Capitalize first letter of a string
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().chain(chars).collect(),
     }
+}
 
-    // Create per-character spans with animated colors
-    chars.iter().enumerate().map(|(i, c)| {
-        let (color, _) = header_animation_color(i, total_chars, elapsed);
-        Span::styled(c.to_string(), Style::default().fg(color))
-    }).collect()
+/// Format model name nicely (e.g., "claude4.5opus" -> "Claude 4.5 Opus")
+fn format_model_name(short: &str) -> String {
+    if short.contains("opus") {
+        if short.contains("4.5") {
+            return "Claude 4.5 Opus".to_string();
+        }
+        return "Claude Opus".to_string();
+    }
+    if short.contains("sonnet") {
+        if short.contains("3.5") {
+            return "Claude 3.5 Sonnet".to_string();
+        }
+        return "Claude Sonnet".to_string();
+    }
+    if short.contains("haiku") {
+        return "Claude Haiku".to_string();
+    }
+    if short.starts_with("gpt") {
+        return short.to_uppercase();
+    }
+    short.to_string()
 }
 
 /// Calculate rainbow color for prompt index with exponential decay to gray.
@@ -414,13 +386,14 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let icon = crate::id::session_icon(&session_name);
 
     if !session_name.is_empty() {
-        // Full agent name with animated gradient during startup
-        let header_text = format!("{} jcode-{}-{}", icon, session_name, short_model);
-        let header_spans = animated_header_spans(&header_text, anim_elapsed);
-        mode_parts.extend(header_spans);
+        // Full agent name with animated color during startup
+        // Format: "JCode Fox · Claude 4.5 Opus"
+        let nice_model = format_model_name(&short_model);
+        let header_text = format!("{} JCode {} · {}", icon, capitalize(&session_name), nice_model);
+        mode_parts.push(animated_header_span(&header_text, anim_elapsed));
     } else {
         mode_parts.push(Span::styled(
-            format!("jcode {}", env!("JCODE_VERSION")),
+            format!("JCode {}", env!("JCODE_VERSION")),
             Style::default().fg(DIM_COLOR),
         ));
     }
