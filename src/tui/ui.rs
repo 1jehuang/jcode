@@ -93,6 +93,39 @@ fn binary_age() -> Option<String> {
     Some(age_str)
 }
 
+/// Shorten model name for display (e.g., "claude-opus-4-5-20251101" -> "claude4.5opus")
+fn shorten_model_name(model: &str) -> String {
+    // Handle common Claude model patterns
+    if model.contains("opus") {
+        if model.contains("4-5") || model.contains("4.5") {
+            return "claude4.5opus".to_string();
+        }
+        return "claudeopus".to_string();
+    }
+    if model.contains("sonnet") {
+        if model.contains("3-5") || model.contains("3.5") {
+            return "claude3.5sonnet".to_string();
+        }
+        return "claudesonnet".to_string();
+    }
+    if model.contains("haiku") {
+        return "claudehaiku".to_string();
+    }
+    // Handle OpenAI models
+    if model.starts_with("gpt-4") {
+        return model.replace("gpt-", "").replace("-", "");
+    }
+    if model.starts_with("gpt-3") {
+        return "gpt3.5".to_string();
+    }
+    // Fallback: remove common suffixes and dashes
+    model
+        .split('-')
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 /// Calculate the number of visual lines an input string will occupy
 /// when wrapped to a given width, accounting for explicit newlines.
 fn calculate_input_lines(input: &str, line_width: usize) -> usize {
@@ -272,20 +305,23 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let provider = app.provider_name();
     let model = app.provider_model();
 
-    // Line 1: Version + Session name + Mode indicators
-    let mut mode_parts: Vec<Span> = vec![
-        Span::styled(
+    // Line 1: Full agent name (icon jcode-session-model) + Mode indicators
+    let mut mode_parts: Vec<Span> = Vec::new();
+
+    // Build full agent name: jcode-{session}-{model}
+    let session_name = app.session_display_name().unwrap_or_default();
+    let short_model = shorten_model_name(&model);
+    let icon = crate::id::session_icon(&session_name);
+
+    if !session_name.is_empty() {
+        mode_parts.push(Span::styled(
+            format!("{} jcode-{}-{}", icon, session_name, short_model),
+            Style::default().fg(ACCENT_COLOR),
+        ));
+    } else {
+        mode_parts.push(Span::styled(
             format!("jcode {}", env!("JCODE_VERSION")),
             Style::default().fg(DIM_COLOR),
-        ),
-    ];
-
-    // Add session name with icon
-    if let Some(name) = app.session_display_name() {
-        let icon = crate::id::session_icon(&name);
-        mode_parts.push(Span::styled(
-            format!("  {} {}", icon, name),
-            Style::default().fg(ACCENT_COLOR),
         ));
     }
 
@@ -306,12 +342,6 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     }
 
     lines.push(Line::from(mode_parts));
-
-    // Line 2: Provider/Model (show full model identifier)
-    lines.push(Line::from(Span::styled(
-        format!("{}: {}", provider, model),
-        Style::default().fg(DIM_COLOR),
-    )));
 
     // Line 3: MCPs (if any)
     let mcps = app.mcp_servers();
