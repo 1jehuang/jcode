@@ -866,15 +866,6 @@ fn draw_input(frame: &mut Frame, app: &dyn TuiState, area: Rect, next_prompt: us
             "  Shift+Enter to send now",
             Style::default().fg(DIM_COLOR),
         )));
-    } else if input_text.is_empty() && !app.is_processing() {
-        // Show session name with icon as placeholder when input is empty
-        if let Some(name) = app.session_display_name() {
-            let icon = crate::id::session_icon(&name);
-            lines.push(Line::from(Span::styled(
-                format!("  {} {}", icon, name),
-                Style::default().fg(DIM_COLOR),
-            )));
-        }
     }
 
     let suggestions_offset = lines.len();

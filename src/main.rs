@@ -433,6 +433,13 @@ async fn run_tui(
         .map(|s| s.to_string())
         .unwrap_or_else(|| session_id.clone());
 
+    // Set terminal window title with session icon and name
+    let icon = id::session_icon(&session_name);
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::terminal::SetTitle(format!("{} jcode {}", icon, session_name))
+    );
+
     app.init_mcp().await;
     let result = app.run(terminal).await;
     // Disable bracketed paste before restoring terminal
