@@ -15,8 +15,8 @@ mod server;
 mod session;
 mod skill;
 mod storage;
-mod tool;
 mod todo;
+mod tool;
 mod tui;
 
 use anyhow::Result;
@@ -46,10 +46,13 @@ fn install_panic_hook() {
         // Print recovery command if we have a session
         if let Ok(guard) = CURRENT_SESSION_ID.lock() {
             if let Some(session_id) = guard.as_ref() {
-                let session_name = id::extract_session_name(session_id)
-                    .unwrap_or(session_id.as_str());
+                let session_name =
+                    id::extract_session_name(session_id).unwrap_or(session_id.as_str());
                 eprintln!();
-                eprintln!("\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m", session_name);
+                eprintln!(
+                    "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
+                    session_name
+                );
                 eprintln!("  jcode --resume {}", session_id);
                 eprintln!();
             }
@@ -178,11 +181,16 @@ async fn main() -> Result<()> {
                 if args.auto_update {
                     eprintln!("Update available - auto-updating...");
                     if let Err(e) = run_auto_update() {
-                        eprintln!("Auto-update failed: {}. Continuing with current version.", e);
+                        eprintln!(
+                            "Auto-update failed: {}. Continuing with current version.",
+                            e
+                        );
                     }
                     // If we get here, exec failed or update failed
                 } else {
-                    eprintln!("\n📦 Update available! Run `jcode update` or `/reload` to update.\n");
+                    eprintln!(
+                        "\n📦 Update available! Run `jcode update` or `/reload` to update.\n"
+                    );
                 }
             }
         }
@@ -294,7 +302,9 @@ async fn run_main(mut args: Args) -> Result<()> {
                 // Default: TUI client mode - start server if needed
                 let server_running = if server::socket_path().exists() {
                     // Test if server is actually responding
-                    tokio::net::UnixStream::connect(server::socket_path()).await.is_ok()
+                    tokio::net::UnixStream::connect(server::socket_path())
+                        .await
+                        .is_ok()
                 } else {
                     false
                 };
@@ -321,7 +331,10 @@ async fn run_main(mut args: Args) -> Result<()> {
                             anyhow::bail!("Server failed to start within 10 seconds");
                         }
                         if server::socket_path().exists() {
-                            if tokio::net::UnixStream::connect(server::socket_path()).await.is_ok() {
+                            if tokio::net::UnixStream::connect(server::socket_path())
+                                .await
+                                .is_ok()
+                            {
                                 break;
                             }
                         }
@@ -413,7 +426,10 @@ async fn run_tui(
     let _debug_handle = if debug_socket {
         let rx = app.enable_debug_socket();
         let handle = app.start_debug_socket_listener(rx);
-        eprintln!("Debug socket enabled at: {:?}", tui::App::debug_socket_path());
+        eprintln!(
+            "Debug socket enabled at: {:?}",
+            tui::App::debug_socket_path()
+        );
         Some(handle)
     } else {
         None
@@ -461,7 +477,10 @@ async fn run_tui(
     // Print resume command for normal exits (not hot-reload)
     if run_result.reload_session.is_none() {
         eprintln!();
-        eprintln!("\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m", session_name);
+        eprintln!(
+            "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
+            session_name
+        );
         eprintln!("  jcode --resume {}", session_id);
         eprintln!();
     }
@@ -488,11 +507,15 @@ fn hot_reload(session_id: &str) -> Result<()> {
                 .exec();
             return Err(anyhow::anyhow!("Failed to exec: {}", err));
         } else {
-            eprintln!("Warning: Migration binary not found at {:?}, falling back to rebuild", binary_path);
+            eprintln!(
+                "Warning: Migration binary not found at {:?}, falling back to rebuild",
+                binary_path
+            );
         }
     }
 
-    let repo_dir = get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
+    let repo_dir =
+        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
     eprintln!("Hot-reloading jcode with session {}...", session_id);
 
@@ -707,7 +730,8 @@ fn check_for_updates() -> Option<bool> {
 fn run_auto_update() -> Result<()> {
     use std::os::unix::process::CommandExt;
 
-    let repo_dir = get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
+    let repo_dir =
+        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
     // Git pull (quiet)
     let pull = ProcessCommand::new("git")
@@ -752,7 +776,8 @@ fn run_auto_update() -> Result<()> {
 
 /// Run the update process (manual)
 fn run_update() -> Result<()> {
-    let repo_dir = get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
+    let repo_dir =
+        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
     eprintln!("Updating jcode from {}...", repo_dir.display());
 
@@ -835,11 +860,18 @@ fn list_sessions() -> Result<()> {
             format!("{}m ago", age.num_minutes())
         };
 
-        let canary_marker = if session.is_canary { " \x1b[33m[self-dev]\x1b[0m" } else { "" };
+        let canary_marker = if session.is_canary {
+            " \x1b[33m[self-dev]\x1b[0m"
+        } else {
+            ""
+        };
         let msg_count = session.messages.len();
 
         eprintln!("  \x1b[1;36m{}\x1b[0m  \x1b[2m{}\x1b[0m", display_name, id);
-        eprintln!("    {} ({} msgs, {}){}", title, msg_count, age_str, canary_marker);
+        eprintln!(
+            "    {} ({} msgs, {}){}",
+            title, msg_count, age_str, canary_marker
+        );
         eprintln!();
     }
 
@@ -854,7 +886,11 @@ fn list_sessions() -> Result<()> {
 
 /// Self-development mode: run as canary with crash recovery wrapper
 async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Result<()> {
-    let repo_dir = get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
+    let repo_dir =
+        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
+
+    // Track if this is a fresh start (not resuming) before we move resume_session
+    let is_fresh_start = resume_session.is_none();
 
     // Get or create session and mark as canary
     let session_id = if let Some(id) = resume_session {
@@ -867,24 +903,19 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
         }
         id
     } else {
-        let mut session = session::Session::create(None, Some("Self-development session".to_string()));
+        let mut session =
+            session::Session::create(None, Some("Self-development session".to_string()));
         session.set_canary("self-dev");
         let _ = session.save();
         session.id.clone()
     };
 
-    let mut hash = if should_build {
-        // Build new canary version
-        eprintln!("Building canary version...");
+    // Use target/release/jcode as the binary
+    let target_binary = repo_dir.join("target/release/jcode");
 
-        let pull = ProcessCommand::new("git")
-            .args(["pull", "-q"])
-            .current_dir(&repo_dir)
-            .status()?;
-
-        if !pull.success() {
-            eprintln!("Warning: git pull failed, continuing with local changes");
-        }
+    // Only rebuild if explicitly requested with --build flag
+    if should_build {
+        eprintln!("Building release version...");
 
         let build_status = ProcessCommand::new("cargo")
             .args(["build", "--release"])
@@ -895,113 +926,41 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
             anyhow::bail!("Build failed");
         }
 
-        // Run quick tests
-        eprintln!("Running tests...");
-        let test = ProcessCommand::new("cargo")
-            .args(["test", "--release"])
-            .current_dir(&repo_dir)
-            .status()?;
+        eprintln!("✓ Build complete");
+    }
 
-        if !test.success() {
-            anyhow::bail!("Tests failed - not creating canary");
-        }
+    // Require binary to exist - developer builds manually otherwise
+    if !target_binary.exists() {
+        anyhow::bail!(
+            "No binary found at {:?}\n\
+             Run 'cargo build --release' first, or use 'jcode self-dev --build'.",
+            target_binary
+        );
+    }
 
-        let hash = build::current_git_hash(&repo_dir)?;
+    let hash = build::current_git_hash(&repo_dir)?;
+    let binary_path = target_binary.clone();
 
-        // Install to versioned location
+    // On fresh start (not resume), set current build as stable
+    // This gives us a safety net to rollback to if canary crashes
+    if is_fresh_start {
+        eprintln!("Setting {} as stable (safety net)...", hash);
+
+        // Install this version and set as stable
         build::install_version(&repo_dir, &hash)?;
-        build::update_canary_symlink(&hash)?;
+        build::update_stable_symlink(&hash)?;
 
-        // Update manifest
+        // Update manifest - clear any old canary, set stable
         let mut manifest = build::BuildManifest::load()?;
-        manifest.start_canary(&hash, &session_id)?;
-
-        // Record build info
-        let info = build::current_build_info(&repo_dir)?;
-        manifest.add_to_history(info)?;
-
-        eprintln!("✓ Canary build {} ready", hash);
-        hash
-    } else {
-        // Use existing canary or current binary (verified below)
-        let manifest = build::BuildManifest::load()?;
-        if let Some(canary) = manifest.canary {
-            canary
-        } else {
-            // No canary yet, use current hash (will be rebuilt if missing)
-            build::current_git_hash(&repo_dir)?
-        }
-    };
-
-    if !should_build {
-        let mut needs_rebuild = false;
-        let canary_path = build::canary_binary_path()?;
-
-        if build::is_working_tree_dirty(&repo_dir).unwrap_or(false) {
-            needs_rebuild = true;
-        }
-
-        if !canary_path.exists() {
-            needs_rebuild = true;
-        } else {
-            match std::fs::read_link(&canary_path) {
-                Ok(target) => {
-                    let target_str = target.to_string_lossy();
-                    if !target_str.contains(&hash) {
-                        needs_rebuild = true;
-                    }
-                }
-                Err(_) => {
-                    needs_rebuild = true;
-                }
-            }
-        }
-
-        if needs_rebuild {
-            eprintln!("Self-dev canary missing or mismatched; rebuilding and testing...");
-            hash = build::rebuild_canary(&repo_dir)?;
-        }
+        manifest.stable = Some(hash.clone());
+        manifest.canary = None;
+        manifest.canary_session = None;
+        manifest.canary_status = None;
+        manifest.save()?;
     }
-
-    // Save migration context
-    let stable_hash = build::read_stable_version()?.unwrap_or_else(|| "unknown".to_string());
-    let diff = build::current_git_diff(&repo_dir).ok();
-
-    let ctx = build::MigrationContext {
-        session_id: session_id.clone(),
-        from_version: stable_hash,
-        to_version: hash.clone(),
-        change_summary: build::get_commit_message(&repo_dir, &hash).ok(),
-        diff,
-        timestamp: chrono::Utc::now(),
-    };
-    build::save_migration_context(&ctx)?;
-
-    // Ensure canary binary exists - wrapper reads from canary symlink
-    let canary_binary = build::canary_binary_path()?;
-    if !canary_binary.exists() {
-        // No canary binary yet - install current binary as canary
-        let current_exe = std::env::current_exe()?;
-        let canary_dir = canary_binary.parent().unwrap();
-        std::fs::create_dir_all(canary_dir)?;
-        std::fs::copy(&current_exe, &canary_binary)?;
-
-        // Make executable
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&canary_binary)?.permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&canary_binary, perms)?;
-        }
-
-        eprintln!("Installed current binary as initial canary");
-    }
-
-    let binary_path = canary_binary;
 
     // Launch wrapper process
-    eprintln!("Starting self-dev session with canary {}...", hash);
+    eprintln!("Starting self-dev session with {}...", hash);
 
     let exe = std::env::current_exe()?;
     let cwd = std::env::current_dir()?;
@@ -1020,8 +979,8 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
 
 // Exit codes for canary wrapper communication
 // Note: Rust panic exits with 101, so we avoid that for our signals
-const EXIT_DONE: i32 = 0;               // Clean exit, stop wrapper
-const EXIT_RELOAD_REQUESTED: i32 = 42;  // Agent wants to reload to new canary build
+const EXIT_DONE: i32 = 0; // Clean exit, stop wrapper
+const EXIT_RELOAD_REQUESTED: i32 = 42; // Agent wants to reload to new canary build
 const EXIT_ROLLBACK_REQUESTED: i32 = 43; // Agent wants to rollback to stable
 
 /// Wrapper that runs canary binary and handles crashes
@@ -1033,18 +992,29 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
     let initial_binary_path = std::path::PathBuf::from(initial_binary);
 
     loop {
-        // Always read canary path fresh - allows agent to rebuild and update symlink
-        // Fall back to initial binary (usually target/release/jcode) if canary not set up yet
+        // Determine which binary to use:
+        // - If canary exists (set by reload/rebuild), use canary
+        // - Otherwise use stable (set on fresh start)
+        // - Fall back to target/release/jcode if neither exists
         let canary_path = build::canary_binary_path()?;
-        let binary_path = if canary_path.exists() {
-            canary_path
+        let stable_path = build::stable_binary_path()?;
+
+        let (binary_path, version_type) = if canary_path.exists() {
+            (canary_path, "canary")
+        } else if stable_path.exists() {
+            (stable_path, "stable")
         } else if initial_binary_path.exists() {
-            initial_binary_path.clone()
+            (initial_binary_path.clone(), "dev")
         } else {
-            anyhow::bail!("No binary found: canary at {:?} or initial at {:?}", canary_path, initial_binary_path);
+            anyhow::bail!(
+                "No binary found: canary at {:?}, stable at {:?}, or initial at {:?}",
+                canary_path,
+                stable_path,
+                initial_binary_path
+            );
         };
 
-        eprintln!("Launching canary session {}...", session_id);
+        eprintln!("Launching {} session {}...", version_type, session_id);
 
         // Run the canary binary
         let mut child = ProcessCommand::new(&binary_path)
@@ -1110,8 +1080,7 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
         };
 
         // Get diff from migration context
-        let diff = build::load_migration_context(session_id)?
-            .and_then(|ctx| ctx.diff);
+        let diff = build::load_migration_context(session_id)?.and_then(|ctx| ctx.diff);
 
         // Record crash in manifest
         let hash = build::BuildManifest::load()?.canary.unwrap_or_default();
@@ -1119,7 +1088,13 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
         manifest.record_crash(&hash, exit_code, &stderr_output, diff)?;
 
         // Inject crash context into session
-        inject_crash_context(session_id, &hash, exit_code, &stderr_output, repo_dir.as_ref())?;
+        inject_crash_context(
+            session_id,
+            &hash,
+            exit_code,
+            &stderr_output,
+            repo_dir.as_ref(),
+        )?;
 
         // Rollback to stable
         let stable_binary = build::stable_binary_path()?;
@@ -1196,17 +1171,19 @@ fn inject_crash_context(
             } else {
                 diff
             };
-            report.push_str(&format!("\n**Recent changes:**\n```diff\n{}\n```\n", truncated));
+            report.push_str(&format!(
+                "\n**Recent changes:**\n```diff\n{}\n```\n",
+                truncated
+            ));
         }
     }
 
-    report.push_str("\nI've been rolled back to the stable version. Please investigate and fix the issue.");
+    report.push_str(
+        "\nI've been rolled back to the stable version. Please investigate and fix the issue.",
+    );
 
     // Add as system message
-    session.add_message(
-        Role::User,
-        vec![ContentBlock::Text { text: report }],
-    );
+    session.add_message(Role::User, vec![ContentBlock::Text { text: report }]);
     session.save()?;
 
     Ok(())
@@ -1216,7 +1193,9 @@ fn inject_crash_context(
 fn run_promote() -> Result<()> {
     let mut manifest = build::BuildManifest::load()?;
 
-    let canary_hash = manifest.canary.clone()
+    let canary_hash = manifest
+        .canary
+        .clone()
         .ok_or_else(|| anyhow::anyhow!("No canary build to promote"))?;
 
     eprintln!("Promoting canary {} to stable...", canary_hash);
@@ -1268,21 +1247,30 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod selfdev_integration_tests {
     use super::*;
-    
+
     // Simple null provider for testing
     struct TestProvider;
-    
+
     #[async_trait::async_trait]
     impl provider::Provider for TestProvider {
-        fn name(&self) -> &str { "test" }
-        fn model(&self) -> String { "test".to_string() }
-        fn available_models(&self) -> Vec<&'static str> { vec![] }
-        fn set_model(&self, _model: &str) -> anyhow::Result<()> { Ok(()) }
-        fn handles_tools_internally(&self) -> bool { false }
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn model(&self) -> String {
+            "test".to_string()
+        }
+        fn available_models(&self) -> Vec<&'static str> {
+            vec![]
+        }
+        fn set_model(&self, _model: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn handles_tools_internally(&self) -> bool {
+            false
+        }
         async fn complete(
             &self,
             _messages: &[crate::message::Message],
@@ -1293,34 +1281,42 @@ mod selfdev_integration_tests {
             unimplemented!()
         }
     }
-    
+
     #[tokio::test]
     async fn test_selfdev_tool_registration() {
         // Create a canary session
         let mut session = session::Session::create(None, Some("Test".to_string()));
         session.set_canary("test");
-        
+
         // Verify session is canary
         assert!(session.is_canary, "Session should be marked as canary");
-        
+
         // Create registry
         let provider = Arc::new(TestProvider) as Arc<dyn provider::Provider>;
         let registry = tool::Registry::new(provider).await;
-        
+
         // Get tool names before
         let tools_before: Vec<String> = registry.tool_names().await;
         let has_selfdev_before = tools_before.contains(&"selfdev".to_string());
-        
+
         // Register selfdev tools
         registry.register_selfdev_tools().await;
-        
+
         // Get tool names after
         let tools_after: Vec<String> = registry.tool_names().await;
         let has_selfdev_after = tools_after.contains(&"selfdev".to_string());
-        
-        println!("Before: selfdev={}, tools={:?}", has_selfdev_before, tools_before.len());
-        println!("After: selfdev={}, tools={:?}", has_selfdev_after, tools_after.len());
-        
+
+        println!(
+            "Before: selfdev={}, tools={:?}",
+            has_selfdev_before,
+            tools_before.len()
+        );
+        println!(
+            "After: selfdev={}, tools={:?}",
+            has_selfdev_after,
+            tools_after.len()
+        );
+
         assert!(has_selfdev_after, "selfdev should be registered");
     }
 }
@@ -1345,11 +1341,21 @@ mod selfdev_e2e_tests {
         struct TestProvider;
         #[async_trait::async_trait]
         impl provider::Provider for TestProvider {
-            fn name(&self) -> &str { "test" }
-            fn model(&self) -> String { "test".to_string() }
-            fn available_models(&self) -> Vec<&'static str> { vec![] }
-            fn set_model(&self, _model: &str) -> anyhow::Result<()> { Ok(()) }
-            fn handles_tools_internally(&self) -> bool { false }
+            fn name(&self) -> &str {
+                "test"
+            }
+            fn model(&self) -> String {
+                "test".to_string()
+            }
+            fn available_models(&self) -> Vec<&'static str> {
+                vec![]
+            }
+            fn set_model(&self, _model: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn handles_tools_internally(&self) -> bool {
+                false
+            }
             async fn complete(
                 &self,
                 _messages: &[crate::message::Message],
@@ -1366,16 +1372,20 @@ mod selfdev_e2e_tests {
 
         // 3. Check tools before selfdev registration
         let tools_before = registry.tool_names().await;
-        assert!(!tools_before.contains(&"selfdev".to_string()),
-            "selfdev should NOT be registered initially");
+        assert!(
+            !tools_before.contains(&"selfdev".to_string()),
+            "selfdev should NOT be registered initially"
+        );
 
         // 4. Register selfdev (simulating what init_mcp does when session.is_canary=true)
         registry.register_selfdev_tools().await;
 
         // 5. Check tools after
         let tools_after = registry.tool_names().await;
-        assert!(tools_after.contains(&"selfdev".to_string()),
-            "selfdev SHOULD be registered after register_selfdev_tools");
+        assert!(
+            tools_after.contains(&"selfdev".to_string()),
+            "selfdev SHOULD be registered after register_selfdev_tools"
+        );
 
         // 6. Test that the tool is executable
         let ctx = tool::ToolContext {
@@ -1383,18 +1393,19 @@ mod selfdev_e2e_tests {
             message_id: "test".to_string(),
             tool_call_id: "test".to_string(),
         };
-        let result = registry.execute(
-            "selfdev",
-            serde_json::json!({"action": "status"}),
-            ctx
-        ).await;
+        let result = registry
+            .execute("selfdev", serde_json::json!({"action": "status"}), ctx)
+            .await;
 
         println!("selfdev status result: {:?}", result);
         assert!(result.is_ok(), "selfdev tool should execute successfully");
 
         // 7. Cleanup
         let _ = std::fs::remove_file(
-            crate::storage::jcode_dir().unwrap().join("sessions").join(format!("{}.json", session_id))
+            crate::storage::jcode_dir()
+                .unwrap()
+                .join("sessions")
+                .join(format!("{}.json", session_id)),
         );
     }
 }

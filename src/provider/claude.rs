@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-
 #![allow(dead_code)]
 
 use super::{EventStream, Provider};
@@ -118,7 +117,16 @@ impl ClaudeSdkConfig {
         let python_bin = std::env::var("JCODE_CLAUDE_SDK_PYTHON")
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "python3".to_string());
+            .unwrap_or_else(|| {
+                // Check common venv location first
+                if let Some(home) = dirs::home_dir() {
+                    let venv_python = home.join(".venv/bin/python3");
+                    if venv_python.exists() {
+                        return venv_python.to_string_lossy().to_string();
+                    }
+                }
+                "python3".to_string()
+            });
 
         let bridge_script_path = std::env::var("JCODE_CLAUDE_SDK_SCRIPT")
             .ok()
@@ -189,10 +197,18 @@ struct ClaudeSdkOptions {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SdkOutput {
-    StreamEvent { event: Value },
-    AssistantMessage { content: Vec<SdkContentBlock> },
-    UserMessage { content: Vec<SdkContentBlock> },
-    ThinkingDone { duration_secs: f64 },
+    StreamEvent {
+        event: Value,
+    },
+    AssistantMessage {
+        content: Vec<SdkContentBlock>,
+    },
+    UserMessage {
+        content: Vec<SdkContentBlock>,
+    },
+    ThinkingDone {
+        duration_secs: f64,
+    },
     Compaction {
         trigger: String,
         pre_tokens: Option<u64>,
@@ -202,7 +218,11 @@ enum SdkOutput {
         usage: Option<UsageInfo>,
         session_id: Option<String>,
     },
-    Error { message: String },
+    Error {
+        message: String,
+        #[serde(default)]
+        retry_after_secs: Option<u64>,
+    },
     #[serde(other)]
     Other,
 }
@@ -210,7 +230,9 @@ enum SdkOutput {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SdkContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -301,6 +323,12 @@ struct MessageDeltaInfo {
 #[derive(Deserialize, Debug)]
 struct ErrorInfo {
     message: String,
+    #[serde(default)]
+    retry_after_secs: Option<u64>,
+    #[serde(default)]
+    status_code: Option<u16>,
+    #[serde(default)]
+    error_type: Option<String>,
 }
 
 struct ClaudeEventTranslator {
@@ -384,7 +412,10 @@ impl ClaudeEventTranslator {
             SseEvent::MessageStop => vec![StreamEvent::MessageEnd {
                 stop_reason: self.last_stop_reason.take(),
             }],
-            SseEvent::Error { error } => vec![StreamEvent::Error(error.message)],
+            SseEvent::Error { error } => vec![StreamEvent::Error {
+                message: error.message,
+                retry_after_secs: error.retry_after_secs,
+            }],
             _ => Vec::new(),
         }
     }
@@ -412,10 +443,10 @@ impl OutputParser {
                 let parsed: SseEvent = match serde_json::from_value(event) {
                     Ok(parsed) => parsed,
                     Err(err) => {
-                        return vec![StreamEvent::Error(format!(
-                            "Failed to parse SDK stream event: {}",
-                            err
-                        ))];
+                        return vec![StreamEvent::Error {
+                            message: format!("Failed to parse SDK stream event: {}", err),
+                            retry_after_secs: None,
+                        }];
                     }
                 };
 
@@ -451,7 +482,11 @@ impl OutputParser {
                                 events.push(StreamEvent::ToolUseEnd);
                             }
                         }
-                        SdkContentBlock::ToolResult { tool_use_id, content, is_error } => {
+                        SdkContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } => {
                             // Always emit tool results - they contain the actual output/diffs
                             // and only come through AssistantMessage, not stream events
                             let content_str = content
@@ -484,7 +519,12 @@ impl OutputParser {
                 // UserMessage contains tool results when SDK executes tools
                 let mut events = Vec::new();
                 for block in content {
-                    if let SdkContentBlock::ToolResult { tool_use_id, content, is_error } = block {
+                    if let SdkContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } = block
+                    {
                         let content_str = content
                             .map(|v| {
                                 if let Some(s) = v.as_str() {
@@ -503,7 +543,11 @@ impl OutputParser {
                 }
                 events
             }
-            SdkOutput::Result { usage, is_error, session_id } => {
+            SdkOutput::Result {
+                usage,
+                is_error,
+                session_id,
+            } => {
                 let mut events = Vec::new();
                 if let Some(usage) = usage {
                     if usage.input_tokens.is_some() || usage.output_tokens.is_some() {
@@ -517,9 +561,10 @@ impl OutputParser {
                     events.push(StreamEvent::SessionId(sid));
                 }
                 if is_error {
-                    events.push(StreamEvent::Error(
-                        "Claude Agent SDK reported an error".to_string(),
-                    ));
+                    events.push(StreamEvent::Error {
+                        message: "Claude Agent SDK reported an error".to_string(),
+                        retry_after_secs: None,
+                    });
                 }
                 if !self.saw_message_end {
                     self.saw_message_end = true;
@@ -530,10 +575,19 @@ impl OutputParser {
             SdkOutput::ThinkingDone { duration_secs } => {
                 vec![StreamEvent::ThinkingDone { duration_secs }]
             }
-            SdkOutput::Compaction { trigger, pre_tokens } => {
-                vec![StreamEvent::Compaction { trigger, pre_tokens }]
+            SdkOutput::Compaction {
+                trigger,
+                pre_tokens,
+            } => {
+                vec![StreamEvent::Compaction {
+                    trigger,
+                    pre_tokens,
+                }]
             }
-            SdkOutput::Error { message } => vec![StreamEvent::Error(message)],
+            SdkOutput::Error { message, retry_after_secs } => vec![StreamEvent::Error {
+                message,
+                retry_after_secs,
+            }],
             SdkOutput::Other => Vec::new(),
         }
     }
@@ -554,7 +608,9 @@ impl Provider for ClaudeProvider {
             .map(|path| path.display().to_string());
 
         // Get current model (using runtime value, not config)
-        let current_model = self.model.read()
+        let current_model = self
+            .model
+            .read()
             .map(|m| m.clone())
             .unwrap_or_else(|_| self.config.model.clone());
 
@@ -627,10 +683,10 @@ impl Provider for ClaudeProvider {
                     Ok(parsed) => parsed,
                     Err(err) => {
                         let _ = tx
-                            .send(Ok(StreamEvent::Error(format!(
-                                "Failed to parse SDK output: {}",
-                                err
-                            ))))
+                            .send(Ok(StreamEvent::Error {
+                                message: format!("Failed to parse SDK output: {}", err),
+                                retry_after_secs: None,
+                            }))
                             .await;
                         continue;
                     }
@@ -662,13 +718,18 @@ impl Provider for ClaudeProvider {
 
     fn set_model(&self, model: &str) -> Result<()> {
         if !AVAILABLE_MODELS.contains(&model) {
-            eprintln!("Warning: '{}' is not in the known model list, but will try anyway", model);
+            eprintln!(
+                "Warning: '{}' is not in the known model list, but will try anyway",
+                model
+            );
         }
         if let Ok(mut current) = self.model.write() {
             *current = model.to_string();
             Ok(())
         } else {
-            Err(anyhow::anyhow!("Cannot change model while a request is in progress"))
+            Err(anyhow::anyhow!(
+                "Cannot change model while a request is in progress"
+            ))
         }
     }
 
