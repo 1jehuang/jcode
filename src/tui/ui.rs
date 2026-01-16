@@ -284,8 +284,8 @@ fn estimate_content_height(app: &dyn TuiState, width: u16) -> u16 {
 
     let mut lines = 0u16;
 
-    // Header is always visible: agent name + model/build + changelog box (3 lines) + blank = 6 lines minimum
-    lines += 6;
+    // Header is always visible: agent name + model/build + changelog box (up to 7 lines) + blank = 10 lines minimum
+    lines += 10;
     // Plus optional MCP line
     if !app.mcp_servers().is_empty() {
         lines += 1;
@@ -423,33 +423,62 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         Style::default().fg(DIM_COLOR),
     )));
 
-    // Line 3: Recent changes in a box (from git log, embedded at build time)
+    // Line 3+: Recent changes in a box (from git log, embedded at build time)
     let changelog = env!("JCODE_CHANGELOG");
     if !changelog.is_empty() {
-        if let Some(first_line) = changelog.lines().next() {
-            // Calculate box width based on content
-            let content = format!(" {} ", first_line);
-            let content_width = content.chars().count();
-            let box_width = content_width + 2; // +2 for side borders
+        let changelog_lines: Vec<&str> = changelog.lines().collect();
+        if !changelog_lines.is_empty() {
+            // Determine box width (max line length, capped at 60 chars)
+            const MAX_WIDTH: usize = 60;
+            const MAX_LINES: usize = 5;
+
+            let max_content_width = changelog_lines.iter()
+                .take(MAX_LINES)
+                .map(|l| l.chars().count())
+                .max()
+                .unwrap_or(0)
+                .min(MAX_WIDTH);
+            let box_width = max_content_width + 4; // +4 for "│ " and " │"
 
             // Top border with title
             let title = " Updates ";
             let title_len = title.chars().count();
-            let remaining = box_width.saturating_sub(title_len + 2); // -2 for corners
+            let remaining = box_width.saturating_sub(title_len);
             let right_border = "─".repeat(remaining);
             lines.push(Line::from(Span::styled(
                 format!("┌{}{}┐", title, right_border),
                 Style::default().fg(DIM_COLOR),
             )));
 
-            // Content line
-            lines.push(Line::from(Span::styled(
-                format!("│{}│", content),
-                Style::default().fg(DIM_COLOR),
-            )));
+            // Content lines (truncate each line if too long, limit total lines)
+            let display_lines = changelog_lines.len().min(MAX_LINES);
+            let has_more = changelog_lines.len() > MAX_LINES;
+
+            for line in changelog_lines.iter().take(display_lines) {
+                let truncated = if line.chars().count() > MAX_WIDTH {
+                    format!("{}…", line.chars().take(MAX_WIDTH - 1).collect::<String>())
+                } else {
+                    line.to_string()
+                };
+                let padding = max_content_width.saturating_sub(truncated.chars().count());
+                lines.push(Line::from(Span::styled(
+                    format!("│ {}{} │", truncated, " ".repeat(padding)),
+                    Style::default().fg(DIM_COLOR),
+                )));
+            }
+
+            // Show truncation indicator if there are more
+            if has_more {
+                let more_text = format!("…{} more", changelog_lines.len() - MAX_LINES);
+                let padding = max_content_width.saturating_sub(more_text.chars().count());
+                lines.push(Line::from(Span::styled(
+                    format!("│ {}{} │", more_text, " ".repeat(padding)),
+                    Style::default().fg(DIM_COLOR),
+                )));
+            }
 
             // Bottom border
-            let bottom_border = "─".repeat(box_width - 2);
+            let bottom_border = "─".repeat(box_width);
             lines.push(Line::from(Span::styled(
                 format!("└{}┘", bottom_border),
                 Style::default().fg(DIM_COLOR),
