@@ -4,7 +4,8 @@
 
 - **Commit as you go** - Make small, focused commits after completing each feature or fix
 - **Push when done** - Push all commits to remote when finishing a task or session
-- **Test before committing** - Run `cargo test` and `cargo build --release`
+- **Rebuild when done** - Run `cargo build --release` so the user has the updated binary
+- **Test before committing** - Run `cargo test` to verify changes
 
 ## Project Structure & Module Organization
 - `src/` is the core library and CLI entry point (`src/main.rs`). Key areas include `src/agent.rs`, `src/provider/`, `src/mcp/`, `src/tool/`, and `src/tui/`.
