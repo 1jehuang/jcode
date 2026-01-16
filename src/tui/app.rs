@@ -151,8 +151,10 @@ pub struct App {
     show_diffs: bool,
     // Keybindings for model switching
     model_switch_keys: ModelSwitchKeys,
-    // Short-lived notice for model switching feedback
-    model_switch_notice: Option<(String, Instant)>,
+    // Short-lived notice for status feedback (model switch, toggle diff, etc.)
+    status_notice: Option<(String, Instant)>,
+    // Message to interleave during processing (set via Shift+Enter)
+    interleave_message: Option<String>,
 }
 
 /// A placeholder provider for remote mode (never actually called)
@@ -231,7 +233,8 @@ impl App {
             requested_exit_code: None,
             show_diffs: true, // Default to showing diffs
             model_switch_keys: super::keybind::load_model_switch_keys(),
-            model_switch_notice: None,
+            status_notice: None,
+            interleave_message: None,
         }
     }
 
@@ -868,14 +871,14 @@ impl App {
                         "Failed to switch model: {}",
                         err
                     )));
-                    self.set_model_switch_notice("Model switch failed");
+                    self.set_status_notice("Model switch failed");
                 } else {
                     self.remote_provider_model = Some(model.clone());
                     self.display_messages.push(DisplayMessage::system(format!(
                         "✓ Switched to model: {}",
                         model
                     )));
-                    self.set_model_switch_notice(format!("Model → {}", model));
+                    self.set_status_notice(format!("Model → {}", model));
                 }
             }
             _ => {}
@@ -941,6 +944,8 @@ impl App {
         // Shift+Tab: toggle diff view
         if code == KeyCode::BackTab {
             self.show_diffs = !self.show_diffs;
+            let status = if self.show_diffs { "Diffs: ON" } else { "Diffs: OFF" };
+            self.set_status_notice(status);
             return Ok(());
         }
 
@@ -1184,6 +1189,8 @@ impl App {
         // Shift+Tab: toggle diff view
         if code == KeyCode::BackTab {
             self.show_diffs = !self.show_diffs;
+            let status = if self.show_diffs { "Diffs: ON" } else { "Diffs: OFF" };
+            self.set_status_notice(status);
             return Ok(());
         }
 
@@ -1270,6 +1277,24 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        // Shift+Enter: interleave message during processing (send immediately)
+        if code == KeyCode::Enter && modifiers.contains(KeyModifiers::SHIFT) {
+            if !self.input.is_empty() {
+                if self.is_processing {
+                    // Set interleave message to interrupt current turn
+                    let raw_input = std::mem::take(&mut self.input);
+                    let expanded = self.expand_paste_placeholders(&raw_input);
+                    self.interleave_message = Some(expanded);
+                    self.cursor_pos = 0;
+                    self.set_status_notice("⚡ Interleaving message...");
+                } else {
+                    // Not processing - just submit normally
+                    self.submit_input();
+                }
+            }
+            return Ok(());
         }
 
         match code {
@@ -1485,7 +1510,7 @@ impl App {
                         title: None,
                         tool_data: None,
                     });
-                    self.set_model_switch_notice(format!("Model → {}", model_name));
+                    self.set_status_notice(format!("Model → {}", model_name));
                 }
                 Err(e) => {
                     self.display_messages.push(DisplayMessage {
@@ -1496,7 +1521,7 @@ impl App {
                         title: None,
                         tool_data: None,
                     });
-                    self.set_model_switch_notice("Model switch failed");
+                    self.set_status_notice("Model switch failed");
                 }
             }
             return;
@@ -1695,7 +1720,7 @@ impl App {
             self.display_messages.push(DisplayMessage::error(
                 "Model switching is not available for this provider.",
             ));
-            self.set_model_switch_notice("Model switching not available");
+            self.set_status_notice("Model switching not available");
             return;
         }
 
@@ -1719,20 +1744,20 @@ impl App {
                     "✓ Switched to model: {}",
                     next_model
                 )));
-                self.set_model_switch_notice(format!("Model → {}", next_model));
+                self.set_status_notice(format!("Model → {}", next_model));
             }
             Err(e) => {
                 self.display_messages.push(DisplayMessage::error(format!(
                     "Failed to switch model: {}",
                     e
                 )));
-                self.set_model_switch_notice("Model switch failed");
+                self.set_status_notice("Model switch failed");
             }
         }
     }
 
-    fn set_model_switch_notice(&mut self, text: impl Into<String>) {
-        self.model_switch_notice = Some((text.into(), Instant::now()));
+    fn set_status_notice(&mut self, text: impl Into<String>) {
+        self.status_notice = Some((text.into(), Instant::now()));
     }
 
     async fn run_turn(&mut self) -> Result<()> {
@@ -2129,6 +2154,7 @@ impl App {
             let mut current_tool_input = String::new();
             let mut first_event = true;
             let mut saw_message_end = false;
+            let mut interleaved = false; // Track if we interleaved a message mid-stream
             // Track tool results from SDK (already executed by Claude Agent SDK)
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
@@ -2164,6 +2190,65 @@ impl App {
                                             tool_data: None,
                                         });
                                         return Ok(());
+                                    }
+                                    // Check for interleave request (Shift+Enter)
+                                    if let Some(interleave_msg) = self.interleave_message.take() {
+                                        // Save partial assistant response if any
+                                        if !text_content.is_empty() || !tool_calls.is_empty() {
+                                            // Complete any pending tool
+                                            if let Some(tool) = current_tool.take() {
+                                                tool_calls.push(tool);
+                                            }
+                                            // Build content blocks for partial response
+                                            let mut content_blocks = Vec::new();
+                                            if !text_content.is_empty() {
+                                                content_blocks.push(ContentBlock::Text {
+                                                    text: text_content.clone(),
+                                                });
+                                            }
+                                            for tc in &tool_calls {
+                                                content_blocks.push(ContentBlock::ToolUse {
+                                                    id: tc.id.clone(),
+                                                    name: tc.name.clone(),
+                                                    input: tc.input.clone(),
+                                                });
+                                            }
+                                            // Add partial assistant response to messages
+                                            if !content_blocks.is_empty() {
+                                                self.messages.push(Message {
+                                                    role: Role::Assistant,
+                                                    content: content_blocks,
+                                                });
+                                            }
+                                            // Add display message for partial response
+                                            if !self.streaming_text.is_empty() {
+                                                self.display_messages.push(DisplayMessage {
+                                                    role: "assistant".to_string(),
+                                                    content: std::mem::take(&mut self.streaming_text),
+                                                    tool_calls: tool_calls.iter().map(|t| t.name.clone()).collect(),
+                                                    duration_secs: None,
+                                                    title: None,
+                                                    tool_data: None,
+                                                });
+                                            }
+                                        }
+                                        // Add user's interleaved message
+                                        self.messages.push(Message::user(&interleave_msg));
+                                        self.display_messages.push(DisplayMessage {
+                                            role: "user".to_string(),
+                                            content: interleave_msg,
+                                            tool_calls: vec![],
+                                            duration_secs: None,
+                                            title: None,
+                                            tool_data: None,
+                                        });
+                                        // Clear streaming state and continue with new turn
+                                        self.streaming_text.clear();
+                                        self.streaming_tool_calls.clear();
+                                        self.stream_buffer = StreamBuffer::new();
+                                        interleaved = true;
+                                        // Continue to next iteration of outer loop (new API call)
+                                        break;
                                     }
                                 }
                             }
@@ -2358,6 +2443,11 @@ impl App {
                         }
                     }
                 }
+            }
+
+            // If we interleaved a message, skip post-processing and go straight to new API call
+            if interleaved {
+                continue;
             }
 
             // Add assistant message to history
@@ -3124,6 +3214,17 @@ impl super::TuiState for App {
         }
     }
 
+    fn session_display_name(&self) -> Option<String> {
+        if self.is_remote {
+            // For remote mode, extract name from session ID
+            self.remote_session_id.as_ref()
+                .and_then(|id| crate::id::extract_session_name(id))
+                .map(|s| s.to_string())
+        } else {
+            Some(self.session.display_name().to_string())
+        }
+    }
+
     fn server_sessions(&self) -> Vec<String> {
         self.remote_sessions.clone()
     }
@@ -3132,9 +3233,9 @@ impl super::TuiState for App {
         self.remote_client_count
     }
 
-    fn model_switch_notice(&self) -> Option<String> {
-        self.model_switch_notice.as_ref().and_then(|(text, at)| {
-            if at.elapsed() <= Duration::from_secs(5) {
+    fn status_notice(&self) -> Option<String> {
+        self.status_notice.as_ref().and_then(|(text, at)| {
+            if at.elapsed() <= Duration::from_secs(3) {
                 Some(text.clone())
             } else {
                 None

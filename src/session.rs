@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::id::new_id;
+use crate::id::{new_id, new_memorable_session_id, extract_session_name};
 use crate::message::{ContentBlock, Message, Role};
 use crate::storage;
 use anyhow::Result;
@@ -46,11 +46,16 @@ pub struct Session {
     /// Working directory (for self-dev detection)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    /// Memorable short name (e.g., "fox", "oak")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_name: Option<String>,
 }
 
 impl Session {
     pub fn create_with_id(session_id: String, parent_id: Option<String>, title: Option<String>) -> Self {
         let now = Utc::now();
+        // Try to extract short name from ID if it's a memorable ID
+        let short_name = extract_session_name(&session_id).map(|s| s.to_string());
         Self {
             id: session_id,
             parent_id,
@@ -62,13 +67,15 @@ impl Session {
             is_canary: false,
             testing_build: None,
             working_dir: std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
+            short_name,
         }
     }
 
     pub fn create(parent_id: Option<String>, title: Option<String>) -> Self {
         let now = Utc::now();
+        let (id, short_name) = new_memorable_session_id();
         Self {
-            id: new_id("session"),
+            id,
             parent_id,
             title,
             created_at: now,
@@ -78,7 +85,15 @@ impl Session {
             is_canary: false,
             testing_build: None,
             working_dir: std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
+            short_name: Some(short_name),
         }
+    }
+
+    /// Get the display name for this session (short memorable name if available)
+    pub fn display_name(&self) -> &str {
+        self.short_name.as_deref()
+            .or_else(|| extract_session_name(&self.id))
+            .unwrap_or(&self.id)
     }
 
     /// Mark this session as a canary tester
@@ -133,4 +148,50 @@ impl Session {
 pub fn session_path(session_id: &str) -> Result<PathBuf> {
     let base = storage::jcode_dir()?;
     Ok(base.join("sessions").join(format!("{}.json", session_id)))
+}
+
+/// Find a session by ID or memorable name
+/// If the input doesn't look like a full session ID (doesn't contain underscore followed by digits),
+/// try to find a session whose short name matches.
+/// Returns the full session ID if found.
+pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
+    // If it looks like a full session ID (contains session_), try loading directly first
+    if name_or_id.starts_with("session_") {
+        if let Ok(_) = Session::load(name_or_id) {
+            return Ok(name_or_id.to_string());
+        }
+    }
+
+    // Otherwise, search for a session with matching short name
+    let sessions_dir = storage::jcode_dir()?.join("sessions");
+    if !sessions_dir.exists() {
+        anyhow::bail!("No sessions found");
+    }
+
+    let mut matches: Vec<(String, chrono::DateTime<chrono::Utc>)> = Vec::new();
+
+    for entry in std::fs::read_dir(&sessions_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().map(|e| e == "json").unwrap_or(false) {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                // Check if short name matches
+                if let Some(short_name) = extract_session_name(stem) {
+                    if short_name == name_or_id {
+                        if let Ok(session) = Session::load(stem) {
+                            matches.push((stem.to_string(), session.updated_at));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if matches.is_empty() {
+        anyhow::bail!("No session found matching '{}'", name_or_id);
+    }
+
+    // Sort by updated_at descending and return the most recent match
+    matches.sort_by(|a, b| b.1.cmp(&a.1));
+    Ok(matches[0].0.clone())
 }

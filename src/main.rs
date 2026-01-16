@@ -46,8 +46,10 @@ fn install_panic_hook() {
         // Print recovery command if we have a session
         if let Ok(guard) = CURRENT_SESSION_ID.lock() {
             if let Some(session_id) = guard.as_ref() {
+                let session_name = id::extract_session_name(session_id)
+                    .unwrap_or(session_id.as_str());
                 eprintln!();
-                eprintln!("\x1b[33mTo restore this session, run:\x1b[0m");
+                eprintln!("\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m", session_name);
                 eprintln!("  jcode --resume {}", session_id);
                 eprintln!();
             }
@@ -212,11 +214,22 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_main(args: Args) -> Result<()> {
+async fn run_main(mut args: Args) -> Result<()> {
     // Handle --resume without session ID: list available sessions
     if let Some(ref resume_id) = args.resume {
         if resume_id.is_empty() {
             return list_sessions();
+        }
+        // Resolve memorable name to full session ID
+        match session::find_session_by_name_or_id(resume_id) {
+            Ok(full_id) => {
+                args.resume = Some(full_id);
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                eprintln!("\nUse `jcode --resume` to list available sessions.");
+                std::process::exit(1);
+            }
         }
     }
 
@@ -414,8 +427,11 @@ async fn run_tui(
     // Set current session for panic recovery
     set_current_session(app.session_id());
 
-    // Save session ID before running (for resume message)
+    // Save session info before running (for resume message)
     let session_id = app.session_id().to_string();
+    let session_name = id::extract_session_name(&session_id)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| session_id.clone());
 
     app.init_mcp().await;
     let result = app.run(terminal).await;
@@ -438,7 +454,7 @@ async fn run_tui(
     // Print resume command for normal exits (not hot-reload)
     if run_result.reload_session.is_none() {
         eprintln!();
-        eprintln!("\x1b[33mTo restore this session, run:\x1b[0m");
+        eprintln!("\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m", session_name);
         eprintln!("  jcode --resume {}", session_id);
         eprintln!();
     }
@@ -801,6 +817,7 @@ fn list_sessions() -> Result<()> {
     eprintln!("\n\x1b[1mAvailable sessions:\x1b[0m\n");
 
     for (id, session) in sessions.iter().take(20) {
+        let display_name = session.display_name();
         let title = session.title.as_deref().unwrap_or("Untitled");
         let age = chrono::Utc::now().signed_duration_since(session.updated_at);
         let age_str = if age.num_days() > 0 {
@@ -814,7 +831,7 @@ fn list_sessions() -> Result<()> {
         let canary_marker = if session.is_canary { " \x1b[33m[self-dev]\x1b[0m" } else { "" };
         let msg_count = session.messages.len();
 
-        eprintln!("  \x1b[36m{}\x1b[0m", id);
+        eprintln!("  \x1b[1;36m{}\x1b[0m  \x1b[2m{}\x1b[0m", display_name, id);
         eprintln!("    {} ({} msgs, {}){}", title, msg_count, age_str, canary_marker);
         eprintln!();
     }
@@ -823,7 +840,7 @@ fn list_sessions() -> Result<()> {
         eprintln!("  ... and {} more sessions", sessions.len() - 20);
     }
 
-    eprintln!("\x1b[2mTo resume: jcode --resume <session_id>\x1b[0m\n");
+    eprintln!("\x1b[2mTo resume: jcode --resume <session_id or name>\x1b[0m\n");
 
     Ok(())
 }

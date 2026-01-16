@@ -63,8 +63,8 @@ pub struct ClientApp {
     current_tool_id: Option<String>,
     current_tool_name: Option<String>,
     current_tool_input: String,
-    // Short-lived notice for model switching feedback
-    model_switch_notice: Option<(String, Instant)>,
+    // Short-lived notice for status feedback
+    status_notice: Option<(String, Instant)>,
 }
 
 impl ClientApp {
@@ -99,7 +99,7 @@ impl ClientApp {
             current_tool_id: None,
             current_tool_name: None,
             current_tool_input: String::new(),
-            model_switch_notice: None,
+            status_notice: None,
         }
     }
 
@@ -409,7 +409,7 @@ impl ClientApp {
                         title: None,
                         tool_data: None,
                     });
-                    self.model_switch_notice = Some(("Model switch failed".to_string(), Instant::now()));
+                    self.status_notice = Some(("Model switch failed".to_string(), Instant::now()));
                 } else {
                     self.provider_model = model.clone();
                     self.display_messages.push(DisplayMessage {
@@ -420,7 +420,7 @@ impl ClientApp {
                         title: None,
                         tool_data: None,
                     });
-                    self.model_switch_notice = Some((format!("Model → {}", model), Instant::now()));
+                    self.status_notice = Some((format!("Model → {}", model), Instant::now()));
                 }
             }
             _ => {}
@@ -644,6 +644,12 @@ impl TuiState for ClientApp {
         self.session_id.clone()
     }
 
+    fn session_display_name(&self) -> Option<String> {
+        self.session_id.as_ref()
+            .and_then(|id| crate::id::extract_session_name(id))
+            .map(|s| s.to_string())
+    }
+
     fn server_sessions(&self) -> Vec<String> {
         Vec::new() // Deprecated client doesn't track server sessions
     }
@@ -652,9 +658,9 @@ impl TuiState for ClientApp {
         None // Deprecated client doesn't track client count
     }
 
-    fn model_switch_notice(&self) -> Option<String> {
-        self.model_switch_notice.as_ref().and_then(|(text, at)| {
-            if at.elapsed() <= Duration::from_secs(5) {
+    fn status_notice(&self) -> Option<String> {
+        self.status_notice.as_ref().and_then(|(text, at)| {
+            if at.elapsed() <= Duration::from_secs(3) {
                 Some(text.clone())
             } else {
                 None

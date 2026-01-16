@@ -49,10 +49,12 @@ pub trait TuiState {
     fn show_diffs(&self) -> bool;
     /// Current session ID (if available)
     fn current_session_id(&self) -> Option<String>;
+    /// Session display name (memorable short name like "fox" or "oak")
+    fn session_display_name(&self) -> Option<String>;
     /// List of all session IDs on the server (remote mode only)
     fn server_sessions(&self) -> Vec<String>;
     /// Number of connected clients (remote mode only)
     fn connected_clients(&self) -> Option<usize>;
-    /// Short-lived notice shown in the status line (e.g., model switch)
-    fn model_switch_notice(&self) -> Option<String>;
+    /// Short-lived notice shown in the status line (e.g., model switch, toggle diff)
+    fn status_notice(&self) -> Option<String>;
 }
