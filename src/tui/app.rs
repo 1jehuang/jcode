@@ -1113,7 +1113,15 @@ impl App {
                 self.cursor_pos = 0;
             }
             KeyCode::Up => {
-                self.scroll_offset = self.scroll_offset.saturating_add(1);
+                // If input is empty and there are queued messages, bring last one back for editing
+                if self.input.is_empty() && !self.queued_messages.is_empty() {
+                    if let Some(msg) = self.queued_messages.pop() {
+                        self.input = msg;
+                        self.cursor_pos = self.input.len();
+                    }
+                } else {
+                    self.scroll_offset = self.scroll_offset.saturating_add(1);
+                }
             }
             KeyCode::Down => {
                 self.scroll_offset = self.scroll_offset.saturating_sub(1);
@@ -1365,11 +1373,19 @@ impl App {
             KeyCode::Home => self.cursor_pos = 0,
             KeyCode::End => self.cursor_pos = self.input.len(),
             KeyCode::Up | KeyCode::PageUp => {
-                // Scroll up (increase offset from bottom)
-                // Use generous estimate - UI will clamp to actual content
-                let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
-                let inc = if code == KeyCode::PageUp { 10 } else { 1 };
-                self.scroll_offset = (self.scroll_offset + inc).min(max_estimate);
+                // If input is empty and there are queued messages, bring last one back for editing (Up only)
+                if code == KeyCode::Up && self.input.is_empty() && !self.queued_messages.is_empty() {
+                    if let Some(msg) = self.queued_messages.pop() {
+                        self.input = msg;
+                        self.cursor_pos = self.input.len();
+                    }
+                } else {
+                    // Scroll up (increase offset from bottom)
+                    // Use generous estimate - UI will clamp to actual content
+                    let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
+                    let inc = if code == KeyCode::PageUp { 10 } else { 1 };
+                    self.scroll_offset = (self.scroll_offset + inc).min(max_estimate);
+                }
             }
             KeyCode::Down | KeyCode::PageDown => {
                 // Scroll down (decrease offset, 0 = bottom)
@@ -3467,6 +3483,30 @@ mod tests {
         app.handle_key(KeyCode::Char('c'), KeyModifiers::empty()).unwrap();
 
         assert_eq!(app.input(), "abc");
+    }
+
+    #[test]
+    fn test_up_arrow_edits_queued_message() {
+        let mut app = create_test_app();
+        app.is_processing = true;
+
+        // Type and queue a message
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('l'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('l'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('o'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+
+        assert_eq!(app.queued_count(), 1);
+        assert!(app.input().is_empty());
+
+        // Press Up to bring it back for editing
+        app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+
+        assert_eq!(app.queued_count(), 0);
+        assert_eq!(app.input(), "hello");
+        assert_eq!(app.cursor_pos(), 5); // Cursor at end
     }
 
     #[test]
