@@ -103,6 +103,8 @@ mod tests {
     #[test]
     fn test_unique_session_ids() {
         let (id1, _) = new_memorable_session_id();
+        // Small sleep to ensure timestamp differs
+        std::thread::sleep(std::time::Duration::from_millis(2));
         let (id2, _) = new_memorable_session_id();
 
         // Even with same word, timestamps should differ

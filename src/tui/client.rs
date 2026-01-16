@@ -65,6 +65,8 @@ pub struct ClientApp {
     current_tool_input: String,
     // Short-lived notice for status feedback
     status_notice: Option<(String, Instant)>,
+    // Time when app started (for startup animations)
+    app_started: Instant,
 }
 
 impl ClientApp {
@@ -100,6 +102,7 @@ impl ClientApp {
             current_tool_name: None,
             current_tool_input: String::new(),
             status_notice: None,
+            app_started: Instant::now(),
         }
     }
 
@@ -666,5 +669,9 @@ impl TuiState for ClientApp {
                 None
             }
         })
+    }
+
+    fn animation_elapsed(&self) -> f32 {
+        self.app_started.elapsed().as_secs_f32()
     }
 }
