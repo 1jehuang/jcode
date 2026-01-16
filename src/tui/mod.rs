@@ -57,4 +57,6 @@ pub trait TuiState {
     fn connected_clients(&self) -> Option<usize>;
     /// Short-lived notice shown in the status line (e.g., model switch, toggle diff)
     fn status_notice(&self) -> Option<String>;
+    /// Time since app started (for startup animations)
+    fn animation_elapsed(&self) -> f32;
 }

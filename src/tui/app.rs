@@ -155,6 +155,8 @@ pub struct App {
     status_notice: Option<(String, Instant)>,
     // Message to interleave during processing (set via Shift+Enter)
     interleave_message: Option<String>,
+    // Time when app started (for startup animations)
+    app_started: Instant,
 }
 
 /// A placeholder provider for remote mode (never actually called)
@@ -235,6 +237,7 @@ impl App {
             model_switch_keys: super::keybind::load_model_switch_keys(),
             status_notice: None,
             interleave_message: None,
+            app_started: Instant::now(),
         }
     }
 
@@ -3241,6 +3244,10 @@ impl super::TuiState for App {
                 None
             }
         })
+    }
+
+    fn animation_elapsed(&self) -> f32 {
+        self.app_started.elapsed().as_secs_f32()
     }
 }
 
