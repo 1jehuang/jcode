@@ -918,18 +918,8 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             }
         }
     } else {
-        // Idle - show session info (remote mode) or token warning
-        if app.is_remote_mode() {
-            // Show session display name (memorable name like "fox" or "oak")
-            if let Some(name) = app.session_display_name() {
-                Line::from(vec![
-                    Span::styled("⚡ ", Style::default().fg(ACCENT_COLOR)),
-                    Span::styled(name, Style::default().fg(DIM_COLOR)),
-                ])
-            } else {
-                Line::from(Span::styled("", Style::default().fg(DIM_COLOR)))
-            }
-        } else if let Some((total_in, total_out)) = app.total_session_tokens() {
+        // Idle - show token warning if high usage, otherwise nothing
+        if let Some((total_in, total_out)) = app.total_session_tokens() {
             let total = total_in + total_out;
             if total > 100_000 {
                 // High usage warning (>100k tokens)
