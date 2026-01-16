@@ -1,6 +1,7 @@
 mod app;
 pub mod backend;
 mod core;
+mod keybind;
 mod markdown;
 mod stream_buffer;
 mod ui;
@@ -52,4 +53,6 @@ pub trait TuiState {
     fn server_sessions(&self) -> Vec<String>;
     /// Number of connected clients (remote mode only)
     fn connected_clients(&self) -> Option<usize>;
+    /// Short-lived notice shown in the status line (e.g., model switch)
+    fn model_switch_notice(&self) -> Option<String>;
 }

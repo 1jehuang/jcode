@@ -435,6 +435,48 @@ async fn handle_client(
                 }
             }
 
+            Request::CycleModel { id, direction } => {
+                let models = provider.available_models();
+                if models.is_empty() {
+                    let _ = client_event_tx.send(ServerEvent::ModelChanged {
+                        id,
+                        model: provider.model(),
+                        error: Some("Model switching is not available for this provider.".to_string()),
+                    });
+                    continue;
+                }
+
+                let current = provider.model();
+                let current_index = models
+                    .iter()
+                    .position(|m| *m == current)
+                    .unwrap_or(0);
+                let len = models.len();
+                let next_index = if direction >= 0 {
+                    (current_index + 1) % len
+                } else {
+                    (current_index + len - 1) % len
+                };
+                let next_model = models[next_index];
+
+                match provider.set_model(next_model) {
+                    Ok(()) => {
+                        let _ = client_event_tx.send(ServerEvent::ModelChanged {
+                            id,
+                            model: next_model.to_string(),
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = client_event_tx.send(ServerEvent::ModelChanged {
+                            id,
+                            model: current,
+                            error: Some(e.to_string()),
+                        });
+                    }
+                }
+            }
+
             // Agent-to-agent communication
             Request::AgentRegister { id, .. } => {
                 let _ = client_event_tx.send(ServerEvent::Done { id });
@@ -696,6 +738,16 @@ impl Client {
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;
         Ok(())
+    }
+
+    pub async fn cycle_model(&mut self, direction: i8) -> Result<u64> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::CycleModel { id, direction };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+        Ok(id)
     }
 }
 

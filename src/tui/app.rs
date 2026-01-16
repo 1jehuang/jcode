@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use super::keybind::ModelSwitchKeys;
 use super::stream_buffer::StreamBuffer;
 use crate::bus::{Bus, BusEvent, ToolEvent, ToolStatus};
 use crate::mcp::McpManager;
@@ -148,6 +149,10 @@ pub struct App {
     requested_exit_code: Option<i32>,
     // Show diffs for edit/write tool outputs (toggle with Alt+D)
     show_diffs: bool,
+    // Keybindings for model switching
+    model_switch_keys: ModelSwitchKeys,
+    // Short-lived notice for model switching feedback
+    model_switch_notice: Option<(String, Instant)>,
 }
 
 /// A placeholder provider for remote mode (never actually called)
@@ -225,6 +230,8 @@ impl App {
             resume_session_id: None,
             requested_exit_code: None,
             show_diffs: true, // Default to showing diffs
+            model_switch_keys: super::keybind::load_model_switch_keys(),
+            model_switch_notice: None,
         }
     }
 
@@ -855,6 +862,22 @@ impl App {
                     }
                 }
             }
+            ServerEvent::ModelChanged { model, error, .. } => {
+                if let Some(err) = error {
+                    self.display_messages.push(DisplayMessage::error(format!(
+                        "Failed to switch model: {}",
+                        err
+                    )));
+                    self.set_model_switch_notice("Model switch failed");
+                } else {
+                    self.remote_provider_model = Some(model.clone());
+                    self.display_messages.push(DisplayMessage::system(format!(
+                        "✓ Switched to model: {}",
+                        model
+                    )));
+                    self.set_model_switch_notice(format!("Model → {}", model));
+                }
+            }
             _ => {}
         }
     }
@@ -866,6 +889,10 @@ impl App {
         modifiers: KeyModifiers,
         remote: &mut super::backend::RemoteConnection,
     ) -> Result<()> {
+        if let Some(direction) = self.model_switch_keys.direction_for(code.clone(), modifiers) {
+            remote.cycle_model(direction).await?;
+            return Ok(());
+        }
         // Most key handling is the same as local mode
         // Handle Alt combos
         if modifiers.contains(KeyModifiers::ALT) {
@@ -1008,36 +1035,38 @@ impl App {
             }
             KeyCode::Enter => {
                 if !self.input.is_empty() {
-                    let input = std::mem::take(&mut self.input);
+                    let raw_input = std::mem::take(&mut self.input);
+                    let expanded = self.expand_paste_placeholders(&raw_input);
+                    self.pasted_contents.clear();
                     self.cursor_pos = 0;
 
                     // Handle /reload
-                    if input.trim() == "/reload" {
+                    if expanded.trim() == "/reload" {
                         remote.reload().await?;
                         return Ok(());
                     }
 
                     // Handle /quit
-                    if input.trim() == "/quit" {
+                    if expanded.trim() == "/quit" {
                         self.should_quit = true;
                         return Ok(());
                     }
 
                     // Queue message if processing, otherwise send
                     if self.is_processing {
-                        self.queued_messages.push(input);
+                        self.queued_messages.push(expanded);
                     } else {
-                        // Add user message to display
+                        // Add user message to display (show placeholder)
                         self.display_messages.push(DisplayMessage {
                             role: "user".to_string(),
-                            content: input.clone(),
+                            content: raw_input,
                             tool_calls: vec![],
                             duration_secs: None,
                             title: None,
                             tool_data: None,
                         });
-                        // Send to server and track the message ID
-                        let msg_id = remote.send_message(input).await?;
+                        // Send expanded content (with actual pasted text) to server
+                        let msg_id = remote.send_message(expanded).await?;
                         self.current_message_id = Some(msg_id);
                         self.is_processing = true;
                         self.status = ProcessingStatus::Sending;
@@ -1100,6 +1129,10 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+        if let Some(direction) = self.model_switch_keys.direction_for(code.clone(), modifiers) {
+            self.cycle_model(direction);
+            return Ok(());
+        }
         // Handle Alt combos (readline word movement)
         if modifiers.contains(KeyModifiers::ALT) {
             match code {
@@ -1350,6 +1383,21 @@ impl App {
         // Check for built-in commands
         let trimmed = input.trim();
         if trimmed == "/help" || trimmed == "/?" {
+            let model_next = format!(
+                "• `{}` - Next model (set JCODE_MODEL_SWITCH_KEY)",
+                self.model_switch_keys.next_label
+            );
+            let model_prev = self
+                .model_switch_keys
+                .prev_label
+                .as_ref()
+                .map(|label| {
+                    format!(
+                        "• `{}` - Previous model (set JCODE_MODEL_SWITCH_PREV_KEY)",
+                        label
+                    )
+                })
+                .unwrap_or_default();
             self.display_messages.push(DisplayMessage {
                 role: "system".to_string(),
                 content: format!(
@@ -1367,8 +1415,12 @@ impl App {
                      • `Ctrl+L` - Clear conversation\n\
                      • `PageUp/Down` - Scroll history\n\
                      • `Ctrl+U` - Clear input line\n\
-                     • `Ctrl+K` - Kill to end of line",
-                    self.skills.list().iter().map(|s| format!("/{}", s.name)).collect::<Vec<_>>().join(", ")
+                     • `Ctrl+K` - Kill to end of line\n\
+                     {}\n\
+                     {}",
+                    self.skills.list().iter().map(|s| format!("/{}", s.name)).collect::<Vec<_>>().join(", "),
+                    model_next,
+                    model_prev
                 ),
                 tool_calls: vec![],
                 duration_secs: None,
@@ -1433,6 +1485,7 @@ impl App {
                         title: None,
                         tool_data: None,
                     });
+                    self.set_model_switch_notice(format!("Model → {}", model_name));
                 }
                 Err(e) => {
                     self.display_messages.push(DisplayMessage {
@@ -1443,6 +1496,7 @@ impl App {
                         title: None,
                         tool_data: None,
                     });
+                    self.set_model_switch_notice("Model switch failed");
                 }
             }
             return;
@@ -1633,6 +1687,52 @@ impl App {
             }
             // Loop will check if more messages were queued during this turn
         }
+    }
+
+    fn cycle_model(&mut self, direction: i8) {
+        let models = self.provider.available_models();
+        if models.is_empty() {
+            self.display_messages.push(DisplayMessage::error(
+                "Model switching is not available for this provider.",
+            ));
+            self.set_model_switch_notice("Model switching not available");
+            return;
+        }
+
+        let current = self.provider.model();
+        let current_index = models
+            .iter()
+            .position(|m| *m == current)
+            .unwrap_or(0);
+
+        let len = models.len();
+        let next_index = if direction >= 0 {
+            (current_index + 1) % len
+        } else {
+            (current_index + len - 1) % len
+        };
+        let next_model = models[next_index];
+
+        match self.provider.set_model(next_model) {
+            Ok(()) => {
+                self.display_messages.push(DisplayMessage::system(format!(
+                    "✓ Switched to model: {}",
+                    next_model
+                )));
+                self.set_model_switch_notice(format!("Model → {}", next_model));
+            }
+            Err(e) => {
+                self.display_messages.push(DisplayMessage::error(format!(
+                    "Failed to switch model: {}",
+                    e
+                )));
+                self.set_model_switch_notice("Model switch failed");
+            }
+        }
+    }
+
+    fn set_model_switch_notice(&mut self, text: impl Into<String>) {
+        self.model_switch_notice = Some((text.into(), Instant::now()));
     }
 
     async fn run_turn(&mut self) -> Result<()> {
@@ -3030,6 +3130,16 @@ impl super::TuiState for App {
 
     fn connected_clients(&self) -> Option<usize> {
         self.remote_client_count
+    }
+
+    fn model_switch_notice(&self) -> Option<String> {
+        self.model_switch_notice.as_ref().and_then(|(text, at)| {
+            if at.elapsed() <= Duration::from_secs(5) {
+                Some(text.clone())
+            } else {
+                None
+            }
+        })
     }
 }
 

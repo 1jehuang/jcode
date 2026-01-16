@@ -273,6 +273,16 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Cycle the active model on the server
+    pub async fn cycle_model(&mut self, direction: i8) -> Result<()> {
+        let request = Request::CycleModel {
+            id: self.next_request_id,
+            direction,
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
     /// Read the next event from the server (returns None on disconnect)
     pub async fn next_event(&mut self) -> Option<ServerEvent> {
         self.line_buffer.clear();

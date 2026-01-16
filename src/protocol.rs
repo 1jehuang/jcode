@@ -58,6 +58,14 @@ pub enum Request {
     #[serde(rename = "resume_session")]
     ResumeSession { id: u64, session_id: String },
 
+    /// Cycle the active model (direction: 1 for next, -1 for previous)
+    #[serde(rename = "cycle_model")]
+    CycleModel {
+        id: u64,
+        #[serde(default = "default_model_direction")]
+        direction: i8,
+    },
+
     // === Agent-to-agent communication ===
 
     /// Register as an external agent
@@ -192,6 +200,15 @@ pub enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         new_socket: Option<String>,
     },
+
+    /// Model changed (response to cycle_model)
+    #[serde(rename = "model_changed")]
+    ModelChanged {
+        id: u64,
+        model: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 impl Request {
@@ -206,12 +223,17 @@ impl Request {
             Request::GetHistory { id } => *id,
             Request::Reload { id } => *id,
             Request::ResumeSession { id, .. } => *id,
+            Request::CycleModel { id, .. } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,
             Request::AgentCapabilities { id } => *id,
             Request::AgentContext { id } => *id,
         }
     }
+}
+
+fn default_model_direction() -> i8 {
+    1
 }
 
 /// Encode an event as a newline-terminated JSON string
