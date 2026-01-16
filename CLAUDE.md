@@ -4,7 +4,7 @@
 
 - **Commit as you go** - Make small, focused commits after completing each feature or fix
 - **Push when done** - Push all commits to remote when finishing a task or session
-- **Rebuild when done** - Run `cargo build --release` so the user has the updated binary
+- **Rebuild and install when done** - Run `cargo build --release && cp target/release/jcode ~/.local/bin/`
 - **Test before committing** - Run `cargo test` to verify changes
 
 ## Testing Changes
@@ -17,7 +17,7 @@ This repo has self-dev mode. When running `jcode` in this directory:
 ## Commands
 
 ```bash
-cargo build --release   # Build (auto-updates jcode symlink)
+cargo build --release && cp target/release/jcode ~/.local/bin/  # Build and install
 cargo test              # Run all tests
 cargo test --test e2e   # Run only e2e tests
 ```
