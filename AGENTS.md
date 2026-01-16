@@ -1,5 +1,11 @@
 # Repository Guidelines
 
+## Development Workflow
+
+- **Commit as you go** - Make small, focused commits after completing each feature or fix
+- **Push when done** - Push all commits to remote when finishing a task or session
+- **Test before committing** - Run `cargo test` and `cargo build --release`
+
 ## Project Structure & Module Organization
 - `src/` is the core library and CLI entry point (`src/main.rs`). Key areas include `src/agent.rs`, `src/provider/`, `src/mcp/`, `src/tool/`, and `src/tui/`.
 - `src/bin/` holds auxiliary binaries: `test_api.rs` (Claude SDK smoke test) and `harness.rs` (tool harness).
