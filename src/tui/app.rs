@@ -122,6 +122,7 @@ pub struct App {
     // Remote provider info (set when running in remote mode)
     remote_provider_name: Option<String>,
     remote_provider_model: Option<String>,
+    remote_available_models: Vec<String>,
     // Remote MCP servers and skills (set from server in remote mode)
     remote_mcp_servers: Vec<String>,
     remote_skills: Vec<String>,
@@ -220,6 +221,7 @@ impl App {
             debug_tx: None,
             remote_provider_name: None,
             remote_provider_model: None,
+            remote_available_models: Vec::new(),
             remote_mcp_servers: Vec::new(),
             remote_skills: Vec::new(),
             remote_total_tokens: None,
@@ -876,6 +878,7 @@ impl App {
                 if let Some(model) = provider_model {
                     self.remote_provider_model = Some(model);
                 }
+                self.remote_available_models = available_models;
                 // Store session list and client count
                 self.remote_sessions = all_sessions;
                 self.remote_client_count = client_count;
@@ -1073,16 +1076,68 @@ impl App {
                     let expanded = self.expand_paste_placeholders(&raw_input);
                     self.pasted_contents.clear();
                     self.cursor_pos = 0;
+                    let trimmed = expanded.trim();
 
                     // Handle /reload
-                    if expanded.trim() == "/reload" {
+                    if trimmed == "/reload" {
                         remote.reload().await?;
                         return Ok(());
                     }
 
                     // Handle /quit
-                    if expanded.trim() == "/quit" {
+                    if trimmed == "/quit" {
                         self.should_quit = true;
+                        return Ok(());
+                    }
+
+                    // Handle /model commands (remote mode)
+                    if trimmed == "/model" || trimmed == "/models" {
+                        let provider_name = self
+                            .remote_provider_name
+                            .clone()
+                            .unwrap_or_else(|| "remote".to_string());
+                        let current = self
+                            .remote_provider_model
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string());
+
+                        if self.remote_available_models.is_empty() {
+                            self.display_messages.push(DisplayMessage::system(format!(
+                                "**Available models for {}:**\n  • {} (current)\n\nUse `/model <name>` to switch.",
+                                provider_name,
+                                current
+                            )));
+                            return Ok(());
+                        }
+
+                        let model_list = self
+                            .remote_available_models
+                            .iter()
+                            .map(|m| {
+                                if m == &current {
+                                    format!("  • **{}** (current)", m)
+                                } else {
+                                    format!("  • {}", m)
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+
+                        self.display_messages.push(DisplayMessage::system(format!(
+                            "**Available models for {}:**\n{}\n\nUse `/model <name>` to switch.",
+                            provider_name, model_list
+                        )));
+                        return Ok(());
+                    }
+
+                    if let Some(model_name) = trimmed.strip_prefix("/model ") {
+                        let model_name = model_name.trim();
+                        if model_name.is_empty() {
+                            self.display_messages
+                                .push(DisplayMessage::error("Usage: /model <name>"));
+                            return Ok(());
+                        }
+                        remote.set_model(model_name).await?;
                         return Ok(());
                     }
 
@@ -3660,7 +3715,10 @@ mod tests {
         assert_eq!(app.display_messages()[0].role, "user");
         assert_eq!(app.display_messages()[0].content, "test message");
         assert_eq!(app.display_messages()[1].role, "system");
-        assert!(app.display_messages()[1].content.contains("reloaded"));
+        assert!(app.display_messages()[1]
+            .content
+            .to_lowercase()
+            .contains("reloaded"));
 
         // Messages for API should only have the original message (no reload msg to avoid breaking alternation)
         assert_eq!(app.messages.len(), 1);

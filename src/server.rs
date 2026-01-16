@@ -363,6 +363,11 @@ async fn handle_client(
                     messages,
                     provider_name: Some(provider.name().to_string()),
                     provider_model: Some(provider.model().to_string()),
+                    available_models: provider
+                        .available_models()
+                        .iter()
+                        .map(|m| (*m).to_string())
+                        .collect(),
                     mcp_servers: Vec::new(),
                     skills: Vec::new(),
                     total_tokens: None,
@@ -416,6 +421,11 @@ async fn handle_client(
                             messages,
                             provider_name: Some(provider.name().to_string()),
                             provider_model: Some(provider.model().to_string()),
+                            available_models: provider
+                                .available_models()
+                                .iter()
+                                .map(|m| (*m).to_string())
+                                .collect(),
                             mcp_servers: Vec::new(),
                             skills: Vec::new(),
                             total_tokens: None,
@@ -464,6 +474,39 @@ async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::ModelChanged {
                             id,
                             model: next_model.to_string(),
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = client_event_tx.send(ServerEvent::ModelChanged {
+                            id,
+                            model: current,
+                            error: Some(e.to_string()),
+                        });
+                    }
+                }
+            }
+
+            Request::SetModel { id, model } => {
+                let models = provider.available_models();
+                if models.is_empty() {
+                    let _ = client_event_tx.send(ServerEvent::ModelChanged {
+                        id,
+                        model: provider.model(),
+                        error: Some(
+                            "Model switching is not available for this provider.".to_string(),
+                        ),
+                    });
+                    continue;
+                }
+
+                let current = provider.model();
+                match provider.set_model(&model) {
+                    Ok(()) => {
+                        let updated = provider.model();
+                        let _ = client_event_tx.send(ServerEvent::ModelChanged {
+                            id,
+                            model: updated,
                             error: None,
                         });
                     }
