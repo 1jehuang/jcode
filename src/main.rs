@@ -849,7 +849,7 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
         session.id.clone()
     };
 
-    let hash = if should_build {
+    let mut hash = if should_build {
         // Build new canary version
         eprintln!("Building canary version...");
 
@@ -899,15 +899,45 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
         eprintln!("✓ Canary build {} ready", hash);
         hash
     } else {
-        // Use existing canary or current binary
+        // Use existing canary or current binary (verified below)
         let manifest = build::BuildManifest::load()?;
         if let Some(canary) = manifest.canary {
             canary
         } else {
-            // No canary, use current
+            // No canary yet, use current hash (will be rebuilt if missing)
             build::current_git_hash(&repo_dir)?
         }
     };
+
+    if !should_build {
+        let mut needs_rebuild = false;
+        let canary_path = build::canary_binary_path()?;
+
+        if build::is_working_tree_dirty(&repo_dir).unwrap_or(false) {
+            needs_rebuild = true;
+        }
+
+        if !canary_path.exists() {
+            needs_rebuild = true;
+        } else {
+            match std::fs::read_link(&canary_path) {
+                Ok(target) => {
+                    let target_str = target.to_string_lossy();
+                    if !target_str.contains(&hash) {
+                        needs_rebuild = true;
+                    }
+                }
+                Err(_) => {
+                    needs_rebuild = true;
+                }
+            }
+        }
+
+        if needs_rebuild {
+            eprintln!("Self-dev canary missing or mismatched; rebuilding and testing...");
+            hash = build::rebuild_canary(&repo_dir)?;
+        }
+    }
 
     // Save migration context
     let stable_hash = build::read_stable_version()?.unwrap_or_else(|| "unknown".to_string());

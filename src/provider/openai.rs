@@ -506,3 +506,26 @@ fn extract_error_message(response: &Option<Value>) -> Option<String> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::codex::CodexCredentials;
+
+    #[test]
+    fn test_openai_supports_codex_52_model() {
+        let creds = CodexCredentials {
+            access_token: "test".to_string(),
+            refresh_token: String::new(),
+            id_token: None,
+            account_id: None,
+            expires_at: None,
+        };
+
+        let provider = OpenAIProvider::new(creds);
+        assert!(provider.available_models().contains(&"gpt-5.2-codex"));
+
+        provider.set_model("gpt-5.2-codex").unwrap();
+        assert_eq!(provider.model(), "gpt-5.2-codex");
+    }
+}

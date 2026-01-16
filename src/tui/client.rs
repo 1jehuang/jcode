@@ -63,6 +63,8 @@ pub struct ClientApp {
     current_tool_id: Option<String>,
     current_tool_name: Option<String>,
     current_tool_input: String,
+    // Short-lived notice for model switching feedback
+    model_switch_notice: Option<(String, Instant)>,
 }
 
 impl ClientApp {
@@ -97,6 +99,7 @@ impl ClientApp {
             current_tool_id: None,
             current_tool_name: None,
             current_tool_input: String::new(),
+            model_switch_notice: None,
         }
     }
 
@@ -396,6 +399,30 @@ impl ClientApp {
                     }
                 }
             }
+            ServerEvent::ModelChanged { model, error, .. } => {
+                if let Some(err) = error {
+                    self.display_messages.push(DisplayMessage {
+                        role: "error".to_string(),
+                        content: format!("Failed to switch model: {}", err),
+                        tool_calls: Vec::new(),
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                    self.model_switch_notice = Some(("Model switch failed".to_string(), Instant::now()));
+                } else {
+                    self.provider_model = model.clone();
+                    self.display_messages.push(DisplayMessage {
+                        role: "system".to_string(),
+                        content: format!("✓ Switched to model: {}", model),
+                        tool_calls: Vec::new(),
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                    self.model_switch_notice = Some((format!("Model → {}", model), Instant::now()));
+                }
+            }
             _ => {}
         }
     }
@@ -623,5 +650,15 @@ impl TuiState for ClientApp {
 
     fn connected_clients(&self) -> Option<usize> {
         None // Deprecated client doesn't track client count
+    }
+
+    fn model_switch_notice(&self) -> Option<String> {
+        self.model_switch_notice.as_ref().and_then(|(text, at)| {
+            if at.elapsed() <= Duration::from_secs(5) {
+                Some(text.clone())
+            } else {
+                None
+            }
+        })
     }
 }

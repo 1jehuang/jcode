@@ -8,9 +8,12 @@ mod mock_provider;
 use anyhow::Result;
 use jcode::agent::Agent;
 use jcode::message::StreamEvent;
+use jcode::protocol::ServerEvent;
+use jcode::server;
 use jcode::tool::Registry;
 use mock_provider::MockProvider;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Test that a simple text response works
 #[tokio::test]
@@ -109,5 +112,69 @@ async fn test_stream_error() -> Result<()> {
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("Something went wrong"));
 
+    Ok(())
+}
+
+/// Test model cycling over the socket interface (server + client)
+#[tokio::test]
+async fn test_socket_model_cycle_openai_codex52() -> Result<()> {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "jcode-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    ));
+    std::fs::create_dir_all(&runtime_dir)?;
+    let prev_runtime = std::env::var("XDG_RUNTIME_DIR").ok();
+    std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
+
+    let provider = MockProvider::with_models(vec!["gpt-5.2-codex", "gpt-5.1-codex"]);
+    let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
+    let registry = Registry::new(provider.clone()).await;
+    let server_instance = server::Server::new(provider, registry);
+
+    let server_handle = tokio::spawn(async move { server_instance.run().await });
+
+    // Wait for socket to appear
+    let socket_path = server::socket_path();
+    let start = Instant::now();
+    while !socket_path.exists() {
+        if start.elapsed() > Duration::from_secs(2) {
+            server_handle.abort();
+            anyhow::bail!("Server socket did not appear");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let mut client = server::Client::connect().await?;
+    let request_id = client.cycle_model(1).await?;
+
+    let mut saw_model_changed = false;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let event = tokio::time::timeout(Duration::from_secs(1), client.read_event()).await??;
+        match event {
+            ServerEvent::Ack { .. } => continue,
+            ServerEvent::ModelChanged { id, model, error } if id == request_id => {
+                assert!(error.is_none(), "Expected successful model change");
+                assert_eq!(model, "gpt-5.1-codex");
+                saw_model_changed = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    server_handle.abort();
+    let _ = std::fs::remove_file(server::socket_path());
+
+    if let Some(prev) = prev_runtime {
+        std::env::set_var("XDG_RUNTIME_DIR", prev);
+    } else {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+
+    assert!(saw_model_changed, "Did not receive model_changed event");
     Ok(())
 }
