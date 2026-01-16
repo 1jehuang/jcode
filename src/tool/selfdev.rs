@@ -30,8 +30,8 @@ impl Tool for SelfDevTool {
 
     fn description(&self) -> &str {
         "Self-development tool for working on jcode itself. Only available in self-dev mode. \
-         Actions: 'rebuild' (build, test, restart with new code), 'promote' (mark current build as stable), \
-         'status' (show build versions and crash history), 'rollback' (switch back to stable)."
+         Actions: 'reload' (restart with already-built binary), 'rebuild' (build, test, restart), \
+         'promote' (mark current build as stable), 'status' (show build versions), 'rollback' (switch to stable)."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -40,8 +40,9 @@ impl Tool for SelfDevTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["rebuild", "promote", "status", "rollback"],
-                    "description": "Action to perform: 'rebuild' builds and tests changes then restarts, \
+                    "enum": ["reload", "rebuild", "promote", "status", "rollback"],
+                    "description": "Action to perform: 'reload' restarts with already-built binary (no rebuild), \
+                                   'rebuild' builds and tests changes then restarts, \
                                    'promote' marks current canary as stable for other sessions, \
                                    'status' shows current build versions and any crash history, \
                                    'rollback' manually switches back to the stable build"
@@ -59,12 +60,13 @@ impl Tool for SelfDevTool {
         let params: SelfDevInput = serde_json::from_value(input)?;
 
         match params.action.as_str() {
+            "reload" => self.do_reload().await,
             "rebuild" => self.do_rebuild().await,
             "promote" => self.do_promote(params.message).await,
             "status" => self.do_status().await,
             "rollback" => self.do_rollback().await,
             _ => Ok(ToolOutput::new(format!(
-                "Unknown action: {}. Use 'rebuild', 'promote', 'status', or 'rollback'.",
+                "Unknown action: {}. Use 'reload', 'rebuild', 'promote', 'status', or 'rollback'.",
                 params.action
             ))),
         }
@@ -72,6 +74,50 @@ impl Tool for SelfDevTool {
 }
 
 impl SelfDevTool {
+    async fn do_reload(&self) -> Result<ToolOutput> {
+        let repo_dir = build::get_repo_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository directory"))?;
+
+        // Check that binary exists
+        let target_binary = repo_dir.join("target/release/jcode");
+        if !target_binary.exists() {
+            return Ok(ToolOutput::new(
+                "No binary found at target/release/jcode.\n\
+                 Run 'cargo build --release' first, then try reload again."
+                    .to_string(),
+            ));
+        }
+
+        let hash = build::current_git_hash(&repo_dir)?;
+
+        // Install this version and set as canary (stable stays as safety net)
+        build::install_version(&repo_dir, &hash)?;
+        build::update_canary_symlink(&hash)?;
+
+        // Update manifest - set as canary, keep stable unchanged
+        let mut manifest = build::BuildManifest::load()?;
+        let stable_hash = manifest.stable.clone().unwrap_or_else(|| "none".to_string());
+        manifest.canary = Some(hash.clone());
+        manifest.canary_status = Some(build::CanaryStatus::Testing);
+        manifest.save()?;
+
+        // Write reload info for post-restart display
+        let info_path = crate::storage::jcode_dir()?.join("reload-info");
+        let info = format!("reload:{}", hash);
+        std::fs::write(&info_path, &info)?;
+
+        // Write signal file for TUI to pick up
+        let signal_path = crate::storage::jcode_dir()?.join("rebuild-signal");
+        std::fs::write(&signal_path, &hash)?;
+
+        Ok(ToolOutput::new(format!(
+            "Reloading with canary build {}.\n\
+             Stable: {} (safety net)\n\n\
+             **Restarting...** The session will continue automatically.",
+            hash, stable_hash
+        )))
+    }
+
     async fn do_rebuild(&self) -> Result<ToolOutput> {
         let repo_dir = build::get_repo_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository directory"))?;
@@ -79,14 +125,31 @@ impl SelfDevTool {
         // Do the build
         match build::rebuild_canary(&repo_dir) {
             Ok(hash) => {
+                // Install this version and set as canary (stable stays as safety net)
+                build::install_version(&repo_dir, &hash)?;
+                build::update_canary_symlink(&hash)?;
+
+                // Update manifest - set as canary, keep stable unchanged
+                let mut manifest = build::BuildManifest::load()?;
+                let stable_hash = manifest.stable.clone().unwrap_or_else(|| "none".to_string());
+                manifest.canary = Some(hash.clone());
+                manifest.canary_status = Some(build::CanaryStatus::Testing);
+                manifest.save()?;
+
+                // Write reload info for post-restart display
+                let info_path = crate::storage::jcode_dir()?.join("reload-info");
+                let info = format!("rebuild:{}", hash);
+                std::fs::write(&info_path, &info)?;
+
                 // Write signal file for TUI to pick up
                 let signal_path = crate::storage::jcode_dir()?.join("rebuild-signal");
                 std::fs::write(&signal_path, &hash)?;
 
                 Ok(ToolOutput::new(format!(
-                    "Build successful ({}). Tests passed.\n\n\
+                    "Build successful. Canary: {}\n\
+                     Stable: {} (safety net)\n\n\
                      **Restarting with new build...** The session will continue automatically.",
-                    hash
+                    hash, stable_hash
                 )))
             }
             Err(e) => Ok(ToolOutput::new(format!(
@@ -99,7 +162,9 @@ impl SelfDevTool {
     async fn do_promote(&self, message: Option<String>) -> Result<ToolOutput> {
         let mut manifest = build::BuildManifest::load()?;
 
-        let canary_hash = manifest.canary.clone()
+        let canary_hash = manifest
+            .canary
+            .clone()
             .ok_or_else(|| anyhow::anyhow!("No canary build to promote"))?;
 
         // Update stable symlink
@@ -179,7 +244,10 @@ impl SelfDevTool {
                 let msg = info.commit_message.as_deref().unwrap_or("no message");
                 status.push_str(&format!(
                     "{}. {} - {}{}\n",
-                    i + 1, info.hash, msg, dirty_marker
+                    i + 1,
+                    info.hash,
+                    msg,
+                    dirty_marker
                 ));
             }
         }
@@ -190,7 +258,9 @@ impl SelfDevTool {
     async fn do_rollback(&self) -> Result<ToolOutput> {
         let manifest = build::BuildManifest::load()?;
 
-        let stable_hash = manifest.stable.clone()
+        let stable_hash = manifest
+            .stable
+            .clone()
             .ok_or_else(|| anyhow::anyhow!("No stable build to rollback to"))?;
 
         // Write signal file with stable hash to trigger rollback
