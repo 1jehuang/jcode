@@ -312,8 +312,8 @@ fn estimate_content_height(app: &dyn TuiState, width: u16) -> u16 {
 
     let mut lines = 0u16;
 
-    // Header is always visible: version + model + blank = 3 lines minimum
-    lines += 3;
+    // Header is always visible: agent name + model/build + changelog + blank = 4 lines minimum
+    lines += 4;
     // Plus optional MCP line
     if !app.mcp_servers().is_empty() {
         lines += 1;
@@ -450,7 +450,19 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         Style::default().fg(DIM_COLOR),
     )));
 
-    // Line 3: MCPs (if any)
+    // Line 3: Recent changes (from git log, embedded at build time)
+    let changelog = env!("JCODE_CHANGELOG");
+    if !changelog.is_empty() {
+        // Show first commit message (most recent change)
+        if let Some(first_line) = changelog.lines().next() {
+            lines.push(Line::from(Span::styled(
+                format!("› {}", first_line),
+                Style::default().fg(DIM_COLOR).italic(),
+            )));
+        }
+    }
+
+    // Line 4: MCPs (if any)
     let mcps = app.mcp_servers();
     if !mcps.is_empty() {
         lines.push(Line::from(Span::styled(

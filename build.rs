@@ -35,10 +35,22 @@ fn main() {
 
     let dirty_suffix = if dirty { "-dirty" } else { "" };
 
+    // Get recent commit messages (last 5 commits, one-line format)
+    let output = Command::new("git")
+        .args(["log", "--oneline", "-5", "--format=%s"])
+        .output()
+        .ok();
+
+    let changelog = output
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
     // Set environment variables for compilation
     println!("cargo:rustc-env=JCODE_GIT_HASH={}", git_hash);
     println!("cargo:rustc-env=JCODE_GIT_DATE={}", git_date);
     println!("cargo:rustc-env=JCODE_VERSION={} ({}{})", git_date, git_hash, dirty_suffix);
+    println!("cargo:rustc-env=JCODE_CHANGELOG={}", changelog);
 
     // Re-run if git HEAD changes
     println!("cargo:rerun-if-changed=.git/HEAD");
