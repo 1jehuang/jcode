@@ -436,7 +436,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     if app.is_remote_mode() {
         mode_parts.push(Span::styled(" ", Style::default()));
         mode_parts.push(Span::styled(
-            " remote ",
+            " client ",
             Style::default().fg(Color::Black).bg(Color::Rgb(100, 149, 237)), // Cornflower blue badge
         ));
     }

@@ -175,6 +175,16 @@ impl Agent {
             prompt.push_str(SELFDEV_PROMPT);
         }
 
+        // Add available skills list
+        let skills: Vec<_> = self.skills.list();
+        if !skills.is_empty() {
+            prompt.push_str("\n\n# Available Skills\n\nThe user can invoke these skills with `/skillname`:\n");
+            for skill in &skills {
+                prompt.push_str(&format!("\n- `/{} ` - {}", skill.name, skill.description));
+            }
+            prompt.push_str("\n\nWhen asked about available skills or capabilities, mention these.");
+        }
+
         // Add active skill prompt
         if let Some(ref skill_name) = self.active_skill {
             if let Some(skill) = self.skills.get(skill_name) {

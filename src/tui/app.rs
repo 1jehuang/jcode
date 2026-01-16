@@ -2703,7 +2703,14 @@ impl App {
         let skill_prompt = self.active_skill.as_ref().and_then(|name| {
             self.skills.get(name).map(|s| s.get_prompt().to_string())
         });
-        crate::prompt::build_system_prompt(skill_prompt.as_deref())
+        let available_skills: Vec<crate::prompt::SkillInfo> = self.skills.list()
+            .iter()
+            .map(|s| crate::prompt::SkillInfo {
+                name: s.name.clone(),
+                description: s.description.clone(),
+            })
+            .collect();
+        crate::prompt::build_system_prompt(skill_prompt.as_deref(), &available_skills)
     }
 
     // Getters for UI

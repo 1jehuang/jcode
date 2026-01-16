@@ -6,8 +6,14 @@ use std::process::Command;
 /// Default system prompt for jcode (embedded at compile time)
 pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompt/system.txt");
 
+/// Skill info for system prompt
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+}
+
 /// Build the full system prompt with dynamic context
-pub fn build_system_prompt(skill_prompt: Option<&str>) -> String {
+pub fn build_system_prompt(skill_prompt: Option<&str>, available_skills: &[SkillInfo]) -> String {
     let mut parts = vec![DEFAULT_SYSTEM_PROMPT.to_string()];
 
     // Add environment context
@@ -18,6 +24,16 @@ pub fn build_system_prompt(skill_prompt: Option<&str>) -> String {
     // Add CLAUDE.md instructions
     if let Some(claude_md) = load_claude_md_files() {
         parts.push(claude_md);
+    }
+
+    // Add available skills list
+    if !available_skills.is_empty() {
+        let mut skills_section = "# Available Skills\n\nYou have access to the following skills that the user can invoke with `/skillname`:\n".to_string();
+        for skill in available_skills {
+            skills_section.push_str(&format!("\n- `/{} ` - {}", skill.name, skill.description));
+        }
+        skills_section.push_str("\n\nWhen a user asks about available skills or capabilities, mention these skills.");
+        parts.push(skills_section);
     }
 
     // Add active skill prompt
