@@ -443,6 +443,13 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
     lines.push(Line::from(mode_parts));
 
+    // Line 2: Model ID and build age (dimmed)
+    let build_info = binary_age().unwrap_or_else(|| "unknown".to_string());
+    lines.push(Line::from(Span::styled(
+        format!("{} · built {}", model, build_info),
+        Style::default().fg(DIM_COLOR),
+    )));
+
     // Line 3: MCPs (if any)
     let mcps = app.mcp_servers();
     if !mcps.is_empty() {
