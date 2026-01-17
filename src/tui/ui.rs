@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use super::markdown;
-use super::visual_debug::{self, FrameCaptureBuilder};
+use super::visual_debug::{self, FrameCaptureBuilder, MessageCapture};
 use super::{ProcessingStatus, TuiState};
 use crate::message::ToolCall;
 use ratatui::{prelude::*, widgets::Paragraph};
@@ -213,6 +213,29 @@ fn calculate_input_lines(input: &str, line_width: usize) -> usize {
     total_lines.max(1)
 }
 
+/// Format status line content for visual debug capture
+fn format_status_for_debug(app: &dyn TuiState) -> String {
+    match app.status() {
+        ProcessingStatus::Idle => {
+            if let Some(notice) = app.status_notice() {
+                format!("Idle (notice: {})", notice)
+            } else if let Some((input, output)) = app.total_session_tokens() {
+                format!("Idle (session: {}k in, {}k out)", input / 1000, output / 1000)
+            } else {
+                "Idle".to_string()
+            }
+        }
+        ProcessingStatus::Sending => "Sending...".to_string(),
+        ProcessingStatus::Streaming => {
+            let (input, output) = app.streaming_tokens();
+            format!("Streaming (↑{} ↓{})", input, output)
+        }
+        ProcessingStatus::RunningTool(ref name) => {
+            format!("Running tool: {}", name)
+        }
+    }
+}
+
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     let area = frame.area();
 
@@ -299,6 +322,37 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         capture.state.streaming_text_len = app.streaming_text().len();
         capture.state.has_suggestions = !suggestions.is_empty();
         capture.state.status = format!("{:?}", app.status());
+
+        // Capture rendered content
+        // Queued messages
+        capture.rendered_text.queued_messages = app
+            .queued_messages()
+            .iter()
+            .map(|s| s.chars().take(100).collect())
+            .collect();
+
+        // Recent display messages (last 5 for context)
+        capture.rendered_text.recent_messages = app
+            .display_messages()
+            .iter()
+            .rev()
+            .take(5)
+            .map(|m| MessageCapture {
+                role: m.role.clone(),
+                content_preview: m.content.chars().take(200).collect(),
+                content_len: m.content.len(),
+            })
+            .collect();
+
+        // Streaming text preview
+        let streaming = app.streaming_text();
+        if !streaming.is_empty() {
+            capture.rendered_text.streaming_text_preview =
+                streaming.chars().take(500).collect();
+        }
+
+        // Status line content
+        capture.rendered_text.status_line = format_status_for_debug(app);
     }
 
     draw_messages(frame, app, chunks[0]);

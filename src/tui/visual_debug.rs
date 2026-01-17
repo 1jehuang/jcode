@@ -104,12 +104,26 @@ pub struct StateSnapshot {
 /// Actual rendered text content
 #[derive(Debug, Clone, Default)]
 pub struct RenderedText {
-    /// Status line text
+    /// Status line text (spinner, tokens, elapsed, etc.)
     pub status_line: String,
-    /// Input area text (all lines joined with \n)
+    /// Input area text (what the user is typing)
     pub input_area: String,
     /// Hint text shown above input (if any)
     pub input_hint: Option<String>,
+    /// Queued messages (messages waiting to be sent)
+    pub queued_messages: Vec<String>,
+    /// Recent messages displayed (last few for context)
+    pub recent_messages: Vec<MessageCapture>,
+    /// Streaming text (if currently streaming)
+    pub streaming_text_preview: String,
+}
+
+/// Captured message for debugging
+#[derive(Debug, Clone, Default)]
+pub struct MessageCapture {
+    pub role: String,
+    pub content_preview: String,
+    pub content_len: usize,
 }
 
 /// Ring buffer of recent frames
@@ -295,6 +309,29 @@ fn write_frame(file: &mut File, frame: &FrameCapture) -> std::io::Result<()> {
         writeln!(file, "  input_hint: {:?}", hint)?;
     }
     writeln!(file, "  input_area: {:?}", frame.rendered_text.input_area)?;
+    if !frame.rendered_text.queued_messages.is_empty() {
+        writeln!(file, "  queued_messages:")?;
+        for (i, msg) in frame.rendered_text.queued_messages.iter().enumerate() {
+            writeln!(file, "    [{}]: {:?}", i, msg)?;
+        }
+    }
+    if !frame.rendered_text.recent_messages.is_empty() {
+        writeln!(file, "  recent_messages:")?;
+        for msg in &frame.rendered_text.recent_messages {
+            writeln!(
+                file,
+                "    [{}] ({} chars): {:?}",
+                msg.role, msg.content_len, msg.content_preview
+            )?;
+        }
+    }
+    if !frame.rendered_text.streaming_text_preview.is_empty() {
+        writeln!(
+            file,
+            "  streaming_text: {:?}",
+            frame.rendered_text.streaming_text_preview
+        )?;
+    }
 
     // Anomalies
     if !frame.anomalies.is_empty() {
