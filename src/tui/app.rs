@@ -1959,6 +1959,24 @@ impl App {
             return;
         }
 
+        if trimmed == "/version" {
+            let version = env!("JCODE_VERSION");
+            let is_canary = if self.session.is_canary {
+                " (canary/self-dev)"
+            } else {
+                ""
+            };
+            self.display_messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: format!("jcode {}{}", version, is_canary),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            return;
+        }
+
         if trimmed == "/reload" {
             self.display_messages.push(DisplayMessage {
                 role: "system".to_string(),
@@ -2072,10 +2090,10 @@ impl App {
             return;
         }
 
-        // Add user message to display with expanded paste content
+        // Add user message to display (show placeholder to user, not full paste)
         self.display_messages.push(DisplayMessage {
             role: "user".to_string(),
-            content: input.clone(),  // Show expanded content (actual pasted text)
+            content: raw_input,  // Show placeholder to user (condensed view)
             tool_calls: vec![],
             duration_secs: None,
             title: None,
@@ -3268,6 +3286,7 @@ impl App {
         // Built-in commands
         let mut commands: Vec<(&'static str, &'static str)> = vec![
             ("/help", "Show help and keyboard shortcuts"),
+            ("/version", "Show current version"),
             ("/reload", "Pull, rebuild, and restart (keeps session)"),
             ("/clear", "Clear conversation history"),
         ];
