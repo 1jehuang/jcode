@@ -1977,6 +1977,80 @@ impl App {
             return;
         }
 
+        if trimmed == "/info" {
+            let version = env!("JCODE_VERSION");
+            let terminal_size = crossterm::terminal::size()
+                .map(|(w, h)| format!("{}x{}", w, h))
+                .unwrap_or_else(|_| "unknown".to_string());
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+
+            // Count turns (user messages)
+            let turn_count = self
+                .display_messages
+                .iter()
+                .filter(|m| m.role == "user")
+                .count();
+
+            // Session duration
+            let session_duration = chrono::Utc::now()
+                .signed_duration_since(self.session.created_at);
+            let duration_str = if session_duration.num_hours() > 0 {
+                format!("{}h {}m", session_duration.num_hours(), session_duration.num_minutes() % 60)
+            } else if session_duration.num_minutes() > 0 {
+                format!("{}m", session_duration.num_minutes())
+            } else {
+                format!("{}s", session_duration.num_seconds())
+            };
+
+            // Build info string
+            let mut info = String::new();
+            info.push_str(&format!("**Version:** {}\n", version));
+            info.push_str(&format!("**Session:** {} ({})\n",
+                self.session.short_name.as_deref().unwrap_or("unnamed"),
+                &self.session.id[..8]));
+            info.push_str(&format!("**Duration:** {} ({} turns)\n", duration_str, turn_count));
+            info.push_str(&format!("**Tokens:** ↑{} ↓{}\n",
+                self.total_input_tokens, self.total_output_tokens));
+            info.push_str(&format!("**Terminal:** {}\n", terminal_size));
+            info.push_str(&format!("**CWD:** {}\n", cwd));
+
+            // Provider info
+            if let Some(ref model) = self.remote_provider_model {
+                info.push_str(&format!("**Model:** {}\n", model));
+            }
+            if let Some(ref provider_id) = self.provider_session_id {
+                info.push_str(&format!("**Provider Session:** {}...\n", &provider_id[..provider_id.len().min(16)]));
+            }
+
+            // Self-dev specific
+            if self.session.is_canary {
+                info.push_str("\n**Self-Dev Mode:** enabled\n");
+                if let Some(ref build) = self.session.testing_build {
+                    info.push_str(&format!("**Testing Build:** {}\n", build));
+                }
+            }
+
+            // Remote mode info
+            if self.is_remote {
+                info.push_str(&format!("\n**Remote Mode:** connected\n"));
+                if let Some(count) = self.remote_client_count {
+                    info.push_str(&format!("**Connected Clients:** {}\n", count));
+                }
+            }
+
+            self.display_messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: info,
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            return;
+        }
+
         if trimmed == "/reload" {
             self.display_messages.push(DisplayMessage {
                 role: "system".to_string(),
@@ -3287,6 +3361,7 @@ impl App {
         let mut commands: Vec<(&'static str, &'static str)> = vec![
             ("/help", "Show help and keyboard shortcuts"),
             ("/version", "Show current version"),
+            ("/info", "Show session info, tokens, environment"),
             ("/reload", "Pull, rebuild, and restart (keeps session)"),
             ("/clear", "Clear conversation history"),
         ];
