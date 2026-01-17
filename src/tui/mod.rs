@@ -5,6 +5,7 @@ mod keybind;
 mod markdown;
 mod stream_buffer;
 mod ui;
+pub mod visual_debug;
 
 // ClientApp is deprecated - use App::new_for_remote().run_remote() instead
 #[deprecated(note = "Use App::new_for_remote().run_remote() instead")]
@@ -59,4 +60,6 @@ pub trait TuiState {
     fn status_notice(&self) -> Option<String>;
     /// Time since app started (for startup animations)
     fn animation_elapsed(&self) -> f32;
+    /// Time remaining until rate limit resets (if rate limited)
+    fn rate_limit_remaining(&self) -> Option<Duration>;
 }
