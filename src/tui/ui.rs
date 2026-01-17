@@ -1,26 +1,23 @@
 #![allow(dead_code)]
-
 #![allow(dead_code)]
 
-use super::{ProcessingStatus, TuiState};
 use super::markdown;
+use super::visual_debug::{self, FrameCaptureBuilder};
+use super::{ProcessingStatus, TuiState};
 use crate::message::ToolCall;
-use ratatui::{
-    prelude::*,
-    widgets::Paragraph,
-};
+use ratatui::{prelude::*, widgets::Paragraph};
 use std::time::SystemTime;
 
 // Minimal color palette
-const USER_COLOR: Color = Color::Rgb(138, 180, 248);    // Soft blue (caret)
-const AI_COLOR: Color = Color::Rgb(129, 199, 132);      // Soft green (unused)
-const TOOL_COLOR: Color = Color::Rgb(120, 120, 120);    // Gray
-const DIM_COLOR: Color = Color::Rgb(80, 80, 80);        // Dimmer gray
-const ACCENT_COLOR: Color = Color::Rgb(186, 139, 255);  // Purple accent
-const QUEUED_COLOR: Color = Color::Rgb(255, 193, 7);    // Amber/yellow for queued
-const USER_TEXT: Color = Color::Rgb(245, 245, 255);     // Bright cool white (user messages)
-const USER_BG: Color = Color::Rgb(35, 40, 50);          // Subtle dark blue background for user
-const AI_TEXT: Color = Color::Rgb(220, 220, 215);       // Softer warm white (AI messages)
+const USER_COLOR: Color = Color::Rgb(138, 180, 248); // Soft blue (caret)
+const AI_COLOR: Color = Color::Rgb(129, 199, 132); // Soft green (unused)
+const TOOL_COLOR: Color = Color::Rgb(120, 120, 120); // Gray
+const DIM_COLOR: Color = Color::Rgb(80, 80, 80); // Dimmer gray
+const ACCENT_COLOR: Color = Color::Rgb(186, 139, 255); // Purple accent
+const QUEUED_COLOR: Color = Color::Rgb(255, 193, 7); // Amber/yellow for queued
+const USER_TEXT: Color = Color::Rgb(245, 245, 255); // Bright cool white (user messages)
+const USER_BG: Color = Color::Rgb(35, 40, 50); // Subtle dark blue background for user
+const AI_TEXT: Color = Color::Rgb(220, 220, 215); // Softer warm white (AI messages)
 
 // Spinner frames for animated status
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -41,8 +38,8 @@ fn header_animation_color(elapsed: f32) -> Color {
 
     // Color journey: cyan -> purple (accent)
     // Start bright cyan, smoothly transition to accent purple
-    let start = (100.0, 220.0, 255.0);  // Bright cyan
-    let end = (186.0, 139.0, 255.0);    // Accent purple
+    let start = (100.0, 220.0, 255.0); // Bright cyan
+    let end = (186.0, 139.0, 255.0); // Accent purple
 
     // Add a subtle pulse/shimmer during transition
     let pulse = (elapsed * 8.0).sin() * 0.15 * (1.0 - eased);
@@ -136,9 +133,9 @@ fn animated_tool_color(elapsed: f32) -> Color {
     let t = (elapsed * 2.0).sin() * 0.5 + 0.5; // 0.0 to 1.0
 
     // Interpolate between cyan and purple
-    let r = (80.0 + t * 106.0) as u8;  // 80 -> 186
-    let g = (200.0 - t * 61.0) as u8;  // 200 -> 139
-    let b = (220.0 + t * 35.0) as u8;  // 220 -> 255
+    let r = (80.0 + t * 106.0) as u8; // 80 -> 186
+    let g = (200.0 - t * 61.0) as u8; // 200 -> 139
+    let b = (220.0 + t * 35.0) as u8; // 220 -> 255
 
     Color::Rgb(r, g, b)
 }
@@ -190,11 +187,7 @@ fn shorten_model_name(model: &str) -> String {
         return "gpt3.5".to_string();
     }
     // Fallback: remove common suffixes and dashes
-    model
-        .split('-')
-        .take(3)
-        .collect::<Vec<_>>()
-        .join("")
+    model.split('-').take(3).collect::<Vec<_>>().join("")
 }
 
 /// Calculate the number of visual lines an input string will occupy
@@ -223,6 +216,13 @@ fn calculate_input_lines(input: &str, line_width: usize) -> usize {
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     let area = frame.area();
 
+    // Initialize visual debug capture if enabled
+    let mut debug_capture = if visual_debug::is_enabled() {
+        Some(FrameCaptureBuilder::new(area.width, area.height))
+    } else {
+        None
+    };
+
     // Calculate queued messages (full count for numbering)
     let queued_count = app.queued_messages().len();
     let queued_height = queued_count.min(3) as u16;
@@ -232,11 +232,19 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     let base_input_height = calculate_input_lines(app.input(), available_width).min(10) as u16;
     // Add 1 line for command suggestions when typing /
     let suggestions = app.command_suggestions();
-    let suggestions_height = if !suggestions.is_empty() && !app.is_processing() { 1 } else { 0 };
+    let suggestions_height = if !suggestions.is_empty() && !app.is_processing() {
+        1
+    } else {
+        0
+    };
     let input_height = base_input_height + suggestions_height;
 
     // Count user messages to show next prompt number
-    let user_count = app.display_messages().iter().filter(|m| m.role == "user").count();
+    let user_count = app
+        .display_messages()
+        .iter()
+        .filter(|m| m.role == "user")
+        .count();
 
     // Estimate message content height (no margin, full width)
     let content_height = estimate_content_height(app, area.width);
@@ -267,12 +275,43 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         })
         .split(area);
 
+    // Capture layout info for visual debug
+    if let Some(ref mut capture) = debug_capture {
+        capture.layout.use_packed = use_packed;
+        capture.layout.estimated_content_height = content_height as usize;
+        capture.layout.messages_area = Some(chunks[0].into());
+        capture.layout.status_area = Some(chunks[1].into());
+        if queued_height > 0 {
+            capture.layout.queued_area = Some(chunks[2].into());
+        }
+        capture.layout.input_area = Some(chunks[3].into());
+        capture.layout.input_lines_raw = app.input().lines().count().max(1);
+        capture.layout.input_lines_wrapped = base_input_height as usize;
+
+        // Capture state snapshot
+        capture.state.is_processing = app.is_processing();
+        capture.state.input_len = app.input().len();
+        capture.state.input_preview = app.input().chars().take(100).collect();
+        capture.state.cursor_pos = app.cursor_pos();
+        capture.state.scroll_offset = app.scroll_offset();
+        capture.state.queued_count = queued_count;
+        capture.state.message_count = app.display_messages().len();
+        capture.state.streaming_text_len = app.streaming_text().len();
+        capture.state.has_suggestions = !suggestions.is_empty();
+        capture.state.status = format!("{:?}", app.status());
+    }
+
     draw_messages(frame, app, chunks[0]);
     draw_status(frame, app, chunks[1]);
     if queued_height > 0 {
         draw_queued(frame, app, chunks[2], user_count + 1);
     }
-    draw_input(frame, app, chunks[3], user_count + queued_count + 1);
+    draw_input(frame, app, chunks[3], user_count + queued_count + 1, &mut debug_capture);
+
+    // Record the frame capture if enabled
+    if let Some(capture) = debug_capture {
+        visual_debug::record_frame(capture.build());
+    }
 }
 
 /// Estimate how many lines the message content will take
@@ -319,7 +358,11 @@ fn estimate_content_height(app: &dyn TuiState, width: u16) -> u16 {
                 // Rough estimate: count newlines + wrap estimate
                 let content_lines = msg.content.lines().count().max(1);
                 let avg_line_len = msg.content.len() / content_lines.max(1);
-                let wrap_factor = if avg_line_len > width { (avg_line_len / width) + 1 } else { 1 };
+                let wrap_factor = if avg_line_len > width {
+                    (avg_line_len / width) + 1
+                } else {
+                    1
+                };
                 lines += (content_lines * wrap_factor) as u16;
 
                 // Tool badges
@@ -355,7 +398,11 @@ fn estimate_content_height(app: &dyn TuiState, width: u16) -> u16 {
             // Estimate with wrapping
             let content_lines = streaming.lines().count().max(1);
             let avg_line_len = streaming.len() / content_lines.max(1);
-            let wrap_factor = if avg_line_len > width { (avg_line_len / width) + 1 } else { 1 };
+            let wrap_factor = if avg_line_len > width {
+                (avg_line_len / width) + 1
+            } else {
+                1
+            };
             lines += (content_lines * wrap_factor) as u16;
         }
         // Active tool calls
@@ -389,7 +436,12 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         // Full agent name with animated color during startup
         // Format: "JCode Fox · Claude 4.5 Opus"
         let nice_model = format_model_name(&short_model);
-        let header_text = format!("{} JCode {} · {}", icon, capitalize(&session_name), nice_model);
+        let header_text = format!(
+            "{} JCode {} · {}",
+            icon,
+            capitalize(&session_name),
+            nice_model
+        );
         mode_parts.push(animated_header_span(&header_text, anim_elapsed));
     } else {
         mode_parts.push(Span::styled(
@@ -403,14 +455,18 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         mode_parts.push(Span::styled(" ", Style::default()));
         mode_parts.push(Span::styled(
             " self-dev ",
-            Style::default().fg(Color::Black).bg(Color::Rgb(255, 193, 7)), // Amber badge
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Rgb(255, 193, 7)), // Amber badge
         ));
     }
     if app.is_remote_mode() {
         mode_parts.push(Span::styled(" ", Style::default()));
         mode_parts.push(Span::styled(
             " client ",
-            Style::default().fg(Color::Black).bg(Color::Rgb(100, 149, 237)), // Cornflower blue badge
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Rgb(100, 149, 237)), // Cornflower blue badge
         ));
     }
 
@@ -434,7 +490,8 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             const MAX_LINES: usize = 5;
 
             // Cap content width to available space minus box chars (│ + space + space + │ = 4)
-            let max_content_width = changelog_lines.iter()
+            let max_content_width = changelog_lines
+                .iter()
                 .take(MAX_LINES)
                 .map(|l| l.chars().count())
                 .max()
@@ -464,7 +521,12 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
                 for line in changelog_lines.iter().take(display_lines) {
                     let truncated = if line.chars().count() > max_content_width {
-                        format!("{}…", line.chars().take(max_content_width.saturating_sub(1)).collect::<String>())
+                        format!(
+                            "{}…",
+                            line.chars()
+                                .take(max_content_width.saturating_sub(1))
+                                .collect::<String>()
+                        )
                     } else {
                         line.to_string()
                     };
@@ -508,7 +570,14 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let skills = app.available_skills();
     if !skills.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!("skills: {}", skills.iter().map(|s| format!("/{}", s)).collect::<Vec<_>>().join(" ")),
+            format!(
+                "skills: {}",
+                skills
+                    .iter()
+                    .map(|s| format!("/{}", s))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
             Style::default().fg(DIM_COLOR),
         )));
     }
@@ -519,7 +588,11 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     if client_count > 0 || session_count > 1 {
         let mut parts = Vec::new();
         if client_count > 0 {
-            parts.push(format!("{} client{}", client_count, if client_count == 1 { "" } else { "s" }));
+            parts.push(format!(
+                "{} client{}",
+                client_count,
+                if client_count == 1 { "" } else { "s" }
+            ));
         }
         if session_count > 1 {
             parts.push(format!("{} sessions", session_count));
@@ -537,7 +610,11 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     // Count total user prompts and queued messages for rainbow coloring
     // The input prompt is distance 0, queued messages are 1..queued_count,
     // existing messages continue from there
-    let total_prompts = app.display_messages().iter().filter(|m| m.role == "user").count();
+    let total_prompts = app
+        .display_messages()
+        .iter()
+        .filter(|m| m.role == "user")
+        .count();
     let queued_count = app.queued_messages().len();
     // Input prompt number is total_prompts + queued_count + 1, so distance for
     // existing prompt N is: (total_prompts + queued_count + 1) - N
@@ -552,7 +629,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             "user" => {
                 prompt_num += 1;
                 user_line_indices.push(lines.len()); // Track this line index
-                // Calculate distance from input prompt (distance 0)
+                                                     // Calculate distance from input prompt (distance 0)
                 let distance = total_prompts + queued_count + 1 - prompt_num;
                 let num_color = rainbow_prompt_color(distance);
                 // User messages: rainbow number, blue caret, bright text
@@ -566,7 +643,8 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 // AI messages: render markdown flush left
                 // Pass width for table rendering (leave some margin)
                 let content_width = area.width.saturating_sub(4) as usize;
-                let md_lines = markdown::render_markdown_with_width(&msg.content, Some(content_width));
+                let md_lines =
+                    markdown::render_markdown_with_width(&msg.content, Some(content_width));
                 for md_line in md_lines {
                     lines.push(md_line);
                 }
@@ -584,10 +662,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 if let Some(secs) = msg.duration_secs {
                     lines.push(Line::from(vec![
                         Span::raw("  "),
-                        Span::styled(
-                            format!("{:.1}s", secs),
-                            Style::default().fg(DIM_COLOR),
-                        ),
+                        Span::styled(format!("{:.1}s", secs), Style::default().fg(DIM_COLOR)),
                     ]));
                 }
             }
@@ -615,21 +690,27 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                     ]));
 
                     // Show diff output for editing tools with syntax highlighting
-                    if app.show_diffs() && matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit") {
+                    if app.show_diffs()
+                        && matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit")
+                    {
                         // Extract file extension for syntax highlighting
-                        let file_ext = tc.input.get("file_path")
+                        let file_ext = tc
+                            .input
+                            .get("file_path")
                             .and_then(|v| v.as_str())
                             .and_then(|p| std::path::Path::new(p).extension())
                             .and_then(|e| e.to_str());
 
                         // Collect only actual change lines (+ and -)
-                        let change_lines: Vec<&str> = msg.content.lines()
+                        let change_lines: Vec<&str> = msg
+                            .content
+                            .lines()
                             .skip(1)
                             .filter(|line| {
                                 let trimmed = line.trim();
-                                !trimmed.is_empty() &&
-                                trimmed != "..." &&
-                                (trimmed.contains("+ ") || trimmed.contains("- "))
+                                !trimmed.is_empty()
+                                    && trimmed != "..."
+                                    && (trimmed.contains("+ ") || trimmed.contains("- "))
                             })
                             .collect();
 
@@ -641,18 +722,25 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                         let deletions = change_lines.iter().filter(|l| l.contains("- ")).count();
 
                         // Determine which lines to show
-                        let (display_lines, truncated): (Vec<&str>, bool) = if total_changes <= MAX_DIFF_LINES {
+                        let (display_lines, truncated): (Vec<&str>, bool) = if total_changes
+                            <= MAX_DIFF_LINES
+                        {
                             (change_lines, false)
                         } else {
                             // Show first half and last half, with truncation indicator
                             let half = MAX_DIFF_LINES / 2;
-                            let mut result: Vec<&str> = change_lines.iter().take(half).copied().collect();
+                            let mut result: Vec<&str> =
+                                change_lines.iter().take(half).copied().collect();
                             result.extend(change_lines.iter().skip(total_changes - half).copied());
                             (result, true)
                         };
 
                         let mut shown_truncation = false;
-                        let half_point = if truncated { MAX_DIFF_LINES / 2 } else { usize::MAX };
+                        let half_point = if truncated {
+                            MAX_DIFF_LINES / 2
+                        } else {
+                            usize::MAX
+                        };
 
                         for (i, line) in display_lines.iter().enumerate() {
                             // Show truncation marker at the midpoint
@@ -667,7 +755,11 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
                             let trimmed = line.trim();
                             let is_add = trimmed.contains("+ ");
-                            let base_color = if is_add { DIFF_ADD_COLOR } else { DIFF_DEL_COLOR };
+                            let base_color = if is_add {
+                                DIFF_ADD_COLOR
+                            } else {
+                                DIFF_DEL_COLOR
+                            };
 
                             // Extract prefix (line number + sign) and content
                             let (prefix, content) = extract_diff_prefix_and_content(trimmed);
@@ -730,7 +822,10 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             "system" => {
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(msg.content.clone(), Style::default().fg(ACCENT_COLOR).italic()),
+                    Span::styled(
+                        msg.content.clone(),
+                        Style::default().fg(ACCENT_COLOR).italic(),
+                    ),
                 ]));
             }
             "usage" => {
@@ -757,7 +852,8 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             }
             // Use markdown rendering to match final display
             let content_width = area.width.saturating_sub(4) as usize;
-            let md_lines = markdown::render_markdown_with_width(app.streaming_text(), Some(content_width));
+            let md_lines =
+                markdown::render_markdown_with_width(app.streaming_text(), Some(content_width));
             lines.extend(md_lines);
         }
         // Tool calls are now shown inline in display_messages
@@ -802,8 +898,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         max_scroll
     };
 
-    let paragraph = Paragraph::new(wrapped_lines)
-        .scroll((scroll as u16, 0));
+    let paragraph = Paragraph::new(wrapped_lines).scroll((scroll as u16, 0));
 
     frame.render_widget(paragraph, area);
 
@@ -813,7 +908,12 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         // Check if this line is visible after scroll
         if line_idx >= scroll && line_idx < scroll + visible_height {
             let screen_y = area.y + (line_idx - scroll) as u16;
-            let bar_area = Rect { x: right_x, y: screen_y, width: 1, height: 1 };
+            let bar_area = Rect {
+                x: right_x,
+                y: screen_y,
+                width: 1,
+                height: 1,
+            };
             let bar = Paragraph::new(Span::styled("│", Style::default().fg(USER_COLOR)));
             frame.render_widget(bar, bar_area);
         }
@@ -829,9 +929,10 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             width: indicator.len() as u16,
             height: 1,
         };
-        let indicator_widget = Paragraph::new(Line::from(vec![
-            Span::styled(indicator, Style::default().fg(DIM_COLOR)),
-        ]));
+        let indicator_widget = Paragraph::new(Line::from(vec![Span::styled(
+            indicator,
+            Style::default().fg(DIM_COLOR),
+        )]));
         frame.render_widget(indicator_widget, indicator_area);
     }
 
@@ -844,9 +945,10 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             width: indicator.len() as u16,
             height: 1,
         };
-        let indicator_widget = Paragraph::new(Line::from(vec![
-            Span::styled(indicator, Style::default().fg(QUEUED_COLOR)),
-        ]));
+        let indicator_widget = Paragraph::new(Line::from(vec![Span::styled(
+            indicator,
+            Style::default().fg(QUEUED_COLOR),
+        )]));
         frame.render_widget(indicator_widget, indicator_area);
     }
 }
@@ -857,8 +959,39 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
 
     let line = if let Some(notice) = app.status_notice() {
+        Line::from(vec![Span::styled(
+            notice,
+            Style::default().fg(ACCENT_COLOR),
+        )])
+    } else if let Some(remaining) = app.rate_limit_remaining() {
+        // Rate limit countdown - show animated spinner and time remaining
+        let secs = remaining.as_secs();
+        let spinner_idx = (elapsed * 4.0) as usize % SPINNER_FRAMES.len();
+        let spinner = SPINNER_FRAMES[spinner_idx];
+        let queued = app.queued_messages();
+        let queued_info = if !queued.is_empty() {
+            format!(" (+{} queued)", queued.len())
+        } else {
+            String::new()
+        };
+        // Format time remaining in a human-readable way
+        let time_str = if secs >= 3600 {
+            let hours = secs / 3600;
+            let mins = (secs % 3600) / 60;
+            format!("{}h {}m", hours, mins)
+        } else if secs >= 60 {
+            let mins = secs / 60;
+            let s = secs % 60;
+            format!("{}m {}s", mins, s)
+        } else {
+            format!("{}s", secs)
+        };
         Line::from(vec![
-            Span::styled(notice, Style::default().fg(ACCENT_COLOR)),
+            Span::styled(spinner, Style::default().fg(Color::Rgb(255, 193, 7))),
+            Span::styled(
+                format!(" Rate limited. Auto-retry in {}...{}", time_str, queued_info),
+                Style::default().fg(Color::Rgb(255, 193, 7)),
+            ),
         ])
     } else if app.is_processing() {
         // Animated spinner based on elapsed time (cycles every 80ms per frame)
@@ -867,12 +1000,13 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
         match app.status() {
             ProcessingStatus::Idle => Line::from(""),
-            ProcessingStatus::Sending => {
-                Line::from(vec![
-                    Span::styled(spinner, Style::default().fg(AI_COLOR)),
-                    Span::styled(format!(" sending… {:.1}s", elapsed), Style::default().fg(DIM_COLOR)),
-                ])
-            }
+            ProcessingStatus::Sending => Line::from(vec![
+                Span::styled(spinner, Style::default().fg(AI_COLOR)),
+                Span::styled(
+                    format!(" sending… {:.1}s", elapsed),
+                    Style::default().fg(DIM_COLOR),
+                ),
+            ]),
             ProcessingStatus::Streaming => {
                 let tokens_str = if input_tokens > 0 || output_tokens > 0 {
                     format!("↑{} ↓{}", input_tokens, output_tokens)
@@ -886,7 +1020,10 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 };
                 Line::from(vec![
                     Span::styled(spinner, Style::default().fg(AI_COLOR)),
-                    Span::styled(format!(" {}{} {:.1}s", tokens_str, stale_str, elapsed), Style::default().fg(DIM_COLOR)),
+                    Span::styled(
+                        format!(" {}{} {:.1}s", tokens_str, stale_str, elapsed),
+                        Style::default().fg(DIM_COLOR),
+                    ),
                 ])
             }
             ProcessingStatus::RunningTool(ref name) => {
@@ -905,11 +1042,13 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 // Use animated color for the tool name
                 let anim_color = animated_tool_color(elapsed);
                 // Show subagent status if available (e.g., "calling API", "running grep")
-                let status_suffix = app.subagent_status()
+                let status_suffix = app
+                    .subagent_status()
                     .map(|s| format!(" ({})", s))
                     .unwrap_or_default();
                 // Get tool details (command, file path, etc.) from the current tool call
-                let tool_detail = app.streaming_tool_calls()
+                let tool_detail = app
+                    .streaming_tool_calls()
                     .last()
                     .map(|tc| get_tool_summary(tc))
                     .filter(|s| !s.is_empty())
@@ -941,11 +1080,11 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                     Span::styled("⚠ ", Style::default().fg(warning_color)),
                     Span::styled(
                         format!("Session: {}k tokens ", total / 1000),
-                        Style::default().fg(warning_color)
+                        Style::default().fg(warning_color),
                     ),
                     Span::styled(
                         "(consider /clear for fresh context)",
-                        Style::default().fg(DIM_COLOR)
+                        Style::default().fg(DIM_COLOR),
                     ),
                 ])
             } else {
@@ -963,7 +1102,8 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usize) {
     let queued = app.queued_messages();
     let queued_count = queued.len();
-    let lines: Vec<Line> = queued.iter()
+    let lines: Vec<Line> = queued
+        .iter()
         .take(3)
         .enumerate()
         .map(|(i, msg)| {
@@ -983,7 +1123,13 @@ fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usi
     frame.render_widget(paragraph, area);
 }
 
-fn draw_input(frame: &mut Frame, app: &dyn TuiState, area: Rect, next_prompt: usize) {
+fn draw_input(
+    frame: &mut Frame,
+    app: &dyn TuiState,
+    area: Rect,
+    next_prompt: usize,
+    debug_capture: &mut Option<FrameCaptureBuilder>,
+) {
     let input_text = app.input();
     let cursor_pos = app.cursor_pos();
 
@@ -1022,6 +1168,7 @@ fn draw_input(frame: &mut Frame, app: &dyn TuiState, area: Rect, next_prompt: us
 
     // Show command suggestions if available (prepended to lines)
     let mut lines: Vec<Line> = Vec::new();
+    let mut hint_shown = false;
     if has_suggestions {
         let suggestion_text: String = suggestions
             .iter()
@@ -1034,10 +1181,25 @@ fn draw_input(frame: &mut Frame, app: &dyn TuiState, area: Rect, next_prompt: us
         )));
     } else if app.is_processing() && !input_text.is_empty() {
         // Show hint for Shift+Enter when processing and user has typed something
+        hint_shown = true;
         lines.push(Line::from(Span::styled(
             "  Shift+Enter to send now",
             Style::default().fg(DIM_COLOR),
         )));
+    }
+
+    // Visual debug: check for shift-enter hint anomalies
+    if let Some(ref mut capture) = debug_capture {
+        capture.rendered_text.input_area = input_text.to_string();
+        if hint_shown {
+            capture.rendered_text.input_hint = Some("Shift+Enter to send now".to_string());
+        }
+        visual_debug::check_shift_enter_anomaly(
+            capture,
+            app.is_processing(),
+            input_text,
+            hint_shown,
+        );
     }
 
     let suggestions_offset = lines.len();
@@ -1163,9 +1325,16 @@ fn wrap_input_text<'a>(
         if newline_pos.is_some() {
             if !found_cursor && cursor_pos == char_count {
                 cursor_line = lines.len().saturating_sub(1);
-                cursor_col = lines.last().map(|l| {
-                    l.spans.iter().skip(1).map(|s| s.content.chars().count()).sum::<usize>()
-                }).unwrap_or(0);
+                cursor_col = lines
+                    .last()
+                    .map(|l| {
+                        l.spans
+                            .iter()
+                            .skip(1)
+                            .map(|s| s.content.chars().count())
+                            .sum::<usize>()
+                    })
+                    .unwrap_or(0);
                 found_cursor = true;
             }
             char_count += 1; // newline char
@@ -1178,19 +1347,25 @@ fn wrap_input_text<'a>(
     // Handle cursor at very end
     if !found_cursor {
         cursor_line = lines.len().saturating_sub(1);
-        cursor_col = lines.last().map(|l| {
-            // Skip the prompt spans and count content
-            l.spans.iter().skip(if cursor_line == 0 { 2 } else { 1 })
-                .map(|s| s.content.chars().count()).sum::<usize>()
-        }).unwrap_or(0);
+        cursor_col = lines
+            .last()
+            .map(|l| {
+                // Skip the prompt spans and count content
+                l.spans
+                    .iter()
+                    .skip(if cursor_line == 0 { 2 } else { 1 })
+                    .map(|s| s.content.chars().count())
+                    .sum::<usize>()
+            })
+            .unwrap_or(0);
     }
 
     (lines, cursor_line, cursor_col)
 }
 
 // Colors for diff display
-const DIFF_ADD_COLOR: Color = Color::Rgb(100, 200, 100);    // Green for additions
-const DIFF_DEL_COLOR: Color = Color::Rgb(200, 100, 100);    // Red for deletions
+const DIFF_ADD_COLOR: Color = Color::Rgb(100, 200, 100); // Green for additions
+const DIFF_DEL_COLOR: Color = Color::Rgb(200, 100, 100); // Red for deletions
 const DIFF_HIGHLIGHT_ADD: Color = Color::Rgb(150, 255, 150); // Brighter green for changed parts
 const DIFF_HIGHLIGHT_DEL: Color = Color::Rgb(255, 130, 130); // Brighter red for changed parts
 
@@ -1225,9 +1400,7 @@ fn tint_span_with_diff_color(span: Span<'static>, diff_color: Color) -> Span<'st
     };
 
     // Blend: 70% syntax color + 30% diff color
-    let blend = |s: u8, d: u8| -> u8 {
-        ((s as u16 * 70 + d as u16 * 30) / 100) as u8
-    };
+    let blend = |s: u8, d: u8| -> u8 { ((s as u16 * 70 + d as u16 * 30) / 100) as u8 };
 
     let tinted = Color::Rgb(blend(sr, dr), blend(sg, dg), blend(sb, db));
     Span::styled(span.content, span.style.fg(tinted))
@@ -1257,8 +1430,16 @@ fn render_diff_line_with_highlights(
 
     // Do word-level diff
     let diff = TextDiff::from_words(
-        if is_deletion { this_content } else { other_content },
-        if is_deletion { other_content } else { this_content },
+        if is_deletion {
+            this_content
+        } else {
+            other_content
+        },
+        if is_deletion {
+            other_content
+        } else {
+            this_content
+        },
     );
 
     let mut spans: Vec<Span<'static>> = vec![
@@ -1298,28 +1479,44 @@ fn get_tool_summary(tool: &ToolCall) -> String {
     };
 
     match tool.name.as_str() {
-        "bash" => {
-            tool.input.get("command").and_then(|v| v.as_str())
-                .map(|cmd| format!("$ {}", truncate(cmd, 50)))
-                .unwrap_or_default()
-        }
-        "read" | "write" | "edit" => {
-            tool.input.get("file_path").and_then(|v| v.as_str())
-                .map(|p| p.to_string())
-                .unwrap_or_default()
-        }
+        "bash" => tool
+            .input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|cmd| format!("$ {}", truncate(cmd, 50)))
+            .unwrap_or_default(),
+        "read" | "write" | "edit" => tool
+            .input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(|p| p.to_string())
+            .unwrap_or_default(),
         "multiedit" => {
-            let path = tool.input.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            let count = tool.input.get("edits").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let path = tool
+                .input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let count = tool
+                .input
+                .get("edits")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
             format!("{} ({} edits)", path, count)
         }
-        "glob" => {
-            tool.input.get("pattern").and_then(|v| v.as_str())
-                .map(|p| format!("'{}'", p))
-                .unwrap_or_default()
-        }
+        "glob" => tool
+            .input
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(|p| format!("'{}'", p))
+            .unwrap_or_default(),
         "grep" => {
-            let pattern = tool.input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+            let pattern = tool
+                .input
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let path = tool.input.get("path").and_then(|v| v.as_str());
             if let Some(p) = path {
                 format!("'{}' in {}", truncate(pattern, 30), p)
@@ -1327,36 +1524,52 @@ fn get_tool_summary(tool: &ToolCall) -> String {
                 format!("'{}'", truncate(pattern, 40))
             }
         }
-        "ls" => {
-            tool.input.get("path").and_then(|v| v.as_str())
-                .unwrap_or(".")
-                .to_string()
-        }
+        "ls" => tool
+            .input
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".")
+            .to_string(),
         "task" => {
-            let desc = tool.input.get("description").and_then(|v| v.as_str()).unwrap_or("task");
-            let agent_type = tool.input.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("agent");
+            let desc = tool
+                .input
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("task");
+            let agent_type = tool
+                .input
+                .get("subagent_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("agent");
             format!("{} ({})", desc, agent_type)
         }
-        "patch" | "apply_patch" => {
-            tool.input.get("patch_text").and_then(|v| v.as_str())
-                .map(|p| {
-                    let lines = p.lines().count();
-                    format!("({} lines)", lines)
-                })
-                .unwrap_or_default()
-        }
-        "webfetch" => {
-            tool.input.get("url").and_then(|v| v.as_str())
-                .map(|u| truncate(u, 50))
-                .unwrap_or_default()
-        }
-        "websearch" => {
-            tool.input.get("query").and_then(|v| v.as_str())
-                .map(|q| format!("'{}'", truncate(q, 40)))
-                .unwrap_or_default()
-        }
+        "patch" | "apply_patch" => tool
+            .input
+            .get("patch_text")
+            .and_then(|v| v.as_str())
+            .map(|p| {
+                let lines = p.lines().count();
+                format!("({} lines)", lines)
+            })
+            .unwrap_or_default(),
+        "webfetch" => tool
+            .input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(|u| truncate(u, 50))
+            .unwrap_or_default(),
+        "websearch" => tool
+            .input
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(|q| format!("'{}'", truncate(q, 40)))
+            .unwrap_or_default(),
         "mcp" => {
-            let action = tool.input.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            let action = tool
+                .input
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let server = tool.input.get("server_name").and_then(|v| v.as_str());
             if let Some(s) = server {
                 format!("{} {}", action, s)
@@ -1364,29 +1577,30 @@ fn get_tool_summary(tool: &ToolCall) -> String {
                 action.to_string()
             }
         }
-        "todowrite" | "todoread" => {
-            "todos".to_string()
-        }
-        "skill" => {
-            tool.input.get("skill").and_then(|v| v.as_str())
-                .map(|s| format!("/{}", s))
-                .unwrap_or_default()
-        }
-        "codesearch" => {
-            tool.input.get("query").and_then(|v| v.as_str())
-                .map(|q| format!("'{}'", truncate(q, 40)))
-                .unwrap_or_default()
-        }
+        "todowrite" | "todoread" => "todos".to_string(),
+        "skill" => tool
+            .input
+            .get("skill")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("/{}", s))
+            .unwrap_or_default(),
+        "codesearch" => tool
+            .input
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(|q| format!("'{}'", truncate(q, 40)))
+            .unwrap_or_default(),
         // MCP tools (prefixed with mcp__)
         name if name.starts_with("mcp__") => {
             // Show first string parameter as summary
-            tool.input.as_object()
+            tool.input
+                .as_object()
                 .and_then(|obj| obj.iter().find(|(_, v)| v.is_string()))
                 .and_then(|(_, v)| v.as_str())
                 .map(|s| truncate(s, 40))
                 .unwrap_or_default()
         }
-        _ => String::new()
+        _ => String::new(),
     }
 }
 
@@ -1436,9 +1650,7 @@ mod tests {
 
     #[test]
     fn test_wrap_input_text_empty() {
-        let (lines, cursor_line, cursor_col) = wrap_input_text(
-            "", 0, 80, "1", "> ", USER_COLOR, 3
-        );
+        let (lines, cursor_line, cursor_col) = wrap_input_text("", 0, 80, "1", "> ", USER_COLOR, 3);
         assert_eq!(lines.len(), 1);
         assert_eq!(cursor_line, 0);
         assert_eq!(cursor_col, 0);
@@ -1446,9 +1658,8 @@ mod tests {
 
     #[test]
     fn test_wrap_input_text_simple() {
-        let (lines, cursor_line, cursor_col) = wrap_input_text(
-            "hello", 5, 80, "1", "> ", USER_COLOR, 3
-        );
+        let (lines, cursor_line, cursor_col) =
+            wrap_input_text("hello", 5, 80, "1", "> ", USER_COLOR, 3);
         assert_eq!(lines.len(), 1);
         assert_eq!(cursor_line, 0);
         assert_eq!(cursor_col, 5); // cursor at end
@@ -1456,9 +1667,8 @@ mod tests {
 
     #[test]
     fn test_wrap_input_text_cursor_middle() {
-        let (lines, cursor_line, cursor_col) = wrap_input_text(
-            "hello world", 6, 80, "1", "> ", USER_COLOR, 3
-        );
+        let (lines, cursor_line, cursor_col) =
+            wrap_input_text("hello world", 6, 80, "1", "> ", USER_COLOR, 3);
         assert_eq!(lines.len(), 1);
         assert_eq!(cursor_line, 0);
         assert_eq!(cursor_col, 6); // cursor at 'w'
@@ -1467,30 +1677,27 @@ mod tests {
     #[test]
     fn test_wrap_input_text_wrapping() {
         // 10 chars with width 5 = 2 lines
-        let (lines, cursor_line, cursor_col) = wrap_input_text(
-            "aaaaaaaaaa", 7, 5, "1", "> ", USER_COLOR, 3
-        );
+        let (lines, cursor_line, cursor_col) =
+            wrap_input_text("aaaaaaaaaa", 7, 5, "1", "> ", USER_COLOR, 3);
         assert_eq!(lines.len(), 2);
         assert_eq!(cursor_line, 1); // second line
-        assert_eq!(cursor_col, 2);  // 7 - 5 = 2
+        assert_eq!(cursor_col, 2); // 7 - 5 = 2
     }
 
     #[test]
     fn test_wrap_input_text_with_newlines() {
-        let (lines, cursor_line, cursor_col) = wrap_input_text(
-            "hello\nworld", 6, 80, "1", "> ", USER_COLOR, 3
-        );
+        let (lines, cursor_line, cursor_col) =
+            wrap_input_text("hello\nworld", 6, 80, "1", "> ", USER_COLOR, 3);
         assert_eq!(lines.len(), 2);
         assert_eq!(cursor_line, 1); // second line (after newline)
-        assert_eq!(cursor_col, 0);  // at start of 'world'
+        assert_eq!(cursor_col, 0); // at start of 'world'
     }
 
     #[test]
     fn test_wrap_input_text_cursor_at_end_of_wrapped() {
         // 10 chars with width 5, cursor at position 10 (end)
-        let (lines, cursor_line, cursor_col) = wrap_input_text(
-            "aaaaaaaaaa", 10, 5, "1", "> ", USER_COLOR, 3
-        );
+        let (lines, cursor_line, cursor_col) =
+            wrap_input_text("aaaaaaaaaa", 10, 5, "1", "> ", USER_COLOR, 3);
         assert_eq!(lines.len(), 2);
         assert_eq!(cursor_line, 1);
         assert_eq!(cursor_col, 5);
@@ -1500,19 +1707,17 @@ mod tests {
     fn test_wrap_input_text_many_lines() {
         // Create text that spans 15 lines when wrapped to width 10
         let text = "a".repeat(150);
-        let (lines, cursor_line, cursor_col) = wrap_input_text(
-            &text, 145, 10, "1", "> ", USER_COLOR, 3
-        );
+        let (lines, cursor_line, cursor_col) =
+            wrap_input_text(&text, 145, 10, "1", "> ", USER_COLOR, 3);
         assert_eq!(lines.len(), 15);
         assert_eq!(cursor_line, 14); // last line
-        assert_eq!(cursor_col, 5);   // 145 % 10 = 5
+        assert_eq!(cursor_col, 5); // 145 % 10 = 5
     }
 
     #[test]
     fn test_wrap_input_text_multiple_newlines() {
-        let (lines, cursor_line, cursor_col) = wrap_input_text(
-            "a\nb\nc\nd", 6, 80, "1", "> ", USER_COLOR, 3
-        );
+        let (lines, cursor_line, cursor_col) =
+            wrap_input_text("a\nb\nc\nd", 6, 80, "1", "> ", USER_COLOR, 3);
         assert_eq!(lines.len(), 4);
         assert_eq!(cursor_line, 3); // on 'd' line
         assert_eq!(cursor_col, 0);
