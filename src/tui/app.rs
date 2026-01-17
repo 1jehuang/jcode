@@ -497,24 +497,31 @@ impl App {
             };
 
             // Build the reload message based on what triggered it
-            let message = if let Some(info) = reload_info {
+            // Extract build hash for the AI notification
+            let (message, build_hash) = if let Some(info) = reload_info {
                 if let Some(hash) = info.strip_prefix("reload:") {
-                    format!(
-                        "✓ Reloaded with build {}. Session restored{}",
-                        hash.trim(),
-                        stats
+                    let h = hash.trim().to_string();
+                    (
+                        format!("✓ Reloaded with build {}. Session restored{}", h, stats),
+                        h,
                     )
                 } else if let Some(hash) = info.strip_prefix("rebuild:") {
-                    format!(
-                        "✓ Rebuilt and reloaded ({}). Session restored{}",
-                        hash.trim(),
-                        stats
+                    let h = hash.trim().to_string();
+                    (
+                        format!("✓ Rebuilt and reloaded ({}). Session restored{}", h, stats),
+                        h,
                     )
                 } else {
-                    format!("✓ JCode reloaded. Session restored{}", stats)
+                    (
+                        format!("✓ JCode reloaded. Session restored{}", stats),
+                        "unknown".to_string(),
+                    )
                 }
             } else {
-                format!("✓ JCode reloaded. Session restored{}", stats)
+                (
+                    format!("✓ JCode reloaded. Session restored{}", stats),
+                    "unknown".to_string(),
+                )
             };
 
             // Add success message with stats
@@ -528,9 +535,22 @@ impl App {
             });
 
             // Queue an automatic message to notify the AI that reload completed
-            // This allows it to continue any interrupted work
-            self.queued_messages
-                .push("[Reload complete - continue where you left off]".to_string());
+            // Include context so it can orient itself and continue
+            let build_info = build_hash;
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+            let terminal_size = crossterm::terminal::size()
+                .map(|(w, h)| format!("{}x{}", w, h))
+                .unwrap_or_else(|_| "unknown".to_string());
+
+            self.queued_messages.push(format!(
+                "[Reload complete. Build: {}, CWD: {}, Terminal: {}, Session: {} turns. Continue where you left off.]",
+                build_info,
+                cwd,
+                terminal_size,
+                total_turns
+            ));
         } else {
             crate::logging::error(&format!("Failed to restore session: {}", session_id));
         }
