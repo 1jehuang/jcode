@@ -132,10 +132,7 @@ impl Tool for ConversationSearchTool {
                 }
 
                 if results.len() > 10 {
-                    output.push_str(&format!(
-                        "... and {} more results\n",
-                        results.len() - 10
-                    ));
+                    output.push_str(&format!("... and {} more results\n", results.len() - 10));
                 }
             }
         }
@@ -150,10 +147,7 @@ impl Tool for ConversationSearchTool {
                     range.start, range.end
                 ));
             } else {
-                output.push_str(&format!(
-                    "## Turns {}-{}\n\n",
-                    range.start, range.end
-                ));
+                output.push_str(&format!("## Turns {}-{}\n\n", range.start, range.end));
 
                 for (idx, msg) in turns.iter().enumerate() {
                     let turn_num = range.start + idx;

@@ -120,10 +120,7 @@ impl McpManagementTool {
 
         for server in &servers {
             output.push_str(&format!("## {}\n", server));
-            let server_tools: Vec<_> = all_tools
-                .iter()
-                .filter(|(s, _)| s == server)
-                .collect();
+            let server_tools: Vec<_> = all_tools.iter().filter(|(s, _)| s == server).collect();
 
             if server_tools.is_empty() {
                 output.push_str("  (no tools)\n");
@@ -144,12 +141,12 @@ impl McpManagementTool {
     }
 
     async fn connect_server(&self, params: McpToolInput) -> Result<ToolOutput> {
-        let server_name = params.server.ok_or_else(|| {
-            anyhow::anyhow!("'server' is required for connect action")
-        })?;
-        let command = params.command.ok_or_else(|| {
-            anyhow::anyhow!("'command' is required for connect action")
-        })?;
+        let server_name = params
+            .server
+            .ok_or_else(|| anyhow::anyhow!("'server' is required for connect action"))?;
+        let command = params
+            .command
+            .ok_or_else(|| anyhow::anyhow!("'command' is required for connect action"))?;
 
         let config = McpServerConfig {
             command,
@@ -165,7 +162,8 @@ impl McpManagementTool {
             return Ok(ToolOutput::new(format!(
                 "Server '{}' is already connected. Use 'disconnect' first to reconnect.",
                 server_name
-            )).with_title("MCP: Already connected"));
+            ))
+            .with_title("MCP: Already connected"));
         }
         drop(manager);
 
@@ -174,10 +172,8 @@ impl McpManagementTool {
         match manager.connect(&server_name, &config).await {
             Ok(()) => {
                 let tools = manager.all_tools().await;
-                let server_tools: Vec<_> = tools
-                    .iter()
-                    .filter(|(s, _)| s == &server_name)
-                    .collect();
+                let server_tools: Vec<_> =
+                    tools.iter().filter(|(s, _)| s == &server_name).collect();
 
                 let mut output = format!(
                     "Connected to MCP server '{}'\n\nAvailable tools ({}):\n",
@@ -195,17 +191,17 @@ impl McpManagementTool {
 
                 Ok(ToolOutput::new(output).with_title(format!("MCP: Connected {}", server_name)))
             }
-            Err(e) => Ok(ToolOutput::new(format!(
-                "Failed to connect to '{}': {}",
-                server_name, e
-            )).with_title("MCP: Connection failed")),
+            Err(e) => Ok(
+                ToolOutput::new(format!("Failed to connect to '{}': {}", server_name, e))
+                    .with_title("MCP: Connection failed"),
+            ),
         }
     }
 
     async fn disconnect_server(&self, params: McpToolInput) -> Result<ToolOutput> {
-        let server_name = params.server.ok_or_else(|| {
-            anyhow::anyhow!("'server' is required for disconnect action")
-        })?;
+        let server_name = params
+            .server
+            .ok_or_else(|| anyhow::anyhow!("'server' is required for disconnect action"))?;
 
         let manager = self.manager.read().await;
         let connected = manager.connected_servers().await;
@@ -219,17 +215,18 @@ impl McpManagementTool {
                 } else {
                     connected.join(", ")
                 }
-            )).with_title("MCP: Not connected"));
+            ))
+            .with_title("MCP: Not connected"));
         }
         drop(manager);
 
         let manager = self.manager.read().await;
         manager.disconnect(&server_name).await?;
 
-        Ok(ToolOutput::new(format!(
-            "Disconnected from MCP server '{}'",
-            server_name
-        )).with_title(format!("MCP: Disconnected {}", server_name)))
+        Ok(
+            ToolOutput::new(format!("Disconnected from MCP server '{}'", server_name))
+                .with_title(format!("MCP: Disconnected {}", server_name)),
+        )
     }
 
     async fn reload_config(&self) -> Result<ToolOutput> {
@@ -257,10 +254,7 @@ impl McpManagementTool {
 
         for server in &servers {
             output.push_str(&format!("## {}\n", server));
-            let server_tools: Vec<_> = all_tools
-                .iter()
-                .filter(|(s, _)| s == server)
-                .collect();
+            let server_tools: Vec<_> = all_tools.iter().filter(|(s, _)| s == server).collect();
 
             for (_, tool) in server_tools {
                 output.push_str(&format!("  - {}\n", tool.name));
@@ -374,9 +368,9 @@ mod tests {
         let result = tool.execute(input, ctx).await.unwrap();
         // Should mention empty config or show no servers
         assert!(
-            result.output.contains("No servers") ||
-            result.output.contains("Empty config") ||
-            result.output.contains("Connected servers: 0")
+            result.output.contains("No servers")
+                || result.output.contains("Empty config")
+                || result.output.contains("Connected servers: 0")
         );
     }
 }

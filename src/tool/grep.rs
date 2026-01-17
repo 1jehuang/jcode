@@ -100,7 +100,10 @@ impl Tool for GrepTool {
 
             // Check include pattern
             if let Some(ref pattern) = include_pattern {
-                let filename = path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default();
+                let filename = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_default();
                 if !pattern.matches(&filename) {
                     continue;
                 }

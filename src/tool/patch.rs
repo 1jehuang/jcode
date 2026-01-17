@@ -109,15 +109,9 @@ fn parse_patch(text: &str) -> Result<Vec<FilePatch>> {
 
             // Determine the actual file path
             let path = if new_file == "/dev/null" {
-                old_file
-                    .strip_prefix("a/")
-                    .unwrap_or(old_file)
-                    .to_string()
+                old_file.strip_prefix("a/").unwrap_or(old_file).to_string()
             } else {
-                new_file
-                    .strip_prefix("b/")
-                    .unwrap_or(new_file)
-                    .to_string()
+                new_file.strip_prefix("b/").unwrap_or(new_file).to_string()
             };
 
             let is_new = old_file == "/dev/null";

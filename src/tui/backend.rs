@@ -75,7 +75,10 @@ pub enum DebugEvent {
     StatusChanged { status: String },
 
     /// Token usage update
-    TokenUsage { input_tokens: u64, output_tokens: u64 },
+    TokenUsage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
 
     /// Input changed (user typing)
     InputChanged { input: String, cursor_pos: usize },
@@ -123,19 +126,35 @@ pub enum BackendEvent {
     TextDelta(String),
 
     /// Tool execution started
-    ToolStart { id: String, name: String },
+    ToolStart {
+        id: String,
+        name: String,
+    },
 
     /// Tool input JSON delta
-    ToolInput { delta: String },
+    ToolInput {
+        delta: String,
+    },
 
     /// Tool is about to execute (after input complete)
-    ToolExec { id: String, name: String },
+    ToolExec {
+        id: String,
+        name: String,
+    },
 
     /// Tool execution completed
-    ToolDone { id: String, name: String, output: String, is_error: bool },
+    ToolDone {
+        id: String,
+        name: String,
+        output: String,
+        is_error: bool,
+    },
 
     /// Token usage update
-    TokenUsage { input_tokens: u64, output_tokens: u64 },
+    TokenUsage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
 
     /// Thinking started (extended thinking mode)
     ThinkingStart,
@@ -144,10 +163,15 @@ pub enum BackendEvent {
     ThinkingEnd,
 
     /// Thinking completed with duration
-    ThinkingDone { duration_secs: f32 },
+    ThinkingDone {
+        duration_secs: f32,
+    },
 
     /// Context compaction occurred
-    Compaction { trigger: String, pre_tokens: u64 },
+    Compaction {
+        trigger: String,
+        pre_tokens: u64,
+    },
 
     /// Session ID assigned/updated
     SessionId(String),
@@ -226,11 +250,17 @@ impl RemoteConnection {
         };
 
         // Subscribe to events
-        conn.send_request(Request::Subscribe { id: conn.next_request_id }).await?;
+        conn.send_request(Request::Subscribe {
+            id: conn.next_request_id,
+        })
+        .await?;
         conn.next_request_id += 1;
 
         // Request history
-        conn.send_request(Request::GetHistory { id: conn.next_request_id }).await?;
+        conn.send_request(Request::GetHistory {
+            id: conn.next_request_id,
+        })
+        .await?;
         conn.next_request_id += 1;
 
         Ok(conn)
@@ -247,10 +277,7 @@ impl RemoteConnection {
     /// Send a message to the server and return the request ID
     pub async fn send_message(&mut self, content: String) -> Result<u64> {
         let id = self.next_request_id;
-        let request = Request::Message {
-            id,
-            content,
-        };
+        let request = Request::Message { id, content };
         self.next_request_id += 1;
         self.send_request(request).await?;
         Ok(id)
@@ -258,7 +285,9 @@ impl RemoteConnection {
 
     /// Request server reload
     pub async fn reload(&mut self) -> Result<()> {
-        let request = Request::Reload { id: self.next_request_id };
+        let request = Request::Reload {
+            id: self.next_request_id,
+        };
         self.next_request_id += 1;
         self.send_request(request).await
     }
@@ -342,8 +371,7 @@ impl RemoteConnection {
 
     /// Get parsed current tool input (before it's cleared in handle_tool_exec)
     pub fn get_current_tool_input(&self) -> serde_json::Value {
-        serde_json::from_str(&self.current_tool_input)
-            .unwrap_or(serde_json::Value::Null)
+        serde_json::from_str(&self.current_tool_input).unwrap_or(serde_json::Value::Null)
     }
 
     /// Handle tool exec - cache file content if edit/write
@@ -352,10 +380,13 @@ impl RemoteConnection {
             if let Ok(input) = serde_json::from_str::<serde_json::Value>(&self.current_tool_input) {
                 if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
                     let original = std::fs::read_to_string(file_path).unwrap_or_default();
-                    self.pending_diffs.insert(id.to_string(), PendingFileDiff {
-                        file_path: file_path.to_string(),
-                        original_content: original,
-                    });
+                    self.pending_diffs.insert(
+                        id.to_string(),
+                        PendingFileDiff {
+                            file_path: file_path.to_string(),
+                            original_content: original,
+                        },
+                    );
                 }
             }
         }
@@ -368,7 +399,8 @@ impl RemoteConnection {
     pub fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String {
         if let Some(pending) = self.pending_diffs.remove(id) {
             let new_content = std::fs::read_to_string(&pending.file_path).unwrap_or_default();
-            let diff = generate_unified_diff(&pending.original_content, &new_content, &pending.file_path);
+            let diff =
+                generate_unified_diff(&pending.original_content, &new_content, &pending.file_path);
             if !diff.is_empty() {
                 return format!("[{}] {}\n{}", name, pending.file_path, diff);
             }

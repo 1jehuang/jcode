@@ -393,20 +393,23 @@ async fn generate_summary(
     }
 
     // Create summarization request
-    let summary_request = vec![
-        Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: format!("{}\n\n---\n\n{}", conversation_text, SUMMARY_PROMPT),
-            }],
-        },
-    ];
+    let summary_request = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: format!("{}\n\n---\n\n{}", conversation_text, SUMMARY_PROMPT),
+        }],
+    }];
 
     // Call provider (this uses remaining context budget)
     // For now, we'll use a simple completion
     // TODO: Add a simple complete method to Provider trait
     let response = provider
-        .complete(&summary_request, &[], "You are a helpful assistant that summarizes conversations.", None)
+        .complete(
+            &summary_request,
+            &[],
+            "You are a helpful assistant that summarizes conversations.",
+            None,
+        )
         .await?;
 
     // Collect response

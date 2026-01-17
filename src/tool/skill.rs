@@ -81,9 +81,7 @@ impl Tool for SkillTool {
 
 impl SkillTool {
     async fn load_skill(&self, name: Option<String>) -> Result<ToolOutput> {
-        let name = name.ok_or_else(|| {
-            anyhow::anyhow!("'name' is required for load action")
-        })?;
+        let name = name.ok_or_else(|| anyhow::anyhow!("'name' is required for load action"))?;
 
         let registry = self.registry.read().await;
         let skill = registry
@@ -101,7 +99,8 @@ impl SkillTool {
             skill.name,
             base_dir,
             skill.get_prompt()
-        )).with_title(format!("skill: {}", skill.name)))
+        ))
+        .with_title(format!("skill: {}", skill.name)))
     }
 
     async fn list_skills(&self) -> Result<ToolOutput> {
@@ -120,8 +119,9 @@ impl SkillTool {
                 description: What this skill does\n\
                 allowed-tools: bash, read, write\n\
                 ---\n\n\
-                # Skill content here"
-            ).with_title("Skills: None available"));
+                # Skill content here",
+            )
+            .with_title("Skills: None available"));
         }
 
         let mut output = format!("Available skills: {}\n\n", skills.len());
@@ -140,9 +140,7 @@ impl SkillTool {
     }
 
     async fn reload_skill(&self, name: Option<String>) -> Result<ToolOutput> {
-        let name = name.ok_or_else(|| {
-            anyhow::anyhow!("'name' is required for reload action")
-        })?;
+        let name = name.ok_or_else(|| anyhow::anyhow!("'name' is required for reload action"))?;
 
         let mut registry = self.registry.write().await;
 
@@ -152,22 +150,25 @@ impl SkillTool {
                 if let Some(skill) = registry.get(&name) {
                     Ok(ToolOutput::new(format!(
                         "Reloaded skill '{}'\n\nDescription: {}\nPath: {}",
-                        name, skill.description, skill.path.display()
-                    )).with_title(format!("Skills: Reloaded {}", name)))
+                        name,
+                        skill.description,
+                        skill.path.display()
+                    ))
+                    .with_title(format!("Skills: Reloaded {}", name)))
                 } else {
-                    Ok(ToolOutput::new(format!(
-                        "Reloaded skill '{}'", name
-                    )).with_title(format!("Skills: Reloaded {}", name)))
+                    Ok(ToolOutput::new(format!("Reloaded skill '{}'", name))
+                        .with_title(format!("Skills: Reloaded {}", name)))
                 }
             }
             Ok(false) => Ok(ToolOutput::new(format!(
                 "Skill '{}' not found or was deleted.\n\nUse 'list' to see available skills.",
                 name
-            )).with_title("Skills: Not found")),
-            Err(e) => Ok(ToolOutput::new(format!(
-                "Failed to reload skill '{}': {}",
-                name, e
-            )).with_title("Skills: Reload failed")),
+            ))
+            .with_title("Skills: Not found")),
+            Err(e) => Ok(
+                ToolOutput::new(format!("Failed to reload skill '{}': {}", name, e))
+                    .with_title("Skills: Reload failed"),
+            ),
         }
     }
 
@@ -185,16 +186,13 @@ impl SkillTool {
 
                 Ok(ToolOutput::new(output).with_title(format!("Skills: Reloaded {}", count)))
             }
-            Err(e) => Ok(ToolOutput::new(format!(
-                "Failed to reload skills: {}", e
-            )).with_title("Skills: Reload failed")),
+            Err(e) => Ok(ToolOutput::new(format!("Failed to reload skills: {}", e))
+                .with_title("Skills: Reload failed")),
         }
     }
 
     async fn read_skill(&self, name: Option<String>) -> Result<ToolOutput> {
-        let name = name.ok_or_else(|| {
-            anyhow::anyhow!("'name' is required for read action")
-        })?;
+        let name = name.ok_or_else(|| anyhow::anyhow!("'name' is required for read action"))?;
 
         let registry = self.registry.read().await;
 
@@ -213,7 +211,8 @@ impl SkillTool {
             Ok(ToolOutput::new(format!(
                 "Skill '{}' not found.\n\nUse 'list' to see available skills.",
                 name
-            )).with_title("Skills: Not found"))
+            ))
+            .with_title("Skills: Not found"))
         }
     }
 }
@@ -326,6 +325,9 @@ mod tests {
         let input = json!({"action": "reload_all"});
 
         let result = tool.execute(input, ctx).await.unwrap();
-        assert!(result.output.contains("Reloaded 0 skills") || result.output.contains("Reloaded 1 skills"));
+        assert!(
+            result.output.contains("Reloaded 0 skills")
+                || result.output.contains("Reloaded 1 skills")
+        );
     }
 }

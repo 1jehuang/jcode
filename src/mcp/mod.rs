@@ -5,9 +5,9 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-mod protocol;
 mod client;
 mod manager;
+mod protocol;
 mod tool;
 
 pub use client::McpClient;

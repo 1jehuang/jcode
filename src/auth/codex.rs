@@ -74,7 +74,9 @@ pub fn load_credentials() -> Result<CodexCredentials> {
 fn extract_account_id(id_token: &str) -> Option<String> {
     let payload = decode_jwt_payload(id_token)?;
     let auth = payload.get("https://api.openai.com/auth")?;
-    auth.get("chatgpt_account_id")?.as_str().map(|s| s.to_string())
+    auth.get("chatgpt_account_id")?
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 fn decode_jwt_payload(token: &str) -> Option<Value> {

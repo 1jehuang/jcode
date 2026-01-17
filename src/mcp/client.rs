@@ -212,7 +212,7 @@ impl McpClient {
     /// Check if server is still running
     pub fn is_running(&mut self) -> bool {
         match self.child.try_wait() {
-            Ok(None) => true,  // Still running
+            Ok(None) => true,     // Still running
             Ok(Some(_)) => false, // Exited
             Err(_) => false,
         }
@@ -221,7 +221,10 @@ impl McpClient {
     /// Shutdown the server
     pub async fn shutdown(&mut self) {
         // Try graceful shutdown first
-        let _ = self.writer_tx.send("{\"jsonrpc\":\"2.0\",\"method\":\"shutdown\"}\n".to_string()).await;
+        let _ = self
+            .writer_tx
+            .send("{\"jsonrpc\":\"2.0\",\"method\":\"shutdown\"}\n".to_string())
+            .await;
 
         // Give it a moment
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

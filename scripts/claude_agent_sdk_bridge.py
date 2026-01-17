@@ -218,11 +218,9 @@ async def _run() -> None:
         extra_args = dict(extra_args)
         extra_args.setdefault("allow-dangerously-skip-permissions", None)
 
-    # Always use our own system prompt (never use Claude Code preset)
-    system_value: Optional[Dict[str, Any]] = {
-        "type": "string",
-        "value": system_prompt if system_prompt.strip() else "You are an AI coding assistant.",
-    }
+    # Always use our own system prompt as a plain string (never use Claude Code preset)
+    # The SDK accepts either a string or SystemPromptPreset dict, we use string
+    system_value: Optional[str] = system_prompt.strip() if system_prompt.strip() else "You are an AI coding assistant."
 
     claude_options = ClaudeAgentOptions(
         tools=tools if tools else None,
@@ -368,6 +366,27 @@ def main() -> None:
         sys.exit(0)
     except Exception as exc:  # pragma: no cover - surfaced to Rust caller
         error_payload = {"type": "error", "message": str(exc), "kind": exc.__class__.__name__}
+
+        # Extract rate limit info if available
+        # Anthropic SDK errors may have response headers with retry-after
+        if hasattr(exc, 'response'):
+            response = exc.response
+            if hasattr(response, 'headers'):
+                retry_after = response.headers.get('retry-after')
+                if retry_after:
+                    try:
+                        error_payload["retry_after_secs"] = int(retry_after)
+                    except (ValueError, TypeError):
+                        pass
+            if hasattr(response, 'status_code'):
+                error_payload["status_code"] = response.status_code
+
+        # Also check for rate_limit_error in the error body
+        if hasattr(exc, 'body') and isinstance(exc.body, dict):
+            error_type = exc.body.get('error', {}).get('type', '')
+            if error_type:
+                error_payload["error_type"] = error_type
+
         _write_output(error_payload)
         raise
 

@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
@@ -39,7 +38,11 @@ fn claude_code_path() -> Result<PathBuf> {
 
 fn opencode_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not find home directory")?;
-    Ok(home.join(".local").join("share").join("opencode").join("auth.json"))
+    Ok(home
+        .join(".local")
+        .join("share")
+        .join("opencode")
+        .join("auth.json"))
 }
 
 // OpenCode auth.json format

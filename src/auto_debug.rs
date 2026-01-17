@@ -2,8 +2,8 @@
 //!
 //! When an error occurs, spawn a Claude Code session to analyze and potentially fix it.
 
-use std::process::Command;
 use crate::logging;
+use std::process::Command;
 
 /// Analyze an error and potentially spawn Claude Code to fix it
 pub fn analyze_error(error: &str, context: &str) {
@@ -41,17 +41,17 @@ Start by reading the error carefully and determining the category before taking 
 
     // Spawn Claude Code in background
     let result = Command::new("claude")
-        .args([
-            "--dangerously-skip-permissions",
-            "-p", &prompt,
-        ])
+        .args(["--dangerously-skip-permissions", "-p", &prompt])
         .current_dir("/home/jeremy/jcode")
         .spawn();
 
     match result {
         Ok(child) => {
             logging::info(&format!("Spawned auto-debug session (pid: {})", child.id()));
-            eprintln!("\n[auto-debug] Spawned Claude Code to analyze error (pid: {})", child.id());
+            eprintln!(
+                "\n[auto-debug] Spawned Claude Code to analyze error (pid: {})",
+                child.id()
+            );
         }
         Err(e) => {
             logging::error(&format!("Failed to spawn auto-debug: {}", e));

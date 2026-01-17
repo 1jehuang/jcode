@@ -1,8 +1,7 @@
 #![allow(dead_code)]
-
 #![allow(dead_code)]
 
-use crate::id::{new_id, new_memorable_session_id, extract_session_name};
+use crate::id::{extract_session_name, new_id, new_memorable_session_id};
 use crate::message::{ContentBlock, Message, Role};
 use crate::storage;
 use anyhow::Result;
@@ -52,7 +51,11 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn create_with_id(session_id: String, parent_id: Option<String>, title: Option<String>) -> Self {
+    pub fn create_with_id(
+        session_id: String,
+        parent_id: Option<String>,
+        title: Option<String>,
+    ) -> Self {
         let now = Utc::now();
         // Try to extract short name from ID if it's a memorable ID
         let short_name = extract_session_name(&session_id).map(|s| s.to_string());
@@ -66,7 +69,9 @@ impl Session {
             provider_session_id: None,
             is_canary: false,
             testing_build: None,
-            working_dir: std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
+            working_dir: std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string()),
             short_name,
         }
     }
@@ -84,14 +89,17 @@ impl Session {
             provider_session_id: None,
             is_canary: false,
             testing_build: None,
-            working_dir: std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
+            working_dir: std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string()),
             short_name: Some(short_name),
         }
     }
 
     /// Get the display name for this session (short memorable name if available)
     pub fn display_name(&self) -> &str {
-        self.short_name.as_deref()
+        self.short_name
+            .as_deref()
             .or_else(|| extract_session_name(&self.id))
             .unwrap_or(&self.id)
     }
@@ -113,11 +121,11 @@ impl Session {
         if let Some(ref dir) = self.working_dir {
             // Check if working dir contains jcode source
             let path = std::path::Path::new(dir);
-            path.join("Cargo.toml").exists() &&
-            path.join("src/main.rs").exists() &&
-            std::fs::read_to_string(path.join("Cargo.toml"))
-                .map(|s| s.contains("name = \"jcode\""))
-                .unwrap_or(false)
+            path.join("Cargo.toml").exists()
+                && path.join("src/main.rs").exists()
+                && std::fs::read_to_string(path.join("Cargo.toml"))
+                    .map(|s| s.contains("name = \"jcode\""))
+                    .unwrap_or(false)
         } else {
             false
         }
@@ -136,7 +144,11 @@ impl Session {
 
     pub fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {
         let id = new_id("message");
-        self.messages.push(StoredMessage { id: id.clone(), role, content });
+        self.messages.push(StoredMessage {
+            id: id.clone(),
+            role,
+            content,
+        });
         id
     }
 

@@ -119,16 +119,14 @@ impl Tool for BashTool {
                 } else {
                     output
                 };
-                Ok(ToolOutput::new(output).with_title(params.description.unwrap_or_else(|| params.command.clone())))
+                Ok(ToolOutput::new(output)
+                    .with_title(params.description.unwrap_or_else(|| params.command.clone())))
             }
             Ok(Err(e)) => Err(anyhow::anyhow!("Command failed: {}", e)),
             Err(_) => {
                 // Timeout - try to kill the process
                 let _ = child.kill().await;
-                Err(anyhow::anyhow!(
-                    "Command timed out after {}ms",
-                    timeout_ms
-                ))
+                Err(anyhow::anyhow!("Command timed out after {}ms", timeout_ms))
             }
         }
     }

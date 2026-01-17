@@ -114,7 +114,11 @@ impl Tool for MultiEditTool {
             // Apply the edit
             if edit.replace_all {
                 content = content.replace(&edit.old_string, &edit.new_string);
-                applied.push(format!("Edit {}: replaced {} occurrences", i + 1, occurrences));
+                applied.push(format!(
+                    "Edit {}: replaced {} occurrences",
+                    i + 1,
+                    occurrences
+                ));
             } else {
                 content = content.replacen(&edit.old_string, &edit.new_string, 1);
                 applied.push(format!("Edit {}: replaced 1 occurrence", i + 1));
@@ -177,7 +181,9 @@ fn generate_diff_summary(old: &str, new: &str) -> String {
             ChangeTag::Delete => {
                 let content = change.value().trim();
                 old_line += 1;
-                if content.is_empty() { continue; }
+                if content.is_empty() {
+                    continue;
+                }
                 if lines_shown >= MAX_LINES {
                     output.push_str("...\n");
                     break;
@@ -188,7 +194,9 @@ fn generate_diff_summary(old: &str, new: &str) -> String {
             ChangeTag::Insert => {
                 let content = change.value().trim();
                 new_line += 1;
-                if content.is_empty() { continue; }
+                if content.is_empty() {
+                    continue;
+                }
                 if lines_shown >= MAX_LINES {
                     output.push_str("...\n");
                     break;
@@ -243,8 +251,14 @@ mod tests {
     #[test]
     fn test_generate_diff_summary_truncation() {
         // Create old and new with more than 30 changed lines
-        let old = (1..=35).map(|i| format!("old line {}", i)).collect::<Vec<_>>().join("\n");
-        let new = (1..=35).map(|i| format!("new line {}", i)).collect::<Vec<_>>().join("\n");
+        let old = (1..=35)
+            .map(|i| format!("old line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let new = (1..=35)
+            .map(|i| format!("new line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         let diff = generate_diff_summary(&old, &new);
 
         assert!(diff.contains("..."), "Should truncate after 30 lines");
@@ -257,7 +271,13 @@ mod tests {
         let diff = generate_diff_summary(old, new);
 
         // Compact format: no padding
-        assert!(diff.contains("1- old"), "Should have line number directly before minus");
-        assert!(diff.contains("1+ new"), "Should have line number directly before plus");
+        assert!(
+            diff.contains("1- old"),
+            "Should have line number directly before minus"
+        );
+        assert!(
+            diff.contains("1+ new"),
+            "Should have line number directly before plus"
+        );
     }
 }

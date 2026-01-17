@@ -86,7 +86,8 @@ impl Tool for LsTool {
         }
 
         // Build ignore list
-        let mut ignore_patterns: Vec<String> = DEFAULT_IGNORE.iter().map(|s| s.to_string()).collect();
+        let mut ignore_patterns: Vec<String> =
+            DEFAULT_IGNORE.iter().map(|s| s.to_string()).collect();
         if let Some(extra) = params.ignore {
             ignore_patterns.extend(extra);
         }
@@ -107,10 +108,7 @@ impl Tool for LsTool {
         }
 
         if truncated {
-            output.push_str(&format!(
-                "\n... truncated at {} entries",
-                MAX_ENTRIES
-            ));
+            output.push_str(&format!("\n... truncated at {} entries", MAX_ENTRIES));
         }
 
         // Add summary
@@ -137,9 +135,7 @@ fn collect_entries(
         return Ok(());
     }
 
-    let mut items: Vec<_> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .collect();
+    let mut items: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
 
     // Sort: directories first, then alphabetically
     items.sort_by(|a, b| {

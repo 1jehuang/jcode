@@ -87,7 +87,7 @@ impl From<Rect> for RectCapture {
 }
 
 /// State snapshot at render time
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct StateSnapshot {
     pub is_processing: bool,
     pub input_len: usize,
@@ -102,7 +102,7 @@ pub struct StateSnapshot {
 }
 
 /// Actual rendered text content
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RenderedText {
     /// Status line text (spinner, tokens, elapsed, etc.)
     pub status_line: String,
@@ -119,7 +119,7 @@ pub struct RenderedText {
 }
 
 /// Captured message for debugging
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MessageCapture {
     pub role: String,
     pub content_preview: String,
@@ -179,13 +179,25 @@ pub fn is_enabled() -> bool {
     VISUAL_DEBUG_ENABLED.load(Ordering::SeqCst)
 }
 
-/// Record a frame capture
+/// Record a frame capture (skips if identical to previous frame)
 pub fn record_frame(frame: FrameCapture) {
     if !is_enabled() {
         return;
     }
 
     let mut buffer = get_frame_buffer().lock().unwrap();
+
+    // Skip duplicate frames - only capture when something changes
+    // Always capture frames with anomalies
+    if let Some(last) = buffer.frames.back() {
+        let dominated = frame.state == last.state
+            && frame.rendered_text == last.rendered_text
+            && frame.anomalies.is_empty();
+        if dominated {
+            return;
+        }
+    }
+
     buffer.push(frame);
 }
 
