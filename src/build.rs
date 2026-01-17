@@ -470,23 +470,118 @@ pub fn update_canary_symlink(hash: &str) -> Result<()> {
     Ok(())
 }
 
+/// Get path to build log file
+pub fn build_log_path() -> Result<PathBuf> {
+    Ok(storage::jcode_dir()?.join("build.log"))
+}
+
+/// Get path to build progress file (for TUI to watch)
+pub fn build_progress_path() -> Result<PathBuf> {
+    Ok(storage::jcode_dir()?.join("build-progress"))
+}
+
+/// Write current build progress (for TUI to display)
+pub fn write_build_progress(status: &str) -> Result<()> {
+    let path = build_progress_path()?;
+    std::fs::write(&path, status)?;
+    Ok(())
+}
+
+/// Read current build progress
+pub fn read_build_progress() -> Option<String> {
+    build_progress_path()
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Clear build progress
+pub fn clear_build_progress() -> Result<()> {
+    let path = build_progress_path()?;
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
 /// Rebuild canary binary from current working tree
 /// Returns the new git hash
 pub fn rebuild_canary(repo_dir: &std::path::Path) -> Result<String> {
-    // Build release binary (goes to target/release/jcode)
-    eprintln!("Building release binary...");
-    let status = Command::new("cargo")
-        .args(["build", "--release"])
+    rebuild_canary_with_progress(repo_dir, |_| {})
+}
+
+/// Rebuild with progress callback for each line of output
+pub fn rebuild_canary_with_progress<F>(repo_dir: &std::path::Path, mut on_line: F) -> Result<String>
+where
+    F: FnMut(&str),
+{
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+
+    // Clear/create build log
+    let log_path = build_log_path()?;
+    let mut log_file = std::fs::File::create(&log_path)?;
+
+    let start = std::time::Instant::now();
+    writeln!(log_file, "=== Build started at {:?} ===", chrono::Utc::now())?;
+
+    // Write initial progress
+    let _ = write_build_progress("Building release binary...");
+    on_line("Building release binary...");
+
+    // Start cargo build with piped stderr (cargo outputs to stderr)
+    let mut child = Command::new("cargo")
+        .args(["build", "--release", "--color=always"])
         .current_dir(repo_dir)
-        .status()?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    // Read stderr line by line (cargo outputs progress to stderr)
+    let stderr = child.stderr.take().expect("Failed to capture stderr");
+    let reader = BufReader::new(stderr);
+
+    for line in reader.lines() {
+        let line = line?;
+        // Write to log file
+        writeln!(log_file, "{}", line)?;
+        log_file.flush()?;
+
+        // Strip ANSI codes for callback (keep in log for color)
+        let clean_line = strip_ansi_codes(&line);
+
+        // Write progress for TUI to display
+        let _ = write_build_progress(&clean_line);
+        on_line(&clean_line);
+    }
+
+    let status = child.wait()?;
+    let elapsed = start.elapsed();
 
     if !status.success() {
+        writeln!(log_file, "=== Build FAILED after {:.1}s ===", elapsed.as_secs_f32())?;
         anyhow::bail!("Build failed");
     }
 
     let hash = current_git_hash(repo_dir)?;
-    eprintln!("✓ Build complete ({})", hash);
+    writeln!(log_file, "=== Build complete: {} in {:.1}s ===", hash, elapsed.as_secs_f32())?;
+
+    let complete_msg = format!("✓ Build complete ({}) in {:.1}s", hash, elapsed.as_secs_f32());
+    let _ = write_build_progress(&complete_msg);
+    on_line(&complete_msg);
+
+    // Clear progress after a short delay to let TUI see the final message
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let _ = clear_build_progress();
+
     Ok(hash)
+}
+
+/// Strip ANSI escape codes from a string
+fn strip_ansi_codes(s: &str) -> String {
+    let re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+    re.replace_all(s, "").to_string()
 }
 
 #[cfg(test)]

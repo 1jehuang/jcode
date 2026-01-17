@@ -1017,6 +1017,17 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             notice,
             Style::default().fg(ACCENT_COLOR),
         )])
+    } else if let Some(build_progress) = crate::build::read_build_progress() {
+        // Show build progress when compiling
+        let spinner_idx = (elapsed * 12.5) as usize % SPINNER_FRAMES.len();
+        let spinner = SPINNER_FRAMES[spinner_idx];
+        Line::from(vec![
+            Span::styled(spinner, Style::default().fg(Color::Rgb(255, 193, 7))),
+            Span::styled(
+                format!(" {}", build_progress),
+                Style::default().fg(Color::Rgb(255, 193, 7)),
+            ),
+        ])
     } else if let Some(remaining) = app.rate_limit_remaining() {
         // Rate limit countdown - show animated spinner and time remaining
         let secs = remaining.as_secs();
