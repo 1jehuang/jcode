@@ -99,6 +99,37 @@ pub enum Request {
     /// Get conversation context (for handoff between agents)
     #[serde(rename = "agent_context")]
     AgentContext { id: u64 },
+
+    // === Agent communication ===
+    /// Share context with other agents
+    #[serde(rename = "comm_share")]
+    CommShare {
+        id: u64,
+        session_id: String,
+        key: String,
+        value: String,
+    },
+
+    /// Read shared context from other agents
+    #[serde(rename = "comm_read")]
+    CommRead {
+        id: u64,
+        session_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+    },
+
+    /// Send a message to other agents
+    #[serde(rename = "comm_message")]
+    CommMessage {
+        id: u64,
+        from_session: String,
+        message: String,
+    },
+
+    /// List agents and their activity
+    #[serde(rename = "comm_list")]
+    CommList { id: u64, session_id: String },
 }
 
 /// Server event sent to client
@@ -137,10 +168,7 @@ pub enum ServerEvent {
 
     /// Token usage update
     #[serde(rename = "tokens")]
-    TokenUsage {
-        input: u64,
-        output: u64,
-    },
+    TokenUsage { input: u64, output: u64 },
 
     /// Message/turn completed
     #[serde(rename = "done")]
@@ -215,6 +243,74 @@ pub enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+
+    /// Notification from another agent (file conflict, message, shared context)
+    #[serde(rename = "notification")]
+    Notification {
+        /// Session ID of the agent that triggered the notification
+        from_session: String,
+        /// Friendly name of the agent (e.g., "fox")
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from_name: Option<String>,
+        /// Type of notification
+        notification_type: NotificationType,
+        /// Human-readable message describing what happened
+        message: String,
+    },
+
+    /// Response to comm_read request
+    #[serde(rename = "comm_context")]
+    CommContext {
+        id: u64,
+        /// Shared context entries
+        entries: Vec<ContextEntry>,
+    },
+
+    /// Response to comm_list request
+    #[serde(rename = "comm_members")]
+    CommMembers {
+        id: u64,
+        members: Vec<AgentInfo>,
+    },
+}
+
+/// A shared context entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextEntry {
+    pub key: String,
+    pub value: String,
+    pub from_session: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_name: Option<String>,
+}
+
+/// Info about an agent
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentInfo {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub friendly_name: Option<String>,
+    /// Files this agent has touched
+    pub files_touched: Vec<String>,
+}
+
+/// Type of notification from another agent
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum NotificationType {
+    /// Another agent touched a file you've worked with
+    #[serde(rename = "file_conflict")]
+    FileConflict {
+        path: String,
+        /// What the other agent did: "read", "wrote", "edited"
+        operation: String,
+    },
+    /// Another agent shared context
+    #[serde(rename = "shared_context")]
+    SharedContext { key: String, value: String },
+    /// Direct message from another agent
+    #[serde(rename = "message")]
+    Message,
 }
 
 impl Request {
@@ -235,6 +331,10 @@ impl Request {
             Request::AgentTask { id, .. } => *id,
             Request::AgentCapabilities { id } => *id,
             Request::AgentContext { id } => *id,
+            Request::CommShare { id, .. } => *id,
+            Request::CommRead { id, .. } => *id,
+            Request::CommMessage { id, .. } => *id,
+            Request::CommList { id, .. } => *id,
         }
     }
 }

@@ -1,9 +1,9 @@
 #![allow(dead_code)]
-
 #![allow(dead_code)]
 
 use crate::todo::TodoItem;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use tokio::sync::broadcast;
 
@@ -60,11 +60,41 @@ pub struct SubagentStatus {
     pub status: String, // e.g., "calling API", "running grep", "streaming"
 }
 
+/// Type of file operation for swarm awareness
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FileOp {
+    Read,
+    Write,
+    Edit,
+}
+
+impl FileOp {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FileOp::Read => "read",
+            FileOp::Write => "wrote",
+            FileOp::Edit => "edited",
+        }
+    }
+}
+
+/// File touch event for swarm coordination
+#[derive(Clone, Debug)]
+pub struct FileTouch {
+    pub session_id: String,
+    pub path: PathBuf,
+    pub op: FileOp,
+    /// Human-readable summary like "edited lines 45-60" or "read 200 lines"
+    pub summary: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub enum BusEvent {
     ToolUpdated(ToolEvent),
     TodoUpdated(TodoEvent),
     SubagentStatus(SubagentStatus),
+    /// File was touched by an agent (for swarm conflict detection)
+    FileTouch(FileTouch),
 }
 
 pub struct Bus {
