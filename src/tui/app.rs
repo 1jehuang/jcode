@@ -526,6 +526,11 @@ impl App {
                 title: None,
                 tool_data: None,
             });
+
+            // Queue an automatic message to notify the AI that reload completed
+            // This allows it to continue any interrupted work
+            self.queued_messages
+                .push("[Reload complete - continue where you left off]".to_string());
         } else {
             crate::logging::error(&format!("Failed to restore session: {}", session_id));
         }
