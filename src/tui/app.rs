@@ -3293,7 +3293,11 @@ impl App {
                 description: s.description.clone(),
             })
             .collect();
-        crate::prompt::build_system_prompt(skill_prompt.as_deref(), &available_skills)
+        crate::prompt::build_system_prompt_with_selfdev(
+            skill_prompt.as_deref(),
+            &available_skills,
+            self.session.is_canary,
+        )
     }
 
     // Getters for UI

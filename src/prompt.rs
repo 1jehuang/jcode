@@ -14,11 +14,25 @@ pub struct SkillInfo {
 
 /// Build the full system prompt with dynamic context
 pub fn build_system_prompt(skill_prompt: Option<&str>, available_skills: &[SkillInfo]) -> String {
+    build_system_prompt_with_selfdev(skill_prompt, available_skills, false)
+}
+
+/// Build the full system prompt with optional self-dev tools
+pub fn build_system_prompt_with_selfdev(
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+) -> String {
     let mut parts = vec![DEFAULT_SYSTEM_PROMPT.to_string()];
 
     // Add environment context
     if let Some(env_context) = build_env_context() {
         parts.push(env_context);
+    }
+
+    // Add self-dev tools section when in canary mode
+    if is_selfdev {
+        parts.push(build_selfdev_prompt());
     }
 
     // Add CLAUDE.md instructions
@@ -44,6 +58,32 @@ pub fn build_system_prompt(skill_prompt: Option<&str>, available_skills: &[Skill
     }
 
     parts.join("\n\n")
+}
+
+/// Build self-dev tools prompt section
+fn build_selfdev_prompt() -> String {
+    r#"# Self-Development Mode
+
+You are running in self-dev mode, working on the jcode codebase itself. You have access to additional tools:
+
+## selfdev Tool
+
+Use this tool to manage builds and reloads:
+
+```json
+{"name": "selfdev", "input": {"action": "reload"}}   // Restart with current binary (no rebuild)
+{"name": "selfdev", "input": {"action": "rebuild"}}  // Build, test, and restart
+{"name": "selfdev", "input": {"action": "status"}}   // Show build versions and crash history
+{"name": "selfdev", "input": {"action": "promote", "message": "description"}}  // Mark current as stable
+{"name": "selfdev", "input": {"action": "rollback"}} // Switch back to stable build
+```
+
+When you make code changes to jcode:
+1. Build with `cargo build --release`
+2. Use `selfdev` with action `reload` to restart with the new binary
+3. The session continues automatically after restart
+
+You can call the selfdev tool directly - it will be executed by jcode."#.to_string()
 }
 
 /// Build environment context (date, cwd, git status)
