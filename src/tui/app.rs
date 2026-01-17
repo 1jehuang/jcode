@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-
 #![allow(dead_code)]
 
 use super::keybind::ModelSwitchKeys;
@@ -15,9 +14,9 @@ use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::path::PathBuf;
 use tokio::sync::RwLock;
 use tokio::time::interval;
 
@@ -29,6 +28,116 @@ fn debug_cmd_path() -> PathBuf {
 /// Debug response file path
 fn debug_response_path() -> PathBuf {
     std::env::temp_dir().join("jcode_debug_response")
+}
+
+/// Parse rate limit reset time from error message
+/// Returns the Duration until rate limit resets, if this is a rate limit error
+fn parse_rate_limit_error(error: &str) -> Option<Duration> {
+    let error_lower = error.to_lowercase();
+
+    // Check if this is a rate limit error
+    if !error_lower.contains("rate limit") && !error_lower.contains("rate_limit")
+        && !error_lower.contains("429") && !error_lower.contains("too many requests")
+        && !error_lower.contains("hit your limit") {
+        return None;
+    }
+
+    // Try to extract time from common patterns
+
+    // Pattern: "retry after X seconds" or "retry in X seconds"
+    if let Some(idx) = error_lower.find("retry") {
+        let after = &error_lower[idx..];
+        for word in after.split_whitespace() {
+            if let Ok(secs) = word.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u64>() {
+                if secs > 0 && secs < 86400 {
+                    return Some(Duration::from_secs(secs));
+                }
+            }
+        }
+    }
+
+    // Pattern: "resets Xam" or "resets Xpm" (clock time like "resets 5am")
+    if let Some(idx) = error_lower.find("resets") {
+        let after = &error_lower[idx..];
+        for word in after.split_whitespace() {
+            let word = word.trim_matches(|c: char| c == '·' || c == ' ');
+            // Check for time like "5am", "12pm", "5:30am"
+            if word.ends_with("am") || word.ends_with("pm") {
+                if let Some(duration) = parse_clock_time_to_duration(word) {
+                    return Some(duration);
+                }
+            }
+        }
+    }
+
+    // Pattern: "reset in X seconds"
+    if let Some(idx) = error_lower.find("reset") {
+        let after = &error_lower[idx..];
+        for word in after.split_whitespace() {
+            if let Ok(secs) = word.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u64>() {
+                if secs > 0 && secs < 86400 {
+                    return Some(Duration::from_secs(secs));
+                }
+            }
+        }
+    }
+
+    // No default - only auto-retry if we know the actual reset time
+    None
+}
+
+/// Parse a clock time like "5am" or "12:30pm" and return duration until that time
+fn parse_clock_time_to_duration(time_str: &str) -> Option<Duration> {
+    let time_lower = time_str.to_lowercase();
+    let is_pm = time_lower.ends_with("pm");
+    let time_part = time_lower.trim_end_matches("am").trim_end_matches("pm");
+
+    // Parse hour (and optional minutes)
+    let (hour, minute) = if time_part.contains(':') {
+        let parts: Vec<&str> = time_part.split(':').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let h: u32 = parts[0].parse().ok()?;
+        let m: u32 = parts[1].parse().ok()?;
+        (h, m)
+    } else {
+        let h: u32 = time_part.parse().ok()?;
+        (h, 0)
+    };
+
+    // Convert to 24-hour format
+    let hour_24 = if is_pm && hour != 12 {
+        hour + 12
+    } else if !is_pm && hour == 12 {
+        0
+    } else {
+        hour
+    };
+
+    if hour_24 >= 24 || minute >= 60 {
+        return None;
+    }
+
+    // Get current time and calculate duration until target time
+    let now = chrono::Local::now();
+    let today = now.date_naive();
+
+    // Try today first, then tomorrow if the time has passed
+    let target_time = chrono::NaiveTime::from_hms_opt(hour_24, minute, 0)?;
+    let mut target_datetime = today.and_time(target_time);
+
+    // If target time is in the past, use tomorrow
+    if target_datetime <= now.naive_local() {
+        target_datetime = (today + chrono::Duration::days(1)).and_time(target_time);
+    }
+
+    let duration_secs = (target_datetime - now.naive_local()).num_seconds();
+    if duration_secs > 0 {
+        Some(Duration::from_secs(duration_secs as u64))
+    } else {
+        None
+    }
 }
 
 /// Current processing status
@@ -158,6 +267,10 @@ pub struct App {
     interleave_message: Option<String>,
     // Time when app started (for startup animations)
     app_started: Instant,
+    // Rate limit state: when rate limit resets (if rate limited)
+    rate_limit_reset: Option<Instant>,
+    // Message that was being sent when rate limit hit (to auto-retry)
+    rate_limit_pending_message: Option<String>,
 }
 
 /// A placeholder provider for remote mode (never actually called)
@@ -165,8 +278,12 @@ struct NullProvider;
 
 #[async_trait::async_trait]
 impl Provider for NullProvider {
-    fn name(&self) -> &str { "remote" }
-    fn model(&self) -> String { "unknown".to_string() }
+    fn name(&self) -> &str {
+        "remote"
+    }
+    fn model(&self) -> String {
+        "unknown".to_string()
+    }
 
     async fn complete(
         &self,
@@ -175,7 +292,9 @@ impl Provider for NullProvider {
         _system: &str,
         _session_id: Option<&str>,
     ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
-        Err(anyhow::anyhow!("NullProvider cannot be used for completion"))
+        Err(anyhow::anyhow!(
+            "NullProvider cannot be used for completion"
+        ))
     }
 }
 
@@ -240,6 +359,8 @@ impl App {
             status_notice: None,
             interleave_message: None,
             app_started: Instant::now(),
+            rate_limit_reset: None,
+            rate_limit_pending_message: None,
         }
     }
 
@@ -262,7 +383,9 @@ impl App {
     pub async fn init_mcp(&mut self) {
         // Always register the MCP management tool so agent can connect servers
         let mcp_tool = crate::tool::mcp::McpManagementTool::new(Arc::clone(&self.mcp_manager));
-        self.registry.register("mcp".to_string(), Arc::new(mcp_tool)).await;
+        self.registry
+            .register("mcp".to_string(), Arc::new(mcp_tool))
+            .await;
 
         let manager = self.mcp_manager.read().await;
         if !manager.config().servers.is_empty() {
@@ -359,10 +482,45 @@ impl App {
                 String::new()
             };
 
+            // Check for reload info to show what triggered the reload
+            let reload_info = if let Ok(jcode_dir) = crate::storage::jcode_dir() {
+                let info_path = jcode_dir.join("reload-info");
+                if info_path.exists() {
+                    let info = std::fs::read_to_string(&info_path).ok();
+                    let _ = std::fs::remove_file(&info_path); // Clean up
+                    info
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Build the reload message based on what triggered it
+            let message = if let Some(info) = reload_info {
+                if let Some(hash) = info.strip_prefix("reload:") {
+                    format!(
+                        "✓ Reloaded with build {}. Session restored{}",
+                        hash.trim(),
+                        stats
+                    )
+                } else if let Some(hash) = info.strip_prefix("rebuild:") {
+                    format!(
+                        "✓ Rebuilt and reloaded ({}). Session restored{}",
+                        hash.trim(),
+                        stats
+                    )
+                } else {
+                    format!("✓ JCode reloaded. Session restored{}", stats)
+                }
+            } else {
+                format!("✓ JCode reloaded. Session restored{}", stats)
+            };
+
             // Add success message with stats
             self.display_messages.push(DisplayMessage {
                 role: "system".to_string(),
-                content: format!("✓ JCode reloaded. Session restored{}", stats),
+                content: message,
                 tool_calls: vec![],
                 duration_secs: None,
                 title: None,
@@ -378,7 +536,8 @@ impl App {
     /// Check for new stable version and trigger migration if at safe point
     fn check_stable_version(&mut self) {
         // Only check every 5 seconds to avoid excessive file reads
-        let should_check = self.last_version_check
+        let should_check = self
+            .last_version_check
             .map(|t| t.elapsed() > Duration::from_secs(5))
             .unwrap_or(true);
 
@@ -400,7 +559,8 @@ impl App {
         };
 
         // Check if it changed
-        let version_changed = self.known_stable_version
+        let version_changed = self
+            .known_stable_version
             .as_ref()
             .map(|v| v != &current_stable)
             .unwrap_or(true);
@@ -558,7 +718,8 @@ impl App {
             if self.pending_turn {
                 self.pending_turn = false;
                 // Process turn while still handling input
-                self.process_turn_with_input(&mut terminal, &mut event_stream).await;
+                self.process_turn_with_input(&mut terminal, &mut event_stream)
+                    .await;
             } else {
                 // Wait for input or redraw tick
                 tokio::select! {
@@ -578,6 +739,20 @@ impl App {
                         // Execute pending migration if ready
                         if self.pending_migration.is_some() && !self.is_processing {
                             self.execute_migration();
+                        }
+                        // Check for rate limit expiry - auto-retry pending message
+                        if let Some(reset_time) = self.rate_limit_reset {
+                            if Instant::now() >= reset_time {
+                                self.rate_limit_reset = None;
+                                let queued_count = self.queued_messages.len();
+                                let msg = if queued_count > 0 {
+                                    format!("✓ Rate limit reset. Retrying... (+{} queued)", queued_count)
+                                } else {
+                                    "✓ Rate limit reset. Retrying...".to_string()
+                                };
+                                self.display_messages.push(DisplayMessage::system(msg));
+                                self.pending_turn = true;
+                            }
                         }
                     }
                     event = event_stream.next() => {
@@ -629,12 +804,16 @@ impl App {
                     }
                     reconnect_attempts += 1;
                     if reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
-                        self.display_messages.push(DisplayMessage::error("Failed to reconnect after 30 seconds. Press Ctrl+C to quit."));
+                        self.display_messages.push(DisplayMessage::error(
+                            "Failed to reconnect after 30 seconds. Press Ctrl+C to quit.",
+                        ));
                         terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
                         loop {
                             if let Some(Ok(Event::Key(key))) = event_stream.next().await {
                                 if key.kind == KeyEventKind::Press {
-                                    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    if key.code == KeyCode::Char('c')
+                                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                                    {
                                         break 'outer;
                                     }
                                 }
@@ -649,14 +828,18 @@ impl App {
 
             // Show reconnection message if applicable
             if reconnect_attempts > 0 {
-                self.display_messages.push(DisplayMessage::system("Reconnected to server."));
+                self.display_messages
+                    .push(DisplayMessage::system("Reconnected to server."));
             }
 
             // Resume session if requested (only on first connect, not reconnect)
             if reconnect_attempts == 0 {
                 if let Some(session_id) = self.resume_session_id.take() {
                     if let Err(e) = remote.resume_session(&session_id).await {
-                        self.display_messages.push(DisplayMessage::error(format!("Failed to resume session: {}", e)));
+                        self.display_messages.push(DisplayMessage::error(format!(
+                            "Failed to resume session: {}",
+                            e
+                        )));
                     }
                 }
             }
@@ -741,7 +924,11 @@ impl App {
     }
 
     /// Handle a server event in remote mode
-    fn handle_server_event(&mut self, event: crate::protocol::ServerEvent, remote: &mut super::backend::RemoteConnection) {
+    fn handle_server_event(
+        &mut self,
+        event: crate::protocol::ServerEvent,
+        remote: &mut super::backend::RemoteConnection,
+    ) {
         use crate::protocol::ServerEvent;
 
         match event {
@@ -775,11 +962,17 @@ impl App {
                 }
                 remote.handle_tool_exec(&id, &name);
             }
-            ServerEvent::ToolDone { id, name, output, error } => {
+            ServerEvent::ToolDone {
+                id,
+                name,
+                output,
+                error,
+            } => {
                 let _ = error; // Currently unused
                 let display_output = remote.handle_tool_done(&id, &name, &output);
                 // Get the tool input from streaming_tool_calls (stored in ToolExec)
-                let tool_input = self.streaming_tool_calls
+                let tool_input = self
+                    .streaming_tool_calls
                     .iter()
                     .find(|tc| tc.id == id)
                     .map(|tc| tc.input.clone())
@@ -806,7 +999,11 @@ impl App {
                     tool_calls: vec![],
                     duration_secs: None,
                     title: None,
-                    tool_data: Some(ToolCall { id, name, input: tool_input }),
+                    tool_data: Some(ToolCall {
+                        id,
+                        name,
+                        input: tool_input,
+                    }),
                 });
                 self.streaming_tool_calls.clear();
                 self.status = ProcessingStatus::Streaming;
@@ -828,7 +1025,9 @@ impl App {
                             role: "assistant".to_string(),
                             content: std::mem::take(&mut self.streaming_text),
                             tool_calls: vec![],
-                            duration_secs: self.processing_started.map(|s| s.elapsed().as_secs_f32()),
+                            duration_secs: self
+                                .processing_started
+                                .map(|s| s.elapsed().as_secs_f32()),
                             title: None,
                             tool_data: None,
                         });
@@ -868,7 +1067,16 @@ impl App {
                     tool_data: None,
                 });
             }
-            ServerEvent::History { messages, session_id, provider_name, provider_model, all_sessions, client_count, .. } => {
+            ServerEvent::History {
+                messages,
+                session_id,
+                provider_name,
+                provider_model,
+                available_models,
+                all_sessions,
+                client_count,
+                ..
+            } => {
                 remote.set_session_id(session_id.clone());
                 self.remote_session_id = Some(session_id);
                 // Store provider info for UI display
@@ -924,7 +1132,10 @@ impl App {
         modifiers: KeyModifiers,
         remote: &mut super::backend::RemoteConnection,
     ) -> Result<()> {
-        if let Some(direction) = self.model_switch_keys.direction_for(code.clone(), modifiers) {
+        if let Some(direction) = self
+            .model_switch_keys
+            .direction_for(code.clone(), modifiers)
+        {
             remote.cycle_model(direction).await?;
             return Ok(());
         }
@@ -976,7 +1187,11 @@ impl App {
         // Shift+Tab: toggle diff view
         if code == KeyCode::BackTab {
             self.show_diffs = !self.show_diffs;
-            let status = if self.show_diffs { "Diffs: ON" } else { "Diffs: OFF" };
+            let status = if self.show_diffs {
+                "Diffs: ON"
+            } else {
+                "Diffs: OFF"
+            };
             self.set_status_notice(status);
             return Ok(());
         }
@@ -1226,7 +1441,10 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
-        if let Some(direction) = self.model_switch_keys.direction_for(code.clone(), modifiers) {
+        if let Some(direction) = self
+            .model_switch_keys
+            .direction_for(code.clone(), modifiers)
+        {
             self.cycle_model(direction);
             return Ok(());
         }
@@ -1281,7 +1499,11 @@ impl App {
         // Shift+Tab: toggle diff view
         if code == KeyCode::BackTab {
             self.show_diffs = !self.show_diffs;
-            let status = if self.show_diffs { "Diffs: ON" } else { "Diffs: OFF" };
+            let status = if self.show_diffs {
+                "Diffs: ON"
+            } else {
+                "Diffs: OFF"
+            };
             self.set_status_notice(status);
             return Ok(());
         }
@@ -1429,7 +1651,8 @@ impl App {
             KeyCode::End => self.cursor_pos = self.input.len(),
             KeyCode::Up | KeyCode::PageUp => {
                 // If input is empty and there are queued messages, bring last one back for editing (Up only)
-                if code == KeyCode::Up && self.input.is_empty() && !self.queued_messages.is_empty() {
+                if code == KeyCode::Up && self.input.is_empty() && !self.queued_messages.is_empty()
+                {
                     if let Some(msg) = self.queued_messages.pop() {
                         self.input = msg;
                         self.cursor_pos = self.input.len();
@@ -1437,7 +1660,8 @@ impl App {
                 } else {
                     // Scroll up (increase offset from bottom)
                     // Use generous estimate - UI will clamp to actual content
-                    let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
+                    let max_estimate =
+                        self.display_messages.len() * 100 + self.streaming_text.len();
                     let inc = if code == KeyCode::PageUp { 10 } else { 1 };
                     self.scroll_offset = (self.scroll_offset + inc).min(max_estimate);
                 }
@@ -1469,7 +1693,11 @@ impl App {
     fn handle_paste(&mut self, text: String) {
         let line_count = text.lines().count().max(1);
         self.pasted_contents.push(text);
-        let placeholder = format!("[pasted {} line{}]", line_count, if line_count == 1 { "" } else { "s" });
+        let placeholder = format!(
+            "[pasted {} line{}]",
+            line_count,
+            if line_count == 1 { "" } else { "s" }
+        );
         self.input.insert_str(self.cursor_pos, &placeholder);
         self.cursor_pos += placeholder.len();
     }
@@ -1480,7 +1708,11 @@ impl App {
         // Replace placeholders in reverse order to preserve indices
         for content in self.pasted_contents.iter().rev() {
             let line_count = content.lines().count().max(1);
-            let placeholder = format!("[pasted {} line{}]", line_count, if line_count == 1 { "" } else { "s" });
+            let placeholder = format!(
+                "[pasted {} line{}]",
+                line_count,
+                if line_count == 1 { "" } else { "s" }
+            );
             // Use rfind to match last occurrence (since we iterate in reverse)
             if let Some(pos) = result.rfind(&placeholder) {
                 result.replace_range(pos..pos + placeholder.len(), content);
@@ -1533,6 +1765,7 @@ impl App {
                      • `/reload` - Hot-reload with new binary (keeps session)\n\
                      • `/rebuild` - Build and test new canary (self-dev mode only)\n\
                      • `/clear` - Clear conversation (Ctrl+L)\n\
+                     • `/debug-visual` - Enable visual debugging for TUI issues\n\
                      • `/<skill>` - Activate a skill\n\n\
                      **Available skills:** {}\n\n\
                      **Keyboard shortcuts:**\n\
@@ -1543,7 +1776,12 @@ impl App {
                      • `Ctrl+K` - Kill to end of line\n\
                      {}\n\
                      {}",
-                    self.skills.list().iter().map(|s| format!("/{}", s.name)).collect::<Vec<_>>().join(", "),
+                    self.skills
+                        .list()
+                        .iter()
+                        .map(|s| format!("/{}", s.name))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     model_next,
                     model_prev
                 ),
@@ -1563,6 +1801,75 @@ impl App {
             self.active_skill = None;
             self.session = Session::create(None, None);
             self.provider_session_id = None;
+            return;
+        }
+
+        // Handle /debug-visual command - toggle visual debugging and dump state
+        if trimmed == "/debug-visual" || trimmed == "/debug-visual on" {
+            use super::visual_debug;
+            visual_debug::enable();
+            self.display_messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: "Visual debugging enabled. Frames are being captured.\n\
+                         Use `/debug-visual dump` to write captured frames to file.\n\
+                         Use `/debug-visual off` to disable."
+                    .to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            self.set_status_notice("Visual debug: ON");
+            return;
+        }
+
+        if trimmed == "/debug-visual off" {
+            use super::visual_debug;
+            visual_debug::disable();
+            self.display_messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: "Visual debugging disabled.".to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            self.set_status_notice("Visual debug: OFF");
+            return;
+        }
+
+        if trimmed == "/debug-visual dump" {
+            use super::visual_debug;
+            match visual_debug::dump_to_file() {
+                Ok(path) => {
+                    self.display_messages.push(DisplayMessage {
+                        role: "system".to_string(),
+                        content: format!(
+                            "Visual debug dump written to:\n`{}`\n\n\
+                             This file contains frame captures with:\n\
+                             - Layout computations\n\
+                             - State snapshots\n\
+                             - Rendered text content\n\
+                             - Any detected anomalies",
+                            path.display()
+                        ),
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                }
+                Err(e) => {
+                    self.display_messages.push(DisplayMessage {
+                        role: "error".to_string(),
+                        content: format!("Failed to write visual debug dump: {}", e),
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                }
+            }
             return;
         }
 
@@ -1650,7 +1957,8 @@ impl App {
             if !self.session.is_canary {
                 self.display_messages.push(DisplayMessage {
                     role: "error".to_string(),
-                    content: "/rebuild is only available in self-dev mode (jcode self-dev)".to_string(),
+                    content: "/rebuild is only available in self-dev mode (jcode self-dev)"
+                        .to_string(),
                     tool_calls: vec![],
                     duration_secs: None,
                     title: None,
@@ -1674,7 +1982,10 @@ impl App {
                     Ok(hash) => {
                         self.display_messages.push(DisplayMessage {
                             role: "system".to_string(),
-                            content: format!("Build successful ({}). Restarting with new canary...", hash),
+                            content: format!(
+                                "Build successful ({}). Restarting with new canary...",
+                                hash
+                            ),
                             tool_calls: vec![],
                             duration_secs: None,
                             title: None,
@@ -1736,10 +2047,10 @@ impl App {
             return;
         }
 
-        // Add user message to display immediately (show placeholder, not full paste)
+        // Add user message to display with expanded paste content
         self.display_messages.push(DisplayMessage {
             role: "user".to_string(),
-            content: raw_input.clone(),
+            content: input.clone(),  // Show expanded content (actual pasted text)
             tool_calls: vec![],
             duration_secs: None,
             title: None,
@@ -1749,7 +2060,9 @@ impl App {
         self.messages.push(Message::user(&input));
         self.session.add_message(
             Role::User,
-            vec![ContentBlock::Text { text: input.clone() }],
+            vec![ContentBlock::Text {
+                text: input.clone(),
+            }],
         );
         let _ = self.session.save();
 
@@ -1757,7 +2070,7 @@ impl App {
         self.is_processing = true;
         self.status = ProcessingStatus::Sending;
         self.streaming_text.clear();
-                self.stream_buffer.clear();
+        self.stream_buffer.clear();
         self.streaming_tool_calls.clear();
         self.streaming_input_tokens = 0;
         self.streaming_output_tokens = 0;
@@ -1787,13 +2100,11 @@ impl App {
             });
 
             self.messages.push(Message::user(&combined));
-            self.session.add_message(
-                Role::User,
-                vec![ContentBlock::Text { text: combined }],
-            );
+            self.session
+                .add_message(Role::User, vec![ContentBlock::Text { text: combined }]);
             let _ = self.session.save();
             self.streaming_text.clear();
-                self.stream_buffer.clear();
+            self.stream_buffer.clear();
             self.streaming_tool_calls.clear();
             self.streaming_input_tokens = 0;
             self.streaming_output_tokens = 0;
@@ -1825,10 +2136,7 @@ impl App {
         }
 
         let current = self.provider.model();
-        let current_index = models
-            .iter()
-            .position(|m| *m == current)
-            .unwrap_or(0);
+        let current_index = models.iter().position(|m| *m == current).unwrap_or(0);
 
         let len = models.len();
         let next_index = if direction >= 0 {
@@ -1870,7 +2178,12 @@ impl App {
             self.status = ProcessingStatus::Sending;
             let mut stream = self
                 .provider
-                .complete(&self.messages, &tools, &system_prompt, self.provider_session_id.as_deref())
+                .complete(
+                    &self.messages,
+                    &tools,
+                    &system_prompt,
+                    self.provider_session_id.as_deref(),
+                )
                 .await?;
 
             let mut text_content = String::new();
@@ -1931,7 +2244,7 @@ impl App {
                                     tool_data: None,
                                 });
                                 self.streaming_text.clear();
-                self.stream_buffer.clear();
+                                self.stream_buffer.clear();
                             }
 
                             // Add tool call as its own display message
@@ -1971,8 +2284,32 @@ impl App {
                             break;
                         }
                     }
-                    StreamEvent::Error(e) => {
-                        return Err(anyhow::anyhow!("Stream error: {}", e));
+                    StreamEvent::Error { message, retry_after_secs } => {
+                        // Check if this is a rate limit error
+                        // First try the explicit retry_after_secs, then fall back to parsing message
+                        let reset_duration = retry_after_secs
+                            .map(Duration::from_secs)
+                            .or_else(|| parse_rate_limit_error(&message));
+
+                        if let Some(reset_duration) = reset_duration {
+                            let reset_time = Instant::now() + reset_duration;
+                            self.rate_limit_reset = Some(reset_time);
+                            // Don't return error - the queued message will retry
+                            let queued_info = if !self.queued_messages.is_empty() {
+                                format!(" ({} messages queued)", self.queued_messages.len())
+                            } else {
+                                String::new()
+                            };
+                            self.display_messages.push(DisplayMessage::system(format!(
+                                "⏳ Rate limit hit. Will auto-retry in {} seconds...{}",
+                                reset_duration.as_secs(),
+                                queued_info
+                            )));
+                            self.status = ProcessingStatus::Idle;
+                            self.streaming_text.clear();
+                            return Ok(());
+                        }
+                        return Err(anyhow::anyhow!("Stream error: {}", message));
                     }
                     StreamEvent::ThinkingStart => {
                         // Track start but don't display - wait for ThinkingDone
@@ -1991,7 +2328,10 @@ impl App {
                         let thinking_msg = format!("Thought for {:.1}s\n\n", duration_secs);
                         self.streaming_text.push_str(&thinking_msg);
                     }
-                    StreamEvent::Compaction { trigger, pre_tokens } => {
+                    StreamEvent::Compaction {
+                        trigger,
+                        pre_tokens,
+                    } => {
                         // Flush any pending buffered text first
                         if let Some(chunk) = self.stream_buffer.flush() {
                             self.streaming_text.push_str(&chunk);
@@ -1999,15 +2339,17 @@ impl App {
                         let tokens_str = pre_tokens
                             .map(|t| format!(" ({} tokens)", t))
                             .unwrap_or_default();
-                        let compact_msg = format!(
-                            "📦 Context compacted ({}){}\n\n",
-                            trigger, tokens_str
-                        );
+                        let compact_msg =
+                            format!("📦 Context compacted ({}){}\n\n", trigger, tokens_str);
                         self.streaming_text.push_str(&compact_msg);
                         // Reset warning so it can appear again
                         self.context_warning_shown = false;
                     }
-                    StreamEvent::ToolResult { tool_use_id, content, is_error } => {
+                    StreamEvent::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
                         // SDK already executed this tool, store result for later
                         sdk_tool_results.insert(tool_use_id, (content, is_error));
                     }
@@ -2095,70 +2437,79 @@ impl App {
                     .unwrap_or_else(|| self.session.id.clone());
 
                 // Check if SDK already executed this tool
-                let (output, is_error, tool_title) = if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
-                    // Use SDK result
-                    Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                        session_id: self.session.id.clone(),
-                        message_id: message_id.clone(),
-                        tool_call_id: tc.id.clone(),
-                        tool_name: tc.name.clone(),
-                        status: if sdk_is_error { ToolStatus::Error } else { ToolStatus::Completed },
-                        title: None,
-                    }));
-                    (sdk_content, sdk_is_error, None)
-                } else {
-                    // Execute locally
-                    let ctx = ToolContext {
-                        session_id: self.session.id.clone(),
-                        message_id: message_id.clone(),
-                        tool_call_id: tc.id.clone(),
+                let (output, is_error, tool_title) =
+                    if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
+                        // Use SDK result
+                        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                            session_id: self.session.id.clone(),
+                            message_id: message_id.clone(),
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            status: if sdk_is_error {
+                                ToolStatus::Error
+                            } else {
+                                ToolStatus::Completed
+                            },
+                            title: None,
+                        }));
+                        (sdk_content, sdk_is_error, None)
+                    } else {
+                        // Execute locally
+                        let ctx = ToolContext {
+                            session_id: self.session.id.clone(),
+                            message_id: message_id.clone(),
+                            tool_call_id: tc.id.clone(),
+                        };
+
+                        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                            session_id: self.session.id.clone(),
+                            message_id: message_id.clone(),
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            status: ToolStatus::Running,
+                            title: None,
+                        }));
+
+                        let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
+                        match result {
+                            Ok(o) => {
+                                Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                                    session_id: self.session.id.clone(),
+                                    message_id: message_id.clone(),
+                                    tool_call_id: tc.id.clone(),
+                                    tool_name: tc.name.clone(),
+                                    status: ToolStatus::Completed,
+                                    title: o.title.clone(),
+                                }));
+                                (o.output, false, o.title)
+                            }
+                            Err(e) => {
+                                Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                                    session_id: self.session.id.clone(),
+                                    message_id: message_id.clone(),
+                                    tool_call_id: tc.id.clone(),
+                                    tool_name: tc.name.clone(),
+                                    status: ToolStatus::Error,
+                                    title: None,
+                                }));
+                                (format!("Error: {}", e), true, None)
+                            }
+                        }
                     };
 
-                    Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                        session_id: self.session.id.clone(),
-                        message_id: message_id.clone(),
-                        tool_call_id: tc.id.clone(),
-                        tool_name: tc.name.clone(),
-                        status: ToolStatus::Running,
-                        title: None,
-                    }));
-
-                    let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
-                    match result {
-                        Ok(o) => {
-                            Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                                session_id: self.session.id.clone(),
-                                message_id: message_id.clone(),
-                                tool_call_id: tc.id.clone(),
-                                tool_name: tc.name.clone(),
-                                status: ToolStatus::Completed,
-                                title: o.title.clone(),
-                            }));
-                            (o.output, false, o.title)
-                        }
-                        Err(e) => {
-                            Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                                session_id: self.session.id.clone(),
-                                message_id: message_id.clone(),
-                                tool_call_id: tc.id.clone(),
-                                tool_name: tc.name.clone(),
-                                status: ToolStatus::Error,
-                                title: None,
-                            }));
-                            (format!("Error: {}", e), true, None)
-                        }
-                    }
-                };
-
                 // Update the tool's DisplayMessage with the output
-                if let Some(dm) = self.display_messages.iter_mut().rev().find(|dm| {
-                    dm.tool_data.as_ref().map(|td| &td.id) == Some(&tc.id)
-                }) {
+                if let Some(dm) = self
+                    .display_messages
+                    .iter_mut()
+                    .rev()
+                    .find(|dm| dm.tool_data.as_ref().map(|td| &td.id) == Some(&tc.id))
+                {
                     dm.content = output.clone();
                     dm.title = tool_title;
                 }
 
-                self.messages.push(Message::tool_result(&tc.id, &output, is_error));
+                self.messages
+                    .push(Message::tool_result(&tc.id, &output, is_error));
                 self.session.add_message(
                     Role::User,
                     vec![ContentBlock::ToolResult {
@@ -2189,7 +2540,10 @@ impl App {
             self.status = ProcessingStatus::Sending;
             terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
 
-            crate::logging::info(&format!("TUI: API call starting ({} messages)", self.messages.len()));
+            crate::logging::info(&format!(
+                "TUI: API call starting ({} messages)",
+                self.messages.len()
+            ));
             let api_start = std::time::Instant::now();
 
             // Clone data needed for the API call to avoid borrow issues
@@ -2246,7 +2600,10 @@ impl App {
                 }
             };
 
-            crate::logging::info(&format!("TUI: API stream opened in {:.2}s", api_start.elapsed().as_secs_f64()));
+            crate::logging::info(&format!(
+                "TUI: API stream opened in {:.2}s",
+                api_start.elapsed().as_secs_f64()
+            ));
 
             let mut text_content = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -2255,7 +2612,7 @@ impl App {
             let mut first_event = true;
             let mut saw_message_end = false;
             let mut interleaved = false; // Track if we interleaved a message mid-stream
-            // Track tool results from SDK (already executed by Claude Agent SDK)
+                                         // Track tool results from SDK (already executed by Claude Agent SDK)
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
 
@@ -2471,8 +2828,8 @@ impl App {
                                             break;
                                         }
                                     }
-                                    StreamEvent::Error(e) => {
-                                        return Err(anyhow::anyhow!("Stream error: {}", e));
+                                    StreamEvent::Error { message, .. } => {
+                                        return Err(anyhow::anyhow!("Stream error: {}", message));
                                     }
                                     StreamEvent::ThinkingStart => {
                                         self.thinking_start = Some(Instant::now());
@@ -2639,14 +2996,21 @@ impl App {
                         message_id: message_id.clone(),
                         tool_call_id: tc.id.clone(),
                         tool_name: tc.name.clone(),
-                        status: if sdk_is_error { ToolStatus::Error } else { ToolStatus::Completed },
+                        status: if sdk_is_error {
+                            ToolStatus::Error
+                        } else {
+                            ToolStatus::Completed
+                        },
                         title: None,
                     }));
 
                     // Update the tool's DisplayMessage with the output
-                    if let Some(dm) = self.display_messages.iter_mut().rev().find(|dm| {
-                        dm.tool_data.as_ref().map(|td| &td.id) == Some(&tc.id)
-                    }) {
+                    if let Some(dm) = self
+                        .display_messages
+                        .iter_mut()
+                        .rev()
+                        .find(|dm| dm.tool_data.as_ref().map(|td| &td.id) == Some(&tc.id))
+                    {
                         dm.content = sdk_content.clone();
                         dm.title = None;
                     }
@@ -2692,9 +3056,7 @@ impl App {
                 let registry = self.registry.clone();
                 let tool_name = tc.name.clone();
                 let tool_input = tc.input.clone();
-                let mut tool_future = std::pin::pin!(
-                    registry.execute(&tool_name, tool_input, ctx)
-                );
+                let mut tool_future = std::pin::pin!(registry.execute(&tool_name, tool_input, ctx));
 
                 // Subscribe to bus for subagent status updates
                 let mut bus_receiver = Bus::global().subscribe();
@@ -2773,14 +3135,18 @@ impl App {
                 };
 
                 // Update the tool's DisplayMessage with the output
-                if let Some(dm) = self.display_messages.iter_mut().rev().find(|dm| {
-                    dm.tool_data.as_ref().map(|td| &td.id) == Some(&tc.id)
-                }) {
+                if let Some(dm) = self
+                    .display_messages
+                    .iter_mut()
+                    .rev()
+                    .find(|dm| dm.tool_data.as_ref().map(|td| &td.id) == Some(&tc.id))
+                {
                     dm.content = output.clone();
                     dm.title = tool_title;
                 }
 
-                self.messages.push(Message::tool_result(&tc.id, &output, is_error));
+                self.messages
+                    .push(Message::tool_result(&tc.id, &output, is_error));
                 self.session.add_message(
                     Role::User,
                     vec![ContentBlock::ToolResult {
@@ -2797,10 +3163,13 @@ impl App {
     }
 
     fn build_system_prompt(&self) -> String {
-        let skill_prompt = self.active_skill.as_ref().and_then(|name| {
-            self.skills.get(name).map(|s| s.get_prompt().to_string())
-        });
-        let available_skills: Vec<crate::prompt::SkillInfo> = self.skills.list()
+        let skill_prompt = self
+            .active_skill
+            .as_ref()
+            .and_then(|name| self.skills.get(name).map(|s| s.get_prompt().to_string()));
+        let available_skills: Vec<crate::prompt::SkillInfo> = self
+            .skills
+            .list()
             .iter()
             .map(|s| crate::prompt::SkillInfo {
                 name: s.name.clone(),
@@ -3016,10 +3385,18 @@ impl App {
                     // Assistant: count lines + wrap estimate
                     let content_lines = msg.content.lines().count().max(1);
                     let avg_line_len = msg.content.len() / content_lines.max(1);
-                    let wrap_factor = if avg_line_len > width { (avg_line_len / width) + 1 } else { 1 };
+                    let wrap_factor = if avg_line_len > width {
+                        (avg_line_len / width) + 1
+                    } else {
+                        1
+                    };
                     let mut h = content_lines * wrap_factor;
-                    if !msg.tool_calls.is_empty() { h += 1; }
-                    if msg.duration_secs.is_some() { h += 1; }
+                    if !msg.tool_calls.is_empty() {
+                        h += 1;
+                    }
+                    if msg.duration_secs.is_some() {
+                        h += 1;
+                    }
                     h + 1 // +1 for spacing
                 }
                 "tool" => 2, // Tool result line + spacing
@@ -3087,7 +3464,9 @@ impl App {
 
     /// Enable debug socket and return the broadcast receiver
     /// Call this before run() to enable debug event broadcasting
-    pub fn enable_debug_socket(&mut self) -> tokio::sync::broadcast::Receiver<super::backend::DebugEvent> {
+    pub fn enable_debug_socket(
+        &mut self,
+    ) -> tokio::sync::broadcast::Receiver<super::backend::DebugEvent> {
         let (tx, rx) = tokio::sync::broadcast::channel(256);
         self.debug_tx = Some(tx);
         rx
@@ -3105,14 +3484,18 @@ impl App {
         use super::backend::{DebugEvent, DebugMessage};
 
         DebugEvent::StateSnapshot {
-            display_messages: self.display_messages.iter().map(|m| DebugMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-                tool_calls: m.tool_calls.clone(),
-                duration_secs: m.duration_secs,
-                title: m.title.clone(),
-                tool_data: m.tool_data.clone(),
-            }).collect(),
+            display_messages: self
+                .display_messages
+                .iter()
+                .map(|m| DebugMessage {
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                    tool_calls: m.tool_calls.clone(),
+                    duration_secs: m.duration_secs,
+                    title: m.title.clone(),
+                    tool_data: m.tool_data.clone(),
+                })
+                .collect(),
             streaming_text: self.streaming_text.clone(),
             streaming_tool_calls: self.streaming_tool_calls.clone(),
             input: self.input.clone(),
@@ -3194,7 +3577,8 @@ impl App {
                         let mut writer = writer;
 
                         // Send initial snapshot
-                        let snapshot_json = serde_json::to_string(&initial_snapshot).unwrap_or_default() + "\n";
+                        let snapshot_json =
+                            serde_json::to_string(&initial_snapshot).unwrap_or_default() + "\n";
                         if writer.write_all(snapshot_json.as_bytes()).await.is_ok() {
                             clients.lock().await.push(writer);
                         }
@@ -3210,8 +3594,7 @@ impl App {
 
     /// Get the debug socket path
     pub fn debug_socket_path() -> std::path::PathBuf {
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-            .unwrap_or_else(|_| "/tmp".to_string());
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
         std::path::PathBuf::from(runtime_dir).join("jcode-debug.sock")
     }
 }
@@ -3246,12 +3629,14 @@ impl super::TuiState for App {
     }
 
     fn provider_name(&self) -> String {
-        self.remote_provider_name.clone()
+        self.remote_provider_name
+            .clone()
             .unwrap_or_else(|| self.provider.name().to_string())
     }
 
     fn provider_model(&self) -> String {
-        self.remote_provider_model.clone()
+        self.remote_provider_model
+            .clone()
             .unwrap_or_else(|| self.provider.model().to_string())
     }
 
@@ -3324,7 +3709,8 @@ impl super::TuiState for App {
     fn session_display_name(&self) -> Option<String> {
         if self.is_remote {
             // For remote mode, extract name from session ID
-            self.remote_session_id.as_ref()
+            self.remote_session_id
+                .as_ref()
                 .and_then(|id| crate::id::extract_session_name(id))
                 .map(|s| s.to_string())
         } else {
@@ -3352,6 +3738,17 @@ impl super::TuiState for App {
 
     fn animation_elapsed(&self) -> f32 {
         self.app_started.elapsed().as_secs_f32()
+    }
+
+    fn rate_limit_remaining(&self) -> Option<Duration> {
+        self.rate_limit_reset.and_then(|reset_time| {
+            let now = Instant::now();
+            if reset_time > now {
+                Some(reset_time - now)
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -3405,11 +3802,16 @@ mod tests {
         let mut app = create_test_app();
 
         // Type "hello"
-        app.handle_key(KeyCode::Char('h'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('l'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('l'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('o'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('l'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('l'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('o'), KeyModifiers::empty())
+            .unwrap();
 
         assert_eq!(app.input(), "hello");
         assert_eq!(app.cursor_pos(), 5);
@@ -3419,9 +3821,12 @@ mod tests {
     fn test_handle_key_backspace() {
         let mut app = create_test_app();
 
-        app.handle_key(KeyCode::Char('a'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('b'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Backspace, KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('a'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('b'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Backspace, KeyModifiers::empty())
+            .unwrap();
 
         assert_eq!(app.input(), "a");
         assert_eq!(app.cursor_pos(), 1);
@@ -3431,16 +3836,21 @@ mod tests {
     fn test_handle_key_cursor_movement() {
         let mut app = create_test_app();
 
-        app.handle_key(KeyCode::Char('a'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('b'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('c'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('a'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('b'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('c'), KeyModifiers::empty())
+            .unwrap();
 
         assert_eq!(app.cursor_pos(), 3);
 
-        app.handle_key(KeyCode::Left, KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Left, KeyModifiers::empty())
+            .unwrap();
         assert_eq!(app.cursor_pos(), 2);
 
-        app.handle_key(KeyCode::Home, KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Home, KeyModifiers::empty())
+            .unwrap();
         assert_eq!(app.cursor_pos(), 0);
 
         app.handle_key(KeyCode::End, KeyModifiers::empty()).unwrap();
@@ -3451,10 +3861,14 @@ mod tests {
     fn test_handle_key_escape_clears_input() {
         let mut app = create_test_app();
 
-        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('s'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty())
+            .unwrap();
 
         assert_eq!(app.input(), "test");
 
@@ -3468,12 +3882,17 @@ mod tests {
     fn test_handle_key_ctrl_u_clears_input() {
         let mut app = create_test_app();
 
-        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('s'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty())
+            .unwrap();
 
-        app.handle_key(KeyCode::Char('u'), KeyModifiers::CONTROL).unwrap();
+        app.handle_key(KeyCode::Char('u'), KeyModifiers::CONTROL)
+            .unwrap();
 
         assert!(app.input().is_empty());
         assert_eq!(app.cursor_pos(), 0);
@@ -3484,8 +3903,10 @@ mod tests {
         let mut app = create_test_app();
 
         // Type and submit
-        app.handle_key(KeyCode::Char('h'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('i'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('i'), KeyModifiers::empty())
+            .unwrap();
         app.submit_input();
 
         // Check message was added to display
@@ -3511,13 +3932,18 @@ mod tests {
         app.is_processing = true;
 
         // Type a message
-        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('s'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty())
+            .unwrap();
 
         // Press Enter should queue, not submit
-        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
 
         assert_eq!(app.queued_count(), 1);
         assert!(app.input().is_empty());
@@ -3533,9 +3959,12 @@ mod tests {
         app.is_processing = true;
 
         // Should still be able to type
-        app.handle_key(KeyCode::Char('a'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('b'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('c'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('a'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('b'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('c'), KeyModifiers::empty())
+            .unwrap();
 
         assert_eq!(app.input(), "abc");
     }
@@ -3546,12 +3975,18 @@ mod tests {
         app.is_processing = true;
 
         // Type and queue a message
-        app.handle_key(KeyCode::Char('h'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('l'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('l'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('o'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('l'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('l'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('o'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
 
         assert_eq!(app.queued_count(), 1);
         assert!(app.input().is_empty());
@@ -3597,11 +4032,16 @@ mod tests {
         let mut app = create_test_app();
 
         // Type a skill command
-        app.handle_key(KeyCode::Char('/'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('s'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('/'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('e'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty())
+            .unwrap();
 
         app.submit_input();
 
@@ -3641,12 +4081,17 @@ mod tests {
         let mut app = create_test_app();
 
         // Type prefix, paste, type suffix
-        app.handle_key(KeyCode::Char('A'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char(':'), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char(' '), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char('A'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char(':'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char(' '), KeyModifiers::empty())
+            .unwrap();
         app.handle_paste("pasted content".to_string());
-        app.handle_key(KeyCode::Char(' '), KeyModifiers::empty()).unwrap();
-        app.handle_key(KeyCode::Char('B'), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char(' '), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('B'), KeyModifiers::empty())
+            .unwrap();
 
         // Input shows placeholder
         assert_eq!(app.input(), "A: [pasted 1 line] B");
@@ -3676,7 +4121,8 @@ mod tests {
         let mut app = create_test_app();
 
         app.handle_paste("first".to_string());
-        app.handle_key(KeyCode::Char(' '), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char(' '), KeyModifiers::empty())
+            .unwrap();
         app.handle_paste("second\nline".to_string());
 
         assert_eq!(app.input(), "[pasted 1 line] [pasted 2 lines]");
@@ -3684,7 +4130,10 @@ mod tests {
 
         app.submit_input();
         // Display shows placeholders (user sees condensed view)
-        assert_eq!(app.display_messages()[0].content, "[pasted 1 line] [pasted 2 lines]");
+        assert_eq!(
+            app.display_messages()[0].content,
+            "[pasted 1 line] [pasted 2 lines]"
+        );
         // Model receives expanded content
         match &app.messages[0].content[0] {
             crate::message::ContentBlock::Text { text } => {
@@ -3702,7 +4151,12 @@ mod tests {
 
         // Create and save a session with a fake provider_session_id
         let mut session = Session::create(None, None);
-        session.add_message(Role::User, vec![ContentBlock::Text { text: "test message".to_string() }]);
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "test message".to_string(),
+            }],
+        );
         session.provider_session_id = Some("fake-uuid".to_string());
         let session_id = session.id.clone();
         session.save().unwrap();
