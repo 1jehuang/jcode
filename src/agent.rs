@@ -1,5 +1,4 @@
 #![allow(unused_assignments)]
-
 #![allow(unused_assignments)]
 
 use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
@@ -7,7 +6,6 @@ use crate::logging;
 use crate::message::{ContentBlock, Role, StreamEvent, ToolCall};
 use crate::protocol::{HistoryMessage, ServerEvent};
 use crate::provider::Provider;
-use tokio::sync::{broadcast, mpsc};
 use crate::session::Session;
 use crate::skill::SkillRegistry;
 use crate::tool::{Registry, ToolContext};
@@ -17,6 +15,7 @@ use std::collections::HashSet;
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::{broadcast, mpsc};
 
 const SYSTEM_PROMPT: &str = r#"You are a coding assistant with access to tools for file operations and shell commands.
 
@@ -44,17 +43,19 @@ const SELFDEV_PROMPT: &str = r#"
 
 You are working on the jcode codebase itself. You have the `selfdev` tool available:
 
-- `selfdev { action: "rebuild" }` - Build and test your changes, then restart with new code
+- `selfdev { action: "reload" }` - Restart with already-built binary (use after `cargo build --release`)
+- `selfdev { action: "rebuild" }` - Build, test, and restart with new code (all-in-one)
 - `selfdev { action: "status" }` - Check build versions and crash history
 - `selfdev { action: "promote" }` - Mark current build as stable for other sessions
 - `selfdev { action: "rollback" }` - Switch back to stable build
 
 **Workflow:**
 1. Make code changes using edit/write tools
-2. Use `selfdev { action: "rebuild" }` to build, test, and restart with new code
-3. The session continues automatically in the new build
-4. If the build crashes, you'll wake up in the stable version with crash context
-5. Once satisfied, use `selfdev { action: "promote" }` to make it stable
+2. Run `cargo build --release` to build
+3. Use `selfdev { action: "reload" }` to restart with the new binary
+4. The session continues automatically in the new build
+5. If the build crashes, you'll wake up in the stable version with crash context
+6. Once satisfied, use `selfdev { action: "promote" }` to make it stable
 
 Use this to iterate quickly on jcode features and fixes."#;
 
@@ -67,6 +68,8 @@ pub struct Agent {
     allowed_tools: Option<HashSet<String>>,
     /// Provider-specific session ID for conversation resume (e.g., Claude SDK session)
     provider_session_id: Option<String>,
+    /// Pending swarm alerts to inject into the next turn
+    pending_alerts: Vec<String>,
 }
 
 impl Agent {
@@ -80,6 +83,7 @@ impl Agent {
             active_skill: None,
             allowed_tools: None,
             provider_session_id: None,
+            pending_alerts: Vec::new(),
         }
     }
 
@@ -98,19 +102,37 @@ impl Agent {
             active_skill: None,
             allowed_tools,
             provider_session_id: None,
+            pending_alerts: Vec::new(),
         }
+    }
+
+    /// Add a swarm alert to be injected into the next turn
+    pub fn push_alert(&mut self, alert: String) {
+        self.pending_alerts.push(alert);
+    }
+
+    /// Take all pending alerts (clears the queue)
+    pub fn take_alerts(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_alerts)
     }
 
     pub fn session_id(&self) -> &str {
         &self.session.id
     }
 
+    /// Get the short/friendly name for this session (e.g., "fox")
+    pub fn session_short_name(&self) -> Option<&str> {
+        self.session.short_name.as_deref()
+    }
+
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
-        self.session
-            .add_message(Role::User, vec![ContentBlock::Text {
+        self.session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
                 text: user_message.to_string(),
-            }]);
+            }],
+        );
         self.session.save()?;
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
@@ -120,10 +142,12 @@ impl Agent {
     }
 
     pub async fn run_once_capture(&mut self, user_message: &str) -> Result<String> {
-        self.session
-            .add_message(Role::User, vec![ContentBlock::Text {
+        self.session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
                 text: user_message.to_string(),
-            }]);
+            }],
+        );
         self.session.save()?;
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
@@ -137,10 +161,26 @@ impl Agent {
         user_message: &str,
         event_tx: broadcast::Sender<ServerEvent>,
     ) -> Result<()> {
-        self.session
-            .add_message(Role::User, vec![ContentBlock::Text {
+        // Inject any pending notifications before the user message
+        let alerts = self.take_alerts();
+        if !alerts.is_empty() {
+            let alert_text = format!(
+                "[NOTIFICATION]\nYou received {} notification(s) from other agents working in this codebase:\n\n{}\n\nUse the communicate tool (actions: list, read, message, share) to coordinate with other agents.",
+                alerts.len(),
+                alerts.join("\n\n---\n\n")
+            );
+            self.session.add_message(
+                Role::User,
+                vec![ContentBlock::Text { text: alert_text }],
+            );
+        }
+
+        self.session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
                 text: user_message.to_string(),
-            }]);
+            }],
+        );
         self.session.save()?;
         self.run_turn_streaming(event_tx).await
     }
@@ -151,10 +191,26 @@ impl Agent {
         user_message: &str,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
-        self.session
-            .add_message(Role::User, vec![ContentBlock::Text {
+        // Inject any pending notifications before the user message
+        let alerts = self.take_alerts();
+        if !alerts.is_empty() {
+            let alert_text = format!(
+                "[NOTIFICATION]\nYou received {} notification(s) from other agents working in this codebase:\n\n{}\n\nUse the communicate tool (actions: list, read, message, share) to coordinate with other agents.",
+                alerts.len(),
+                alerts.join("\n\n---\n\n")
+            );
+            self.session.add_message(
+                Role::User,
+                vec![ContentBlock::Text { text: alert_text }],
+            );
+        }
+
+        self.session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
                 text: user_message.to_string(),
-            }]);
+            }],
+        );
         self.session.save()?;
         self.run_turn_streaming_mpsc(event_tx).await
     }
@@ -178,11 +234,14 @@ impl Agent {
         // Add available skills list
         let skills: Vec<_> = self.skills.list();
         if !skills.is_empty() {
-            prompt.push_str("\n\n# Available Skills\n\nThe user can invoke these skills with `/skillname`:\n");
+            prompt.push_str(
+                "\n\n# Available Skills\n\nThe user can invoke these skills with `/skillname`:\n",
+            );
             for skill in &skills {
                 prompt.push_str(&format!("\n- `/{} ` - {}", skill.name, skill.description));
             }
-            prompt.push_str("\n\nWhen asked about available skills or capabilities, mention these.");
+            prompt
+                .push_str("\n\nWhen asked about available skills or capabilities, mention these.");
         }
 
         // Add active skill prompt
@@ -337,7 +396,12 @@ impl Agent {
 
             let mut stream = self
                 .provider
-                .complete(&messages, &tools, &system_prompt, self.provider_session_id.as_deref())
+                .complete(
+                    &messages,
+                    &tools,
+                    &system_prompt,
+                    self.provider_session_id.as_deref(),
+                )
                 .await?;
 
             logging::info(&format!(
@@ -406,10 +470,9 @@ impl Agent {
                     StreamEvent::ToolUseEnd => {
                         if let Some(mut tool) = current_tool.take() {
                             // Parse the accumulated JSON
-                            let tool_input = serde_json::from_str::<serde_json::Value>(
-                                &current_tool_input,
-                            )
-                            .unwrap_or(serde_json::Value::Null);
+                            let tool_input =
+                                serde_json::from_str::<serde_json::Value>(&current_tool_input)
+                                    .unwrap_or(serde_json::Value::Null);
                             tool.input = tool_input.clone();
 
                             if trace {
@@ -436,12 +499,18 @@ impl Agent {
                             current_tool_input.clear();
                         }
                     }
-                    StreamEvent::ToolResult { tool_use_id, content, is_error } => {
+                    StreamEvent::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
                         // SDK already executed this tool, store the result
                         if trace {
                             eprintln!(
                                 "[trace] sdk_tool_result id={} is_error={} content_len={}",
-                                tool_use_id, is_error, content.len()
+                                tool_use_id,
+                                is_error,
+                                content.len()
                             );
                         }
                         sdk_tool_results.insert(tool_use_id, (content, is_error));
@@ -479,7 +548,10 @@ impl Agent {
                             break;
                         }
                     }
-                    StreamEvent::Compaction { trigger, pre_tokens } => {
+                    StreamEvent::Compaction {
+                        trigger,
+                        pre_tokens,
+                    } => {
                         if print_output {
                             let tokens_str = pre_tokens
                                 .map(|t| format!(" ({} tokens)", t))
@@ -487,11 +559,11 @@ impl Agent {
                             println!("📦 Context compacted ({}){}", trigger, tokens_str);
                         }
                     }
-                    StreamEvent::Error(e) => {
+                    StreamEvent::Error { message, .. } => {
                         if trace {
-                            eprintln!("[trace] stream_error {}", e);
+                            eprintln!("[trace] stream_error {}", message);
                         }
-                        return Err(anyhow::anyhow!("Stream error: {}", e));
+                        return Err(anyhow::anyhow!("Stream error: {}", message));
                     }
                 }
             }
@@ -506,7 +578,9 @@ impl Agent {
             // Add assistant message to history
             let mut content_blocks = Vec::new();
             if !text_content.is_empty() {
-                content_blocks.push(ContentBlock::Text { text: text_content.clone() });
+                content_blocks.push(ContentBlock::Text {
+                    text: text_content.clone(),
+                });
             }
             for tc in &tool_calls {
                 content_blocks.push(ContentBlock::ToolUse {
@@ -534,7 +608,10 @@ impl Agent {
                 break;
             }
 
-            logging::info(&format!("Turn has {} tool calls to execute", tool_calls.len()));
+            logging::info(&format!(
+                "Turn has {} tool calls to execute",
+                tool_calls.len()
+            ));
 
             // If provider handles tools internally (like Claude Agent SDK), don't re-execute
             if self.provider.handles_tools_internally() {
@@ -579,7 +656,11 @@ impl Agent {
                         message_id: message_id.clone(),
                         tool_call_id: tc.id.clone(),
                         tool_name: tc.name.clone(),
-                        status: if sdk_is_error { ToolStatus::Error } else { ToolStatus::Completed },
+                        status: if sdk_is_error {
+                            ToolStatus::Error
+                        } else {
+                            ToolStatus::Completed
+                        },
                         title: None,
                     }));
 
@@ -608,10 +689,7 @@ impl Agent {
                 };
 
                 if trace {
-                    eprintln!(
-                        "[trace] tool_exec_start name={} id={}",
-                        tc.name, tc.id
-                    );
+                    eprintln!("[trace] tool_exec_start name={} id={}", tc.name, tc.id);
                 }
                 Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
                     session_id: self.session.id.clone(),
@@ -717,10 +795,7 @@ impl Agent {
     }
 
     /// Run turns with events streamed to a broadcast channel (for server mode)
-    async fn run_turn_streaming(
-        &mut self,
-        event_tx: broadcast::Sender<ServerEvent>,
-    ) -> Result<()> {
+    async fn run_turn_streaming(&mut self, event_tx: broadcast::Sender<ServerEvent>) -> Result<()> {
         let trace = trace_enabled();
 
         loop {
@@ -732,7 +807,12 @@ impl Agent {
 
             let mut stream = self
                 .provider
-                .complete(&messages, &tools, &system_prompt, self.provider_session_id.as_deref())
+                .complete(
+                    &messages,
+                    &tools,
+                    &system_prompt,
+                    self.provider_session_id.as_deref(),
+                )
                 .await?;
 
             let mut text_content = String::new();
@@ -774,15 +854,16 @@ impl Agent {
                         current_tool_input.clear();
                     }
                     StreamEvent::ToolInputDelta(delta) => {
-                        let _ = event_tx.send(ServerEvent::ToolInput { delta: delta.clone() });
+                        let _ = event_tx.send(ServerEvent::ToolInput {
+                            delta: delta.clone(),
+                        });
                         current_tool_input.push_str(&delta);
                     }
                     StreamEvent::ToolUseEnd => {
                         if let Some(mut tool) = current_tool.take() {
-                            let tool_input = serde_json::from_str::<serde_json::Value>(
-                                &current_tool_input,
-                            )
-                            .unwrap_or(serde_json::Value::Null);
+                            let tool_input =
+                                serde_json::from_str::<serde_json::Value>(&current_tool_input)
+                                    .unwrap_or(serde_json::Value::Null);
                             tool.input = tool_input;
 
                             let _ = event_tx.send(ServerEvent::ToolExec {
@@ -794,7 +875,11 @@ impl Agent {
                             current_tool_input.clear();
                         }
                     }
-                    StreamEvent::ToolResult { tool_use_id, content, is_error } => {
+                    StreamEvent::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
                         // SDK executed tool - send result and store for later
                         let tool_name = tool_id_to_name
                             .get(&tool_use_id)
@@ -804,11 +889,18 @@ impl Agent {
                             id: tool_use_id.clone(),
                             name: tool_name,
                             output: content.clone(),
-                            error: if is_error { Some("Tool error".to_string()) } else { None },
+                            error: if is_error {
+                                Some("Tool error".to_string())
+                            } else {
+                                None
+                            },
                         });
                         sdk_tool_results.insert(tool_use_id, (content, is_error));
                     }
-                    StreamEvent::TokenUsage { input_tokens, output_tokens } => {
+                    StreamEvent::TokenUsage {
+                        input_tokens,
+                        output_tokens,
+                    } => {
                         if let Some(input) = input_tokens {
                             usage_input = Some(input);
                         }
@@ -822,8 +914,8 @@ impl Agent {
                         let _ = event_tx.send(ServerEvent::SessionId { session_id: sid });
                     }
                     StreamEvent::Compaction { .. } => {}
-                    StreamEvent::Error(e) => {
-                        return Err(anyhow::anyhow!("Stream error: {}", e));
+                    StreamEvent::Error { message, .. } => {
+                        return Err(anyhow::anyhow!("Stream error: {}", message));
                     }
                 }
             }
@@ -839,7 +931,9 @@ impl Agent {
             // Add assistant message to history
             let mut content_blocks = Vec::new();
             if !text_content.is_empty() {
-                content_blocks.push(ContentBlock::Text { text: text_content.clone() });
+                content_blocks.push(ContentBlock::Text {
+                    text: text_content.clone(),
+                });
             }
             for tc in &tool_calls {
                 content_blocks.push(ContentBlock::ToolUse {
@@ -975,7 +1069,12 @@ impl Agent {
 
             let mut stream = self
                 .provider
-                .complete(&messages, &tools, &system_prompt, self.provider_session_id.as_deref())
+                .complete(
+                    &messages,
+                    &tools,
+                    &system_prompt,
+                    self.provider_session_id.as_deref(),
+                )
                 .await?;
 
             let mut text_content = String::new();
@@ -1015,15 +1114,16 @@ impl Agent {
                         current_tool_input.clear();
                     }
                     StreamEvent::ToolInputDelta(delta) => {
-                        let _ = event_tx.send(ServerEvent::ToolInput { delta: delta.clone() });
+                        let _ = event_tx.send(ServerEvent::ToolInput {
+                            delta: delta.clone(),
+                        });
                         current_tool_input.push_str(&delta);
                     }
                     StreamEvent::ToolUseEnd => {
                         if let Some(mut tool) = current_tool.take() {
-                            let tool_input = serde_json::from_str::<serde_json::Value>(
-                                &current_tool_input,
-                            )
-                            .unwrap_or(serde_json::Value::Null);
+                            let tool_input =
+                                serde_json::from_str::<serde_json::Value>(&current_tool_input)
+                                    .unwrap_or(serde_json::Value::Null);
                             tool.input = tool_input;
 
                             let _ = event_tx.send(ServerEvent::ToolExec {
@@ -1035,7 +1135,11 @@ impl Agent {
                             current_tool_input.clear();
                         }
                     }
-                    StreamEvent::ToolResult { tool_use_id, content, is_error } => {
+                    StreamEvent::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
                         let tool_name = tool_id_to_name
                             .get(&tool_use_id)
                             .cloned()
@@ -1044,11 +1148,18 @@ impl Agent {
                             id: tool_use_id.clone(),
                             name: tool_name,
                             output: content.clone(),
-                            error: if is_error { Some("Tool error".to_string()) } else { None },
+                            error: if is_error {
+                                Some("Tool error".to_string())
+                            } else {
+                                None
+                            },
                         });
                         sdk_tool_results.insert(tool_use_id, (content, is_error));
                     }
-                    StreamEvent::TokenUsage { input_tokens, output_tokens } => {
+                    StreamEvent::TokenUsage {
+                        input_tokens,
+                        output_tokens,
+                    } => {
                         if let Some(input) = input_tokens {
                             usage_input = Some(input);
                         }
@@ -1062,8 +1173,8 @@ impl Agent {
                         let _ = event_tx.send(ServerEvent::SessionId { session_id: sid });
                     }
                     StreamEvent::Compaction { .. } => {}
-                    StreamEvent::Error(e) => {
-                        return Err(anyhow::anyhow!("Stream error: {}", e));
+                    StreamEvent::Error { message, .. } => {
+                        return Err(anyhow::anyhow!("Stream error: {}", message));
                     }
                 }
             }
@@ -1077,7 +1188,9 @@ impl Agent {
 
             let mut content_blocks = Vec::new();
             if !text_content.is_empty() {
-                content_blocks.push(ContentBlock::Text { text: text_content.clone() });
+                content_blocks.push(ContentBlock::Text {
+                    text: text_content.clone(),
+                });
             }
             for tc in &tool_calls {
                 content_blocks.push(ContentBlock::ToolUse {

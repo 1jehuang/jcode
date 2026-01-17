@@ -1,4 +1,5 @@
 use super::{Tool, ToolContext, ToolOutput};
+use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -58,7 +59,7 @@ impl Tool for ReadTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: ReadInput = serde_json::from_value(input)?;
 
         let path = Path::new(&params.file_path);
@@ -95,6 +96,19 @@ impl Tool for ReadTool {
 
         let total_lines = lines.len();
         let end = (offset + limit).min(total_lines);
+
+        // Publish file touch event for swarm coordination
+        Bus::global().publish(BusEvent::FileTouch(FileTouch {
+            session_id: ctx.session_id.clone(),
+            path: path.to_path_buf(),
+            op: FileOp::Read,
+            summary: Some(format!(
+                "read lines {}-{} of {}",
+                offset + 1,
+                end,
+                total_lines
+            )),
+        }));
 
         let mut output = String::new();
 

@@ -1,4 +1,5 @@
 use super::{Tool, ToolContext, ToolOutput};
+use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -48,7 +49,7 @@ impl Tool for WriteTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: WriteInput = serde_json::from_value(input)?;
 
         let path = Path::new(&params.file_path);
@@ -74,6 +75,18 @@ impl Tool for WriteTool {
         let _new_len = params.content.len();
         let line_count = params.content.lines().count();
 
+        // Publish file touch event for swarm coordination
+        Bus::global().publish(BusEvent::FileTouch(FileTouch {
+            session_id: ctx.session_id.clone(),
+            path: path.to_path_buf(),
+            op: FileOp::Write,
+            summary: Some(if existed {
+                format!("overwrote file ({} lines)", line_count)
+            } else {
+                format!("created new file ({} lines)", line_count)
+            }),
+        }));
+
         if existed {
             let diff = if let Some(ref old) = old_content {
                 generate_diff_summary(old, &params.content)
@@ -86,14 +99,16 @@ impl Tool for WriteTool {
                 line_count,
                 if diff.is_empty() { "" } else { ":" },
                 diff
-            )).with_title(format!("{}", params.file_path)))
+            ))
+            .with_title(format!("{}", params.file_path)))
         } else {
             // For new files, show all lines as additions
             let diff = generate_diff_summary("", &params.content);
             Ok(ToolOutput::new(format!(
                 "Created {} ({} lines):\n{}",
                 params.file_path, line_count, diff
-            )).with_title(format!("{}", params.file_path)))
+            ))
+            .with_title(format!("{}", params.file_path)))
         }
     }
 }
@@ -118,7 +133,9 @@ fn generate_diff_summary(old: &str, new: &str) -> String {
             ChangeTag::Delete => {
                 let content = change.value().trim();
                 old_line += 1;
-                if content.is_empty() { continue; }
+                if content.is_empty() {
+                    continue;
+                }
                 if lines_shown >= MAX_LINES {
                     output.push_str("...\n");
                     break;
@@ -129,7 +146,9 @@ fn generate_diff_summary(old: &str, new: &str) -> String {
             ChangeTag::Insert => {
                 let content = change.value().trim();
                 new_line += 1;
-                if content.is_empty() { continue; }
+                if content.is_empty() {
+                    continue;
+                }
                 if lines_shown >= MAX_LINES {
                     output.push_str("...\n");
                     break;
@@ -167,7 +186,10 @@ mod tests {
         assert!(diff.contains("2- line two"), "Should show deleted line");
         assert!(diff.contains("2+ changed two"), "Should show added line");
         // Equal lines should not appear
-        assert!(!diff.contains("line one"), "Should not show unchanged lines");
+        assert!(
+            !diff.contains("line one"),
+            "Should not show unchanged lines"
+        );
     }
 
     #[test]
@@ -184,8 +206,14 @@ mod tests {
     #[test]
     fn test_generate_diff_summary_truncation() {
         // Create old and new with more than 20 changed lines
-        let old = (1..=25).map(|i| format!("old line {}", i)).collect::<Vec<_>>().join("\n");
-        let new = (1..=25).map(|i| format!("new line {}", i)).collect::<Vec<_>>().join("\n");
+        let old = (1..=25)
+            .map(|i| format!("old line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let new = (1..=25)
+            .map(|i| format!("new line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         let diff = generate_diff_summary(&old, &new);
 
         assert!(diff.contains("..."), "Should truncate after 20 lines");
@@ -198,8 +226,14 @@ mod tests {
         let diff = generate_diff_summary(old, new);
 
         // Compact format: no padding
-        assert!(diff.contains("1- old"), "Should have line number directly before minus");
-        assert!(diff.contains("1+ new"), "Should have line number directly before plus");
+        assert!(
+            diff.contains("1- old"),
+            "Should have line number directly before minus"
+        );
+        assert!(
+            diff.contains("1+ new"),
+            "Should have line number directly before plus"
+        );
     }
 
     #[test]

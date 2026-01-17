@@ -1,4 +1,5 @@
 use super::{Tool, ToolContext, ToolOutput};
+use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -60,7 +61,7 @@ impl Tool for EditTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: EditInput = serde_json::from_value(input)?;
 
         if params.old_string == params.new_string {
@@ -107,6 +108,21 @@ impl Tool for EditTool {
         // Write back
         tokio::fs::write(path, &new_content).await?;
 
+        // Publish file touch event for swarm coordination
+        let end_line = start_line + params.new_string.lines().count().saturating_sub(1);
+        Bus::global().publish(BusEvent::FileTouch(FileTouch {
+            session_id: ctx.session_id.clone(),
+            path: path.to_path_buf(),
+            op: FileOp::Edit,
+            summary: Some(format!(
+                "edited lines {}-{} ({} occurrence{})",
+                start_line,
+                end_line,
+                occurrences,
+                if occurrences == 1 { "" } else { "s" }
+            )),
+        }));
+
         // Generate a diff with line numbers
         let diff = generate_diff(&params.old_string, &params.new_string, start_line);
 
@@ -116,9 +132,9 @@ impl Tool for EditTool {
 
         Ok(ToolOutput::new(format!(
             "Edited {}: replaced {} occurrence(s)\n{}\n\nContext after edit (lines {}-{}):\n{}",
-            params.file_path, occurrences, diff,
-            context.0, context.1, context.2
-        )).with_title(format!("{}", params.file_path)))
+            params.file_path, occurrences, diff, context.0, context.1, context.2
+        ))
+        .with_title(format!("{}", params.file_path)))
     }
 }
 
@@ -145,13 +161,17 @@ fn generate_diff(old: &str, new: &str, start_line: usize) -> String {
             ChangeTag::Delete => {
                 let num = old_line;
                 old_line += 1;
-                if content.is_empty() { continue; }
+                if content.is_empty() {
+                    continue;
+                }
                 ("-", num)
             }
             ChangeTag::Insert => {
                 let num = new_line;
                 new_line += 1;
-                if content.is_empty() { continue; }
+                if content.is_empty() {
+                    continue;
+                }
                 ("+", num)
             }
             ChangeTag::Equal => {
@@ -173,7 +193,12 @@ fn generate_diff(old: &str, new: &str, start_line: usize) -> String {
 }
 
 /// Extract lines around the edited region, returns (start_line, end_line, content)
-fn extract_context(content: &str, edit_start: usize, edit_end: usize, padding: usize) -> (usize, usize, String) {
+fn extract_context(
+    content: &str,
+    edit_start: usize,
+    edit_end: usize,
+    padding: usize,
+) -> (usize, usize, String) {
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
 
@@ -251,8 +276,14 @@ mod tests {
         assert!(diff.contains("6- line two"), "Should show deleted line");
         assert!(diff.contains("6+ modified two"), "Should show added line");
         // Equal lines should not appear
-        assert!(!diff.contains("line one"), "Should not show unchanged lines");
-        assert!(!diff.contains("line three"), "Should not show unchanged lines");
+        assert!(
+            !diff.contains("line one"),
+            "Should not show unchanged lines"
+        );
+        assert!(
+            !diff.contains("line three"),
+            "Should not show unchanged lines"
+        );
     }
 
     #[test]
@@ -289,8 +320,14 @@ mod tests {
         let diff = generate_diff(old, new, 42);
 
         // Compact format: no padding
-        assert!(diff.contains("42- old"), "Should have line number directly before minus");
-        assert!(diff.contains("42+ new"), "Should have line number directly before plus");
+        assert!(
+            diff.contains("42- old"),
+            "Should have line number directly before minus"
+        );
+        assert!(
+            diff.contains("42+ new"),
+            "Should have line number directly before plus"
+        );
     }
 
     #[test]
@@ -306,7 +343,8 @@ mod tests {
 
     #[test]
     fn test_extract_context() {
-        let content = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10";
+        let content =
+            "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10";
 
         // Edit at line 5, with 2 lines padding
         let (start, end, ctx) = extract_context(content, 5, 5, 2);

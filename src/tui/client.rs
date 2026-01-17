@@ -8,7 +8,7 @@
 
 use super::{DisplayMessage, ProcessingStatus, TuiState};
 use crate::message::ToolCall;
-use crate::protocol::{Request, ServerEvent};
+use crate::protocol::{NotificationType, Request, ServerEvent};
 use crate::server;
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
@@ -23,7 +23,9 @@ use tokio::time::interval;
 
 /// Check if client-side diffs are enabled (default: true, disable with JCODE_SHOW_DIFFS=0)
 fn show_diffs_enabled() -> bool {
-    std::env::var("JCODE_SHOW_DIFFS").map(|v| v != "0" && v != "false").unwrap_or(true)
+    std::env::var("JCODE_SHOW_DIFFS")
+        .map(|v| v != "0" && v != "false")
+        .unwrap_or(true)
 }
 
 /// Tracks a pending file edit for diff generation
@@ -121,7 +123,9 @@ impl ClientApp {
         let mut reader = BufReader::new(reader);
 
         // Send GetHistory request
-        let request = Request::GetHistory { id: self.next_request_id };
+        let request = Request::GetHistory {
+            id: self.next_request_id,
+        };
         self.next_request_id += 1;
         let json = serde_json::to_string(&request)? + "\n";
         writer.write_all(json.as_bytes()).await?;
@@ -131,7 +135,12 @@ impl ClientApp {
         reader.read_line(&mut line).await?;
         let event: ServerEvent = serde_json::from_str(&line)?;
 
-        if let ServerEvent::History { session_id, messages, .. } = event {
+        if let ServerEvent::History {
+            session_id,
+            messages,
+            ..
+        } = event
+        {
             self.session_id = Some(session_id);
             for msg in messages {
                 self.display_messages.push(DisplayMessage {
@@ -152,7 +161,7 @@ impl ClientApp {
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         let mut event_stream = EventStream::new();
         let mut reconnect_attempts = 0;
-        const MAX_RECONNECT_ATTEMPTS: u32 = 30;  // 30 seconds max
+        const MAX_RECONNECT_ATTEMPTS: u32 = 30; // 30 seconds max
 
         'outer: loop {
             // Connect to server
@@ -175,7 +184,8 @@ impl ClientApp {
                     if reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
                         self.display_messages.push(DisplayMessage {
                             role: "error".to_string(),
-                            content: "Failed to reconnect after 30 seconds. Press Ctrl+C to quit.".to_string(),
+                            content: "Failed to reconnect after 30 seconds. Press Ctrl+C to quit."
+                                .to_string(),
                             tool_calls: Vec::new(),
                             duration_secs: None,
                             title: None,
@@ -186,7 +196,9 @@ impl ClientApp {
                         loop {
                             if let Some(Ok(Event::Key(key))) = event_stream.next().await {
                                 if key.kind == KeyEventKind::Press {
-                                    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    if key.code == KeyCode::Char('c')
+                                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                                    {
                                         break 'outer;
                                     }
                                 }
@@ -221,14 +233,18 @@ impl ClientApp {
             // Subscribe to server events and get history
             {
                 // Subscribe first
-                let request = Request::Subscribe { id: self.next_request_id };
+                let request = Request::Subscribe {
+                    id: self.next_request_id,
+                };
                 self.next_request_id += 1;
                 let json = serde_json::to_string(&request)? + "\n";
                 let mut w = writer.lock().await;
                 w.write_all(json.as_bytes()).await?;
 
                 // Request history to restore display state
-                let request = Request::GetHistory { id: self.next_request_id };
+                let request = Request::GetHistory {
+                    id: self.next_request_id,
+                };
                 self.next_request_id += 1;
                 let json = serde_json::to_string(&request)? + "\n";
                 w.write_all(json.as_bytes()).await?;
@@ -311,14 +327,19 @@ impl ClientApp {
             ServerEvent::ToolExec { id, name } => {
                 // Tool is about to execute - if it's edit/write, cache the file content
                 if show_diffs_enabled() && (name == "edit" || name == "write") {
-                    if let Ok(input) = serde_json::from_str::<serde_json::Value>(&self.current_tool_input) {
+                    if let Ok(input) =
+                        serde_json::from_str::<serde_json::Value>(&self.current_tool_input)
+                    {
                         if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
                             // Read current file content (sync is fine here, it's quick)
                             let original = std::fs::read_to_string(file_path).unwrap_or_default();
-                            self.pending_diffs.insert(id.clone(), PendingFileDiff {
-                                file_path: file_path.to_string(),
-                                original_content: original,
-                            });
+                            self.pending_diffs.insert(
+                                id.clone(),
+                                PendingFileDiff {
+                                    file_path: file_path.to_string(),
+                                    original_content: original,
+                                },
+                            );
                         }
                     }
                 }
@@ -327,21 +348,31 @@ impl ClientApp {
                 self.current_tool_name = None;
                 self.current_tool_input.clear();
             }
-            ServerEvent::ToolDone { id, name, output, .. } => {
+            ServerEvent::ToolDone {
+                id, name, output, ..
+            } => {
                 // Check if we have a pending diff for this tool
                 if let Some(pending) = self.pending_diffs.remove(&id) {
                     // Read the file again and generate diff
-                    let new_content = std::fs::read_to_string(&pending.file_path).unwrap_or_default();
-                    let diff = generate_unified_diff(&pending.original_content, &new_content, &pending.file_path);
+                    let new_content =
+                        std::fs::read_to_string(&pending.file_path).unwrap_or_default();
+                    let diff = generate_unified_diff(
+                        &pending.original_content,
+                        &new_content,
+                        &pending.file_path,
+                    );
                     if !diff.is_empty() {
-                        self.streaming_text.push_str(&format!("\n[{}] {}\n{}\n", name, pending.file_path, diff));
+                        self.streaming_text
+                            .push_str(&format!("\n[{}] {}\n{}\n", name, pending.file_path, diff));
                     } else {
                         // No changes or couldn't generate diff, show original output
-                        self.streaming_text.push_str(&format!("\n[{}] {}\n", name, output));
+                        self.streaming_text
+                            .push_str(&format!("\n[{}] {}\n", name, output));
                     }
                 } else {
                     // No pending diff, just show the output
-                    self.streaming_text.push_str(&format!("\n[{}] {}\n", name, output));
+                    self.streaming_text
+                        .push_str(&format!("\n[{}] {}\n", name, output));
                 }
             }
             ServerEvent::Done { .. } => {
@@ -384,7 +415,11 @@ impl ClientApp {
                     tool_data: None,
                 });
             }
-            ServerEvent::History { messages, session_id, .. } => {
+            ServerEvent::History {
+                messages,
+                session_id,
+                ..
+            } => {
                 self.session_id = Some(session_id);
                 // Only load history on first connect, not on reconnect
                 // (we already have display_messages in memory on reconnect)
@@ -425,6 +460,32 @@ impl ClientApp {
                     });
                     self.status_notice = Some((format!("Model → {}", model), Instant::now()));
                 }
+            }
+            ServerEvent::Notification {
+                from_session,
+                from_name,
+                notification_type,
+                message,
+            } => {
+                let from = from_name.unwrap_or_else(|| from_session.chars().take(8).collect());
+                let prefix = match notification_type {
+                    NotificationType::FileConflict { path, .. } => {
+                        format!("⚠️ File conflict ({})", path)
+                    }
+                    NotificationType::SharedContext { key, .. } => {
+                        format!("📤 Context shared: {}", key)
+                    }
+                    NotificationType::Message => "💬 Message".to_string(),
+                };
+                self.display_messages.push(DisplayMessage {
+                    role: "notification".to_string(),
+                    content: format!("{}\nFrom: {}\n\n{}", prefix, from, message),
+                    tool_calls: Vec::new(),
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+                self.status_notice = Some(("Notification received".to_string(), Instant::now()));
             }
             _ => {}
         }
@@ -470,7 +531,9 @@ impl ClientApp {
 
                     // Handle /reload specially
                     if input.trim() == "/reload" {
-                        let request = Request::Reload { id: self.next_request_id };
+                        let request = Request::Reload {
+                            id: self.next_request_id,
+                        };
                         self.next_request_id += 1;
                         let json = serde_json::to_string(&request)? + "\n";
                         let mut w = writer.lock().await;
@@ -522,7 +585,6 @@ impl ClientApp {
         }
         Ok(())
     }
-
 }
 
 /// Generate a unified diff between two strings
@@ -606,10 +668,7 @@ impl TuiState for ClientApp {
     fn command_suggestions(&self) -> Vec<(&'static str, &'static str)> {
         // Basic command suggestions for client
         if self.input.starts_with('/') {
-            vec![
-                ("/reload", "Reload server code"),
-                ("/quit", "Quit client"),
-            ]
+            vec![("/reload", "Reload server code"), ("/quit", "Quit client")]
         } else {
             Vec::new()
         }
@@ -648,7 +707,8 @@ impl TuiState for ClientApp {
     }
 
     fn session_display_name(&self) -> Option<String> {
-        self.session_id.as_ref()
+        self.session_id
+            .as_ref()
             .and_then(|id| crate::id::extract_session_name(id))
             .map(|s| s.to_string())
     }
@@ -673,5 +733,9 @@ impl TuiState for ClientApp {
 
     fn animation_elapsed(&self) -> f32 {
         self.app_started.elapsed().as_secs_f32()
+    }
+
+    fn rate_limit_remaining(&self) -> Option<Duration> {
+        None // Rate limits handled by server in client mode
     }
 }

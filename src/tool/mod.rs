@@ -1,29 +1,29 @@
 #![allow(dead_code)]
-
 #![allow(dead_code)]
 
-mod codesearch;
-mod bash;
 mod apply_patch;
+mod bash;
 mod batch;
+mod codesearch;
 mod conversation_search;
 mod edit;
 mod glob;
 mod grep;
 mod invalid;
 mod ls;
+mod lsp;
 pub mod mcp;
 mod multiedit;
 mod patch;
 mod read;
+pub mod selfdev;
 mod skill;
-mod lsp;
+mod communicate;
 mod task;
 mod todo;
 mod webfetch;
 mod websearch;
 mod write;
-pub mod selfdev;
 
 use crate::compaction::CompactionManager;
 use crate::message::ToolDefinition;
@@ -126,40 +126,88 @@ impl Registry {
         let mut tools_map = HashMap::new();
 
         // File operations
-        tools_map.insert("read".to_string(), Arc::new(read::ReadTool::new()) as Arc<dyn Tool>);
-        tools_map.insert("write".to_string(), Arc::new(write::WriteTool::new()) as Arc<dyn Tool>);
-        tools_map.insert("edit".to_string(), Arc::new(edit::EditTool::new()) as Arc<dyn Tool>);
-        tools_map.insert("multiedit".to_string(), Arc::new(multiedit::MultiEditTool::new()) as Arc<dyn Tool>);
-        tools_map.insert("patch".to_string(), Arc::new(patch::PatchTool::new()) as Arc<dyn Tool>);
+        tools_map.insert(
+            "read".to_string(),
+            Arc::new(read::ReadTool::new()) as Arc<dyn Tool>,
+        );
+        tools_map.insert(
+            "write".to_string(),
+            Arc::new(write::WriteTool::new()) as Arc<dyn Tool>,
+        );
+        tools_map.insert(
+            "edit".to_string(),
+            Arc::new(edit::EditTool::new()) as Arc<dyn Tool>,
+        );
+        tools_map.insert(
+            "multiedit".to_string(),
+            Arc::new(multiedit::MultiEditTool::new()) as Arc<dyn Tool>,
+        );
+        tools_map.insert(
+            "patch".to_string(),
+            Arc::new(patch::PatchTool::new()) as Arc<dyn Tool>,
+        );
         tools_map.insert(
             "apply_patch".to_string(),
             Arc::new(apply_patch::ApplyPatchTool::new()) as Arc<dyn Tool>,
         );
 
         // Search and navigation
-        tools_map.insert("glob".to_string(), Arc::new(glob::GlobTool::new()) as Arc<dyn Tool>);
-        tools_map.insert("grep".to_string(), Arc::new(grep::GrepTool::new()) as Arc<dyn Tool>);
-        tools_map.insert("ls".to_string(), Arc::new(ls::LsTool::new()) as Arc<dyn Tool>);
+        tools_map.insert(
+            "glob".to_string(),
+            Arc::new(glob::GlobTool::new()) as Arc<dyn Tool>,
+        );
+        tools_map.insert(
+            "grep".to_string(),
+            Arc::new(grep::GrepTool::new()) as Arc<dyn Tool>,
+        );
+        tools_map.insert(
+            "ls".to_string(),
+            Arc::new(ls::LsTool::new()) as Arc<dyn Tool>,
+        );
 
         // Execution
-        tools_map.insert("bash".to_string(), Arc::new(bash::BashTool::new()) as Arc<dyn Tool>);
+        tools_map.insert(
+            "bash".to_string(),
+            Arc::new(bash::BashTool::new()) as Arc<dyn Tool>,
+        );
 
         // Web
-        tools_map.insert("webfetch".to_string(), Arc::new(webfetch::WebFetchTool::new()) as Arc<dyn Tool>);
-        tools_map.insert("websearch".to_string(), Arc::new(websearch::WebSearchTool::new()) as Arc<dyn Tool>);
+        tools_map.insert(
+            "webfetch".to_string(),
+            Arc::new(webfetch::WebFetchTool::new()) as Arc<dyn Tool>,
+        );
+        tools_map.insert(
+            "websearch".to_string(),
+            Arc::new(websearch::WebSearchTool::new()) as Arc<dyn Tool>,
+        );
         tools_map.insert(
             "codesearch".to_string(),
             Arc::new(codesearch::CodeSearchTool::new()) as Arc<dyn Tool>,
         );
 
         // Meta tools
-        tools_map.insert("invalid".to_string(), Arc::new(invalid::InvalidTool::new()) as Arc<dyn Tool>);
-        tools_map.insert("skill_manage".to_string(), Arc::new(skill::SkillTool::new(skills)) as Arc<dyn Tool>);
-        tools_map.insert("lsp".to_string(), Arc::new(lsp::LspTool::new()) as Arc<dyn Tool>);
+        tools_map.insert(
+            "invalid".to_string(),
+            Arc::new(invalid::InvalidTool::new()) as Arc<dyn Tool>,
+        );
+        tools_map.insert(
+            "skill_manage".to_string(),
+            Arc::new(skill::SkillTool::new(skills)) as Arc<dyn Tool>,
+        );
+        tools_map.insert(
+            "lsp".to_string(),
+            Arc::new(lsp::LspTool::new()) as Arc<dyn Tool>,
+        );
         let task_tool = task::TaskTool::new(provider, registry.clone());
         tools_map.insert("task".to_string(), Arc::new(task_tool) as Arc<dyn Tool>);
-        tools_map.insert("todowrite".to_string(), Arc::new(todo::TodoWriteTool::new()) as Arc<dyn Tool>);
-        tools_map.insert("todoread".to_string(), Arc::new(todo::TodoReadTool::new()) as Arc<dyn Tool>);
+        tools_map.insert(
+            "todowrite".to_string(),
+            Arc::new(todo::TodoWriteTool::new()) as Arc<dyn Tool>,
+        );
+        tools_map.insert(
+            "todoread".to_string(),
+            Arc::new(todo::TodoReadTool::new()) as Arc<dyn Tool>,
+        );
 
         // Add batch with a reference to the registry
         let batch_tool = batch::BatchTool::new(registry.clone());
@@ -167,7 +215,16 @@ impl Registry {
 
         // Conversation search for RAG over compacted history
         let search_tool = conversation_search::ConversationSearchTool::new(compaction);
-        tools_map.insert("conversation_search".to_string(), Arc::new(search_tool) as Arc<dyn Tool>);
+        tools_map.insert(
+            "conversation_search".to_string(),
+            Arc::new(search_tool) as Arc<dyn Tool>,
+        );
+
+        // Agent communication tool
+        tools_map.insert(
+            "communicate".to_string(),
+            Arc::new(communicate::CommunicateTool::new()) as Arc<dyn Tool>,
+        );
 
         // Populate the registry
         *registry.tools.write().await = tools_map;
@@ -176,13 +233,14 @@ impl Registry {
     }
 
     /// Get all tool definitions for the API
-    pub async fn definitions(&self, allowed_tools: Option<&HashSet<String>>) -> Vec<ToolDefinition> {
+    pub async fn definitions(
+        &self,
+        allowed_tools: Option<&HashSet<String>>,
+    ) -> Vec<ToolDefinition> {
         let tools = self.tools.read().await;
         tools
             .iter()
-            .filter(|(name, _)| {
-                allowed_tools.map(|set| set.contains(*name)).unwrap_or(true)
-            })
+            .filter(|(name, _)| allowed_tools.map(|set| set.contains(*name)).unwrap_or(true))
             .map(|(_, tool)| tool.to_definition())
             .collect()
     }
@@ -215,7 +273,8 @@ impl Registry {
     /// Register self-dev tools (only for canary/self-dev sessions)
     pub async fn register_selfdev_tools(&self) {
         let tool = selfdev::SelfDevTool::new();
-        self.register("selfdev".to_string(), Arc::new(tool) as Arc<dyn Tool>).await;
+        self.register("selfdev".to_string(), Arc::new(tool) as Arc<dyn Tool>)
+            .await;
     }
 
     /// Unregister a tool

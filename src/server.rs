@@ -1,19 +1,53 @@
 #![allow(dead_code)]
-
 #![allow(dead_code)]
 
 use crate::agent::Agent;
-use crate::protocol::{decode_request, encode_event, HistoryMessage, Request, ServerEvent};
+use crate::bus::{Bus, BusEvent, FileOp};
+use crate::protocol::{
+    decode_request, encode_event, AgentInfo, ContextEntry, HistoryMessage, NotificationType,
+    Request, ServerEvent,
+};
 use crate::provider::Provider;
 use crate::tool::Registry;
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
+
+/// Record of a file access by an agent
+#[derive(Clone, Debug)]
+pub struct FileAccess {
+    pub session_id: String,
+    pub op: FileOp,
+    pub timestamp: Instant,
+    pub summary: Option<String>,
+}
+
+/// Information about a session in a swarm
+#[derive(Clone, Debug)]
+pub struct SwarmMember {
+    pub session_id: String,
+    /// Channel to send events to this session
+    pub event_tx: mpsc::UnboundedSender<ServerEvent>,
+    /// Working directory (used for auto-swarm by cwd)
+    pub working_dir: Option<PathBuf>,
+    /// Friendly name like "fox"
+    pub friendly_name: Option<String>,
+}
+
+/// A shared context entry stored by the server
+#[derive(Clone, Debug)]
+pub struct SharedContext {
+    pub key: String,
+    pub value: String,
+    pub from_session: String,
+    pub from_name: Option<String>,
+}
 
 /// Default socket path for main communication
 pub fn socket_path() -> PathBuf {
@@ -47,6 +81,14 @@ pub struct Server {
     session_id: Arc<RwLock<String>>,
     /// Number of connected clients
     client_count: Arc<RwLock<usize>>,
+    /// Track file touches: path -> list of accesses
+    file_touches: Arc<RwLock<HashMap<PathBuf, Vec<FileAccess>>>>,
+    /// Swarm members: session_id -> SwarmMember info
+    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    /// Swarm groupings by working directory: canonical cwd -> set of session_ids
+    swarms_by_cwd: Arc<RwLock<HashMap<PathBuf, HashSet<String>>>>,
+    /// Shared context by swarm (cwd -> key -> SharedContext)
+    shared_context: Arc<RwLock<HashMap<PathBuf, HashMap<String, SharedContext>>>>,
 }
 
 impl Server {
@@ -62,6 +104,164 @@ impl Server {
             is_processing: Arc::new(RwLock::new(false)),
             session_id: Arc::new(RwLock::new(String::new())),
             client_count: Arc::new(RwLock::new(0)),
+            file_touches: Arc::new(RwLock::new(HashMap::new())),
+            swarm_members: Arc::new(RwLock::new(HashMap::new())),
+            swarms_by_cwd: Arc::new(RwLock::new(HashMap::new())),
+            shared_context: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Monitor the global Bus for FileTouch events and detect conflicts
+    async fn monitor_bus(
+        file_touches: Arc<RwLock<HashMap<PathBuf, Vec<FileAccess>>>>,
+        swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+        swarms_by_cwd: Arc<RwLock<HashMap<PathBuf, HashSet<String>>>>,
+        sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    ) {
+        let mut receiver = Bus::global().subscribe();
+
+        loop {
+            match receiver.recv().await {
+                Ok(BusEvent::FileTouch(touch)) => {
+                    let path = touch.path.clone();
+                    let session_id = touch.session_id.clone();
+
+                    // Record this touch
+                    {
+                        let mut touches = file_touches.write().await;
+                        let accesses = touches.entry(path.clone()).or_insert_with(Vec::new);
+                        accesses.push(FileAccess {
+                            session_id: session_id.clone(),
+                            op: touch.op.clone(),
+                            timestamp: Instant::now(),
+                            summary: touch.summary.clone(),
+                        });
+                    }
+
+                    // Find the swarm this session belongs to
+                    let swarm_session_ids: Vec<String> = {
+                        let members = swarm_members.read().await;
+                        if let Some(member) = members.get(&session_id) {
+                            if let Some(ref cwd) = member.working_dir {
+                                let swarms = swarms_by_cwd.read().await;
+                                if let Some(swarm) = swarms.get(cwd) {
+                                    swarm.iter().cloned().collect()
+                                } else {
+                                    vec![]
+                                }
+                            } else {
+                                vec![]
+                            }
+                        } else {
+                            vec![]
+                        }
+                    };
+
+                    // Check if any other session in the same swarm has touched this file
+                    let previous_touches: Vec<FileAccess> = {
+                        let touches = file_touches.read().await;
+                        if let Some(accesses) = touches.get(&path) {
+                            accesses
+                                .iter()
+                                .filter(|a| {
+                                    a.session_id != session_id
+                                        && swarm_session_ids.contains(&a.session_id)
+                                })
+                                .cloned()
+                                .collect()
+                        } else {
+                            vec![]
+                        }
+                    };
+
+                    // If there are previous touches from swarm members, send alerts
+                    if !previous_touches.is_empty() {
+                        let members = swarm_members.read().await;
+                        let current_member = members.get(&session_id);
+                        let current_name = current_member.and_then(|m| m.friendly_name.clone());
+                        let agent_sessions = sessions.read().await;
+
+                        // Alert the current agent about previous touches
+                        if let Some(member) = current_member {
+                            for prev in &previous_touches {
+                                let prev_member = members.get(&prev.session_id);
+                                let prev_name = prev_member.and_then(|m| m.friendly_name.clone());
+                                let alert_msg = format!(
+                                    "File conflict: {} ({}) - Another agent ({}) previously {} this file{}",
+                                    path.display(),
+                                    touch.op.as_str(),
+                                    prev_name.as_deref().unwrap_or(&prev.session_id[..8]),
+                                    prev.op.as_str(),
+                                    prev.summary
+                                        .as_ref()
+                                        .map(|s| format!(": {}", s))
+                                        .unwrap_or_default()
+                                );
+                                let notification = ServerEvent::Notification {
+                                    from_session: prev.session_id.clone(),
+                                    from_name: prev_name,
+                                    notification_type: NotificationType::FileConflict {
+                                        path: path.display().to_string(),
+                                        operation: prev.op.as_str().to_string(),
+                                    },
+                                    message: alert_msg.clone(),
+                                };
+                                let _ = member.event_tx.send(notification);
+
+                                // Also push to the agent's pending alerts
+                                if let Some(agent) = agent_sessions.get(&session_id) {
+                                    if let Ok(mut agent) = agent.try_lock() {
+                                        agent.push_alert(alert_msg);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Alert previous agents about the current touch
+                        for prev in &previous_touches {
+                            if let Some(prev_member) = members.get(&prev.session_id) {
+                                let alert_msg = format!(
+                                    "File conflict: {} - Another agent ({}) just {} this file you previously worked with{}",
+                                    path.display(),
+                                    current_name.as_deref().unwrap_or(&session_id[..8.min(session_id.len())]),
+                                    touch.op.as_str(),
+                                    touch
+                                        .summary
+                                        .as_ref()
+                                        .map(|s| format!(": {}", s))
+                                        .unwrap_or_default()
+                                );
+                                let notification = ServerEvent::Notification {
+                                    from_session: session_id.clone(),
+                                    from_name: current_name.clone(),
+                                    notification_type: NotificationType::FileConflict {
+                                        path: path.display().to_string(),
+                                        operation: touch.op.as_str().to_string(),
+                                    },
+                                    message: alert_msg.clone(),
+                                };
+                                let _ = prev_member.event_tx.send(notification);
+
+                                // Also push to the agent's pending alerts
+                                if let Some(agent) = agent_sessions.get(&prev.session_id) {
+                                    if let Ok(mut agent) = agent.try_lock() {
+                                        agent.push_alert(alert_msg);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // Ignore other events
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    eprintln!("Bus monitor lagged by {} events", n);
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    break;
+                }
+            }
         }
     }
 
@@ -76,6 +276,21 @@ impl Server {
 
         eprintln!("Server listening on {:?}", self.socket_path);
         eprintln!("Debug socket on {:?}", self.debug_socket_path);
+
+        // Spawn the bus monitor for swarm coordination
+        let monitor_file_touches = Arc::clone(&self.file_touches);
+        let monitor_swarm_members = Arc::clone(&self.swarm_members);
+        let monitor_swarms_by_cwd = Arc::clone(&self.swarms_by_cwd);
+        let monitor_sessions = Arc::clone(&self.sessions);
+        tokio::spawn(async move {
+            Self::monitor_bus(
+                monitor_file_touches,
+                monitor_swarm_members,
+                monitor_swarms_by_cwd,
+                monitor_sessions,
+            )
+            .await;
+        });
 
         // Create default session
         let agent = Agent::new(Arc::clone(&self.provider), self.registry.clone());
@@ -94,6 +309,10 @@ impl Server {
         let main_is_processing = Arc::clone(&self.is_processing);
         let main_session_id = Arc::clone(&self.session_id);
         let main_client_count = Arc::clone(&self.client_count);
+        let main_swarm_members = Arc::clone(&self.swarm_members);
+        let main_swarms_by_cwd = Arc::clone(&self.swarms_by_cwd);
+        let main_shared_context = Arc::clone(&self.shared_context);
+        let main_file_touches = Arc::clone(&self.file_touches);
 
         let main_handle = tokio::spawn(async move {
             loop {
@@ -106,6 +325,10 @@ impl Server {
                         let is_processing = Arc::clone(&main_is_processing);
                         let session_id = Arc::clone(&main_session_id);
                         let client_count = Arc::clone(&main_client_count);
+                        let swarm_members = Arc::clone(&main_swarm_members);
+                        let swarms_by_cwd = Arc::clone(&main_swarms_by_cwd);
+                        let shared_context = Arc::clone(&main_shared_context);
+                        let file_touches = Arc::clone(&main_file_touches);
 
                         // Increment client count
                         *client_count.write().await += 1;
@@ -120,6 +343,10 @@ impl Server {
                                 is_processing,
                                 session_id,
                                 Arc::clone(&client_count),
+                                swarm_members,
+                                swarms_by_cwd,
+                                shared_context,
+                                file_touches,
                             )
                             .await;
 
@@ -182,6 +409,10 @@ async fn handle_client(
     _global_is_processing: Arc<RwLock<bool>>,
     _global_session_id: Arc<RwLock<String>>,
     client_count: Arc<RwLock<usize>>,
+    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_cwd: Arc<RwLock<HashMap<PathBuf, HashSet<String>>>>,
+    shared_context: Arc<RwLock<HashMap<PathBuf, HashMap<String, SharedContext>>>>,
+    file_touches: Arc<RwLock<HashMap<PathBuf, Vec<FileAccess>>>>,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -194,6 +425,7 @@ async fn handle_client(
     // Create a new session for this client
     let new_agent = Agent::new(Arc::clone(&provider), registry.clone());
     let client_session_id = new_agent.session_id().to_string();
+    let friendly_name = new_agent.session_short_name().map(|s| s.to_string());
     let agent = Arc::new(Mutex::new(new_agent));
     {
         let mut sessions_guard = sessions.write().await;
@@ -201,7 +433,34 @@ async fn handle_client(
     }
 
     // Per-client event channel (not shared with other clients)
-    let (client_event_tx, mut client_event_rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
+    let (client_event_tx, mut client_event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
+
+    // Get the working directory for swarm grouping
+    let working_dir = std::env::current_dir().ok();
+
+    // Register this client as a swarm member
+    {
+        let mut members = swarm_members.write().await;
+        members.insert(
+            client_session_id.clone(),
+            SwarmMember {
+                session_id: client_session_id.clone(),
+                event_tx: client_event_tx.clone(),
+                working_dir: working_dir.clone(),
+                friendly_name: friendly_name.clone(),
+            },
+        );
+
+        // Add to swarm by working directory
+        if let Some(ref cwd) = working_dir {
+            let mut swarms = swarms_by_cwd.write().await;
+            swarms
+                .entry(cwd.clone())
+                .or_insert_with(HashSet::new)
+                .insert(client_session_id.clone());
+        }
+    }
 
     // Spawn event forwarder for this client only
     let writer_clone = Arc::clone(&writer);
@@ -264,7 +523,12 @@ async fn handle_client(
                 client_is_processing = true;
 
                 // Process message with streaming to this client's channel
-                let result = process_message_streaming_mpsc(Arc::clone(&agent), &content, client_event_tx.clone()).await;
+                let result = process_message_streaming_mpsc(
+                    Arc::clone(&agent),
+                    &content,
+                    client_event_tx.clone(),
+                )
+                .await;
 
                 // Clear processing flag
                 client_is_processing = false;
@@ -304,9 +568,7 @@ async fn handle_client(
                     sessions_guard.insert(new_id.clone(), Arc::clone(&agent));
                 }
 
-                let _ = client_event_tx.send(ServerEvent::SessionId {
-                    session_id: new_id,
-                });
+                let _ = client_event_tx.send(ServerEvent::SessionId { session_id: new_id });
                 let _ = client_event_tx.send(ServerEvent::Done { id });
             }
 
@@ -451,16 +713,15 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::ModelChanged {
                         id,
                         model: provider.model(),
-                        error: Some("Model switching is not available for this provider.".to_string()),
+                        error: Some(
+                            "Model switching is not available for this provider.".to_string(),
+                        ),
                     });
                     continue;
                 }
 
                 let current = provider.model();
-                let current_index = models
-                    .iter()
-                    .position(|m| *m == current)
-                    .unwrap_or(0);
+                let current_index = models.iter().position(|m| *m == current).unwrap_or(0);
                 let len = models.len();
                 let next_index = if direction >= 0 {
                     (current_index + 1) % len
@@ -527,7 +788,12 @@ async fn handle_client(
 
             Request::AgentTask { id, task, .. } => {
                 // Process as a message on this client's agent
-                let result = process_message_streaming_mpsc(Arc::clone(&agent), &task, client_event_tx.clone()).await;
+                let result = process_message_streaming_mpsc(
+                    Arc::clone(&agent),
+                    &task,
+                    client_event_tx.clone(),
+                )
+                .await;
                 match result {
                     Ok(()) => {
                         let _ = client_event_tx.send(ServerEvent::Done { id });
@@ -548,6 +814,235 @@ async fn handle_client(
             Request::AgentContext { id } => {
                 let _ = client_event_tx.send(ServerEvent::Done { id });
             }
+
+            // === Agent communication ===
+            Request::CommShare {
+                id,
+                session_id: req_session_id,
+                key,
+                value,
+            } => {
+                // Find the swarm (cwd) for this session
+                let cwd = {
+                    let members = swarm_members.read().await;
+                    members
+                        .get(&req_session_id)
+                        .and_then(|m| m.working_dir.clone())
+                };
+
+                if let Some(cwd) = cwd {
+                    let friendly_name = {
+                        let members = swarm_members.read().await;
+                        members.get(&req_session_id).and_then(|m| m.friendly_name.clone())
+                    };
+
+                    // Store the shared context
+                    {
+                        let mut ctx = shared_context.write().await;
+                        let swarm_ctx = ctx.entry(cwd.clone()).or_insert_with(HashMap::new);
+                        swarm_ctx.insert(
+                            key.clone(),
+                            SharedContext {
+                                key: key.clone(),
+                                value: value.clone(),
+                                from_session: req_session_id.clone(),
+                                from_name: friendly_name.clone(),
+                            },
+                        );
+                    }
+
+                    // Notify other swarm members
+                    let swarm_session_ids: Vec<String> = {
+                        let swarms = swarms_by_cwd.read().await;
+                        swarms
+                            .get(&cwd)
+                            .map(|s| s.iter().cloned().collect())
+                            .unwrap_or_default()
+                    };
+
+                    let members = swarm_members.read().await;
+                    for sid in &swarm_session_ids {
+                        if sid != &req_session_id {
+                            if let Some(member) = members.get(sid) {
+                                let _ = member.event_tx.send(ServerEvent::Notification {
+                                    from_session: req_session_id.clone(),
+                                    from_name: friendly_name.clone(),
+                                    notification_type: NotificationType::SharedContext {
+                                        key: key.clone(),
+                                        value: value.clone(),
+                                    },
+                                    message: format!("Shared context: {} = {}", key, value),
+                                });
+                            }
+                        }
+                    }
+                }
+                let _ = client_event_tx.send(ServerEvent::Done { id });
+            }
+
+            Request::CommRead {
+                id,
+                session_id: req_session_id,
+                key,
+            } => {
+                // Find the swarm (cwd) for this session
+                let cwd = {
+                    let members = swarm_members.read().await;
+                    members
+                        .get(&req_session_id)
+                        .and_then(|m| m.working_dir.clone())
+                };
+
+                let entries = if let Some(cwd) = cwd {
+                    let ctx = shared_context.read().await;
+                    if let Some(swarm_ctx) = ctx.get(&cwd) {
+                        let entries: Vec<ContextEntry> = if let Some(k) = key {
+                            // Get specific key
+                            swarm_ctx
+                                .get(&k)
+                                .map(|c| vec![ContextEntry {
+                                    key: c.key.clone(),
+                                    value: c.value.clone(),
+                                    from_session: c.from_session.clone(),
+                                    from_name: c.from_name.clone(),
+                                }])
+                                .unwrap_or_default()
+                        } else {
+                            // Get all
+                            swarm_ctx
+                                .values()
+                                .map(|c| ContextEntry {
+                                    key: c.key.clone(),
+                                    value: c.value.clone(),
+                                    from_session: c.from_session.clone(),
+                                    from_name: c.from_name.clone(),
+                                })
+                                .collect()
+                        };
+                        entries
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                };
+
+                let _ = client_event_tx.send(ServerEvent::CommContext { id, entries });
+            }
+
+            Request::CommMessage {
+                id,
+                from_session,
+                message,
+            } => {
+                // Find the swarm (cwd) for this session
+                let cwd = {
+                    let members = swarm_members.read().await;
+                    members.get(&from_session).and_then(|m| m.working_dir.clone())
+                };
+
+                if let Some(cwd) = cwd {
+                    let friendly_name = {
+                        let members = swarm_members.read().await;
+                        members.get(&from_session).and_then(|m| m.friendly_name.clone())
+                    };
+
+                    // Send to all swarm members except sender
+                    let swarm_session_ids: Vec<String> = {
+                        let swarms = swarms_by_cwd.read().await;
+                        swarms
+                            .get(&cwd)
+                            .map(|s| s.iter().cloned().collect())
+                            .unwrap_or_default()
+                    };
+
+                    let members = swarm_members.read().await;
+                    let sessions = sessions.read().await;
+                    for sid in &swarm_session_ids {
+                        if sid != &from_session {
+                            if let Some(member) = members.get(sid) {
+                                let notification_msg = format!(
+                                    "Message from {}: {}",
+                                    friendly_name.as_deref().unwrap_or(&from_session[..8.min(from_session.len())]),
+                                    message
+                                );
+                                let _ = member.event_tx.send(ServerEvent::Notification {
+                                    from_session: from_session.clone(),
+                                    from_name: friendly_name.clone(),
+                                    notification_type: NotificationType::Message,
+                                    message: notification_msg.clone(),
+                                });
+
+                                // Also push to the agent's pending alerts
+                                if let Some(agent) = sessions.get(sid) {
+                                    if let Ok(mut agent) = agent.try_lock() {
+                                        agent.push_alert(notification_msg);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let _ = client_event_tx.send(ServerEvent::Done { id });
+            }
+
+            Request::CommList {
+                id,
+                session_id: req_session_id,
+            } => {
+                // Find the swarm (cwd) for this session
+                let cwd = {
+                    let members = swarm_members.read().await;
+                    members
+                        .get(&req_session_id)
+                        .and_then(|m| m.working_dir.clone())
+                };
+
+                let member_list = if let Some(cwd) = cwd {
+                    let swarm_session_ids: Vec<String> = {
+                        let swarms = swarms_by_cwd.read().await;
+                        swarms
+                            .get(&cwd)
+                            .map(|s| s.iter().cloned().collect())
+                            .unwrap_or_default()
+                    };
+
+                    let members = swarm_members.read().await;
+                    let touches = file_touches.read().await;
+
+                    swarm_session_ids
+                        .iter()
+                        .filter_map(|sid| {
+                            members.get(sid).map(|m| {
+                                // Get files this member has touched
+                                let files: Vec<String> = touches
+                                    .iter()
+                                    .filter_map(|(path, accesses)| {
+                                        if accesses.iter().any(|a| &a.session_id == sid) {
+                                            Some(path.display().to_string())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect();
+
+                                AgentInfo {
+                                    session_id: sid.clone(),
+                                    friendly_name: m.friendly_name.clone(),
+                                    files_touched: files,
+                                }
+                            })
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                };
+
+                let _ = client_event_tx.send(ServerEvent::CommMembers {
+                    id,
+                    members: member_list,
+                });
+            }
         }
     }
 
@@ -555,6 +1050,24 @@ async fn handle_client(
     {
         let mut sessions_guard = sessions.write().await;
         sessions_guard.remove(&client_session_id);
+    }
+
+    // Clean up: remove from swarm tracking
+    {
+        let mut members = swarm_members.write().await;
+        if let Some(member) = members.remove(&client_session_id) {
+            // Remove from swarm by cwd
+            if let Some(ref cwd) = member.working_dir {
+                let mut swarms = swarms_by_cwd.write().await;
+                if let Some(swarm) = swarms.get_mut(cwd) {
+                    swarm.remove(&client_session_id);
+                    // Remove empty swarms
+                    if swarm.is_empty() {
+                        swarms.remove(cwd);
+                    }
+                }
+            }
+        }
     }
 
     event_handle.abort();
@@ -806,7 +1319,11 @@ fn get_repo_dir() -> Option<PathBuf> {
     // Fallback: check relative to executable
     if let Ok(exe) = std::env::current_exe() {
         // Assume structure: repo/target/release/jcode
-        if let Some(repo) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+        if let Some(repo) = exe
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+        {
             if repo.join(".git").exists() {
                 return Some(repo.to_path_buf());
             }
@@ -820,7 +1337,8 @@ fn get_repo_dir() -> Option<PathBuf> {
 fn do_server_reload() -> Result<()> {
     use std::os::unix::process::CommandExt;
 
-    let repo_dir = get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
+    let repo_dir =
+        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
     eprintln!("Server hot-reload starting...");
 
@@ -855,9 +1373,7 @@ fn do_server_reload() -> Result<()> {
     }
 
     // Exec into new binary with serve command
-    let err = ProcessCommand::new(&exe)
-        .arg("serve")
-        .exec();
+    let err = ProcessCommand::new(&exe).arg("serve").exec();
 
     // exec() only returns on error
     Err(anyhow::anyhow!("Failed to exec: {}", err))
