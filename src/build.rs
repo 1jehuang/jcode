@@ -399,6 +399,14 @@ pub fn install_version(repo_dir: &std::path::Path, hash: &str) -> Result<PathBuf
     storage::ensure_dir(&dest_dir)?;
 
     let dest = dest_dir.join("jcode");
+
+    // Remove existing file first to avoid "Text file busy" error (ETXTBSY)
+    // when the binary is currently being executed. Unlinking is allowed
+    // on running executables, but writing to them is not.
+    if dest.exists() {
+        std::fs::remove_file(&dest)?;
+    }
+
     std::fs::copy(&source, &dest)?;
 
     // Make executable
