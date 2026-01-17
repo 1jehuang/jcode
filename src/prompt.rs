@@ -32,7 +32,9 @@ pub fn build_system_prompt(skill_prompt: Option<&str>, available_skills: &[Skill
         for skill in available_skills {
             skills_section.push_str(&format!("\n- `/{} ` - {}", skill.name, skill.description));
         }
-        skills_section.push_str("\n\nWhen a user asks about available skills or capabilities, mention these skills.");
+        skills_section.push_str(
+            "\n\nWhen a user asks about available skills or capabilities, mention these skills.",
+        );
         parts.push(skills_section);
     }
 
@@ -95,10 +97,7 @@ fn get_git_info() -> Option<String> {
     }
 
     // Short status (modified files count)
-    if let Ok(output) = Command::new("git")
-        .args(["status", "--porcelain"])
-        .output()
-    {
+    if let Ok(output) = Command::new("git").args(["status", "--porcelain"]).output() {
         if output.status.success() {
             let status = String::from_utf8_lossy(&output.stdout);
             let modified: Vec<&str> = status.lines().take(5).collect();
@@ -153,5 +152,48 @@ fn load_claude_md_files() -> Option<String> {
         None
     } else {
         Some(contents.join("\n\n"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify the default system prompt does NOT identify as "Claude Code"
+    /// It's fine to say "powered by Claude" but not "Claude Code" (Anthropic's product)
+    #[test]
+    fn test_default_system_prompt_no_claude_code_identity() {
+        let prompt = DEFAULT_SYSTEM_PROMPT.to_lowercase();
+
+        assert!(
+            !prompt.contains("claude code"),
+            "DEFAULT_SYSTEM_PROMPT should NOT identify as 'Claude Code'. Found in system.txt"
+        );
+        assert!(
+            !prompt.contains("claude-code"),
+            "DEFAULT_SYSTEM_PROMPT should NOT contain 'claude-code'. Found in system.txt"
+        );
+    }
+
+    /// Verify skill prompts don't accidentally introduce "Claude Code" identity
+    #[test]
+    fn test_skill_prompt_integration() {
+        // Test that a skill prompt is properly appended and doesn't break anything
+        let skill_prompt = "You are helping with a debugging task.";
+        let prompt = build_system_prompt(Some(skill_prompt), &[]);
+
+        // The prompt should contain our default system prompt
+        assert!(prompt.contains("jcode, an independent AI coding agent"));
+
+        // The prompt should contain the skill prompt
+        assert!(prompt.contains(skill_prompt));
+
+        // The base prompt parts (excluding user CLAUDE.md files) should NOT contain "Claude Code"
+        // We check DEFAULT_SYSTEM_PROMPT separately since user files may legitimately contain it
+        let default_lower = DEFAULT_SYSTEM_PROMPT.to_lowercase();
+        assert!(
+            !default_lower.contains("claude code"),
+            "DEFAULT_SYSTEM_PROMPT should NOT identify as 'Claude Code'"
+        );
     }
 }

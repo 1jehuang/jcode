@@ -41,8 +41,8 @@ pub struct OpenAIProvider {
 impl OpenAIProvider {
     pub fn new(credentials: CodexCredentials) -> Self {
         // Check for model override from environment
-        let model = std::env::var("JCODE_OPENAI_MODEL")
-            .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let model =
+            std::env::var("JCODE_OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
         Self {
             client: Client::new(),
@@ -75,7 +75,10 @@ impl OpenAIProvider {
         }
 
         let refreshed = oauth::refresh_openai_tokens(&tokens.refresh_token).await?;
-        let id_token = refreshed.id_token.clone().or_else(|| tokens.id_token.clone());
+        let id_token = refreshed
+            .id_token
+            .clone()
+            .or_else(|| tokens.id_token.clone());
         let account_id = tokens.account_id.clone();
 
         *tokens = CodexCredentials {
@@ -290,10 +293,12 @@ impl OpenAIResponsesStream {
                     return self.pending.pop_front();
                 }
                 "response.failed" | "error" => {
-                    let message = extract_error_message(&event.response).unwrap_or_else(|| {
-                        "OpenAI response stream error".to_string()
+                    let message = extract_error_message(&event.response)
+                        .unwrap_or_else(|| "OpenAI response stream error".to_string());
+                    return Some(StreamEvent::Error {
+                        message,
+                        retry_after_secs: None, // TODO: Extract from response headers if available
                     });
-                    return Some(StreamEvent::Error(message));
                 }
                 _ => {}
             }
@@ -406,7 +411,7 @@ impl Provider for OpenAIProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
         system: &str,
-        _resume_session_id: Option<&str>,  // Not used by OpenAI provider
+        _resume_session_id: Option<&str>, // Not used by OpenAI provider
     ) -> Result<EventStream> {
         let input = build_responses_input(messages);
         let api_tools = build_tools(tools);
@@ -472,13 +477,18 @@ impl Provider for OpenAIProvider {
         // Allow any model (OpenAI may have models we don't know about)
         // But warn if it's not in our known list
         if !AVAILABLE_MODELS.contains(&model) {
-            eprintln!("Warning: '{}' is not in the known model list, but will try anyway", model);
+            eprintln!(
+                "Warning: '{}' is not in the known model list, but will try anyway",
+                model
+            );
         }
         if let Ok(mut current) = self.model.try_write() {
             *current = model.to_string();
             Ok(())
         } else {
-            Err(anyhow::anyhow!("Cannot change model while a request is in progress"))
+            Err(anyhow::anyhow!(
+                "Cannot change model while a request is in progress"
+            ))
         }
     }
 
@@ -493,7 +503,9 @@ fn should_refresh_token(status: StatusCode, body: &str) -> bool {
     }
     if status == StatusCode::FORBIDDEN {
         let lower = body.to_lowercase();
-        return lower.contains("token") || lower.contains("expired") || lower.contains("unauthorized");
+        return lower.contains("token")
+            || lower.contains("expired")
+            || lower.contains("unauthorized");
     }
     false
 }

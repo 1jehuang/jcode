@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-
 #![allow(dead_code)]
 
 use anyhow::Result;
@@ -83,11 +82,9 @@ impl SkillRegistry {
         // Parse YAML frontmatter
         let (frontmatter, body) = Self::parse_frontmatter(&content)?;
 
-        let allowed_tools = frontmatter.allowed_tools.map(|s| {
-            s.split(',')
-                .map(|t| t.trim().to_string())
-                .collect()
-        });
+        let allowed_tools = frontmatter
+            .allowed_tools
+            .map(|s| s.split(',').map(|t| t.trim().to_string()).collect());
 
         Ok(Skill {
             name: frontmatter.name,
@@ -107,7 +104,9 @@ impl SkillRegistry {
         }
 
         let rest = &content[3..];
-        let end = rest.find("---").ok_or_else(|| anyhow::anyhow!("Unclosed frontmatter"))?;
+        let end = rest
+            .find("---")
+            .ok_or_else(|| anyhow::anyhow!("Unclosed frontmatter"))?;
 
         let yaml = &rest[..end];
         let body = rest[end + 3..].trim().to_string();
@@ -211,15 +210,16 @@ impl Skill {
     pub fn get_prompt(&self) -> String {
         format!(
             "# Skill: {}\n\n{}\n\n{}",
-            self.name,
-            self.description,
-            self.content
+            self.name, self.description, self.content
         )
     }
 
     /// Load additional files from the skill directory
     pub fn load_file(&self, filename: &str) -> Result<String> {
-        let skill_dir = self.path.parent().ok_or_else(|| anyhow::anyhow!("No parent dir"))?;
+        let skill_dir = self
+            .path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("No parent dir"))?;
         let file_path = skill_dir.join(filename);
         Ok(std::fs::read_to_string(file_path)?)
     }

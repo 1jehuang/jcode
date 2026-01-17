@@ -162,12 +162,12 @@ async fn main() -> Result<()> {
         cases.push(ToolCase {
             name: "websearch",
             label: "websearch rust async",
-            input: json!({"query": "rust async await"}), 
+            input: json!({"query": "rust async await"}),
         });
         cases.push(ToolCase {
             name: "codesearch",
             label: "codesearch tokio spawn",
-            input: json!({"query": "tokio::spawn"}), 
+            input: json!({"query": "tokio::spawn"}),
         });
     }
 

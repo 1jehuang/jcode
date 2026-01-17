@@ -1,7 +1,7 @@
+use futures::StreamExt;
+use jcode::message::{ContentBlock, Message, ToolDefinition};
 use jcode::provider::claude::ClaudeProvider;
 use jcode::provider::Provider;
-use jcode::message::{Message, ContentBlock, ToolDefinition};
-use futures::StreamExt;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -11,7 +11,7 @@ async fn main() -> anyhow::Result<()> {
     let messages = vec![Message {
         role: jcode::message::Role::User,
         content: vec![ContentBlock::Text {
-            text: "Say hello in exactly 5 words.".to_string()
+            text: "Say hello in exactly 5 words.".to_string(),
         }],
     }];
 

@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-
 #![allow(dead_code)]
 
 use super::{Registry, Tool, ToolContext, ToolOutput};
@@ -90,17 +89,13 @@ impl Tool for TaskTool {
 
         session.save()?;
 
-        let mut allowed: HashSet<String> = self
-            .registry
-            .tool_names()
-            .await
-            .into_iter()
-            .collect();
+        let mut allowed: HashSet<String> = self.registry.tool_names().await.into_iter().collect();
         for blocked in ["task", "todowrite", "todoread"] {
             allowed.remove(blocked);
         }
 
-        let summary_map: Arc<Mutex<HashMap<String, ToolSummary>>> = Arc::new(Mutex::new(HashMap::new()));
+        let summary_map: Arc<Mutex<HashMap<String, ToolSummary>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let summary_map_handle = summary_map.clone();
         let session_id = session.id.clone();
 
@@ -187,5 +182,8 @@ impl Tool for TaskTool {
 }
 
 fn task_title(params: &TaskInput) -> String {
-    format!("{} (@{} subagent)", params.description, params.subagent_type)
+    format!(
+        "{} (@{} subagent)",
+        params.description, params.subagent_type
+    )
 }

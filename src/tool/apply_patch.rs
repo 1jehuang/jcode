@@ -88,7 +88,10 @@ impl Tool for ApplyPatchTool {
         if !unified.trim().is_empty() {
             let patch_tool = super::patch::PatchTool::new();
             let patch_result = patch_tool
-                .execute(json!({"patch_text": unified}), ctx.for_subcall("patch".to_string()))
+                .execute(
+                    json!({"patch_text": unified}),
+                    ctx.for_subcall("patch".to_string()),
+                )
                 .await?;
             results.push(patch_result.output);
         }

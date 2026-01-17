@@ -29,9 +29,7 @@ fn main() {
         .output()
         .ok();
 
-    let dirty = output
-        .map(|o| !o.stdout.is_empty())
-        .unwrap_or(false);
+    let dirty = output.map(|o| !o.stdout.is_empty()).unwrap_or(false);
 
     let dirty_suffix = if dirty { "-dirty" } else { "" };
 
@@ -49,7 +47,10 @@ fn main() {
     // Set environment variables for compilation
     println!("cargo:rustc-env=JCODE_GIT_HASH={}", git_hash);
     println!("cargo:rustc-env=JCODE_GIT_DATE={}", git_date);
-    println!("cargo:rustc-env=JCODE_VERSION={} ({}{})", git_date, git_hash, dirty_suffix);
+    println!(
+        "cargo:rustc-env=JCODE_VERSION={} ({}{})",
+        git_date, git_hash, dirty_suffix
+    );
     println!("cargo:rustc-env=JCODE_CHANGELOG={}", changelog);
 
     // Re-run if git HEAD changes

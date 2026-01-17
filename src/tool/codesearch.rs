@@ -110,11 +110,7 @@ impl Tool for CodeSearchTool {
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "Code search error ({}): {}",
-                status,
-                text
-            ));
+            return Err(anyhow::anyhow!("Code search error ({}): {}", status, text));
         }
 
         let response_text = response.text().await?;
@@ -128,13 +124,16 @@ impl Tool for CodeSearchTool {
                                 output.truncate(MAX_OUTPUT_LEN);
                                 output.push_str("\n... (truncated)");
                             }
-                            return Ok(ToolOutput::new(output).with_title(format!("codesearch: {}", params.query)));
+                            return Ok(ToolOutput::new(output)
+                                .with_title(format!("codesearch: {}", params.query)));
                         }
                     }
                 }
             }
         }
 
-        Ok(ToolOutput::new("No code snippets found. Try a different query."))
+        Ok(ToolOutput::new(
+            "No code snippets found. Try a different query.",
+        ))
     }
 }

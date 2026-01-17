@@ -24,7 +24,9 @@ async fn test_simple_response() -> Result<()> {
     provider.queue_response(vec![
         StreamEvent::TextDelta("Hello! ".to_string()),
         StreamEvent::TextDelta("How can I help?".to_string()),
-        StreamEvent::MessageEnd { stop_reason: Some("end_turn".to_string()) },
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".to_string()),
+        },
         StreamEvent::SessionId("test-session-123".to_string()),
     ]);
 
@@ -46,14 +48,18 @@ async fn test_multi_turn_conversation() -> Result<()> {
     // First turn response
     provider.queue_response(vec![
         StreamEvent::TextDelta("I'll remember that.".to_string()),
-        StreamEvent::MessageEnd { stop_reason: Some("end_turn".to_string()) },
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".to_string()),
+        },
         StreamEvent::SessionId("session-abc".to_string()),
     ]);
 
     // Second turn response
     provider.queue_response(vec![
         StreamEvent::TextDelta("You said hello earlier.".to_string()),
-        StreamEvent::MessageEnd { stop_reason: Some("end_turn".to_string()) },
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".to_string()),
+        },
         StreamEvent::SessionId("session-abc".to_string()),
     ]);
 
@@ -78,9 +84,14 @@ async fn test_token_usage() -> Result<()> {
     let provider = MockProvider::new();
 
     provider.queue_response(vec![
-        StreamEvent::TokenUsage { input_tokens: Some(10), output_tokens: Some(20) },
+        StreamEvent::TokenUsage {
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+        },
         StreamEvent::TextDelta("Response".to_string()),
-        StreamEvent::MessageEnd { stop_reason: Some("end_turn".to_string()) },
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".to_string()),
+        },
         StreamEvent::SessionId("session-123".to_string()),
     ]);
 
@@ -101,7 +112,7 @@ async fn test_stream_error() -> Result<()> {
 
     provider.queue_response(vec![
         StreamEvent::TextDelta("Starting...".to_string()),
-        StreamEvent::Error("Something went wrong".to_string()),
+        StreamEvent::Error { message: "Something went wrong".to_string(), retry_after_secs: None },
     ]);
 
     let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
@@ -110,7 +121,10 @@ async fn test_stream_error() -> Result<()> {
 
     let result = agent.run_once_capture("Test").await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Something went wrong"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Something went wrong"));
 
     Ok(())
 }
@@ -176,5 +190,61 @@ async fn test_socket_model_cycle_openai_codex52() -> Result<()> {
     }
 
     assert!(saw_model_changed, "Did not receive model_changed event");
+    Ok(())
+}
+
+/// Test that the system prompt does NOT identify the agent as "Claude Code"
+/// The agent should identify as "jcode" or just a generic "coding assistant powered by Claude"
+#[tokio::test]
+async fn test_system_prompt_no_claude_code_identity() -> Result<()> {
+    let provider = Arc::new(MockProvider::new());
+
+    // Queue a simple response
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("I'm a coding assistant.".to_string()),
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".to_string()),
+        },
+        StreamEvent::SessionId("test-identity-123".to_string()),
+    ]);
+
+    // Keep a clone of Arc<MockProvider> before converting to Arc<dyn Provider>
+    let provider_for_check = provider.clone();
+    let provider_dyn: Arc<dyn jcode::provider::Provider> = provider;
+    let registry = Registry::new(provider_dyn.clone()).await;
+    let mut agent = Agent::new(provider_dyn, registry);
+
+    // Run a simple query - we just need to trigger a complete() call
+    let _ = agent.run_once_capture("Who are you?").await?;
+
+    // Get the captured system prompt from our Arc<MockProvider>
+    let captured_prompts = provider_for_check.captured_system_prompts.lock().unwrap();
+
+    assert!(
+        !captured_prompts.is_empty(),
+        "No system prompts were captured"
+    );
+
+    let system_prompt = &captured_prompts[0];
+
+    // The system prompt should NOT contain "Claude Code" (case insensitive check)
+    let lower_prompt = system_prompt.to_lowercase();
+    assert!(
+        !lower_prompt.contains("claude code"),
+        "System prompt should NOT identify as 'Claude Code'. Found: {}",
+        system_prompt
+    );
+
+    // The system prompt should NOT contain common Claude Code identifiers
+    assert!(
+        !lower_prompt.contains("claude-code"),
+        "System prompt should NOT contain 'claude-code'. Found: {}",
+        system_prompt
+    );
+
+    // It's OK if it says "powered by Claude" or just "Claude" (the model name)
+    // It's OK if it says "jcode" or "coding assistant"
+    // Just not "Claude Code" as that's the Anthropic product name
+
     Ok(())
 }

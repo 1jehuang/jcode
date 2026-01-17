@@ -72,11 +72,7 @@ impl Tool for WebSearchTool {
             urlencoding::encode(&params.query)
         );
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await?;
+        let response = self.client.get(&url).send().await?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
@@ -89,7 +85,10 @@ impl Tool for WebSearchTool {
         let results = parse_ddg_results(&html, num_results);
 
         if results.is_empty() {
-            return Ok(ToolOutput::new(format!("No results found for: {}", params.query)));
+            return Ok(ToolOutput::new(format!(
+                "No results found for: {}",
+                params.query
+            )));
         }
 
         // Format results
@@ -116,13 +115,13 @@ fn parse_ddg_results(html: &str, max_results: usize) -> Vec<SearchResult> {
     // Each contains <a class="result__a"> for title/URL and <a class="result__snippet"> for snippet
 
     // Simple regex-based parsing (not as robust as a proper HTML parser, but works for DDG)
-    let result_re = regex::Regex::new(
-        r#"<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>"#
-    ).unwrap();
+    let result_re =
+        regex::Regex::new(r#"<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>"#)
+            .unwrap();
 
-    let snippet_re = regex::Regex::new(
-        r#"<a[^>]*class="result__snippet"[^>]*>([^<]*(?:<[^>]*>[^<]*)*)</a>"#
-    ).unwrap();
+    let snippet_re =
+        regex::Regex::new(r#"<a[^>]*class="result__snippet"[^>]*>([^<]*(?:<[^>]*>[^<]*)*)</a>"#)
+            .unwrap();
 
     // Find all result links
     let links: Vec<_> = result_re.captures_iter(html).collect();
@@ -164,7 +163,10 @@ fn decode_ddg_url(url: &str) -> String {
     // DDG wraps URLs like //duckduckgo.com/l/?uddg=ACTUAL_URL&...
     if let Some(uddg_start) = url.find("uddg=") {
         let start = uddg_start + 5;
-        let end = url[start..].find('&').map(|i| start + i).unwrap_or(url.len());
+        let end = url[start..]
+            .find('&')
+            .map(|i| start + i)
+            .unwrap_or(url.len());
         let encoded = &url[start..end];
         urlencoding::decode(encoded)
             .map(|s| s.to_string())

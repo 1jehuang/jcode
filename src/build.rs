@@ -17,7 +17,11 @@ pub fn get_repo_dir() -> Option<PathBuf> {
     // Fallback: check relative to executable
     if let Ok(exe) = std::env::current_exe() {
         // Assume structure: repo/target/release/jcode
-        if let Some(repo) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+        if let Some(repo) = exe
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+        {
             if repo.join(".git").exists() {
                 return Some(repo.to_path_buf());
             }
@@ -189,7 +193,13 @@ impl BuildManifest {
     }
 
     /// Record a crash
-    pub fn record_crash(&mut self, hash: &str, exit_code: i32, stderr: &str, diff: Option<String>) -> Result<()> {
+    pub fn record_crash(
+        &mut self,
+        hash: &str,
+        exit_code: i32,
+        stderr: &str,
+        diff: Option<String>,
+    ) -> Result<()> {
         self.last_crash = Some(CrashInfo {
             build_hash: hash.to_string(),
             exit_code,
@@ -257,7 +267,9 @@ pub fn canary_binary_path() -> Result<PathBuf> {
 
 /// Get path to migration context file
 pub fn migration_context_path(session_id: &str) -> Result<PathBuf> {
-    Ok(builds_dir()?.join("migrations").join(format!("{}.json", session_id)))
+    Ok(builds_dir()?
+        .join("migrations")
+        .join(format!("{}.json", session_id)))
 }
 
 /// Get path to stable version file (watched by other sessions)
@@ -461,7 +473,7 @@ pub fn update_canary_symlink(hash: &str) -> Result<()> {
 /// Rebuild canary binary from current working tree
 /// Returns the new git hash
 pub fn rebuild_canary(repo_dir: &std::path::Path) -> Result<String> {
-    // Build release binary
+    // Build release binary (goes to target/release/jcode)
     eprintln!("Building release binary...");
     let status = Command::new("cargo")
         .args(["build", "--release"])
@@ -472,35 +484,8 @@ pub fn rebuild_canary(repo_dir: &std::path::Path) -> Result<String> {
         anyhow::bail!("Build failed");
     }
 
-    // Run tests
-    eprintln!("Running tests...");
-    let status = Command::new("cargo")
-        .args(["test", "--release"])
-        .current_dir(repo_dir)
-        .status()?;
-
-    if !status.success() {
-        anyhow::bail!("Tests failed - not updating canary");
-    }
-
-    // Get build info
-    let info = current_build_info(repo_dir)?;
-    let hash = info.hash.clone();
-
-    // Install to versions directory
-    eprintln!("Installing version {}...", hash);
-    install_version(repo_dir, &hash)?;
-
-    // Update canary symlink
-    update_canary_symlink(&hash)?;
-
-    // Update manifest
-    let mut manifest = BuildManifest::load()?;
-    manifest.canary = Some(hash.clone());
-    manifest.canary_status = Some(CanaryStatus::Testing);
-    manifest.add_to_history(info)?;
-
-    eprintln!("Canary updated to {}", hash);
+    let hash = current_git_hash(repo_dir)?;
+    eprintln!("✓ Build complete ({})", hash);
     Ok(hash)
 }
 
@@ -530,7 +515,7 @@ mod tests {
 
         // Other sessions should get stable (or current if no stable)
         match manifest.binary_for_session("other_session") {
-            BinaryChoice::Current => {},
+            BinaryChoice::Current => {}
             _ => panic!("Expected current binary"),
         }
     }

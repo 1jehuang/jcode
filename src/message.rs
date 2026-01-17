@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
@@ -117,7 +116,11 @@ pub enum StreamEvent {
         output_tokens: Option<u64>,
     },
     /// Error occurred
-    Error(String),
+    Error {
+        message: String,
+        /// Seconds until rate limit resets (if this is a rate limit error)
+        retry_after_secs: Option<u64>,
+    },
     /// Provider session ID (for conversation resume)
     SessionId(String),
     /// Compaction occurred (context was summarized)

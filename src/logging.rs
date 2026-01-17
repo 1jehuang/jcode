@@ -4,11 +4,11 @@
 
 #![allow(dead_code)]
 
+use chrono::Local;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use chrono::Local;
 
 static LOGGER: Mutex<Option<Logger>> = Mutex::new(None);
 
@@ -82,8 +82,12 @@ pub fn debug(message: &str) {
 
 /// Log a tool call
 pub fn tool_call(name: &str, input: &str, output: &str) {
-    let msg = format!("TOOL[{}] input={} output={}", name,
-        truncate(input, 200), truncate(output, 500));
+    let msg = format!(
+        "TOOL[{}] input={} output={}",
+        name,
+        truncate(input, 200),
+        truncate(output, 500)
+    );
     if let Ok(mut guard) = LOGGER.lock() {
         if let Some(logger) = guard.as_mut() {
             logger.write("TOOL", &msg);

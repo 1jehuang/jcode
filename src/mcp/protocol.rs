@@ -156,9 +156,7 @@ pub enum ContentBlock {
         mime_type: String,
     },
     #[serde(rename = "resource")]
-    Resource {
-        resource: ResourceContent,
-    },
+    Resource { resource: ResourceContent },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -242,7 +240,8 @@ mod tests {
 
     #[test]
     fn test_json_rpc_error_response() {
-        let json = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid Request"}}"#;
+        let json =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid Request"}}"#;
         let response: JsonRpcResponse = serde_json::from_str(json).unwrap();
         assert!(response.error.is_some());
         let err = response.error.unwrap();

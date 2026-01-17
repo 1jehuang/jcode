@@ -4,6 +4,7 @@
 
 - **Commit as you go** - Make small, focused commits after completing each feature or fix
 - **Push when done** - Push all commits to remote when finishing a task or session
+- **No AI co-author** - Never include `Co-Authored-By` lines in commits
 - **Rebuild and install when done** - Run `cargo build --release && cp target/release/jcode ~/.local/bin/`
 - **Test before committing** - Run `cargo test` to verify changes
 

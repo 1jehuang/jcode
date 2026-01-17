@@ -13,6 +13,8 @@ pub struct MockProvider {
     responses: Mutex<VecDeque<Vec<StreamEvent>>>,
     models: Vec<&'static str>,
     current_model: Mutex<String>,
+    /// Captured system prompts from complete() calls (for testing)
+    pub captured_system_prompts: Mutex<Vec<String>>,
 }
 
 impl MockProvider {
@@ -21,6 +23,7 @@ impl MockProvider {
             responses: Mutex::new(VecDeque::new()),
             models: Vec::new(),
             current_model: Mutex::new("mock".to_string()),
+            captured_system_prompts: Mutex::new(Vec::new()),
         }
     }
 
@@ -33,6 +36,7 @@ impl MockProvider {
             responses: Mutex::new(VecDeque::new()),
             models,
             current_model: Mutex::new(current),
+            captured_system_prompts: Mutex::new(Vec::new()),
         }
     }
 
@@ -48,9 +52,15 @@ impl Provider for MockProvider {
         &self,
         _messages: &[Message],
         _tools: &[ToolDefinition],
-        _system: &str,
+        system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        // Capture the system prompt for testing
+        self.captured_system_prompts
+            .lock()
+            .unwrap()
+            .push(system.to_string());
+
         let events = self
             .responses
             .lock()

@@ -19,7 +19,11 @@ pub struct McpTool {
 }
 
 impl McpTool {
-    pub fn new(server_name: String, tool_def: McpToolDef, manager: Arc<RwLock<McpManager>>) -> Self {
+    pub fn new(
+        server_name: String,
+        tool_def: McpToolDef,
+        manager: Arc<RwLock<McpManager>>,
+    ) -> Self {
         Self {
             server_name,
             tool_def,
@@ -41,10 +45,7 @@ impl Tool for McpTool {
     }
 
     fn description(&self) -> &str {
-        self.tool_def
-            .description
-            .as_deref()
-            .unwrap_or("MCP tool")
+        self.tool_def.description.as_deref().unwrap_or("MCP tool")
     }
 
     fn parameters_schema(&self) -> Value {

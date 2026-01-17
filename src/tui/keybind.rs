@@ -46,8 +46,10 @@ pub fn load_model_switch_keys() -> ModelSwitchKeys {
         modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
     };
 
-    let next_raw = std::env::var("JCODE_MODEL_SWITCH_KEY").unwrap_or_else(|_| "ctrl+tab".to_string());
-    let prev_raw = std::env::var("JCODE_MODEL_SWITCH_PREV_KEY").unwrap_or_else(|_| "ctrl+shift+tab".to_string());
+    let next_raw =
+        std::env::var("JCODE_MODEL_SWITCH_KEY").unwrap_or_else(|_| "ctrl+tab".to_string());
+    let prev_raw = std::env::var("JCODE_MODEL_SWITCH_PREV_KEY")
+        .unwrap_or_else(|_| "ctrl+shift+tab".to_string());
 
     let (next, next_label) = parse_or_default(&next_raw, default_next, "Ctrl+Tab");
     let (prev, prev_label) = parse_optional(&prev_raw, default_prev, "Ctrl+Shift+Tab");
@@ -67,7 +69,11 @@ fn parse_or_default(raw: &str, fallback: KeyBinding, fallback_label: &str) -> (K
     }
 }
 
-fn parse_optional(raw: &str, fallback: KeyBinding, fallback_label: &str) -> (Option<KeyBinding>, Option<String>) {
+fn parse_optional(
+    raw: &str,
+    fallback: KeyBinding,
+    fallback_label: &str,
+) -> (Option<KeyBinding>, Option<String>) {
     let raw = raw.trim();
     if raw.is_empty() || is_disabled(raw) {
         return (None, None);
@@ -94,7 +100,11 @@ fn parse_keybinding(raw: &str) -> Option<KeyBinding> {
         return None;
     }
     let lower = raw.to_ascii_lowercase();
-    let parts: Vec<&str> = lower.split('+').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let parts: Vec<&str> = lower
+        .split('+')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
     if parts.is_empty() {
         return None;
     }

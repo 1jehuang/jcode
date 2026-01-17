@@ -9,30 +9,97 @@ pub fn new_id(prefix: &str) -> String {
 /// Session names with their icons - only words with specific emojis
 const SESSION_NAMES: &[(&str, &str)] = &[
     // Animals
-    ("ant", "🐜"), ("bat", "🦇"), ("bee", "🐝"), ("cat", "🐱"), ("cow", "🐄"),
-    ("dog", "🐕"), ("fox", "🦊"), ("owl", "🦉"), ("pig", "🐷"), ("rat", "🐀"),
-    ("bear", "🐻"), ("bird", "🐦"), ("crab", "🦀"), ("crow", "🐦‍⬛"), ("deer", "🦌"),
-    ("dove", "🕊️"), ("duck", "🦆"), ("frog", "🐸"), ("goat", "🐐"), ("hawk", "🦅"),
-    ("lion", "🦁"), ("moth", "🦋"), ("swan", "🦢"), ("wolf", "🐺"), ("zebra", "🦓"),
-    ("eagle", "🦅"), ("goose", "🪿"), ("horse", "🐴"), ("koala", "🐨"), ("llama", "🦙"),
-    ("moose", "🫎"), ("mouse", "🐭"), ("otter", "🦦"), ("panda", "🐼"), ("raven", "🐦‍⬛"),
-    ("shark", "🦈"), ("sheep", "🐑"), ("sloth", "🦥"), ("snail", "🐌"), ("snake", "🐍"),
-    ("squid", "🦑"), ("tiger", "🐯"), ("whale", "🐋"), ("turtle", "🐢"), ("rabbit", "🐰"),
-    ("parrot", "🦜"), ("falcon", "🦅"), ("jaguar", "🐆"), ("lizard", "🦎"),
+    ("ant", "🐜"),
+    ("bat", "🦇"),
+    ("bee", "🐝"),
+    ("cat", "🐱"),
+    ("cow", "🐄"),
+    ("dog", "🐕"),
+    ("fox", "🦊"),
+    ("owl", "🦉"),
+    ("pig", "🐷"),
+    ("rat", "🐀"),
+    ("bear", "🐻"),
+    ("bird", "🐦"),
+    ("crab", "🦀"),
+    ("crow", "🐦‍⬛"),
+    ("deer", "🦌"),
+    ("dove", "🕊️"),
+    ("duck", "🦆"),
+    ("frog", "🐸"),
+    ("goat", "🐐"),
+    ("hawk", "🦅"),
+    ("lion", "🦁"),
+    ("moth", "🦋"),
+    ("swan", "🦢"),
+    ("wolf", "🐺"),
+    ("zebra", "🦓"),
+    ("eagle", "🦅"),
+    ("goose", "🪿"),
+    ("horse", "🐴"),
+    ("koala", "🐨"),
+    ("llama", "🦙"),
+    ("moose", "🫎"),
+    ("mouse", "🐭"),
+    ("otter", "🦦"),
+    ("panda", "🐼"),
+    ("raven", "🐦‍⬛"),
+    ("shark", "🦈"),
+    ("sheep", "🐑"),
+    ("sloth", "🦥"),
+    ("snail", "🐌"),
+    ("snake", "🐍"),
+    ("squid", "🦑"),
+    ("tiger", "🐯"),
+    ("whale", "🐋"),
+    ("turtle", "🐢"),
+    ("rabbit", "🐰"),
+    ("parrot", "🦜"),
+    ("falcon", "🦅"),
+    ("jaguar", "🐆"),
+    ("lizard", "🦎"),
     // Nature
-    ("sun", "☀️"), ("moon", "🌙"), ("star", "⭐"), ("fire", "🔥"), ("snow", "❄️"),
-    ("rain", "🌧️"), ("wind", "💨"), ("wave", "🌊"), ("leaf", "🍃"), ("tree", "🌲"),
-    ("rose", "🌹"), ("pine", "🌲"), ("oak", "🌳"), ("fern", "🌿"), ("moss", "🌱"),
-    ("cloud", "☁️"), ("storm", "⛈️"), ("frost", "🥶"), ("coral", "🪸"),
-    ("gem", "💎"), ("jade", "💚"), ("pearl", "🦪"), ("amber", "🟠"),
-    ("lake", "🏞️"), ("river", "🏞️"), ("creek", "💧"), ("brook", "💧"),
-    ("rock", "🪨"), ("stone", "🪨"), ("cliff", "🏔️"), ("peak", "⛰️"), ("summit", "🏔️"),
-    ("meadow", "🌾"), ("grove", "🌳"), ("marsh", "🌿"),
+    ("sun", "☀️"),
+    ("moon", "🌙"),
+    ("star", "⭐"),
+    ("fire", "🔥"),
+    ("snow", "❄️"),
+    ("rain", "🌧️"),
+    ("wind", "💨"),
+    ("wave", "🌊"),
+    ("leaf", "🍃"),
+    ("tree", "🌲"),
+    ("rose", "🌹"),
+    ("pine", "🌲"),
+    ("oak", "🌳"),
+    ("fern", "🌿"),
+    ("moss", "🌱"),
+    ("cloud", "☁️"),
+    ("storm", "⛈️"),
+    ("frost", "🥶"),
+    ("coral", "🪸"),
+    ("gem", "💎"),
+    ("jade", "💚"),
+    ("pearl", "🦪"),
+    ("amber", "🟠"),
+    ("lake", "🏞️"),
+    ("river", "🏞️"),
+    ("creek", "💧"),
+    ("brook", "💧"),
+    ("rock", "🪨"),
+    ("stone", "🪨"),
+    ("cliff", "🏔️"),
+    ("peak", "⛰️"),
+    ("summit", "🏔️"),
+    ("meadow", "🌾"),
+    ("grove", "🌳"),
+    ("marsh", "🌿"),
 ];
 
 /// Get an emoji icon for a session name word
 pub fn session_icon(name: &str) -> &'static str {
-    SESSION_NAMES.iter()
+    SESSION_NAMES
+        .iter()
         .find(|(n, _)| *n == name)
         .map(|(_, icon)| *icon)
         .unwrap_or("💫")
@@ -61,7 +128,7 @@ pub fn new_memorable_session_id() -> (String, String) {
 pub fn extract_session_name(session_id: &str) -> Option<&str> {
     if session_id.starts_with("session_") {
         let rest = &session_id[8..]; // Skip "session_"
-        // Find the last underscore (before timestamp)
+                                     // Find the last underscore (before timestamp)
         if let Some(pos) = rest.rfind('_') {
             return Some(&rest[..pos]);
         }
@@ -88,14 +155,24 @@ mod tests {
 
         // Short name should have a specific icon (not default)
         let icon = session_icon(&short_name);
-        assert_ne!(icon, "💫", "Name '{}' should have a specific icon", short_name);
+        assert_ne!(
+            icon, "💫",
+            "Name '{}' should have a specific icon",
+            short_name
+        );
     }
 
     #[test]
     fn test_extract_session_name() {
         assert_eq!(extract_session_name("session_fox_1234567890"), Some("fox"));
-        assert_eq!(extract_session_name("session_blue-whale_1234567890"), Some("blue-whale"));
-        assert_eq!(extract_session_name("session_1234567890_9876543210"), Some("1234567890"));
+        assert_eq!(
+            extract_session_name("session_blue-whale_1234567890"),
+            Some("blue-whale")
+        );
+        assert_eq!(
+            extract_session_name("session_1234567890_9876543210"),
+            Some("1234567890")
+        );
         assert_eq!(extract_session_name("invalid"), None);
         assert_eq!(extract_session_name("session_"), None);
     }

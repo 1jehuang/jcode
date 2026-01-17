@@ -85,9 +85,11 @@ impl Tool for TodoWriteTool {
             .iter()
             .filter(|t| t.status != "completed")
             .count();
-        Ok(ToolOutput::new(serde_json::to_string_pretty(&params.todos)?)
-            .with_title(format!("{} todos", remaining))
-            .with_metadata(json!({"todos": params.todos})))
+        Ok(
+            ToolOutput::new(serde_json::to_string_pretty(&params.todos)?)
+                .with_title(format!("{} todos", remaining))
+                .with_metadata(json!({"todos": params.todos})),
+        )
     }
 }
 

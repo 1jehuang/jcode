@@ -1,9 +1,8 @@
 #![allow(dead_code)]
-
 #![allow(dead_code)]
 
-use anyhow::Result;
 use crate::auth::claude as claude_auth;
+use anyhow::Result;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -83,12 +82,14 @@ fn wait_for_callback(port: u16, expected_state: &str) -> Result<String> {
     let path = parts[1];
     let url = url::Url::parse(&format!("http://localhost{}", path))?;
 
-    let code = url.query_pairs()
+    let code = url
+        .query_pairs()
         .find(|(k, _)| k == "code")
         .map(|(_, v)| v.to_string())
         .ok_or_else(|| anyhow::anyhow!("No code in callback"))?;
 
-    let state = url.query_pairs()
+    let state = url
+        .query_pairs()
         .find(|(k, _)| k == "state")
         .map(|(_, v)| v.to_string())
         .ok_or_else(|| anyhow::anyhow!("No state in callback"))?;

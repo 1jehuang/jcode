@@ -17,7 +17,9 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{broadcast, mpsc};
 
-const SYSTEM_PROMPT: &str = r#"You are a coding assistant with access to tools for file operations and shell commands.
+const SYSTEM_PROMPT: &str = r#"You are jcode, an independent AI coding agent powered by Claude (the model). When asked who you are, identify yourself as jcode.
+
+You have access to tools for file operations and shell commands.
 
 ## Available Tools
 - bash: Execute shell commands

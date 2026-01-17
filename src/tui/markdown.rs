@@ -1,13 +1,12 @@
 #![allow(dead_code)]
-
 #![allow(dead_code)]
 
-use pulldown_cmark::{Event, Parser, Tag, TagEnd, CodeBlockKind, Options};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::prelude::*;
-use syntect::highlighting::{ThemeSet, Style as SynStyle};
-use syntect::parsing::SyntaxSet;
-use syntect::easy::HighlightLines;
 use std::sync::LazyLock;
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Style as SynStyle, ThemeSet};
+use syntect::parsing::SyntaxSet;
 
 // Syntax highlighting resources (loaded once)
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(|| SyntaxSet::load_defaults_newlines());
@@ -16,15 +15,15 @@ static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 // Colors matching ui.rs palette
 const CODE_BG: Color = Color::Rgb(45, 45, 45);
 const CODE_FG: Color = Color::Rgb(180, 180, 180);
-const TEXT_COLOR: Color = Color::Rgb(200, 200, 195);      // Soft warm white for AI text
-const BOLD_COLOR: Color = Color::Rgb(240, 240, 235);      // Slightly brighter for bold
-// Heading colors - warm gold/amber gradient by level
-const HEADING_H1_COLOR: Color = Color::Rgb(255, 215, 100);   // Bright gold for # H1
-const HEADING_H2_COLOR: Color = Color::Rgb(240, 190, 90);    // Gold for ## H2
-const HEADING_H3_COLOR: Color = Color::Rgb(220, 170, 80);    // Amber for ### H3
-const HEADING_COLOR: Color = Color::Rgb(200, 155, 75);       // Darker amber for #### and below
+const TEXT_COLOR: Color = Color::Rgb(200, 200, 195); // Soft warm white for AI text
+const BOLD_COLOR: Color = Color::Rgb(240, 240, 235); // Slightly brighter for bold
+                                                     // Heading colors - warm gold/amber gradient by level
+const HEADING_H1_COLOR: Color = Color::Rgb(255, 215, 100); // Bright gold for # H1
+const HEADING_H2_COLOR: Color = Color::Rgb(240, 190, 90); // Gold for ## H2
+const HEADING_H3_COLOR: Color = Color::Rgb(220, 170, 80); // Amber for ### H3
+const HEADING_COLOR: Color = Color::Rgb(200, 155, 75); // Darker amber for #### and below
 const DIM_COLOR: Color = Color::Rgb(100, 100, 100);
-const TABLE_COLOR: Color = Color::Rgb(150, 150, 150);     // Table borders/separators
+const TABLE_COLOR: Color = Color::Rgb(150, 150, 150); // Table borders/separators
 
 /// Render markdown text to styled ratatui Lines
 pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
@@ -76,7 +75,9 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
 
                     let heading_spans: Vec<Span<'static>> = current_spans
                         .drain(..)
-                        .map(|s| Span::styled(s.content.to_string(), Style::default().fg(color).bold()))
+                        .map(|s| {
+                            Span::styled(s.content.to_string(), Style::default().fg(color).bold())
+                        })
                         .collect();
                     lines.push(Line::from(heading_spans));
                 }
@@ -117,7 +118,10 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     lines.push(Line::from(spans));
                 }
                 // Add code block end indicator
-                lines.push(Line::from(Span::styled("└─", Style::default().fg(DIM_COLOR))));
+                lines.push(Line::from(Span::styled(
+                    "└─",
+                    Style::default().fg(DIM_COLOR),
+                )));
                 in_code_block = false;
                 code_block_lang = None;
                 code_block_content.clear();
@@ -138,7 +142,8 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     current_cell.push_str(&text);
                 } else {
                     // Check for "Thought for X.Xs" pattern and render dimmed
-                    let is_thinking_duration = text.starts_with("Thought for ") && text.ends_with('s');
+                    let is_thinking_duration =
+                        text.starts_with("Thought for ") && text.ends_with('s');
                     let style = if is_thinking_duration {
                         Style::default().fg(DIM_COLOR).italic()
                     } else {
@@ -320,7 +325,10 @@ fn render_table(rows: &[Vec<String>], max_width: Option<usize>) -> Vec<Line<'sta
                 .map(|&w| "─".repeat(w))
                 .collect::<Vec<_>>()
                 .join("─┼─");
-            lines.push(Line::from(Span::styled(separator, Style::default().fg(TABLE_COLOR))));
+            lines.push(Line::from(Span::styled(
+                separator,
+                Style::default().fg(TABLE_COLOR),
+            )));
         }
     }
 
@@ -352,10 +360,7 @@ fn highlight_code(code: &str, lang: Option<&str>) -> Vec<Line<'static>> {
                 let spans: Vec<Span<'static>> = ranges
                     .into_iter()
                     .map(|(style, text)| {
-                        Span::styled(
-                            text.to_string(),
-                            syntect_to_ratatui_style(style),
-                        )
+                        Span::styled(text.to_string(), syntect_to_ratatui_style(style))
                     })
                     .collect();
                 lines.push(Line::from(spans));
@@ -392,14 +397,10 @@ pub fn highlight_line(code: &str, ext: Option<&str>) -> Vec<Span<'static>> {
     let mut highlighter = HighlightLines::new(syntax, theme);
 
     match highlighter.highlight_line(code, &SYNTAX_SET) {
-        Ok(ranges) => {
-            ranges
-                .into_iter()
-                .map(|(style, text)| {
-                    Span::styled(text.to_string(), syntect_to_ratatui_style(style))
-                })
-                .collect()
-        }
+        Ok(ranges) => ranges
+            .into_iter()
+            .map(|(style, text)| Span::styled(text.to_string(), syntect_to_ratatui_style(style)))
+            .collect(),
         Err(_) => {
             vec![Span::raw(code.to_string())]
         }
@@ -408,7 +409,11 @@ pub fn highlight_line(code: &str, ext: Option<&str>) -> Vec<Span<'static>> {
 
 /// Highlight a full file and return spans for specific line numbers (1-indexed)
 /// Used for comparison logging with single-line approach
-pub fn highlight_file_lines(content: &str, ext: Option<&str>, line_numbers: &[usize]) -> Vec<(usize, Vec<Span<'static>>)> {
+pub fn highlight_file_lines(
+    content: &str,
+    ext: Option<&str>,
+    line_numbers: &[usize],
+) -> Vec<(usize, Vec<Span<'static>>)> {
     let syntax = ext
         .and_then(|e| SYNTAX_SET.find_syntax_by_extension(e))
         .or_else(|| ext.and_then(|e| SYNTAX_SET.find_syntax_by_token(e)))
@@ -516,7 +521,8 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
 
 /// Wrap multiple lines to fit within a given width
 pub fn wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
-    lines.into_iter()
+    lines
+        .into_iter()
         .flat_map(|line| wrap_line(line, width))
         .collect()
 }

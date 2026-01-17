@@ -76,7 +76,10 @@ impl Tool for LspTool {
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: LspInput = serde_json::from_value(input)?;
         if !OPERATIONS.contains(&params.operation.as_str()) {
-            return Err(anyhow::anyhow!("Unsupported LSP operation: {}", params.operation));
+            return Err(anyhow::anyhow!(
+                "Unsupported LSP operation: {}",
+                params.operation
+            ));
         }
 
         let path = Path::new(&params.file_path);

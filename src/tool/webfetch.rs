@@ -71,9 +71,7 @@ impl Tool for WebFetchTool {
 
         // Validate URL
         if !params.url.starts_with("http://") && !params.url.starts_with("https://") {
-            return Err(anyhow::anyhow!(
-                "URL must start with http:// or https://"
-            ));
+            return Err(anyhow::anyhow!("URL must start with http:// or https://"));
         }
 
         let timeout = params.timeout.unwrap_or(DEFAULT_TIMEOUT).min(MAX_TIMEOUT);
@@ -197,12 +195,15 @@ fn html_to_markdown(html: &str) -> String {
         let h_open = regex::Regex::new(&format!(r"(?i)<h{}[^>]*>", i)).unwrap();
         let h_close = regex::Regex::new(&format!(r"(?i)</h{}>", i)).unwrap();
         let prefix = "#".repeat(i);
-        md = h_open.replace_all(&md, &format!("\n{} ", prefix)).to_string();
+        md = h_open
+            .replace_all(&md, &format!("\n{} ", prefix))
+            .to_string();
         md = h_close.replace_all(&md, "\n").to_string();
     }
 
     // Convert links
-    let link_re = regex::Regex::new(r#"(?i)<a[^>]*href=["']([^"']+)["'][^>]*>([^<]*)</a>"#).unwrap();
+    let link_re =
+        regex::Regex::new(r#"(?i)<a[^>]*href=["']([^"']+)["'][^>]*>([^<]*)</a>"#).unwrap();
     md = link_re.replace_all(&md, "[$2]($1)").to_string();
 
     // Convert bold/strong

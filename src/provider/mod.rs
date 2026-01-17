@@ -33,7 +33,9 @@ pub trait Provider: Send + Sync {
 
     /// Set the model to use (returns error if model not supported)
     fn set_model(&self, _model: &str) -> Result<()> {
-        Err(anyhow::anyhow!("This provider does not support model switching"))
+        Err(anyhow::anyhow!(
+            "This provider does not support model switching"
+        ))
     }
 
     /// List available models for this provider
