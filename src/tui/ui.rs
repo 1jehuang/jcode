@@ -1267,22 +1267,8 @@ fn format_cache_status(
     cache_read_tokens: Option<u64>,
     cache_creation_tokens: Option<u64>,
 ) -> Option<String> {
-    if cache_read_tokens.is_none() && cache_creation_tokens.is_none() {
-        return None;
-    }
-
-    let read = cache_read_tokens.unwrap_or(0);
-    let write = cache_creation_tokens.unwrap_or(0);
-
-    if read > 0 && write > 0 {
-        Some(format!("cache r{} w{}", read, write))
-    } else if read > 0 {
-        Some(format!("cache hit {}", read))
-    } else if write > 0 {
-        Some(format!("cache write {}", write))
-    } else {
-        Some("cache miss".to_string())
-    }
+    let _ = (cache_read_tokens, cache_creation_tokens);
+    None
 }
 
 fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usize) {
