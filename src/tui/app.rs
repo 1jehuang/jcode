@@ -1968,6 +1968,17 @@ impl App {
                     self.cursor_pos = start;
                     return Ok(());
                 }
+                KeyCode::Char('i') => {
+                    // Alt+I: toggle info widget
+                    super::info_widget::toggle_enabled();
+                    let status = if super::info_widget::is_enabled() {
+                        "Info widget: ON"
+                    } else {
+                        "Info widget: OFF"
+                    };
+                    self.set_status_notice(status);
+                    return Ok(());
+                }
                 _ => {}
             }
         }
