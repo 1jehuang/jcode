@@ -78,6 +78,12 @@ pub fn set_socket_path(path: &str) {
     std::env::set_var("JCODE_SOCKET", path);
 }
 
+/// Idle timeout for self-dev server (5 minutes)
+const IDLE_TIMEOUT_SECS: u64 = 300;
+
+/// Exit code when server shuts down due to idle timeout
+pub const EXIT_IDLE_TIMEOUT: i32 = 44;
+
 /// Server state
 pub struct Server {
     provider: Arc<dyn Provider>,
@@ -310,14 +316,49 @@ impl Server {
             .await;
         });
 
-        // Create default session
-        let agent = Agent::new(Arc::clone(&self.provider), self.registry.clone());
-        let session_id = agent.session_id().to_string();
-        {
-            let mut sessions = self.sessions.write().await;
-            sessions.insert(session_id.clone(), Arc::new(Mutex::new(agent)));
-            *self.session_id.write().await = session_id.clone();
-        }
+        // Note: No default session created here - each client creates its own session
+
+        // Spawn idle timeout monitor (for self-dev mode)
+        // Server exits after IDLE_TIMEOUT_SECS with no connected clients
+        let idle_client_count = Arc::clone(&self.client_count);
+        tokio::spawn(async move {
+            let mut idle_since: Option<std::time::Instant> = None;
+            let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(10));
+
+            loop {
+                check_interval.tick().await;
+
+                let count = *idle_client_count.read().await;
+
+                if count == 0 {
+                    // No clients connected
+                    if idle_since.is_none() {
+                        idle_since = Some(std::time::Instant::now());
+                        eprintln!(
+                            "No clients connected. Server will exit after {} minutes of idle.",
+                            IDLE_TIMEOUT_SECS / 60
+                        );
+                    }
+
+                    if let Some(since) = idle_since {
+                        let idle_duration = since.elapsed().as_secs();
+                        if idle_duration >= IDLE_TIMEOUT_SECS {
+                            eprintln!(
+                                "Server idle for {} minutes with no clients. Shutting down.",
+                                idle_duration / 60
+                            );
+                            std::process::exit(EXIT_IDLE_TIMEOUT);
+                        }
+                    }
+                } else {
+                    // Clients connected - reset idle timer
+                    if idle_since.is_some() {
+                        eprintln!("Client connected. Idle timer cancelled.");
+                    }
+                    idle_since = None;
+                }
+            }
+        });
 
         // Spawn main socket handler
         let main_sessions = Arc::clone(&self.sessions);
