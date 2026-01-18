@@ -150,22 +150,8 @@ fn parse_clock_time_to_duration(time_str: &str) -> Option<Duration> {
 }
 
 fn format_cache_footer(read_tokens: Option<u64>, write_tokens: Option<u64>) -> Option<String> {
-    if read_tokens.is_none() && write_tokens.is_none() {
-        return None;
-    }
-
-    let read = read_tokens.unwrap_or(0);
-    let write = write_tokens.unwrap_or(0);
-
-    if read > 0 && write > 0 {
-        Some(format!("cache r{} w{}", read, write))
-    } else if read > 0 {
-        Some(format!("cache hit {}", read))
-    } else if write > 0 {
-        Some(format!("cache write {}", write))
-    } else {
-        Some("cache miss".to_string())
-    }
+    let _ = (read_tokens, write_tokens);
+    None
 }
 
 /// Current processing status
