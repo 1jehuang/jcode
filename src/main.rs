@@ -1469,9 +1469,13 @@ fn run_promote() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static TEST_SESSION_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_session_recovery_tracking() {
+        let _guard = TEST_SESSION_LOCK.lock().unwrap();
         // Set a session ID
         set_current_session("test_session_123");
 
@@ -1482,6 +1486,7 @@ mod tests {
 
     #[test]
     fn test_session_recovery_message_format() {
+        let _guard = TEST_SESSION_LOCK.lock().unwrap();
         // Set a unique session ID for this test
         let test_session = "session_format_test_12345";
         set_current_session(test_session);

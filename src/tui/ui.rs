@@ -1399,18 +1399,21 @@ fn append_send_mode_indicator<'a>(mut line: Line<'a>, app: &dyn TuiState) -> Lin
 }
 
 fn pending_prompt_count(app: &dyn TuiState) -> usize {
-    let interleave = app
-        .interleave_message()
-        .map(|msg| !msg.is_empty())
-        .unwrap_or(false);
+    let interleave = app.is_processing()
+        && app
+            .interleave_message()
+            .map(|msg| !msg.is_empty())
+            .unwrap_or(false);
     app.queued_messages().len() + if interleave { 1 } else { 0 }
 }
 
 fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
     let mut previews = Vec::new();
-    if let Some(msg) = app.interleave_message() {
-        if !msg.is_empty() {
-            previews.push(format!("⚡ {}", msg.chars().take(100).collect::<String>()));
+    if app.is_processing() {
+        if let Some(msg) = app.interleave_message() {
+            if !msg.is_empty() {
+                previews.push(format!("⚡ {}", msg.chars().take(100).collect::<String>()));
+            }
         }
     }
     for msg in app.queued_messages() {
@@ -1424,9 +1427,11 @@ fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
 
 fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usize) {
     let mut items: Vec<(bool, &str)> = Vec::new();
-    if let Some(msg) = app.interleave_message() {
-        if !msg.is_empty() {
-            items.push((true, msg));
+    if app.is_processing() {
+        if let Some(msg) = app.interleave_message() {
+            if !msg.is_empty() {
+                items.push((true, msg));
+            }
         }
     }
     for msg in app.queued_messages() {

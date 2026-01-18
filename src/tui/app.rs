@@ -1432,6 +1432,7 @@ impl App {
                     self.processing_started = None;
                     self.streaming_tool_calls.clear();
                     self.current_message_id = None;
+                    self.interleave_message = None;
                     remote.clear_pending();
                 }
             }
@@ -1446,6 +1447,7 @@ impl App {
                 });
                 self.is_processing = false;
                 self.status = ProcessingStatus::Idle;
+                self.interleave_message = None;
                 remote.clear_pending();
             }
             ServerEvent::SessionId { session_id } => {
@@ -1888,10 +1890,6 @@ impl App {
                     }
                 }
             }
-            KeyCode::Esc => {
-                self.input.clear();
-                self.cursor_pos = 0;
-            }
             KeyCode::Up => {
                 // If input is empty and there are queued messages, bring last one back for editing
                 if self.input.is_empty() && !self.queued_messages.is_empty() {
@@ -1911,6 +1909,16 @@ impl App {
             }
             KeyCode::PageDown => {
                 self.scroll_offset = self.scroll_offset.saturating_sub(10);
+            }
+            KeyCode::Esc => {
+                if self.is_processing {
+                    remote.cancel().await?;
+                    self.set_status_notice("Interrupting...");
+                } else {
+                    self.scroll_offset = 0;
+                    self.input.clear();
+                    self.cursor_pos = 0;
+                }
             }
             _ => {}
         }
@@ -1948,6 +1956,7 @@ impl App {
         self.is_processing = false;
         self.status = ProcessingStatus::Idle;
         self.processing_started = None;
+        self.interleave_message = None;
     }
 
     /// Handle a key event (wrapper for debug injection)
@@ -2236,6 +2245,7 @@ impl App {
                 if self.is_processing {
                     // Interrupt generation
                     self.cancel_requested = true;
+                    self.interleave_message = None;
                 } else {
                     // Reset scroll to bottom and clear input
                     self.scroll_offset = 0;
@@ -3470,6 +3480,7 @@ impl App {
                                     let _ = self.handle_key(key.code, key.modifiers);
                                     if self.cancel_requested {
                                         self.cancel_requested = false;
+                                        self.interleave_message = None;
                                         self.display_messages.push(DisplayMessage {
                                             role: "system".to_string(),
                                             content: "Interrupted".to_string(),
@@ -3537,6 +3548,7 @@ impl App {
                                     // Check for cancel request
                                     if self.cancel_requested {
                                         self.cancel_requested = false;
+                                        self.interleave_message = None;
                                         self.display_messages.push(DisplayMessage {
                                             role: "system".to_string(),
                                             content: "Interrupted".to_string(),
@@ -3996,6 +4008,7 @@ impl App {
                                         let _ = self.handle_key(key.code, key.modifiers);
                                         if self.cancel_requested {
                                             self.cancel_requested = false;
+                                            self.interleave_message = None;
                                             self.display_messages.push(DisplayMessage {
                                                 role: "system".to_string(),
                                                 content: "Interrupted".to_string(),
@@ -4919,7 +4932,6 @@ impl super::TuiState for App {
 
         super::info_widget::InfoWidgetData {
             todos,
-            client_count: self.remote_client_count,
             session_tokens: self.remote_total_tokens,
         }
     }

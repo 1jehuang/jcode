@@ -6,7 +6,7 @@
 use crate::todo::TodoItem;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, BorderType, Borders, Paragraph},
 };
 use std::sync::Mutex;
 
@@ -21,15 +21,12 @@ const MIN_WIDGET_HEIGHT: u16 = 5;
 #[derive(Debug, Default, Clone)]
 pub struct InfoWidgetData {
     pub todos: Vec<TodoItem>,
-    pub client_count: Option<usize>,
     pub session_tokens: Option<(u64, u64)>,
 }
 
 impl InfoWidgetData {
     pub fn is_empty(&self) -> bool {
-        self.todos.is_empty()
-            && self.client_count.is_none()
-            && self.session_tokens.is_none()
+        self.todos.is_empty() && self.session_tokens.is_none()
     }
 }
 
@@ -120,7 +117,8 @@ pub fn calculate_layout(
     }
 
     let x = messages_area.x + messages_area.width.saturating_sub(widget_width);
-    let y = messages_area.y + top;
+    let extra_height = height.saturating_sub(widget_height);
+    let y = messages_area.y + top + (extra_height / 2);
 
     let rect = Rect::new(x, y, widget_width, widget_height);
 
@@ -175,11 +173,6 @@ fn calculate_needed_height(data: &InfoWidgetData) -> u16 {
         height += 1; // Spacing
     }
 
-    // Client count
-    if data.client_count.is_some() {
-        height += 1;
-    }
-
     // Token usage
     if data.session_tokens.is_some() {
         height += 1;
@@ -193,8 +186,8 @@ pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
     // Semi-transparent looking border (using dim colors)
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(60, 60, 70)))
-        .style(Style::default().bg(Color::Rgb(25, 25, 30)));
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Rgb(70, 70, 80)).dim());
 
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
@@ -237,27 +230,9 @@ pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
         }
     }
 
-    // Client count
-    if let Some(count) = data.client_count {
-        if !lines.is_empty() {
-            lines.push(Line::from(""));
-        }
-        let icon = if count > 1 { "" } else { "" };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{} ", icon),
-                Style::default().fg(Color::Rgb(100, 160, 200)),
-            ),
-            Span::styled(
-                format!("{} client{}", count, if count == 1 { "" } else { "s" }),
-                Style::default().fg(Color::Rgb(140, 140, 150)),
-            ),
-        ]));
-    }
-
     // Token usage
     if let Some((input, output)) = data.session_tokens {
-        if !lines.is_empty() && data.client_count.is_none() {
+        if !lines.is_empty() {
             lines.push(Line::from(""));
         }
         let total_k = (input + output) / 1000;
