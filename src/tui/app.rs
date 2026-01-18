@@ -379,6 +379,7 @@ impl App {
             remote_total_tokens: None,
             current_message_id: None,
             is_remote: false,
+            tool_result_ids: HashSet::new(),
             remote_session_id: None,
             remote_sessions: Vec::new(),
             known_stable_version: crate::build::read_stable_version().ok().flatten(),
@@ -1274,8 +1275,28 @@ impl App {
                 client_count,
                 ..
             } => {
+                let prev_session_id = self.remote_session_id.clone();
                 remote.set_session_id(session_id.clone());
-                self.remote_session_id = Some(session_id);
+                self.remote_session_id = Some(session_id.clone());
+                let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
+
+                if session_changed {
+                    self.display_messages.clear();
+                    self.streaming_text.clear();
+                    self.streaming_tool_calls.clear();
+                    self.streaming_input_tokens = 0;
+                    self.streaming_output_tokens = 0;
+                    self.streaming_cache_read_tokens = None;
+                    self.streaming_cache_creation_tokens = None;
+                    self.processing_started = None;
+                    self.last_stream_activity = None;
+                    self.is_processing = false;
+                    self.status = ProcessingStatus::Idle;
+                    self.scroll_offset = 0;
+                    self.queued_messages.clear();
+                    self.interleave_message = None;
+                    self.remote_total_tokens = None;
+                }
                 // Store provider info for UI display
                 if let Some(name) = provider_name {
                     self.remote_provider_name = Some(name);
@@ -1288,7 +1309,7 @@ impl App {
                 self.remote_sessions = all_sessions;
                 self.remote_client_count = client_count;
 
-                if !remote.has_loaded_history() {
+                if session_changed || !remote.has_loaded_history() {
                     remote.mark_history_loaded();
                     for msg in messages {
                         self.display_messages.push(DisplayMessage {

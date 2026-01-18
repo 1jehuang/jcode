@@ -518,10 +518,31 @@ impl ClientApp {
                 session_id,
                 ..
             } => {
+                let session_changed = self.session_id.as_deref() != Some(&session_id);
                 self.session_id = Some(session_id);
-                // Only load history on first connect, not on reconnect
-                // (we already have display_messages in memory on reconnect)
-                if !self.has_loaded_history {
+
+                if session_changed {
+                    self.display_messages.clear();
+                    self.streaming_text.clear();
+                    self.streaming_tool_calls.clear();
+                    self.streaming_input_tokens = 0;
+                    self.streaming_output_tokens = 0;
+                    self.streaming_cache_read_tokens = None;
+                    self.streaming_cache_creation_tokens = None;
+                    self.processing_started = None;
+                    self.last_activity = None;
+                    self.is_processing = false;
+                    self.status = ProcessingStatus::Idle;
+                    self.scroll_offset = 0;
+                    self.queued_messages.clear();
+                    self.pending_diffs.clear();
+                    self.current_tool_id = None;
+                    self.current_tool_name = None;
+                    self.current_tool_input.clear();
+                    self.has_loaded_history = false;
+                }
+
+                if session_changed || !self.has_loaded_history {
                     self.has_loaded_history = true;
                     for msg in messages {
                         self.display_messages.push(DisplayMessage {
