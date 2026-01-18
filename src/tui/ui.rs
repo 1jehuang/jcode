@@ -226,21 +226,35 @@ fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Ve
     let total: usize = final_segs.iter().map(|(_, _, t, _)| *t).sum();
     let bar_w = 20.min(max_width.saturating_sub(30));
 
+    // Find max label width for alignment
+    let max_label_len = final_segs.iter().map(|(_, l, _, _)| l.chars().count()).max().unwrap_or(12);
+    let label_w = max_label_len.max(12).min(20);
+
     for (icon, label, tokens, color) in &final_segs {
-        let mut spans = vec![
+        let pct = (*tokens as f64 / LIMIT as f64 * 100.0).round() as usize;
+        let token_str = if *tokens >= 1000 {
+            format!("{:>3}k", tokens / 1000)
+        } else {
+            format!("{:>4}", tokens)
+        };
+        let bar_len = ((*tokens as f64 / LIMIT as f64) * bar_w as f64)
+            .ceil().max(if *tokens > 0 { 1.0 } else { 0.0 }).min(bar_w as f64) as usize;
+
+        let spans = vec![
             Span::styled(format!("{} ", icon), Style::default().fg(*color)),
-            Span::styled(format!("{:<16}", label), Style::default().fg(*color)),
-            Span::styled(if *tokens >= 1000 { format!("{:>4}k", tokens / 1000) } else { format!("{:>5}", tokens) }, Style::default().fg(*color)),
-            Span::styled(format!(" {:>3}%  ", (*tokens as f64 / LIMIT as f64 * 100.0).round() as usize), Style::default().fg(DIM_COLOR)),
-            Span::styled("█".repeat(((*tokens as f64 / LIMIT as f64) * bar_w as f64).ceil().max(if *tokens > 0 { 1.0 } else { 0.0 }).min(bar_w as f64) as usize), Style::default().fg(*color)),
+            Span::styled(format!("{:<width$}", label, width = label_w), Style::default().fg(*color)),
+            Span::styled(format!(" {:>4}", token_str), Style::default().fg(DIM_COLOR)),
+            Span::styled(format!(" {:>2}%", pct), Style::default().fg(DIM_COLOR)),
+            Span::styled("  ", Style::default()),
+            Span::styled("█".repeat(bar_len), Style::default().fg(*color)),
         ];
         lines.push(Line::from(spans));
     }
 
-    lines.push(Line::from(Span::styled("─".repeat(40.min(max_width)), Style::default().fg(EMPTY_COLOR))));
-
-    let sum_w = 40.min(max_width.saturating_sub(12));
-    let used_w = ((total as f64 / LIMIT as f64) * sum_w as f64).ceil().max(if total > 0 { 1.0 } else { 0.0 }).min(sum_w as f64) as usize;
+    // Summary bar
+    let sum_w = 30.min(max_width.saturating_sub(15));
+    let used_w = ((total as f64 / LIMIT as f64) * sum_w as f64)
+        .ceil().max(if total > 0 { 1.0 } else { 0.0 }).min(sum_w as f64) as usize;
     let empty_w = sum_w.saturating_sub(used_w);
 
     let mut bar: Vec<Span<'static>> = vec![Span::styled("[", Style::default().fg(DIM_COLOR))];
@@ -248,12 +262,20 @@ fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Ve
     for (_, _, t, c) in &final_segs {
         if rem == 0 || total == 0 { break; }
         let w = ((*t as f64 / total as f64) * used_w as f64).round().min(rem as f64) as usize;
-        if w > 0 { bar.push(Span::styled("█".repeat(w), Style::default().fg(*c))); rem -= w; }
+        if w > 0 {
+            bar.push(Span::styled("█".repeat(w), Style::default().fg(*c)));
+            rem -= w;
+        }
     }
-    if rem > 0 && !final_segs.is_empty() { bar.push(Span::styled("█".repeat(rem), Style::default().fg(final_segs.last().unwrap().3))); }
-    if empty_w > 0 { bar.push(Span::styled("░".repeat(empty_w), Style::default().fg(EMPTY_COLOR))); }
-    bar.push(Span::styled("]", Style::default().fg(DIM_COLOR)));
-    bar.push(Span::styled(if total >= 1000 { format!(" {}k/200k", total / 1000) } else { format!(" {}/200k", total) }, Style::default().fg(DIM_COLOR)));
+    if rem > 0 && !final_segs.is_empty() {
+        bar.push(Span::styled("█".repeat(rem), Style::default().fg(final_segs.last().unwrap().3)));
+    }
+    if empty_w > 0 {
+        bar.push(Span::styled("░".repeat(empty_w), Style::default().fg(EMPTY_COLOR)));
+    }
+    bar.push(Span::styled("] ", Style::default().fg(DIM_COLOR)));
+    let total_str = if total >= 1000 { format!("{}k", total / 1000) } else { format!("{}", total) };
+    bar.push(Span::styled(format!("{}/200k", total_str), Style::default().fg(DIM_COLOR)));
     lines.push(Line::from(bar));
 
     lines

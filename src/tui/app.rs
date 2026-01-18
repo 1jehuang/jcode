@@ -252,6 +252,8 @@ pub struct App {
     stream_buffer: StreamBuffer,
     // Track thinking start time for extended thinking display
     thinking_start: Option<Instant>,
+    // Whether we've inserted the current turn's thought line
+    thought_line_inserted: bool,
     // Hot-reload: if set, exec into new binary with this session ID (no rebuild)
     reload_requested: Option<String>,
     // Hot-rebuild: if set, do full git pull + cargo build + tests then exec
@@ -402,6 +404,7 @@ impl App {
             mcp_server_names: Vec::new(),
             stream_buffer: StreamBuffer::new(),
             thinking_start: None,
+            thought_line_inserted: false,
             reload_requested: None,
             rebuild_requested: None,
             pasted_contents: Vec::new(),
@@ -1317,6 +1320,13 @@ impl App {
 
         match event {
             ServerEvent::TextDelta { text } => {
+                if let Some(thought_line) = Self::extract_thought_line(&text) {
+                    if let Some(chunk) = self.stream_buffer.flush() {
+                        self.streaming_text.push_str(&chunk);
+                    }
+                    self.insert_thought_line(thought_line);
+                    return;
+                }
                 // Update status from Sending to Streaming on first text
                 if matches!(self.status, ProcessingStatus::Sending) {
                     self.status = ProcessingStatus::Streaming;
@@ -1433,6 +1443,7 @@ impl App {
                     self.streaming_tool_calls.clear();
                     self.current_message_id = None;
                     self.interleave_message = None;
+                    self.thought_line_inserted = false;
                     remote.clear_pending();
                 }
             }
@@ -1448,6 +1459,7 @@ impl App {
                 self.is_processing = false;
                 self.status = ProcessingStatus::Idle;
                 self.interleave_message = None;
+                self.thought_line_inserted = false;
                 remote.clear_pending();
             }
             ServerEvent::SessionId { session_id } => {
@@ -1524,6 +1536,7 @@ impl App {
                     self.display_messages.clear();
                     self.streaming_text.clear();
                     self.streaming_tool_calls.clear();
+                    self.thought_line_inserted = false;
                     self.streaming_input_tokens = 0;
                     self.streaming_output_tokens = 0;
                     self.streaming_cache_read_tokens = None;
@@ -1887,6 +1900,7 @@ impl App {
                         self.is_processing = true;
                         self.status = ProcessingStatus::Sending;
                         self.processing_started = Some(Instant::now());
+                        self.thought_line_inserted = false;
                     }
                 }
             }
@@ -1957,6 +1971,7 @@ impl App {
         self.status = ProcessingStatus::Idle;
         self.processing_started = None;
         self.interleave_message = None;
+        self.thought_line_inserted = false;
     }
 
     /// Handle a key event (wrapper for debug injection)
@@ -2298,6 +2313,23 @@ impl App {
         self.pasted_contents.clear();
         self.cursor_pos = 0;
         self.queued_messages.push(expanded);
+    }
+
+    fn insert_thought_line(&mut self, line: String) {
+        if self.thought_line_inserted || line.is_empty() {
+            return;
+        }
+        self.thought_line_inserted = true;
+        let mut prefix = line;
+        if !prefix.ends_with('\n') {
+            prefix.push('\n');
+        }
+        prefix.push('\n');
+        if self.streaming_text.is_empty() {
+            self.streaming_text = prefix;
+        } else {
+            self.streaming_text = format!("{}{}", prefix, self.streaming_text);
+        }
     }
 
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
@@ -2814,6 +2846,7 @@ impl App {
         self.status = ProcessingStatus::Sending;
         self.streaming_text.clear();
         self.stream_buffer.clear();
+        self.thought_line_inserted = false;
         self.streaming_tool_calls.clear();
         self.streaming_input_tokens = 0;
         self.streaming_output_tokens = 0;
@@ -2855,6 +2888,7 @@ impl App {
             let _ = self.session.save();
             self.streaming_text.clear();
             self.stream_buffer.clear();
+            self.thought_line_inserted = false;
             self.streaming_tool_calls.clear();
             self.streaming_input_tokens = 0;
             self.streaming_output_tokens = 0;
@@ -2918,6 +2952,15 @@ impl App {
 
     fn set_status_notice(&mut self, text: impl Into<String>) {
         self.status_notice = Some((text.into(), Instant::now()));
+    }
+
+    fn extract_thought_line(text: &str) -> Option<String> {
+        let trimmed = text.trim();
+        if trimmed.starts_with("Thought for ") && trimmed.ends_with('s') {
+            Some(trimmed.to_string())
+        } else {
+            None
+        }
     }
 
     /// Handle quit request (Ctrl+C/Ctrl+D). Returns true if should actually quit.
@@ -3216,9 +3259,8 @@ impl App {
                             self.streaming_text.push_str(&chunk);
                         }
                         // Bridge provides accurate wall-clock timing
-                        // Use hard break (two spaces + newline) to ensure line separation
-                        let thinking_msg = format!("*Thought for {:.1}s*  \n\n", duration_secs);
-                        self.streaming_text.push_str(&thinking_msg);
+                        let thinking_msg = format!("*Thought for {:.1}s*", duration_secs);
+                        self.insert_thought_line(thinking_msg);
                     }
                     StreamEvent::Compaction {
                         trigger,
@@ -3771,9 +3813,8 @@ impl App {
                                         if let Some(chunk) = self.stream_buffer.flush() {
                                             self.streaming_text.push_str(&chunk);
                                         }
-                                        // Use hard break (two spaces + newline) to ensure line separation
-                                        let thinking_msg = format!("*Thought for {:.1}s*  \n\n", duration_secs);
-                                        self.streaming_text.push_str(&thinking_msg);
+                                        let thinking_msg = format!("*Thought for {:.1}s*", duration_secs);
+                                        self.insert_thought_line(thinking_msg);
                                     }
                                     StreamEvent::Compaction { trigger, pre_tokens } => {
                                         // Flush any pending buffered text first
