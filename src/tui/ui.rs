@@ -89,9 +89,27 @@ fn format_model_name(short: &str) -> String {
         return "Claude Haiku".to_string();
     }
     if short.starts_with("gpt") {
-        return short.to_uppercase();
+        return format_gpt_name(short);
     }
     short.to_string()
+}
+
+/// Format GPT-style model names for display (e.g., "gpt5.2codex" -> "GPT-5.2 Codex")
+fn format_gpt_name(short: &str) -> String {
+    let rest = short.trim_start_matches("gpt");
+    if rest.is_empty() {
+        return "GPT".to_string();
+    }
+
+    if let Some(idx) = rest.find("codex") {
+        let version = &rest[..idx];
+        if version.is_empty() {
+            return "GPT Codex".to_string();
+        }
+        return format!("GPT-{} Codex", version);
+    }
+
+    format!("GPT-{}", rest)
 }
 
 /// Calculate rainbow color for prompt index with exponential decay to gray.
