@@ -871,4 +871,15 @@ impl TuiState for ClientApp {
     fn rate_limit_remaining(&self) -> Option<Duration> {
         None // Rate limits handled by server in client mode
     }
+
+    fn context_info(&self) -> &crate::prompt::ContextInfo {
+        // Return a static default since deprecated client doesn't track context
+        static DEFAULT_INFO: std::sync::OnceLock<crate::prompt::ContextInfo> = std::sync::OnceLock::new();
+        DEFAULT_INFO.get_or_init(crate::prompt::ContextInfo::default)
+    }
+
+    fn info_widget_data(&self) -> super::info_widget::InfoWidgetData {
+        // Deprecated client - return empty widget data
+        super::info_widget::InfoWidgetData::default()
+    }
 }

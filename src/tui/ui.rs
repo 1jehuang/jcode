@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(dead_code)]
 
+use super::info_widget;
 use super::markdown;
 use super::visual_debug::{self, FrameCaptureBuilder, MessageCapture};
 use super::{ProcessingStatus, TuiState};
@@ -141,6 +142,131 @@ fn format_gpt_name(short: &str) -> String {
     }
 
     format!("GPT-{}", rest)
+}
+
+/// Render context bar showing what's loaded in the system prompt
+/// Icons show different context types, with relative widths showing proportions
+fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+
+    // Colors for different context types
+    const SYS_COLOR: Color = Color::Rgb(100, 140, 200);    // Blue - system prompt
+    const ENV_COLOR: Color = Color::Rgb(100, 180, 140);    // Teal - environment
+    const AGENTS_COLOR: Color = Color::Rgb(200, 140, 100); // Orange - AGENTS.md
+    const CLAUDE_COLOR: Color = Color::Rgb(180, 100, 200); // Purple - CLAUDE.md
+    const SKILLS_COLOR: Color = Color::Rgb(140, 200, 100); // Green - skills
+    const DEV_COLOR: Color = Color::Rgb(255, 193, 7);      // Amber - self-dev
+
+    // Calculate total for proportions (use raw file sizes for better representation)
+    let total = info.total_chars.max(1);
+
+    // Build segments with their proportional widths
+    // Each segment: (icon, label, chars, color, is_file)
+    let mut segments: Vec<(&str, &str, usize, Color, bool)> = Vec::new();
+
+    // Always show base system prompt
+    segments.push(("⚙", "sys", info.system_prompt_chars, SYS_COLOR, false));
+
+    if info.env_context_chars > 0 {
+        segments.push(("🌍", "env", info.env_context_chars, ENV_COLOR, false));
+    }
+
+    // File-based contexts (these are the important ones to highlight)
+    if info.has_project_agents_md {
+        segments.push(("📋", "AGENTS.md", info.project_agents_md_chars, AGENTS_COLOR, true));
+    }
+    if info.has_project_claude_md {
+        segments.push(("📝", "CLAUDE.md", info.project_claude_md_chars, CLAUDE_COLOR, true));
+    }
+    if info.has_global_agents_md {
+        segments.push(("📋", "~/.AGENTS", info.global_agents_md_chars, AGENTS_COLOR, true));
+    }
+    if info.has_global_claude_md {
+        segments.push(("📝", "~/.CLAUDE", info.global_claude_md_chars, CLAUDE_COLOR, true));
+    }
+
+    if info.skills_chars > 0 {
+        segments.push(("🔧", "skills", info.skills_chars, SKILLS_COLOR, false));
+    }
+    if info.selfdev_chars > 0 {
+        segments.push(("🛠", "dev", info.selfdev_chars, DEV_COLOR, false));
+    }
+
+    // Prefix with context label
+    spans.push(Span::styled("ctx: ", Style::default().fg(DIM_COLOR)));
+
+    // Calculate bar width (leave room for prefix and token count)
+    let prefix_len = 5; // "ctx: "
+    let suffix_len = 15; // " ~XXXk tokens"
+    let bar_width = max_width.saturating_sub(prefix_len + suffix_len).min(60);
+
+    if bar_width < 10 {
+        // Too narrow - just show icons
+        for (icon, _label, _chars, color, is_file) in &segments {
+            if *is_file {
+                // Highlight loaded files
+                spans.push(Span::styled(
+                    format!("{} ", icon),
+                    Style::default().fg(*color),
+                ));
+            }
+        }
+    } else {
+        // Show proportional bar
+        let mut used_width = 0;
+        for (i, (icon, label, chars, color, is_file)) in segments.iter().enumerate() {
+            // Calculate proportional width (minimum 1 char for icon)
+            let proportion = (*chars as f64) / (total as f64);
+            let seg_width = ((proportion * bar_width as f64).round() as usize).max(1);
+
+            if used_width + seg_width > bar_width {
+                break;
+            }
+
+            // Icon
+            spans.push(Span::styled(
+                format!("{}", icon),
+                Style::default().fg(*color),
+            ));
+            used_width += 1;
+
+            // Label if there's room (for file contexts, always try to show name)
+            let remaining = seg_width.saturating_sub(1);
+            if remaining > 0 && *is_file {
+                let display_label = if label.len() <= remaining {
+                    label.to_string()
+                } else if remaining >= 3 {
+                    format!("{}…", &label[..remaining-1])
+                } else {
+                    String::new()
+                };
+                if !display_label.is_empty() {
+                    spans.push(Span::styled(
+                        display_label,
+                        Style::default().fg(*color).dim(),
+                    ));
+                    used_width += remaining.min(label.len());
+                }
+            }
+
+            // Add separator
+            if i < segments.len() - 1 && used_width < bar_width {
+                spans.push(Span::styled(" ", Style::default()));
+                used_width += 1;
+            }
+        }
+    }
+
+    // Token estimate at the end
+    let est_tokens = info.estimated_tokens();
+    let token_str = if est_tokens >= 1000 {
+        format!(" ~{}k tokens", est_tokens / 1000)
+    } else {
+        format!(" ~{} tokens", est_tokens)
+    };
+    spans.push(Span::styled(token_str, Style::default().fg(DIM_COLOR)));
+
+    Line::from(spans)
 }
 
 /// Calculate rainbow color for prompt index with exponential decay to gray.
@@ -424,6 +550,24 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         &mut debug_capture,
     );
 
+    // Draw info widget overlay (if there's space and content)
+    let widget_data = app.info_widget_data();
+    if !widget_data.is_empty() {
+        // Estimate max content width based on messages
+        // For now, use a simple heuristic: 70% of terminal width or less
+        let estimated_content_width = (area.width as f32 * 0.7) as u16;
+
+        if let Some(widget_rect) = info_widget::calculate_layout(
+            area.width,
+            area.height,
+            chunks[0], // messages area
+            estimated_content_width,
+            &widget_data,
+        ) {
+            info_widget::render(frame, widget_rect, &widget_data);
+        }
+    }
+
     // Record the frame capture if enabled
     if let Some(capture) = debug_capture {
         visual_debug::record_frame(capture.build());
@@ -439,8 +583,8 @@ fn estimate_content_height(app: &dyn TuiState, width: u16) -> u16 {
 
     let mut lines = 0u16;
 
-    // Header is always visible: agent name + model/build + changelog box (up to 7 lines) + blank = 10 lines minimum
-    lines += 10;
+    // Header is always visible: agent name + model/build + context + changelog box (up to 7 lines) + blank = 11 lines minimum
+    lines += 11;
     // Plus optional MCP line
     if !app.mcp_servers().is_empty() {
         lines += 1;
@@ -605,7 +749,13 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         Style::default().fg(DIM_COLOR),
     )));
 
-    // Line 3+: Recent changes in a box (from git log, embedded at build time)
+    // Line 3: Context info bar (icons showing what's loaded)
+    let context_info = app.context_info();
+    if context_info.total_chars > 0 {
+        lines.push(render_context_bar(context_info, area.width as usize));
+    }
+
+    // Line 4+: Recent changes in a box (from git log, embedded at build time)
     let changelog = env!("JCODE_CHANGELOG");
     let term_width = area.width as usize;
     if !changelog.is_empty() && term_width > 20 {

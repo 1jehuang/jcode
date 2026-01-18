@@ -227,6 +227,8 @@ pub struct App {
     // Context limit tracking (for compaction warning)
     context_limit: u64,
     context_warning_shown: bool,
+    // Context info (what's loaded in system prompt)
+    context_info: crate::prompt::ContextInfo,
     // Track last streaming activity for "stale" detection
     last_stream_activity: Option<Instant>,
     // Current status
@@ -370,6 +372,7 @@ impl App {
             total_output_tokens: 0,
             context_limit: 200_000, // Claude's context window
             context_warning_shown: false,
+            context_info: crate::prompt::ContextInfo::default(),
             last_stream_activity: None,
             status: ProcessingStatus::default(),
             subagent_status: None,
@@ -4045,7 +4048,7 @@ impl App {
         Ok(())
     }
 
-    fn build_system_prompt(&self) -> String {
+    fn build_system_prompt(&mut self) -> String {
         let skill_prompt = self
             .active_skill
             .as_ref()
@@ -4059,11 +4062,13 @@ impl App {
                 description: s.description.clone(),
             })
             .collect();
-        crate::prompt::build_system_prompt_with_selfdev(
+        let (prompt, context_info) = crate::prompt::build_system_prompt_with_context(
             skill_prompt.as_deref(),
             &available_skills,
             self.session.is_canary,
-        )
+        );
+        self.context_info = context_info;
+        prompt
     }
 
     // Getters for UI
@@ -4782,6 +4787,28 @@ impl super::TuiState for App {
                 None
             }
         })
+    }
+
+    fn context_info(&self) -> &crate::prompt::ContextInfo {
+        &self.context_info
+    }
+
+    fn info_widget_data(&self) -> super::info_widget::InfoWidgetData {
+        let session_id = if self.is_remote {
+            self.remote_session_id.as_deref()
+        } else {
+            Some(self.session.id.as_str())
+        };
+
+        let todos = session_id
+            .and_then(|id| crate::todo::load_todos(id).ok())
+            .unwrap_or_default();
+
+        super::info_widget::InfoWidgetData {
+            todos,
+            client_count: self.remote_client_count,
+            session_tokens: self.remote_total_tokens,
+        }
     }
 }
 
