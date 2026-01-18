@@ -149,6 +149,25 @@ fn parse_clock_time_to_duration(time_str: &str) -> Option<Duration> {
     }
 }
 
+fn format_cache_footer(read_tokens: Option<u64>, write_tokens: Option<u64>) -> Option<String> {
+    if read_tokens.is_none() && write_tokens.is_none() {
+        return None;
+    }
+
+    let read = read_tokens.unwrap_or(0);
+    let write = write_tokens.unwrap_or(0);
+
+    if read > 0 && write > 0 {
+        Some(format!("cache r{} w{}", read, write))
+    } else if read > 0 {
+        Some(format!("cache hit {}", read))
+    } else if write > 0 {
+        Some(format!("cache write {}", write))
+    } else {
+        Some("cache miss".to_string())
+    }
+}
+
 /// Current processing status
 #[derive(Clone, Default, Debug)]
 pub enum ProcessingStatus {
@@ -405,6 +424,14 @@ impl App {
         let registry = Registry::new(Arc::clone(&provider)).await;
         let mut app = Self::new(provider, registry);
         app.is_remote = true;
+
+        // Load session to get canary status (for "client self-dev" badge)
+        if let Some(ref session_id) = resume_session {
+            if let Ok(session) = Session::load(session_id) {
+                app.session = session;
+            }
+        }
+
         app.resume_session_id = resume_session;
         app
     }
@@ -910,6 +937,21 @@ impl App {
 
             // Show reconnection message if applicable
             if reconnect_attempts > 0 {
+                // Check if client also needs to reload (newer binary available)
+                if self.has_newer_binary() {
+                    self.display_messages.push(DisplayMessage::system(
+                        "Server reloaded. Reloading client with newer binary...".to_string(),
+                    ));
+                    terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
+                    let session_id = self
+                        .remote_session_id
+                        .clone()
+                        .unwrap_or_else(|| crate::id::new_id("ses"));
+                    self.reload_requested = Some(session_id);
+                    self.should_quit = true;
+                    break 'outer;
+                }
+
                 // Build success message with reload info if available
                 let reload_details = if !self.reload_info.is_empty() {
                     format!("\n  {}", self.reload_info.join("\n  "))
@@ -1149,16 +1191,16 @@ impl App {
                         self.streaming_text.push_str(&chunk);
                     }
                     if !self.streaming_text.is_empty() {
+                        let duration = self.processing_started.map(|s| s.elapsed().as_secs_f32());
                         self.display_messages.push(DisplayMessage {
                             role: "assistant".to_string(),
                             content: std::mem::take(&mut self.streaming_text),
                             tool_calls: vec![],
-                            duration_secs: self
-                                .processing_started
-                                .map(|s| s.elapsed().as_secs_f32()),
+                            duration_secs: duration,
                             title: None,
                             tool_data: None,
                         });
+                        self.push_turn_footer(duration);
                     }
                     self.is_processing = false;
                     self.status = ProcessingStatus::Idle;
@@ -2771,6 +2813,7 @@ impl App {
                         title: None,
                         tool_data: None,
                     });
+                    self.push_turn_footer(duration);
                 }
             } else {
                 // Had tool calls - only display text that came AFTER the last tool
@@ -2780,10 +2823,11 @@ impl App {
                         role: "assistant".to_string(),
                         content: self.streaming_text.clone(),
                         tool_calls: vec![],
-                        duration_secs: None,
+                        duration_secs: duration,
                         title: None,
                         tool_data: None,
                     });
+                    self.push_turn_footer(duration);
                 }
             }
             self.streaming_text.clear();
@@ -3339,6 +3383,7 @@ impl App {
                         title: None,
                         tool_data: None,
                     });
+                    self.push_turn_footer(duration);
                 }
             } else {
                 // Had tool calls - only display text that came AFTER the last tool
@@ -3348,10 +3393,11 @@ impl App {
                         role: "assistant".to_string(),
                         content: self.streaming_text.clone(),
                         tool_calls: vec![],
-                        duration_secs: None,
+                        duration_secs: duration,
                         title: None,
                         tool_data: None,
                     });
+                    self.push_turn_footer(duration);
                 }
             }
             self.streaming_text.clear();
@@ -3778,6 +3824,43 @@ impl App {
 
     pub fn streaming_tokens(&self) -> (u64, u64) {
         (self.streaming_input_tokens, self.streaming_output_tokens)
+    }
+
+    fn build_turn_footer(&self, duration: Option<f32>) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(secs) = duration {
+            parts.push(format!("{:.1}s", secs));
+        }
+        if self.streaming_input_tokens > 0 || self.streaming_output_tokens > 0 {
+            parts.push(format!(
+                "↑{} ↓{}",
+                self.streaming_input_tokens, self.streaming_output_tokens
+            ));
+        }
+        if let Some(cache) =
+            format_cache_footer(self.streaming_cache_read_tokens, self.streaming_cache_creation_tokens)
+        {
+            parts.push(cache);
+        }
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" · "))
+        }
+    }
+
+    fn push_turn_footer(&mut self, duration: Option<f32>) {
+        if let Some(footer) = self.build_turn_footer(duration) {
+            self.display_messages.push(DisplayMessage {
+                role: "meta".to_string(),
+                content: footer,
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+        }
     }
 
     /// Check if approaching context limit and show warning

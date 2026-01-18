@@ -540,7 +540,19 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     }
 
     // Add mode badges
-    if app.is_canary() {
+    let is_canary = app.is_canary();
+    let is_remote = app.is_remote_mode();
+
+    if is_canary && is_remote {
+        // Combined badge when both modes are active
+        mode_parts.push(Span::styled(" ", Style::default()));
+        mode_parts.push(Span::styled(
+            " client self-dev ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Rgb(255, 170, 50)), // Orange-amber blend
+        ));
+    } else if is_canary {
         mode_parts.push(Span::styled(" ", Style::default()));
         mode_parts.push(Span::styled(
             " self-dev ",
@@ -548,8 +560,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 .fg(Color::Black)
                 .bg(Color::Rgb(255, 193, 7)), // Amber badge
         ));
-    }
-    if app.is_remote_mode() {
+    } else if is_remote {
         mode_parts.push(Span::styled(" ", Style::default()));
         mode_parts.push(Span::styled(
             " client ",
@@ -710,7 +721,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
     for msg in app.display_messages() {
         // Add spacing between messages
-        if !lines.is_empty() && msg.role != "tool" {
+        if !lines.is_empty() && msg.role != "tool" && msg.role != "meta" {
             lines.push(Line::from(""));
         }
 
@@ -747,13 +758,12 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                         ),
                     ]));
                 }
-                // Show duration if available
-                if let Some(secs) = msg.duration_secs {
-                    lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(format!("{:.1}s", secs), Style::default().fg(DIM_COLOR)),
-                    ]));
-                }
+            }
+            "meta" => {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(msg.content.clone(), Style::default().fg(DIM_COLOR)),
+                ]));
             }
             "tool" => {
                 // Show tool call with full details
@@ -1119,13 +1129,25 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 let usage_str = format_usage_line(tokens_str, cache_status.clone());
                 // Show stale indicator if no activity for >2s
                 let stale_str = match stale_secs {
-                    Some(s) if s > 2.0 => format!(" (idle {:.0}s)", s),
+                    Some(s) if s > 2.0 => format!("(idle {:.0}s)", s),
                     _ => String::new(),
+                };
+                let mut status_parts = Vec::new();
+                if !usage_str.is_empty() {
+                    status_parts.push(usage_str);
+                }
+                if !stale_str.is_empty() {
+                    status_parts.push(stale_str);
+                }
+                let status_text = if status_parts.is_empty() {
+                    format!("{:.1}s", elapsed)
+                } else {
+                    format!("{} {:.1}s", status_parts.join(" "), elapsed)
                 };
                 Line::from(vec![
                     Span::styled(spinner, Style::default().fg(AI_COLOR)),
                     Span::styled(
-                        format!(" {}{} {:.1}s", usage_str, stale_str, elapsed),
+                        format!(" {}", status_text),
                         Style::default().fg(DIM_COLOR),
                     ),
                 ])
@@ -1137,12 +1159,27 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                     String::new()
                 };
                 let usage_str = format_usage_line(tokens_str, cache_status.clone());
+                let usage_prefix = if usage_str.is_empty() {
+                    " ".to_string()
+                } else {
+                    format!(" {}", usage_str)
+                };
                 // Animated progress dots - split on both sides of the command
                 let half_width = 5;
                 let progress = ((elapsed * 2.0) % 1.0) as f32; // Cycle every 0.5s
                 let filled_pos = ((progress * half_width as f32) as usize) % half_width;
-                // Left dots: animate from right to left (towards command)
+                // Left dots: animate left-to-right (towards command)
                 let left_bar: String = (0..half_width)
+                    .map(|i| {
+                        if i == filled_pos {
+                            '●'
+                        } else {
+                            '·'
+                        }
+                    })
+                    .collect();
+                // Right dots: animate right-to-left (towards command)
+                let right_bar: String = (0..half_width)
                     .map(|i| {
                         if i == (half_width - 1 - filled_pos) {
                             '●'
@@ -1150,10 +1187,6 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                             '·'
                         }
                     })
-                    .collect();
-                // Right dots: animate from left to right (away from command)
-                let right_bar: String = (0..half_width)
-                    .map(|i| if i == filled_pos { '●' } else { '·' })
                     .collect();
                 // Use animated color for the tool name
                 let anim_color = animated_tool_color(elapsed);
@@ -1172,7 +1205,7 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                     .unwrap_or_default();
                 Line::from(vec![
                     Span::styled(left_bar, Style::default().fg(anim_color)),
-                    Span::styled(format!(" {}", usage_str), Style::default().fg(DIM_COLOR)),
+                    Span::styled(usage_prefix, Style::default().fg(DIM_COLOR)),
                     Span::styled(name.to_string(), Style::default().fg(anim_color).bold()),
                     Span::styled(status_suffix, Style::default().fg(DIM_COLOR)),
                     Span::styled(tool_detail, Style::default().fg(DIM_COLOR)),
