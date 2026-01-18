@@ -235,6 +235,21 @@ pub enum ServerEvent {
         new_socket: Option<String>,
     },
 
+    /// Progress update during server reload
+    #[serde(rename = "reload_progress")]
+    ReloadProgress {
+        /// Step name (e.g., "git_pull", "cargo_build", "exec")
+        step: String,
+        /// Human-readable message
+        message: String,
+        /// Whether this step succeeded (None = in progress)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        success: Option<bool>,
+        /// Output from the step (stdout/stderr)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+    },
+
     /// Model changed (response to cycle_model)
     #[serde(rename = "model_changed")]
     ModelChanged {

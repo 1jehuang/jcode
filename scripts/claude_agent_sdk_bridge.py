@@ -23,6 +23,7 @@ def _write_output(payload: dict) -> bool:
     except BrokenPipeError:
         return False
 
+
 import anyio
 from claude_agent_sdk import ClaudeAgentOptions, query
 from claude_agent_sdk.types import (

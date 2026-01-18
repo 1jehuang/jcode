@@ -69,6 +69,8 @@ pub struct ClientApp {
     status_notice: Option<(String, Instant)>,
     // Time when app started (for startup animations)
     app_started: Instant,
+    // Store reload info to pass to agent after reconnection
+    reload_info: Vec<String>,
 }
 
 impl ClientApp {
@@ -105,6 +107,7 @@ impl ClientApp {
             current_tool_input: String::new(),
             status_notice: None,
             app_started: Instant::now(),
+            reload_info: Vec::new(),
         }
     }
 
@@ -167,7 +170,6 @@ impl ClientApp {
             // Connect to server
             let stream = match self.connect().await {
                 Ok(s) => {
-                    reconnect_attempts = 0;
                     self.server_disconnected = false;
                     s
                 }
@@ -214,14 +216,34 @@ impl ClientApp {
 
             // Show reconnection success message if we were reconnecting
             if reconnect_attempts > 0 {
+                // Build success message with reload info if available
+                let reload_details = if !self.reload_info.is_empty() {
+                    format!("\n  {}", self.reload_info.join("\n  "))
+                } else {
+                    String::new()
+                };
+
                 self.display_messages.push(DisplayMessage {
                     role: "system".to_string(),
-                    content: "Reconnected to server.".to_string(),
+                    content: format!("✓ Reconnected successfully.{}", reload_details),
                     tool_calls: Vec::new(),
                     duration_secs: None,
                     title: None,
                     tool_data: None,
                 });
+
+                // Queue message to notify the agent about the reload
+                if !self.reload_info.is_empty() {
+                    let cwd = std::env::current_dir()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "unknown".to_string());
+                    let reload_summary = self.reload_info.join(", ");
+                    self.queued_messages.push(format!(
+                        "[Reload complete. {}. CWD: {}. Session restored - continue where you left off.]",
+                        reload_summary, cwd
+                    ));
+                    self.reload_info.clear();
+                }
             }
 
             let (reader, writer) = stream.into_split();
@@ -232,13 +254,28 @@ impl ClientApp {
 
             // Subscribe to server events and get history
             {
-                // Subscribe first
+                let mut w = writer.lock().await;
+
+                // If reconnecting after server reload, restore the session first
+                if reconnect_attempts > 0 {
+                    if let Some(ref session_id) = self.session_id {
+                        let request = Request::ResumeSession {
+                            id: self.next_request_id,
+                            session_id: session_id.clone(),
+                        };
+                        self.next_request_id += 1;
+                        let json = serde_json::to_string(&request)? + "\n";
+                        w.write_all(json.as_bytes()).await?;
+                    }
+                }
+                reconnect_attempts = 0;
+
+                // Subscribe to events
                 let request = Request::Subscribe {
                     id: self.next_request_id,
                 };
                 self.next_request_id += 1;
                 let json = serde_json::to_string(&request)? + "\n";
-                let mut w = writer.lock().await;
                 w.write_all(json.as_bytes()).await?;
 
                 // Request history to restore display state
@@ -408,12 +445,48 @@ impl ClientApp {
             ServerEvent::Reloading { .. } => {
                 self.display_messages.push(DisplayMessage {
                     role: "system".to_string(),
-                    content: "Server is reloading... Will reconnect shortly.".to_string(),
+                    content: "🔄 Server reload initiated...".to_string(),
                     tool_calls: Vec::new(),
                     duration_secs: None,
-                    title: None,
+                    title: Some("Reload".to_string()),
                     tool_data: None,
                 });
+            }
+            ServerEvent::ReloadProgress { step, message, success, output } => {
+                // Format the progress message with optional output
+                let status_icon = match success {
+                    Some(true) => "✓",
+                    Some(false) => "✗",
+                    None => "→",
+                };
+
+                let mut content = format!("[{}] {}", step, message);
+
+                if let Some(out) = output {
+                    if !out.is_empty() {
+                        content.push_str("\n```\n");
+                        content.push_str(&out);
+                        content.push_str("\n```");
+                    }
+                }
+
+                self.display_messages.push(DisplayMessage {
+                    role: "system".to_string(),
+                    content,
+                    tool_calls: Vec::new(),
+                    duration_secs: None,
+                    title: Some(format!("Reload: {} {}", status_icon, step)),
+                    tool_data: None,
+                });
+
+                // Store key reload info for agent notification after reconnect
+                // Store info from verify and git steps
+                if step == "verify" || step == "git" {
+                    self.reload_info.push(message.clone());
+                }
+
+                // Update status notice
+                self.status_notice = Some((format!("Reload: {}", message), std::time::Instant::now()));
             }
             ServerEvent::History {
                 messages,
@@ -665,10 +738,13 @@ impl TuiState for ClientApp {
         self.status.clone()
     }
 
-    fn command_suggestions(&self) -> Vec<(&'static str, &'static str)> {
+    fn command_suggestions(&self) -> Vec<(String, &'static str)> {
         // Basic command suggestions for client
         if self.input.starts_with('/') {
-            vec![("/reload", "Reload server code"), ("/quit", "Quit client")]
+            vec![
+                ("/reload".into(), "Reload server code"),
+                ("/quit".into(), "Quit client"),
+            ]
         } else {
             Vec::new()
         }

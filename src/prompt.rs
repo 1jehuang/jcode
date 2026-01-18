@@ -68,11 +68,10 @@ You are running in self-dev mode, working on the jcode codebase itself. You have
 
 ## selfdev Tool
 
-Use this tool to manage builds and reloads:
+Use this tool to manage reloads:
 
 ```json
-{"name": "selfdev", "input": {"action": "reload"}}   // Restart with current binary (no rebuild)
-{"name": "selfdev", "input": {"action": "rebuild"}}  // Build, test, and restart
+{"name": "selfdev", "input": {"action": "reload"}}   // Restart with current binary
 {"name": "selfdev", "input": {"action": "status"}}   // Show build versions and crash history
 {"name": "selfdev", "input": {"action": "promote", "message": "description"}}  // Mark current as stable
 {"name": "selfdev", "input": {"action": "rollback"}} // Switch back to stable build

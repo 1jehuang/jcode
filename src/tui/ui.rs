@@ -6,6 +6,7 @@ use super::visual_debug::{self, FrameCaptureBuilder, MessageCapture};
 use super::{ProcessingStatus, TuiState};
 use crate::message::ToolCall;
 use ratatui::{prelude::*, widgets::Paragraph};
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
 // Minimal color palette
@@ -142,23 +143,28 @@ fn animated_tool_color(elapsed: f32) -> Color {
 
 /// Get how long ago the binary was last modified
 fn binary_age() -> Option<String> {
-    let exe = std::env::current_exe().ok()?;
-    let metadata = std::fs::metadata(&exe).ok()?;
-    let modified = metadata.modified().ok()?;
-    let elapsed = SystemTime::now().duration_since(modified).ok()?;
-    let secs = elapsed.as_secs();
+    static BUILD_AGE: OnceLock<Option<String>> = OnceLock::new();
+    BUILD_AGE
+        .get_or_init(|| {
+            let exe = std::env::current_exe().ok()?;
+            let metadata = std::fs::metadata(&exe).ok()?;
+            let modified = metadata.modified().ok()?;
+            let elapsed = SystemTime::now().duration_since(modified).ok()?;
+            let secs = elapsed.as_secs();
 
-    let age_str = if secs < 60 {
-        "just now".to_string()
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h ago", secs / 3600)
-    } else {
-        format!("{}d ago", secs / 86400)
-    };
+            let age_str = if secs < 60 {
+                "just now".to_string()
+            } else if secs < 3600 {
+                format!("{}m ago", secs / 60)
+            } else if secs < 86400 {
+                format!("{}h ago", secs / 3600)
+            } else {
+                format!("{}d ago", secs / 86400)
+            };
 
-    Some(age_str)
+            Some(age_str)
+        })
+        .clone()
 }
 
 /// Shorten model name for display (e.g., "claude-opus-4-5-20251101" -> "claude4.5opus")
@@ -253,14 +259,16 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     // Calculate input height based on content (max 10 lines visible, scrolls if more)
     let available_width = area.width.saturating_sub(3) as usize; // prompt chars
     let base_input_height = calculate_input_lines(app.input(), available_width).min(10) as u16;
-    // Add 1 line for command suggestions when typing /
+    // Add 1 line for command suggestions when typing /, or for Shift+Enter hint when processing
     let suggestions = app.command_suggestions();
-    let suggestions_height = if !suggestions.is_empty() && !app.is_processing() {
-        1
+    let hint_line_height = if !suggestions.is_empty() && !app.is_processing() {
+        1 // Command suggestions
+    } else if app.is_processing() && !app.input().is_empty() {
+        1 // Shift+Enter hint
     } else {
         0
     };
-    let input_height = base_input_height + suggestions_height;
+    let input_height = base_input_height + hint_line_height;
 
     // Count user messages to show next prompt number
     let user_count = app
@@ -737,10 +745,28 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                         ("✓", Color::Rgb(100, 180, 100)) // Green for success
                     };
 
+                    // For edit tools, count line changes
+                    let line_change_summary = if matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit") {
+                        let additions = msg.content.lines()
+                            .filter(|l| l.trim().starts_with("+ "))
+                            .count();
+                        let deletions = msg.content.lines()
+                            .filter(|l| l.trim().starts_with("- "))
+                            .count();
+                        if additions > 0 || deletions > 0 {
+                            format!(" (+{} -{})", additions, deletions)
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    };
+
                     lines.push(Line::from(vec![
                         Span::styled(format!("  {} ", icon), Style::default().fg(icon_color)),
                         Span::styled(tc.name.clone(), Style::default().fg(TOOL_COLOR)),
                         Span::styled(format!(" {}", summary), Style::default().fg(DIM_COLOR)),
+                        Span::styled(line_change_summary, Style::default().fg(DIM_COLOR)),
                     ]));
 
                     // Show diff output for editing tools with syntax highlighting
@@ -845,32 +871,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                         }
                     }
 
-                    // Show task output (sub-agent result, truncated)
-                    if tc.name == "task" {
-                        let mut line_count = 0;
-                        const MAX_TASK_LINES: usize = 10;
-                        for line in msg.content.lines() {
-                            // Skip metadata section
-                            if line.contains("<task_metadata>") {
-                                break;
-                            }
-                            if line.trim().is_empty() {
-                                continue;
-                            }
-                            if line_count >= MAX_TASK_LINES {
-                                lines.push(Line::from(Span::styled(
-                                    "    ...(truncated)".to_string(),
-                                    Style::default().fg(DIM_COLOR),
-                                )));
-                                break;
-                            }
-                            lines.push(Line::from(Span::styled(
-                                format!("    {}", line),
-                                Style::default().fg(DIM_COLOR),
-                            )));
-                            line_count += 1;
-                        }
-                    }
+                    // Task tool output: just show summary line (content is in AI context anyway)
                 }
             }
             "system" => {
@@ -1097,12 +1098,17 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 } else {
                     String::new()
                 };
-                // Animated progress bar for tool execution
-                let bar_width = 10;
+                // Animated progress dots - split on both sides of the command
+                let half_width = 5;
                 let progress = ((elapsed * 2.0) % 1.0) as f32; // Cycle every 0.5s
-                let filled = ((progress * bar_width as f32) as usize) % bar_width;
-                let bar: String = (0..bar_width)
-                    .map(|i| if i == filled { '●' } else { '·' })
+                let filled_pos = ((progress * half_width as f32) as usize) % half_width;
+                // Left dots: animate from right to left (towards command)
+                let left_bar: String = (0..half_width)
+                    .map(|i| if i == (half_width - 1 - filled_pos) { '●' } else { '·' })
+                    .collect();
+                // Right dots: animate from left to right (away from command)
+                let right_bar: String = (0..half_width)
+                    .map(|i| if i == filled_pos { '●' } else { '·' })
                     .collect();
                 // Use animated color for the tool name
                 let anim_color = animated_tool_color(elapsed);
@@ -1120,13 +1126,13 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                     .map(|s| format!(" {}", s))
                     .unwrap_or_default();
                 Line::from(vec![
-                    Span::styled(spinner, Style::default().fg(anim_color)),
+                    Span::styled(left_bar, Style::default().fg(anim_color)),
                     Span::styled(format!(" {}", tokens_str), Style::default().fg(DIM_COLOR)),
                     Span::styled(name.to_string(), Style::default().fg(anim_color).bold()),
                     Span::styled(status_suffix, Style::default().fg(DIM_COLOR)),
                     Span::styled(tool_detail, Style::default().fg(DIM_COLOR)),
                     Span::styled(format!(" {:.1}s ", elapsed), Style::default().fg(DIM_COLOR)),
-                    Span::styled(bar, Style::default().fg(anim_color)),
+                    Span::styled(right_bar, Style::default().fg(anim_color)),
                 ])
             }
         }
@@ -1235,15 +1241,28 @@ fn draw_input(
     let mut lines: Vec<Line> = Vec::new();
     let mut hint_shown = false;
     if has_suggestions {
-        let suggestion_text: String = suggestions
-            .iter()
-            .map(|(cmd, desc)| format!("  {} - {}", cmd, desc))
-            .collect::<Vec<_>>()
-            .join("  │  ");
-        lines.push(Line::from(Span::styled(
-            suggestion_text,
-            Style::default().fg(DIM_COLOR),
-        )));
+        // Limit suggestions and add Tab hint
+        let max_suggestions = 5;
+        let limited: Vec<_> = suggestions.iter().take(max_suggestions).collect();
+        let more_count = suggestions.len().saturating_sub(max_suggestions);
+
+        let mut spans = vec![Span::styled("  Tab: ", Style::default().fg(DIM_COLOR))];
+        for (i, (cmd, _desc)) in limited.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" │ ", Style::default().fg(DIM_COLOR)));
+            }
+            spans.push(Span::styled(
+                cmd.to_string(),
+                Style::default().fg(Color::Rgb(138, 180, 248)), // USER_COLOR - soft blue
+            ));
+        }
+        if more_count > 0 {
+            spans.push(Span::styled(
+                format!(" (+{})", more_count),
+                Style::default().fg(DIM_COLOR),
+            ));
+        }
+        lines.push(Line::from(spans));
     } else if app.is_processing() && !input_text.is_empty() {
         // Show hint for Shift+Enter when processing and user has typed something
         hint_shown = true;

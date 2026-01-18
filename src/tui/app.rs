@@ -269,6 +269,9 @@ pub struct App {
     status_notice: Option<(String, Instant)>,
     // Message to interleave during processing (set via Shift+Enter)
     interleave_message: Option<String>,
+    // Queue mode: if true, Enter during processing queues; if false, Enter interleaves immediately
+    // Toggle with Ctrl+Tab
+    queue_mode: bool,
     // Tab completion state: (base_input, suggestion_index)
     // base_input is the original input before cycling, suggestion_index is current position
     tab_completion_state: Option<(String, usize)>,
@@ -368,6 +371,7 @@ impl App {
             model_switch_keys: super::keybind::load_model_switch_keys(),
             status_notice: None,
             interleave_message: None,
+            queue_mode: true, // Default to queue mode (wait until done)
             tab_completion_state: None,
             app_started: Instant::now(),
             rate_limit_reset: None,
@@ -1695,20 +1699,48 @@ impl App {
                     }
                     return Ok(());
                 }
+                KeyCode::Tab => {
+                    // Ctrl+Tab: toggle queue mode (immediate send vs wait until done)
+                    self.queue_mode = !self.queue_mode;
+                    let mode_str = if self.queue_mode {
+                        "Queue mode: messages wait until response completes"
+                    } else {
+                        "Immediate mode: messages interrupt current response"
+                    };
+                    self.set_status_notice(mode_str);
+                    return Ok(());
+                }
+                KeyCode::Up => {
+                    // Ctrl+Up: retrieve last queued message for editing
+                    if self.input.is_empty() && !self.queued_messages.is_empty() {
+                        if let Some(msg) = self.queued_messages.pop() {
+                            self.input = msg;
+                            self.cursor_pos = self.input.len();
+                            self.set_status_notice("Retrieved queued message for editing");
+                        }
+                    }
+                    return Ok(());
+                }
                 _ => {}
             }
         }
 
-        // Shift+Enter: interleave message during processing (send immediately)
+        // Shift+Enter: does opposite of queue_mode during processing
         if code == KeyCode::Enter && modifiers.contains(KeyModifiers::SHIFT) {
             if !self.input.is_empty() {
                 if self.is_processing {
-                    // Set interleave message to interrupt current turn
-                    let raw_input = std::mem::take(&mut self.input);
-                    let expanded = self.expand_paste_placeholders(&raw_input);
-                    self.interleave_message = Some(expanded);
-                    self.cursor_pos = 0;
-                    self.set_status_notice("⚡ Interleaving message...");
+                    // Shift+Enter does the opposite of queue_mode
+                    if self.queue_mode {
+                        // Queue mode is on, so Shift+Enter interleaves
+                        let raw_input = std::mem::take(&mut self.input);
+                        let expanded = self.expand_paste_placeholders(&raw_input);
+                        self.interleave_message = Some(expanded);
+                        self.cursor_pos = 0;
+                        self.set_status_notice("⚡ Interleaving message...");
+                    } else {
+                        // Immediate mode is on, so Shift+Enter queues
+                        self.queue_message();
+                    }
                 } else {
                     // Not processing - just submit normally
                     self.submit_input();
@@ -1721,8 +1753,18 @@ impl App {
             KeyCode::Enter => {
                 if !self.input.is_empty() {
                     if self.is_processing {
-                        // Queue the message instead of blocking
-                        self.queue_message();
+                        // Enter behavior depends on queue_mode
+                        if self.queue_mode {
+                            // Queue mode: queue the message
+                            self.queue_message();
+                        } else {
+                            // Immediate mode: interleave immediately
+                            let raw_input = std::mem::take(&mut self.input);
+                            let expanded = self.expand_paste_placeholders(&raw_input);
+                            self.interleave_message = Some(expanded);
+                            self.cursor_pos = 0;
+                            self.set_status_notice("⚡ Interleaving message...");
+                        }
                     } else {
                         self.submit_input();
                     }
@@ -1763,21 +1805,12 @@ impl App {
                 self.autocomplete();
             }
             KeyCode::Up | KeyCode::PageUp => {
-                // If input is empty and there are queued messages, bring last one back for editing (Up only)
-                if code == KeyCode::Up && self.input.is_empty() && !self.queued_messages.is_empty()
-                {
-                    if let Some(msg) = self.queued_messages.pop() {
-                        self.input = msg;
-                        self.cursor_pos = self.input.len();
-                    }
-                } else {
-                    // Scroll up (increase offset from bottom)
-                    // Use generous estimate - UI will clamp to actual content
-                    let max_estimate =
-                        self.display_messages.len() * 100 + self.streaming_text.len();
-                    let inc = if code == KeyCode::PageUp { 10 } else { 1 };
-                    self.scroll_offset = (self.scroll_offset + inc).min(max_estimate);
-                }
+                // Scroll up (increase offset from bottom)
+                // Use generous estimate - UI will clamp to actual content
+                let max_estimate =
+                    self.display_messages.len() * 100 + self.streaming_text.len();
+                let inc = if code == KeyCode::PageUp { 10 } else { 1 };
+                self.scroll_offset = (self.scroll_offset + inc).min(max_estimate);
             }
             KeyCode::Down | KeyCode::PageDown => {
                 // Scroll down (decrease offset, 0 = bottom)
@@ -1884,7 +1917,9 @@ impl App {
                      **Keyboard shortcuts:**\n\
                      • `Ctrl+C` / `Ctrl+D` - Quit\n\
                      • `Ctrl+L` - Clear conversation\n\
-                     • `PageUp/Down` - Scroll history\n\
+                     • `PageUp/Down` or `Up/Down` - Scroll history\n\
+                     • `Ctrl+Tab` - Toggle queue mode (wait vs immediate send)\n\
+                     • `Ctrl+Up` - Retrieve queued message for editing\n\
                      • `Ctrl+U` - Clear input line\n\
                      • `Ctrl+K` - Kill to end of line\n\
                      {}\n\
@@ -4216,7 +4251,7 @@ mod tests {
     }
 
     #[test]
-    fn test_up_arrow_edits_queued_message() {
+    fn test_ctrl_up_edits_queued_message() {
         let mut app = create_test_app();
         app.is_processing = true;
 
@@ -4237,8 +4272,8 @@ mod tests {
         assert_eq!(app.queued_count(), 1);
         assert!(app.input().is_empty());
 
-        // Press Up to bring it back for editing
-        app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+        // Press Ctrl+Up to bring it back for editing
+        app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
 
         assert_eq!(app.queued_count(), 0);
         assert_eq!(app.input(), "hello");
