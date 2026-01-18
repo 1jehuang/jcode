@@ -966,7 +966,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                     let is_edit_tool =
                         matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit");
                     let (additions, deletions) = if is_edit_tool {
-                        diff_change_counts(&msg.content)
+                        diff_change_counts_for_tool(tc, &msg.content)
                     } else {
                         (0, 0)
                     };
@@ -1778,6 +1778,64 @@ fn diff_change_counts(content: &str) -> (usize, usize) {
         .iter()
         .filter(|line| line.kind == DiffLineKind::Del)
         .count();
+    (additions, deletions)
+}
+
+fn diff_change_counts_for_tool(tool: &ToolCall, content: &str) -> (usize, usize) {
+    let (additions, deletions) = diff_change_counts(content);
+    if additions > 0 || deletions > 0 {
+        return (additions, deletions);
+    }
+
+    match tool.name.as_str() {
+        "edit" | "Edit" => diff_counts_from_input_pair(&tool.input, "old_string", "new_string")
+            .unwrap_or((0, 0)),
+        "multiedit" => diff_counts_from_multiedit(&tool.input).unwrap_or((0, 0)),
+        _ => (additions, deletions),
+    }
+}
+
+fn diff_counts_from_input_pair(
+    input: &serde_json::Value,
+    old_key: &str,
+    new_key: &str,
+) -> Option<(usize, usize)> {
+    let old = input.get(old_key)?.as_str()?;
+    let new = input.get(new_key)?.as_str()?;
+    Some(diff_counts_from_strings(old, new))
+}
+
+fn diff_counts_from_multiedit(input: &serde_json::Value) -> Option<(usize, usize)> {
+    let edits = input.get("edits")?.as_array()?;
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+
+    for edit in edits {
+        let old = edit.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+        let new = edit.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+        if old.is_empty() && new.is_empty() {
+            continue;
+        }
+        let (add, del) = diff_counts_from_strings(old, new);
+        additions += add;
+        deletions += del;
+    }
+
+    Some((additions, deletions))
+}
+
+fn diff_counts_from_strings(old: &str, new: &str) -> (usize, usize) {
+    use similar::ChangeTag;
+    let diff = similar::TextDiff::from_lines(old, new);
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Insert => additions += 1,
+            ChangeTag::Delete => deletions += 1,
+            ChangeTag::Equal => {}
+        }
+    }
     (additions, deletions)
 }
 
