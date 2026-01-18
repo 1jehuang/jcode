@@ -480,6 +480,10 @@ async fn handle_client(
 
     // Per-client state
     let mut client_is_processing = false;
+    let (processing_done_tx, mut processing_done_rx) =
+        mpsc::unbounded_channel::<(u64, Result<()>)>();
+    let mut processing_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut processing_message_id: Option<u64> = None;
 
     // Create a new session for this client
     let new_agent = Agent::new(Arc::clone(&provider), registry.clone());
@@ -540,9 +544,38 @@ async fn handle_client(
 
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            break; // Client disconnected
+        tokio::select! {
+            done = processing_done_rx.recv() => {
+                if let Some((done_id, result)) = done {
+                    if Some(done_id) != processing_message_id {
+                        continue;
+                    }
+                    processing_message_id = None;
+                    processing_task = None;
+                    client_is_processing = false;
+
+                    match result {
+                        Ok(()) => {
+                            let _ = client_event_tx.send(ServerEvent::Done { id: done_id });
+                        }
+                        Err(e) => {
+                            let _ = client_event_tx.send(ServerEvent::Error {
+                                id: done_id,
+                                message: e.to_string(),
+                            });
+                        }
+                    }
+                } else {
+                    break;
+                }
+                continue;
+            }
+            n = reader.read_line(&mut line) => {
+                let n = n?;
+                if n == 0 {
+                    break; // Client disconnected
+                }
+            }
         }
 
         let request = match decode_request(&line) {
@@ -580,34 +613,34 @@ async fn handle_client(
 
                 // Set processing flag for this client
                 client_is_processing = true;
+                processing_message_id = Some(id);
 
-                // Process message with streaming to this client's channel
-                let result = process_message_streaming_mpsc(
-                    Arc::clone(&agent),
-                    &content,
-                    client_event_tx.clone(),
-                )
-                .await;
-
-                // Clear processing flag
-                client_is_processing = false;
-
-                match result {
-                    Ok(()) => {
-                        let _ = client_event_tx.send(ServerEvent::Done { id });
-                    }
-                    Err(e) => {
-                        let _ = client_event_tx.send(ServerEvent::Error {
-                            id,
-                            message: e.to_string(),
-                        });
-                    }
-                }
+                let agent = Arc::clone(&agent);
+                let tx = client_event_tx.clone();
+                let done_tx = processing_done_tx.clone();
+                processing_task = Some(tokio::spawn(async move {
+                    let result = process_message_streaming_mpsc(agent, &content, tx).await;
+                    let _ = done_tx.send((id, result));
+                }));
             }
 
             Request::Cancel { id } => {
-                // TODO: Implement cancellation
-                let _ = client_event_tx.send(ServerEvent::Done { id });
+                let _ = id; // cancel request id (not the message id)
+                if let Some(handle) = processing_task.take() {
+                    if handle.is_finished() {
+                        processing_task = Some(handle);
+                        continue;
+                    }
+                    handle.abort();
+                    processing_task = None;
+                    client_is_processing = false;
+                    if let Some(message_id) = processing_message_id.take() {
+                        let _ = client_event_tx.send(ServerEvent::TextDelta {
+                            text: "Interrupted".to_string(),
+                        });
+                        let _ = client_event_tx.send(ServerEvent::Done { id: message_id });
+                    }
+                }
             }
 
             Request::Clear { id } => {
@@ -1152,6 +1185,10 @@ async fn handle_client(
                 }
             }
         }
+    }
+
+    if let Some(handle) = processing_task.take() {
+        handle.abort();
     }
 
     event_handle.abort();
