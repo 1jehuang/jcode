@@ -19,6 +19,9 @@ const QUEUED_COLOR: Color = Color::Rgb(255, 193, 7); // Amber/yellow for queued
 const USER_TEXT: Color = Color::Rgb(245, 245, 255); // Bright cool white (user messages)
 const USER_BG: Color = Color::Rgb(35, 40, 50); // Subtle dark blue background for user
 const AI_TEXT: Color = Color::Rgb(220, 220, 215); // Softer warm white (AI messages)
+const HEADER_ICON_COLOR: Color = Color::Rgb(110, 210, 255); // Cyan for session icon
+const HEADER_NAME_COLOR: Color = Color::Rgb(255, 200, 120); // Warm amber for JCode label
+const HEADER_SESSION_COLOR: Color = Color::Rgb(140, 220, 160); // Soft green for session name
 
 // Spinner frames for animated status
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -1565,11 +1568,11 @@ fn wrap_input_text<'a>(
     (lines, cursor_line, cursor_col)
 }
 
-// Colors for diff display
-const DIFF_ADD_COLOR: Color = Color::Rgb(100, 200, 100); // Green for additions
-const DIFF_DEL_COLOR: Color = Color::Rgb(200, 100, 100); // Red for deletions
-const DIFF_HIGHLIGHT_ADD: Color = Color::Rgb(150, 255, 150); // Brighter green for changed parts
-const DIFF_HIGHLIGHT_DEL: Color = Color::Rgb(255, 130, 130); // Brighter red for changed parts
+// Colors for diff display (high-contrast, color-blind friendly)
+const DIFF_ADD_COLOR: Color = Color::Rgb(70, 165, 245); // Blue for additions
+const DIFF_DEL_COLOR: Color = Color::Rgb(245, 140, 80); // Orange for deletions
+const DIFF_HIGHLIGHT_ADD: Color = Color::Rgb(150, 210, 255); // Brighter blue highlight
+const DIFF_HIGHLIGHT_DEL: Color = Color::Rgb(255, 190, 140); // Brighter orange highlight
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DiffLineKind {
@@ -1623,7 +1626,7 @@ fn parse_diff_line(raw_line: &str) -> Option<ParsedDiffLine> {
             return Some(ParsedDiffLine {
                 kind: DiffLineKind::Del,
                 prefix: prefix.to_string(),
-                content: content.to_string(),
+                content: trim_diff_content(content),
             });
         }
     }
@@ -1633,7 +1636,7 @@ fn parse_diff_line(raw_line: &str) -> Option<ParsedDiffLine> {
             return Some(ParsedDiffLine {
                 kind: DiffLineKind::Add,
                 prefix: prefix.to_string(),
-                content: content.to_string(),
+                content: trim_diff_content(content),
             });
         }
     }
@@ -1643,18 +1646,22 @@ fn parse_diff_line(raw_line: &str) -> Option<ParsedDiffLine> {
         return Some(ParsedDiffLine {
             kind: DiffLineKind::Add,
             prefix: "+".to_string(),
-            content: rest.to_string(),
+            content: trim_diff_content(rest),
         });
     }
     if let Some(rest) = raw_line.strip_prefix('-') {
         return Some(ParsedDiffLine {
             kind: DiffLineKind::Del,
             prefix: "-".to_string(),
-            content: rest.to_string(),
+            content: trim_diff_content(rest),
         });
     }
 
     None
+}
+
+fn trim_diff_content(content: &str) -> String {
+    content.trim_start_matches(|c| c == ' ' || c == '\t').to_string()
 }
 
 /// Extract prefix (line number + sign) and content from diff line
@@ -1687,8 +1694,8 @@ fn tint_span_with_diff_color(span: Span<'static>, diff_color: Color) -> Span<'st
         _ => return span, // Can't tint indexed colors easily
     };
 
-    // Blend: 70% syntax color + 30% diff color
-    let blend = |s: u8, d: u8| -> u8 { ((s as u16 * 70 + d as u16 * 30) / 100) as u8 };
+    // Blend: 60% syntax color + 40% diff color for clearer diff emphasis
+    let blend = |s: u8, d: u8| -> u8 { ((s as u16 * 60 + d as u16 * 40) / 100) as u8 };
 
     let tinted = Color::Rgb(blend(sr, dr), blend(sg, dg), blend(sb, db));
     Span::styled(span.content, span.style.fg(tinted))
