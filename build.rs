@@ -17,9 +17,9 @@ fn main() {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Get git commit date
+    // Get git commit date (full datetime with timezone for accurate age calculation)
     let output = Command::new("git")
-        .args(["log", "-1", "--format=%cs"])
+        .args(["log", "-1", "--format=%ci"])
         .output()
         .ok();
 
