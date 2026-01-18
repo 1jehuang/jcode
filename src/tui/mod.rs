@@ -66,6 +66,8 @@ pub trait TuiState {
     fn animation_elapsed(&self) -> f32;
     /// Time remaining until rate limit resets (if rate limited)
     fn rate_limit_remaining(&self) -> Option<Duration>;
+    /// Whether queue mode is enabled (true = wait, false = immediate)
+    fn queue_mode(&self) -> bool;
     /// Context info (what's loaded in the system prompt)
     fn context_info(&self) -> &crate::prompt::ContextInfo;
     /// Get info widget data (todos, client count, etc.)

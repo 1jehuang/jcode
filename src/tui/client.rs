@@ -883,6 +883,10 @@ impl TuiState for ClientApp {
         None // Rate limits handled by server in client mode
     }
 
+    fn queue_mode(&self) -> bool {
+        true // Deprecated client doesn't support immediate mode
+    }
+
     fn context_info(&self) -> &crate::prompt::ContextInfo {
         &self.context_info
     }
