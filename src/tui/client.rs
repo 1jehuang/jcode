@@ -73,6 +73,8 @@ pub struct ClientApp {
     app_started: Instant,
     // Store reload info to pass to agent after reconnection
     reload_info: Vec<String>,
+    // Context info (what's loaded in system prompt)
+    context_info: crate::prompt::ContextInfo,
 }
 
 impl ClientApp {
@@ -112,6 +114,15 @@ impl ClientApp {
             status_notice: None,
             app_started: Instant::now(),
             reload_info: Vec::new(),
+            // Compute context info at startup (selfdev mode is always canary)
+            context_info: {
+                let (_, info) = crate::prompt::build_system_prompt_with_context(
+                    None,
+                    &[],  // No skills in client mode
+                    true, // selfdev = canary
+                );
+                info
+            },
         }
     }
 
@@ -873,9 +884,7 @@ impl TuiState for ClientApp {
     }
 
     fn context_info(&self) -> &crate::prompt::ContextInfo {
-        // Return a static default since deprecated client doesn't track context
-        static DEFAULT_INFO: std::sync::OnceLock<crate::prompt::ContextInfo> = std::sync::OnceLock::new();
-        DEFAULT_INFO.get_or_init(crate::prompt::ContextInfo::default)
+        &self.context_info
     }
 
     fn info_widget_data(&self) -> super::info_widget::InfoWidgetData {
