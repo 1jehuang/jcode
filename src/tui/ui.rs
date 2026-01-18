@@ -16,6 +16,7 @@ const TOOL_COLOR: Color = Color::Rgb(120, 120, 120); // Gray
 const DIM_COLOR: Color = Color::Rgb(80, 80, 80); // Dimmer gray
 const ACCENT_COLOR: Color = Color::Rgb(186, 139, 255); // Purple accent
 const QUEUED_COLOR: Color = Color::Rgb(255, 193, 7); // Amber/yellow for queued
+const ASAP_COLOR: Color = Color::Rgb(110, 210, 255); // Cyan for immediate send
 const USER_TEXT: Color = Color::Rgb(245, 245, 255); // Bright cool white (user messages)
 const USER_BG: Color = Color::Rgb(35, 40, 50); // Subtle dark blue background for user
 const AI_TEXT: Color = Color::Rgb(220, 220, 215); // Softer warm white (AI messages)
@@ -143,8 +144,8 @@ fn format_gpt_name(short: &str) -> String {
     format!("GPT-{}", rest)
 }
 
-/// Render context bar showing what's loaded in the system prompt
-/// Icons show different context types, with relative widths showing proportions
+/// Render context bar as a visual rectangle showing context window usage
+/// Format: [⚙███🌍██📋███📝███🛠██░░░░░░░░░░░░░░] 12k/200k
 fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
 
@@ -155,113 +156,111 @@ fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Li
     const CLAUDE_COLOR: Color = Color::Rgb(180, 100, 200); // Purple - CLAUDE.md
     const SKILLS_COLOR: Color = Color::Rgb(140, 200, 100); // Green - skills
     const DEV_COLOR: Color = Color::Rgb(255, 193, 7);      // Amber - self-dev
+    const EMPTY_COLOR: Color = Color::Rgb(50, 50, 50);     // Dark gray - unused
 
-    // Calculate total for proportions (use raw file sizes for better representation)
-    let total = info.total_chars.max(1);
+    // Context window limit (Claude's ~200k tokens ≈ 800k chars)
+    const CONTEXT_LIMIT_CHARS: usize = 800_000;
 
-    // Build segments with their proportional widths
-    // Each segment: (icon, label, chars, color, is_file)
-    let mut segments: Vec<(&str, &str, usize, Color, bool)> = Vec::new();
+    // Build segments: (icon, chars, color)
+    let mut segments: Vec<(&str, usize, Color)> = Vec::new();
 
-    // Always show base system prompt
-    segments.push(("⚙", "sys", info.system_prompt_chars, SYS_COLOR, false));
-
+    segments.push(("⚙", info.system_prompt_chars, SYS_COLOR));
     if info.env_context_chars > 0 {
-        segments.push(("🌍", "env", info.env_context_chars, ENV_COLOR, false));
+        segments.push(("🌍", info.env_context_chars, ENV_COLOR));
     }
-
-    // File-based contexts (these are the important ones to highlight)
     if info.has_project_agents_md {
-        segments.push(("📋", "AGENTS.md", info.project_agents_md_chars, AGENTS_COLOR, true));
+        segments.push(("📋", info.project_agents_md_chars, AGENTS_COLOR));
     }
     if info.has_project_claude_md {
-        segments.push(("📝", "CLAUDE.md", info.project_claude_md_chars, CLAUDE_COLOR, true));
+        segments.push(("📝", info.project_claude_md_chars, CLAUDE_COLOR));
     }
     if info.has_global_agents_md {
-        segments.push(("📋", "~/.AGENTS", info.global_agents_md_chars, AGENTS_COLOR, true));
+        segments.push(("📋", info.global_agents_md_chars, AGENTS_COLOR));
     }
     if info.has_global_claude_md {
-        segments.push(("📝", "~/.CLAUDE", info.global_claude_md_chars, CLAUDE_COLOR, true));
+        segments.push(("📝", info.global_claude_md_chars, CLAUDE_COLOR));
     }
-
     if info.skills_chars > 0 {
-        segments.push(("🔧", "skills", info.skills_chars, SKILLS_COLOR, false));
+        segments.push(("🔧", info.skills_chars, SKILLS_COLOR));
     }
     if info.selfdev_chars > 0 {
-        segments.push(("🛠", "dev", info.selfdev_chars, DEV_COLOR, false));
+        segments.push(("🛠", info.selfdev_chars, DEV_COLOR));
     }
 
-    // Prefix with context label
-    spans.push(Span::styled("ctx: ", Style::default().fg(DIM_COLOR)));
+    // Calculate bar dimensions
+    let suffix_len = 10; // " 12k/200k"
+    let bar_inner_width = max_width.saturating_sub(suffix_len + 2).min(50); // +2 for [ ]
 
-    // Calculate bar width (leave room for prefix and token count)
-    let prefix_len = 5; // "ctx: "
-    let suffix_len = 15; // " ~XXXk tokens"
-    let bar_width = max_width.saturating_sub(prefix_len + suffix_len).min(60);
-
-    if bar_width < 10 {
-        // Too narrow - just show icons
-        for (icon, _label, _chars, color, is_file) in &segments {
-            if *is_file {
-                // Highlight loaded files
-                spans.push(Span::styled(
-                    format!("{} ", icon),
-                    Style::default().fg(*color),
-                ));
-            }
+    if bar_inner_width < 10 {
+        // Too narrow - compact mode: just icons in brackets
+        spans.push(Span::styled("[", Style::default().fg(DIM_COLOR)));
+        for (icon, _, color) in &segments {
+            spans.push(Span::styled(*icon, Style::default().fg(*color)));
         }
+        spans.push(Span::styled("]", Style::default().fg(DIM_COLOR)));
     } else {
-        // Show proportional bar
-        let mut used_width = 0;
-        for (i, (icon, label, chars, color, is_file)) in segments.iter().enumerate() {
-            // Calculate proportional width (minimum 1 char for icon)
-            let proportion = (*chars as f64) / (total as f64);
-            let seg_width = ((proportion * bar_width as f64).round() as usize).max(1);
+        // Visual bar: [⚙███🌍██📋██📝██🛠█░░░░░░░░░░░]
+        spans.push(Span::styled("[", Style::default().fg(DIM_COLOR)));
 
-            if used_width + seg_width > bar_width {
-                break;
-            }
+        let total_used = info.total_chars;
+        let used_ratio = (total_used as f64) / (CONTEXT_LIMIT_CHARS as f64);
+        let used_width = ((used_ratio * bar_inner_width as f64).ceil() as usize)
+            .max(segments.len() * 2) // At minimum, show all icons (each ~2 chars)
+            .min(bar_inner_width);
+        let empty_width = bar_inner_width.saturating_sub(used_width);
 
+        // Distribute used_width among segments
+        // Each segment gets: icon (2 chars) + proportional fill blocks
+        let icon_total_width: usize = segments.len() * 2; // Each emoji ~2 chars
+        let fill_width = used_width.saturating_sub(icon_total_width);
+
+        for (i, (icon, chars, color)) in segments.iter().enumerate() {
             // Icon
-            spans.push(Span::styled(
-                format!("{}", icon),
-                Style::default().fg(*color),
-            ));
-            used_width += 1;
+            spans.push(Span::styled(*icon, Style::default().fg(*color)));
 
-            // Label if there's room (for file contexts, always try to show name)
-            let remaining = seg_width.saturating_sub(1);
-            if remaining > 0 && *is_file {
-                let display_label = if label.len() <= remaining {
-                    label.to_string()
-                } else if remaining >= 3 {
-                    format!("{}…", &label[..remaining-1])
-                } else {
-                    String::new()
-                };
-                if !display_label.is_empty() {
+            // Fill blocks proportional to this segment's size
+            if fill_width > 0 && total_used > 0 {
+                let seg_ratio = (*chars as f64) / (total_used as f64);
+                let mut seg_fill = (seg_ratio * fill_width as f64).round() as usize;
+
+                // Last segment fills remaining to avoid rounding gaps
+                if i == segments.len() - 1 {
+                    let used_so_far: usize = segments[..i]
+                        .iter()
+                        .map(|(_, c, _)| {
+                            let r = (*c as f64) / (total_used as f64);
+                            (r * fill_width as f64).round() as usize
+                        })
+                        .sum();
+                    seg_fill = fill_width.saturating_sub(used_so_far);
+                }
+
+                if seg_fill > 0 {
                     spans.push(Span::styled(
-                        display_label,
-                        Style::default().fg(*color).dim(),
+                        "█".repeat(seg_fill),
+                        Style::default().fg(*color),
                     ));
-                    used_width += remaining.min(label.len());
                 }
             }
-
-            // Add separator
-            if i < segments.len() - 1 && used_width < bar_width {
-                spans.push(Span::styled(" ", Style::default()));
-                used_width += 1;
-            }
         }
+
+        // Empty/remaining capacity shown as dim blocks
+        if empty_width > 0 {
+            spans.push(Span::styled(
+                "░".repeat(empty_width),
+                Style::default().fg(EMPTY_COLOR),
+            ));
+        }
+
+        spans.push(Span::styled("]", Style::default().fg(DIM_COLOR)));
     }
 
-    // Token estimate at the end
+    // Token count: used/total
     let est_tokens = info.estimated_tokens();
     let token_str = if est_tokens >= 1000 {
-        format!(" ~{}k tokens", est_tokens / 1000)
+        format!(" {}k/200k", est_tokens / 1000)
     } else {
-        format!(" ~{} tokens", est_tokens)
+        format!(" {}/200k", est_tokens)
     };
     spans.push(Span::styled(token_str, Style::default().fg(DIM_COLOR)));
 
@@ -1412,6 +1411,7 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         }
     };
 
+    let line = append_send_mode_indicator(line, app);
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, area);
 }
@@ -1439,6 +1439,27 @@ fn format_cache_status(
     None
 }
 
+fn send_mode_label(app: &dyn TuiState) -> (&'static str, Color) {
+    if app.queue_mode() {
+        ("⏳ wait", QUEUED_COLOR)
+    } else {
+        ("⚡ now", ASAP_COLOR)
+    }
+}
+
+fn append_send_mode_indicator<'a>(mut line: Line<'a>, app: &dyn TuiState) -> Line<'a> {
+    let (label, color) = send_mode_label(app);
+    if label.is_empty() {
+        return line;
+    }
+    if line.width() > 0 {
+        line.spans
+            .push(Span::styled(" • ", Style::default().fg(DIM_COLOR)));
+    }
+    line.spans.push(Span::styled(label, Style::default().fg(color)));
+    line
+}
+
 fn pending_prompt_count(app: &dyn TuiState) -> usize {
     let interleave = app
         .interleave_message()
@@ -1451,12 +1472,12 @@ fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
     let mut previews = Vec::new();
     if let Some(msg) = app.interleave_message() {
         if !msg.is_empty() {
-            previews.push(format!("[asap] {}", msg.chars().take(100).collect::<String>()));
+            previews.push(format!("⚡ {}", msg.chars().take(100).collect::<String>()));
         }
     }
     for msg in app.queued_messages() {
         previews.push(format!(
-            "[wait] {}",
+            "⏳ {}",
             msg.chars().take(100).collect::<String>()
         ));
     }
@@ -1464,14 +1485,14 @@ fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
 }
 
 fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usize) {
-    let mut items: Vec<(&'static str, &str)> = Vec::new();
+    let mut items: Vec<(bool, &str)> = Vec::new();
     if let Some(msg) = app.interleave_message() {
         if !msg.is_empty() {
-            items.push(("[asap] ", msg));
+            items.push((true, msg));
         }
     }
     for msg in app.queued_messages() {
-        items.push(("[wait] ", msg.as_str()));
+        items.push((false, msg.as_str()));
     }
 
     let pending_count = items.len();
@@ -1479,15 +1500,26 @@ fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usi
         .iter()
         .take(3)
         .enumerate()
-        .map(|(i, (indicator, msg))| {
+        .map(|(i, (is_asap, msg))| {
             // Distance from input prompt: pending_count - i (first pending is furthest from input)
             // +1 because the input prompt itself is distance 0
             let distance = pending_count.saturating_sub(i);
             let num_color = rainbow_prompt_color(distance);
+            let (indicator, indicator_color, msg_color, dim) = if *is_asap {
+                ("⚡", ASAP_COLOR, ASAP_COLOR, false)
+            } else {
+                ("⏳", QUEUED_COLOR, QUEUED_COLOR, true)
+            };
+            let mut msg_style = Style::default().fg(msg_color);
+            if dim {
+                msg_style = msg_style.dim();
+            }
             Line::from(vec![
                 Span::styled(format!("{}", start_num + i), Style::default().fg(num_color)),
-                Span::styled(*indicator, Style::default().fg(QUEUED_COLOR)),
-                Span::styled(*msg, Style::default().fg(QUEUED_COLOR).dim()),
+                Span::raw(" "),
+                Span::styled(indicator, Style::default().fg(indicator_color)),
+                Span::raw(" "),
+                Span::styled(*msg, msg_style),
             ])
         })
         .collect();
