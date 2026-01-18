@@ -18,12 +18,32 @@ pub struct Message {
     pub content: Vec<ContentBlock>,
 }
 
+/// Cache control metadata for prompt caching
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+}
+
+impl CacheControl {
+    pub fn ephemeral(ttl: Option<String>) -> Self {
+        Self {
+            kind: "ephemeral".to_string(),
+            ttl,
+        }
+    }
+}
+
 /// Content block within a message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     ToolUse {
         id: String,
@@ -44,6 +64,7 @@ impl Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
+                cache_control: None,
             }],
         }
     }
@@ -53,6 +74,7 @@ impl Message {
             role: Role::Assistant,
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
+                cache_control: None,
             }],
         }
     }
@@ -114,6 +136,8 @@ pub enum StreamEvent {
     TokenUsage {
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
+        cache_read_input_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
     },
     /// Error occurred
     Error {

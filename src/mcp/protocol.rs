@@ -303,7 +303,7 @@ mod tests {
         assert!(!result.is_error);
         assert_eq!(result.content.len(), 1);
         match &result.content[0] {
-            ContentBlock::Text { text } => assert_eq!(text, "File contents here"),
+            ContentBlock::Text { text, .. } => assert_eq!(text, "File contents here"),
             _ => panic!("Expected text block"),
         }
     }

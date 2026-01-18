@@ -740,12 +740,24 @@ async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
     ratatui::restore();
 
-    // Handle reload request
-    if let Ok(Some(_reload_session)) = &result {
-        // TODO: Implement client-side reload if needed
+    let run_result = result?;
+
+    // Check for special exit code (canary wrapper communication)
+    if let Some(code) = run_result.exit_code {
+        std::process::exit(code);
     }
 
-    result.map(|_| ())
+    // Check for hot-reload request (no rebuild) - reload CLIENT binary
+    if let Some(ref reload_session_id) = run_result.reload_session {
+        hot_reload(reload_session_id)?;
+    }
+
+    // Check for hot-rebuild request (full git pull + cargo build + tests)
+    if let Some(ref rebuild_session_id) = run_result.rebuild_session {
+        hot_rebuild(rebuild_session_id)?;
+    }
+
+    Ok(())
 }
 
 /// Get the jcode repository directory (where the source code lives)
@@ -1178,24 +1190,17 @@ async fn run_server_manager(
         let canary_path = build::canary_binary_path().ok();
         let stable_path = build::stable_binary_path().ok();
 
-        let (binary_path, version_type) = if canary_path
-            .as_ref()
-            .map(|p| p.exists())
-            .unwrap_or(false)
-        {
-            (canary_path.unwrap(), "canary")
-        } else if stable_path
-            .as_ref()
-            .map(|p| p.exists())
-            .unwrap_or(false)
-        {
-            (stable_path.unwrap(), "stable")
-        } else if initial_binary.exists() {
-            (initial_binary.to_path_buf(), "dev")
-        } else {
-            eprintln!("No binary found for server!");
-            break;
-        };
+        let (binary_path, version_type) =
+            if canary_path.as_ref().map(|p| p.exists()).unwrap_or(false) {
+                (canary_path.unwrap(), "canary")
+            } else if stable_path.as_ref().map(|p| p.exists()).unwrap_or(false) {
+                (stable_path.unwrap(), "stable")
+            } else if initial_binary.exists() {
+                (initial_binary.to_path_buf(), "dev")
+            } else {
+                eprintln!("No binary found for server!");
+                break;
+            };
 
         eprintln!("Starting {} server...", version_type);
 
@@ -1321,7 +1326,13 @@ fn inject_crash_context(
     );
 
     // Add as system message
-    session.add_message(Role::User, vec![ContentBlock::Text { text: report }]);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: report,
+            cache_control: None,
+        }],
+    );
     session.save()?;
 
     Ok(())

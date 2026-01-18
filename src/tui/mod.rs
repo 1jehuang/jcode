@@ -33,6 +33,7 @@ pub trait TuiState {
     fn mcp_servers(&self) -> Vec<String>;
     fn available_skills(&self) -> Vec<String>;
     fn streaming_tokens(&self) -> (u64, u64);
+    fn streaming_cache_tokens(&self) -> (Option<u64>, Option<u64>);
     fn streaming_tool_calls(&self) -> Vec<ToolCall>;
     fn elapsed(&self) -> Option<Duration>;
     fn status(&self) -> ProcessingStatus;

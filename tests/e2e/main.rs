@@ -87,6 +87,8 @@ async fn test_token_usage() -> Result<()> {
         StreamEvent::TokenUsage {
             input_tokens: Some(10),
             output_tokens: Some(20),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
         },
         StreamEvent::TextDelta("Response".to_string()),
         StreamEvent::MessageEnd {
@@ -112,7 +114,10 @@ async fn test_stream_error() -> Result<()> {
 
     provider.queue_response(vec![
         StreamEvent::TextDelta("Starting...".to_string()),
-        StreamEvent::Error { message: "Something went wrong".to_string(), retry_after_secs: None },
+        StreamEvent::Error {
+            message: "Something went wrong".to_string(),
+            retry_after_secs: None,
+        },
     ]);
 
     let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
@@ -143,10 +148,7 @@ async fn test_socket_model_cycle_supported_models() -> Result<()> {
     let prev_runtime = std::env::var("XDG_RUNTIME_DIR").ok();
     std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
 
-    let provider = MockProvider::with_models(vec![
-        "gpt-5.2-codex",
-        "claude-opus-4-5-20251101",
-    ]);
+    let provider = MockProvider::with_models(vec!["gpt-5.2-codex", "claude-opus-4-5-20251101"]);
     let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
     let registry = Registry::new(provider.clone()).await;
     let server_instance = server::Server::new(provider, registry);
@@ -266,8 +268,13 @@ async fn binary_integration_standalone_claude() -> Result<()> {
 
     let output = Command::new("cargo")
         .args([
-            "run", "--release", "--bin", "jcode", "--",
-            "run", "Say 'test-ok' and nothing else"
+            "run",
+            "--release",
+            "--bin",
+            "jcode",
+            "--",
+            "run",
+            "Say 'test-ok' and nothing else",
         ])
         .output()?;
 
@@ -277,7 +284,8 @@ async fn binary_integration_standalone_claude() -> Result<()> {
     assert!(
         output.status.success() || stdout.contains("test") || stderr.contains("Claude"),
         "Binary should run successfully. stdout: {}, stderr: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 
     Ok(())
@@ -291,9 +299,15 @@ async fn binary_integration_openai_provider() -> Result<()> {
 
     let output = Command::new("cargo")
         .args([
-            "run", "--release", "--bin", "jcode", "--",
-            "--provider", "openai",
-            "run", "Say 'openai-ok' and nothing else"
+            "run",
+            "--release",
+            "--bin",
+            "jcode",
+            "--",
+            "--provider",
+            "openai",
+            "run",
+            "Say 'openai-ok' and nothing else",
         ])
         .output()?;
 
@@ -308,7 +322,8 @@ async fn binary_integration_openai_provider() -> Result<()> {
     assert!(
         output.status.success() || has_response,
         "OpenAI provider should work. stdout: {}, stderr: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 
     Ok(())

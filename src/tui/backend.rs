@@ -39,6 +39,8 @@ pub enum DebugEvent {
         session_id: Option<String>,
         input_tokens: u64,
         output_tokens: u64,
+        cache_read_input_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
         queued_messages: Vec<String>,
     },
 
@@ -78,6 +80,8 @@ pub enum DebugEvent {
     TokenUsage {
         input_tokens: u64,
         output_tokens: u64,
+        cache_read_input_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
     },
 
     /// Input changed (user typing)
@@ -154,6 +158,8 @@ pub enum BackendEvent {
     TokenUsage {
         input_tokens: u64,
         output_tokens: u64,
+        cache_read_input_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
     },
 
     /// Thinking started (extended thinking mode)

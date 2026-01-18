@@ -29,6 +29,8 @@ pub struct OpenAIProvider {
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
     model: Arc<RwLock<String>>,
+    prompt_cache_key: Option<String>,
+    prompt_cache_retention: Option<String>,
 }
 
 impl OpenAIProvider {
@@ -44,10 +46,32 @@ impl OpenAIProvider {
             model = DEFAULT_MODEL.to_string();
         }
 
+        let prompt_cache_key = std::env::var("JCODE_OPENAI_PROMPT_CACHE_KEY")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let prompt_cache_retention = std::env::var("JCODE_OPENAI_PROMPT_CACHE_RETENTION")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let prompt_cache_retention = match prompt_cache_retention.as_deref() {
+            Some("in_memory") | Some("24h") => prompt_cache_retention,
+            Some(other) => {
+                eprintln!(
+                    "Warning: Unsupported JCODE_OPENAI_PROMPT_CACHE_RETENTION '{}'; expected 'in_memory' or '24h'",
+                    other
+                );
+                None
+            }
+            None => None,
+        };
+
         Self {
             client: Client::new(),
             credentials: Arc::new(RwLock::new(credentials)),
             model: Arc::new(RwLock::new(model)),
+            prompt_cache_key,
+            prompt_cache_retention,
         }
     }
 
@@ -156,7 +180,7 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
             Role::User => {
                 for block in &msg.content {
                     match block {
-                        ContentBlock::Text { text } => {
+                        ContentBlock::Text { text, .. } => {
                             items.push(serde_json::json!({
                                 "type": "message",
                                 "role": "user",
@@ -187,7 +211,7 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
             Role::Assistant => {
                 for block in &msg.content {
                     match block {
-                        ContentBlock::Text { text } => {
+                        ContentBlock::Text { text, .. } => {
                             items.push(serde_json::json!({
                                 "type": "message",
                                 "role": "assistant",
@@ -362,14 +386,25 @@ impl OpenAIResponsesStream {
     }
 }
 
+fn extract_cached_input_tokens(usage: &Value) -> Option<u64> {
+    usage
+        .get("input_tokens_details")
+        .or_else(|| usage.get("prompt_tokens_details"))
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(|v| v.as_u64())
+}
+
 fn extract_usage_from_response(response: &Value) -> Option<StreamEvent> {
     let usage = response.get("usage")?;
     let input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64());
     let output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64());
-    if input_tokens.is_some() || output_tokens.is_some() {
+    let cache_read_input_tokens = extract_cached_input_tokens(usage);
+    if input_tokens.is_some() || output_tokens.is_some() || cache_read_input_tokens.is_some() {
         Some(StreamEvent::TokenUsage {
             input_tokens,
             output_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens: None,
         })
     } else {
         None
@@ -417,16 +452,18 @@ impl Provider for OpenAIProvider {
         let input = build_responses_input(messages);
         let api_tools = build_tools(tools);
         let model_id = self.model_id().await;
-        let instructions = {
+        let (instructions, is_chatgpt_mode) = {
             let credentials = self.credentials.read().await;
-            if Self::is_chatgpt_mode(&credentials) {
+            let is_chatgpt = Self::is_chatgpt_mode(&credentials);
+            let instructions = if is_chatgpt {
                 CHATGPT_INSTRUCTIONS.to_string()
             } else {
                 system.to_string()
-            }
+            };
+            (instructions, is_chatgpt)
         };
 
-        let request = serde_json::json!({
+        let mut request = serde_json::json!({
             "model": model_id,
             "instructions": instructions,
             "input": input,
@@ -437,6 +474,15 @@ impl Provider for OpenAIProvider {
             "store": false,
             "include": ["reasoning.encrypted_content"],
         });
+
+        if !is_chatgpt_mode {
+            if let Some(key) = self.prompt_cache_key.as_ref() {
+                request["prompt_cache_key"] = serde_json::json!(key);
+            }
+            if let Some(retention) = self.prompt_cache_retention.as_ref() {
+                request["prompt_cache_retention"] = serde_json::json!(retention);
+            }
+        }
 
         let access_token = self.get_access_token().await?;
         let response = self.send_request(&request, &access_token).await?;

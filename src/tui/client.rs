@@ -48,6 +48,8 @@ pub struct ClientApp {
     streaming_tool_calls: Vec<ToolCall>,
     streaming_input_tokens: u64,
     streaming_output_tokens: u64,
+    streaming_cache_read_tokens: Option<u64>,
+    streaming_cache_creation_tokens: Option<u64>,
     processing_started: Option<Instant>,
     last_activity: Option<Instant>,
 
@@ -88,6 +90,8 @@ impl ClientApp {
             streaming_tool_calls: Vec::new(),
             streaming_input_tokens: 0,
             streaming_output_tokens: 0,
+            streaming_cache_read_tokens: None,
+            streaming_cache_creation_tokens: None,
             processing_started: None,
             last_activity: None,
 
@@ -412,6 +416,21 @@ impl ClientApp {
                         .push_str(&format!("\n[{}] {}\n", name, output));
                 }
             }
+            ServerEvent::TokenUsage {
+                input,
+                output,
+                cache_read_input,
+                cache_creation_input,
+            } => {
+                self.streaming_input_tokens = input;
+                self.streaming_output_tokens = output;
+                if cache_read_input.is_some() {
+                    self.streaming_cache_read_tokens = cache_read_input;
+                }
+                if cache_creation_input.is_some() {
+                    self.streaming_cache_creation_tokens = cache_creation_input;
+                }
+            }
             ServerEvent::Done { .. } => {
                 if !self.streaming_text.is_empty() {
                     self.display_messages.push(DisplayMessage {
@@ -452,7 +471,12 @@ impl ClientApp {
                     tool_data: None,
                 });
             }
-            ServerEvent::ReloadProgress { step, message, success, output } => {
+            ServerEvent::ReloadProgress {
+                step,
+                message,
+                success,
+                output,
+            } => {
                 // Format the progress message with optional output
                 let status_icon = match success {
                     Some(true) => "✓",
@@ -486,7 +510,8 @@ impl ClientApp {
                 }
 
                 // Update status notice
-                self.status_notice = Some((format!("Reload: {}", message), std::time::Instant::now()));
+                self.status_notice =
+                    Some((format!("Reload: {}", message), std::time::Instant::now()));
             }
             ServerEvent::History {
                 messages,
@@ -724,6 +749,13 @@ impl TuiState for ClientApp {
 
     fn streaming_tokens(&self) -> (u64, u64) {
         (self.streaming_input_tokens, self.streaming_output_tokens)
+    }
+
+    fn streaming_cache_tokens(&self) -> (Option<u64>, Option<u64>) {
+        (
+            self.streaming_cache_read_tokens,
+            self.streaming_cache_creation_tokens,
+        )
     }
 
     fn streaming_tool_calls(&self) -> Vec<ToolCall> {

@@ -160,7 +160,7 @@ impl Tool for ConversationSearchTool {
 
                     for block in &msg.content {
                         match block {
-                            crate::message::ContentBlock::Text { text } => {
+                            crate::message::ContentBlock::Text { text, .. } => {
                                 // Truncate very long messages
                                 if text.len() > 1000 {
                                     output.push_str(&text[..1000]);

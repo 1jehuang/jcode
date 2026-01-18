@@ -860,7 +860,9 @@ async fn handle_client(
                 if let Some(cwd) = cwd {
                     let friendly_name = {
                         let members = swarm_members.read().await;
-                        members.get(&req_session_id).and_then(|m| m.friendly_name.clone())
+                        members
+                            .get(&req_session_id)
+                            .and_then(|m| m.friendly_name.clone())
                     };
 
                     // Store the shared context
@@ -927,12 +929,14 @@ async fn handle_client(
                             // Get specific key
                             swarm_ctx
                                 .get(&k)
-                                .map(|c| vec![ContextEntry {
-                                    key: c.key.clone(),
-                                    value: c.value.clone(),
-                                    from_session: c.from_session.clone(),
-                                    from_name: c.from_name.clone(),
-                                }])
+                                .map(|c| {
+                                    vec![ContextEntry {
+                                        key: c.key.clone(),
+                                        value: c.value.clone(),
+                                        from_session: c.from_session.clone(),
+                                        from_name: c.from_name.clone(),
+                                    }]
+                                })
                                 .unwrap_or_default()
                         } else {
                             // Get all
@@ -965,13 +969,17 @@ async fn handle_client(
                 // Find the swarm (cwd) for this session
                 let cwd = {
                     let members = swarm_members.read().await;
-                    members.get(&from_session).and_then(|m| m.working_dir.clone())
+                    members
+                        .get(&from_session)
+                        .and_then(|m| m.working_dir.clone())
                 };
 
                 if let Some(cwd) = cwd {
                     let friendly_name = {
                         let members = swarm_members.read().await;
-                        members.get(&from_session).and_then(|m| m.friendly_name.clone())
+                        members
+                            .get(&from_session)
+                            .and_then(|m| m.friendly_name.clone())
                     };
 
                     // Send to all swarm members except sender
@@ -990,7 +998,9 @@ async fn handle_client(
                             if let Some(member) = members.get(sid) {
                                 let notification_msg = format!(
                                     "Message from {}: {}",
-                                    friendly_name.as_deref().unwrap_or(&from_session[..8.min(from_session.len())]),
+                                    friendly_name
+                                        .as_deref()
+                                        .unwrap_or(&from_session[..8.min(from_session.len())]),
                                     message
                                 );
                                 let _ = member.event_tx.send(ServerEvent::Notification {
@@ -1414,28 +1424,44 @@ async fn do_server_reload_with_progress(
 ) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
-    let send_progress = |step: &str, message: &str, success: Option<bool>, output: Option<String>| {
-        let _ = tx.send(ServerEvent::ReloadProgress {
-            step: step.to_string(),
-            message: message.to_string(),
-            success,
-            output,
-        });
-    };
+    let send_progress =
+        |step: &str, message: &str, success: Option<bool>, output: Option<String>| {
+            let _ = tx.send(ServerEvent::ReloadProgress {
+                step: step.to_string(),
+                message: message.to_string(),
+                success,
+                output,
+            });
+        };
 
     // Step 1: Find repo
     send_progress("init", "🔄 Starting hot-reload...", None, None);
 
-    let repo_dir = get_repo_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
+    let repo_dir =
+        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
-    send_progress("init", &format!("📁 Repository: {}", repo_dir.display()), Some(true), None);
+    send_progress(
+        "init",
+        &format!("📁 Repository: {}", repo_dir.display()),
+        Some(true),
+        None,
+    );
 
     // Step 2: Check for binary
     let exe = repo_dir.join("target/release/jcode");
     if !exe.exists() {
-        send_progress("verify", "❌ No binary found at target/release/jcode", Some(false), None);
-        send_progress("verify", "💡 Run 'cargo build --release' first, then use 'selfdev reload'", Some(false), None);
+        send_progress(
+            "verify",
+            "❌ No binary found at target/release/jcode",
+            Some(false),
+            None,
+        );
+        send_progress(
+            "verify",
+            "💡 Run 'cargo build --release' first, then use 'selfdev reload'",
+            Some(false),
+            None,
+        );
         anyhow::bail!("No binary found. Build first with 'cargo build --release'");
     }
 
@@ -1463,7 +1489,12 @@ async fn do_server_reload_with_progress(
         "unknown".to_string()
     };
 
-    send_progress("verify", &format!("✓ Binary: {:.1} MB, built {}", size_mb, age_str), Some(true), None);
+    send_progress(
+        "verify",
+        &format!("✓ Binary: {:.1} MB, built {}", size_mb, age_str),
+        Some(true),
+        None,
+    );
 
     // Step 4: Show current git state (informational)
     let head_output = ProcessCommand::new("git")
@@ -1473,11 +1504,21 @@ async fn do_server_reload_with_progress(
 
     if let Ok(output) = head_output {
         let head_str = String::from_utf8_lossy(&output.stdout);
-        send_progress("git", &format!("📍 HEAD: {}", head_str.trim()), Some(true), None);
+        send_progress(
+            "git",
+            &format!("📍 HEAD: {}", head_str.trim()),
+            Some(true),
+            None,
+        );
     }
 
     // Step 5: Exec
-    send_progress("exec", "🚀 Restarting server with existing binary...", None, None);
+    send_progress(
+        "exec",
+        "🚀 Restarting server with existing binary...",
+        None,
+        None,
+    );
 
     // Small delay to ensure the progress message is sent
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
