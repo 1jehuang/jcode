@@ -887,8 +887,8 @@ impl TuiState for ClientApp {
         true // Deprecated client doesn't support immediate mode
     }
 
-    fn context_info(&self) -> &crate::prompt::ContextInfo {
-        &self.context_info
+    fn context_info(&self) -> crate::prompt::ContextInfo {
+        self.context_info.clone()
     }
 
     fn info_widget_data(&self) -> super::info_widget::InfoWidgetData {

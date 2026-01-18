@@ -68,8 +68,8 @@ pub trait TuiState {
     fn rate_limit_remaining(&self) -> Option<Duration>;
     /// Whether queue mode is enabled (true = wait, false = immediate)
     fn queue_mode(&self) -> bool;
-    /// Context info (what's loaded in the system prompt)
-    fn context_info(&self) -> &crate::prompt::ContextInfo;
+    /// Context info (what's loaded in context window - static + dynamic)
+    fn context_info(&self) -> crate::prompt::ContextInfo;
     /// Get info widget data (todos, client count, etc.)
     fn info_widget_data(&self) -> info_widget::InfoWidgetData;
 }
