@@ -144,146 +144,119 @@ fn format_gpt_name(short: &str) -> String {
     format!("GPT-{}", rest)
 }
 
-/// Render context display as two lines:
-/// Line 1: Labels with token counts - ⚙sys 8k  🌍env 1k  📋AGENTS 2k  📝CLAUDE 3k
-/// Line 2: Color-coded bar         - [████████░░░░░░░░░░░░░░░░░░░░░░░░] 15k/200k
+/// Render context window as vertical list with smart grouping
+/// Items < 5% are grouped by category (docs, msgs, etc.)
 fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Vec<Line<'static>> {
-    // Colors for different context types
-    const SYS_COLOR: Color = Color::Rgb(100, 140, 200);    // Blue - system prompt
-    const ENV_COLOR: Color = Color::Rgb(100, 180, 140);    // Teal - environment
-    const AGENTS_COLOR: Color = Color::Rgb(200, 140, 100); // Orange - AGENTS.md
-    const CLAUDE_COLOR: Color = Color::Rgb(180, 100, 200); // Purple - CLAUDE.md
-    const SKILLS_COLOR: Color = Color::Rgb(140, 200, 100); // Green - skills
-    const DEV_COLOR: Color = Color::Rgb(255, 193, 7);      // Amber - self-dev
-    const EMPTY_COLOR: Color = Color::Rgb(50, 50, 50);     // Dark gray - unused
+    const SYS_COLOR: Color = Color::Rgb(100, 140, 200);
+    const DOCS_COLOR: Color = Color::Rgb(200, 160, 100);
+    const TOOLS_COLOR: Color = Color::Rgb(100, 200, 200);
+    const MSGS_COLOR: Color = Color::Rgb(138, 180, 248);
+    const TOOL_IO_COLOR: Color = Color::Rgb(255, 183, 77);
+    const OTHER_COLOR: Color = Color::Rgb(150, 150, 150);
+    const EMPTY_COLOR: Color = Color::Rgb(50, 50, 50);
 
-    // Context window limit (Claude's ~200k tokens ≈ 800k chars)
-    const CONTEXT_LIMIT_CHARS: usize = 800_000;
+    const LIMIT: usize = 200_000;
+    const THRESHOLD: f64 = 5.0;
 
-    // Build segments: (icon, label, chars, color)
-    let mut segments: Vec<(&str, &str, usize, Color)> = Vec::new();
+    // Collect raw: (icon, label, tokens, color, category)
+    let mut raw: Vec<(&str, String, usize, Color, &str)> = Vec::new();
 
-    segments.push(("⚙", "sys", info.system_prompt_chars, SYS_COLOR));
-    if info.env_context_chars > 0 {
-        segments.push(("🌍", "env", info.env_context_chars, ENV_COLOR));
+    let sys = info.system_prompt_chars / 4;
+    if sys > 0 { raw.push(("⚙", "system".into(), sys, SYS_COLOR, "system")); }
+
+    if info.has_project_agents_md { raw.push(("📋", "AGENTS.md".into(), info.project_agents_md_chars / 4, DOCS_COLOR, "docs")); }
+    if info.has_project_claude_md { raw.push(("📝", "CLAUDE.md".into(), info.project_claude_md_chars / 4, DOCS_COLOR, "docs")); }
+    if info.has_global_agents_md { raw.push(("📋", "~/.AGENTS".into(), info.global_agents_md_chars / 4, DOCS_COLOR, "docs")); }
+    if info.has_global_claude_md { raw.push(("📝", "~/.CLAUDE".into(), info.global_claude_md_chars / 4, DOCS_COLOR, "docs")); }
+
+    if info.env_context_chars > 0 { raw.push(("🌍", "env".into(), info.env_context_chars / 4, OTHER_COLOR, "other")); }
+    if info.skills_chars > 0 { raw.push(("🔧", "skills".into(), info.skills_chars / 4, OTHER_COLOR, "other")); }
+    if info.selfdev_chars > 0 { raw.push(("🛠", "selfdev".into(), info.selfdev_chars / 4, OTHER_COLOR, "other")); }
+
+    if info.tool_defs_chars > 0 {
+        let lbl = if info.tool_defs_count > 0 { format!("tools ({})", info.tool_defs_count) } else { "tools".into() };
+        raw.push(("🔨", lbl, info.tool_defs_chars / 4, TOOLS_COLOR, "tools"));
     }
-    if info.has_project_agents_md {
-        segments.push(("📋", "AGENTS", info.project_agents_md_chars, AGENTS_COLOR));
+    if info.user_messages_chars > 0 {
+        let lbl = if info.user_messages_count > 0 { format!("user ({})", info.user_messages_count) } else { "user".into() };
+        raw.push(("👤", lbl, info.user_messages_chars / 4, MSGS_COLOR, "msgs"));
     }
-    if info.has_project_claude_md {
-        segments.push(("📝", "CLAUDE", info.project_claude_md_chars, CLAUDE_COLOR));
+    if info.assistant_messages_chars > 0 {
+        let lbl = if info.assistant_messages_count > 0 { format!("assistant ({})", info.assistant_messages_count) } else { "assistant".into() };
+        raw.push(("🤖", lbl, info.assistant_messages_chars / 4, MSGS_COLOR, "msgs"));
     }
-    if info.has_global_agents_md {
-        segments.push(("📋", "~AGENTS", info.global_agents_md_chars, AGENTS_COLOR));
+    if info.tool_calls_chars > 0 {
+        let lbl = if info.tool_calls_count > 0 { format!("calls ({})", info.tool_calls_count) } else { "calls".into() };
+        raw.push(("⚡", lbl, info.tool_calls_chars / 4, TOOL_IO_COLOR, "tool_io"));
     }
-    if info.has_global_claude_md {
-        segments.push(("📝", "~CLAUDE", info.global_claude_md_chars, CLAUDE_COLOR));
-    }
-    if info.skills_chars > 0 {
-        segments.push(("🔧", "skills", info.skills_chars, SKILLS_COLOR));
-    }
-    if info.selfdev_chars > 0 {
-        segments.push(("🛠", "dev", info.selfdev_chars, DEV_COLOR));
+    if info.tool_results_chars > 0 {
+        let lbl = if info.tool_results_count > 0 { format!("results ({})", info.tool_results_count) } else { "results".into() };
+        raw.push(("📤", lbl, info.tool_results_chars / 4, TOOL_IO_COLOR, "tool_io"));
     }
 
-    // === Line 1: Labels with token counts ===
-    // Format: ⚙sys 8k  🌍env 1k  📋AGENTS 2k  📝CLAUDE 3k
-    let mut label_spans: Vec<Span<'static>> = Vec::new();
+    // Smart grouping
+    let mut final_segs: Vec<(String, String, usize, Color)> = Vec::new();
+    let mut grouped: std::collections::HashMap<&str, (usize, Vec<String>)> = std::collections::HashMap::new();
 
-    for (i, (icon, label, chars, color)) in segments.iter().enumerate() {
-        // Icon
-        label_spans.push(Span::styled(*icon, Style::default().fg(*color)));
-
-        // Label
-        label_spans.push(Span::styled(
-            format!("{} ", label),
-            Style::default().fg(*color).dim(),
-        ));
-
-        // Token count (chars / 4 ≈ tokens)
-        let tokens = *chars / 4;
-        let size_str = if tokens >= 1000 {
-            format!("{}k", tokens / 1000)
+    for (icon, label, tokens, color, cat) in &raw {
+        let pct = (*tokens as f64 / LIMIT as f64) * 100.0;
+        if pct >= THRESHOLD || *cat == "system" {
+            final_segs.push((icon.to_string(), label.clone(), *tokens, *color));
         } else {
-            format!("{}", tokens)
-        };
-        label_spans.push(Span::styled(size_str, Style::default().fg(*color)));
-
-        // Separator (except for last)
-        if i < segments.len() - 1 {
-            label_spans.push(Span::styled("  ", Style::default()));
+            let e = grouped.entry(*cat).or_insert((0, Vec::new()));
+            e.0 += tokens;
+            e.1.push(label.clone());
         }
     }
 
-    let line1 = Line::from(label_spans);
-
-    // === Line 2: Color-coded bar ===
-    // Format: [████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 15k/200k
-    let mut bar_spans: Vec<Span<'static>> = Vec::new();
-
-    let suffix_len = 10; // " 15k/200k"
-    let bar_inner_width = max_width.saturating_sub(suffix_len + 2).min(60); // +2 for [ ]
-
-    bar_spans.push(Span::styled("[", Style::default().fg(DIM_COLOR)));
-
-    let total_used = info.total_chars;
-    let used_ratio = (total_used as f64) / (CONTEXT_LIMIT_CHARS as f64);
-    let used_width = ((used_ratio * bar_inner_width as f64).ceil() as usize)
-        .max(1)
-        .min(bar_inner_width);
-    let empty_width = bar_inner_width.saturating_sub(used_width);
-
-    // Color-coded filled portion - each segment gets proportional width
-    for (i, (_icon, _label, chars, color)) in segments.iter().enumerate() {
-        if total_used == 0 {
-            break;
-        }
-
-        let seg_ratio = (*chars as f64) / (total_used as f64);
-        let mut seg_width = (seg_ratio * used_width as f64).round() as usize;
-
-        // Last segment fills remaining to avoid rounding gaps
-        if i == segments.len() - 1 {
-            let used_so_far: usize = segments[..i]
-                .iter()
-                .map(|(_, _, c, _)| {
-                    let r = (*c as f64) / (total_used as f64);
-                    (r * used_width as f64).round() as usize
-                })
-                .sum();
-            seg_width = used_width.saturating_sub(used_so_far);
-        }
-
-        if seg_width > 0 {
-            bar_spans.push(Span::styled(
-                "█".repeat(seg_width),
-                Style::default().fg(*color),
-            ));
+    for (cat, icon, color) in [("docs", "📄", DOCS_COLOR), ("msgs", "💬", MSGS_COLOR),
+                               ("tools", "🔨", TOOLS_COLOR), ("tool_io", "⚡", TOOL_IO_COLOR),
+                               ("other", "📦", OTHER_COLOR)] {
+        if let Some((tokens, items)) = grouped.get(cat) {
+            if *tokens > 0 {
+                let lbl = if items.len() == 1 { items[0].clone() } else { format!("{} ({})", cat, items.len()) };
+                final_segs.push((icon.to_string(), lbl, *tokens, color));
+            }
         }
     }
 
-    // Empty/remaining capacity
-    if empty_width > 0 {
-        bar_spans.push(Span::styled(
-            "░".repeat(empty_width),
-            Style::default().fg(EMPTY_COLOR),
-        ));
+    final_segs.sort_by(|a, b| b.2.cmp(&a.2));
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let total: usize = final_segs.iter().map(|(_, _, t, _)| *t).sum();
+    let bar_w = 20.min(max_width.saturating_sub(30));
+
+    for (icon, label, tokens, color) in &final_segs {
+        let mut spans = vec![
+            Span::styled(format!("{} ", icon), Style::default().fg(*color)),
+            Span::styled(format!("{:<16}", label), Style::default().fg(*color)),
+            Span::styled(if *tokens >= 1000 { format!("{:>4}k", tokens / 1000) } else { format!("{:>5}", tokens) }, Style::default().fg(*color)),
+            Span::styled(format!(" {:>3}%  ", (*tokens as f64 / LIMIT as f64 * 100.0).round() as usize), Style::default().fg(DIM_COLOR)),
+            Span::styled("█".repeat(((*tokens as f64 / LIMIT as f64) * bar_w as f64).ceil().max(if *tokens > 0 { 1.0 } else { 0.0 }).min(bar_w as f64) as usize), Style::default().fg(*color)),
+        ];
+        lines.push(Line::from(spans));
     }
 
-    bar_spans.push(Span::styled("]", Style::default().fg(DIM_COLOR)));
+    lines.push(Line::from(Span::styled("─".repeat(40.min(max_width)), Style::default().fg(EMPTY_COLOR))));
 
-    // Token count: used/total
-    let est_tokens = info.estimated_tokens();
-    let token_str = if est_tokens >= 1000 {
-        format!(" {}k/200k", est_tokens / 1000)
-    } else {
-        format!(" {}/200k", est_tokens)
-    };
-    bar_spans.push(Span::styled(token_str, Style::default().fg(DIM_COLOR)));
+    let sum_w = 40.min(max_width.saturating_sub(12));
+    let used_w = ((total as f64 / LIMIT as f64) * sum_w as f64).ceil().max(if total > 0 { 1.0 } else { 0.0 }).min(sum_w as f64) as usize;
+    let empty_w = sum_w.saturating_sub(used_w);
 
-    let line2 = Line::from(bar_spans);
+    let mut bar: Vec<Span<'static>> = vec![Span::styled("[", Style::default().fg(DIM_COLOR))];
+    let mut rem = used_w;
+    for (_, _, t, c) in &final_segs {
+        if rem == 0 || total == 0 { break; }
+        let w = ((*t as f64 / total as f64) * used_w as f64).round().min(rem as f64) as usize;
+        if w > 0 { bar.push(Span::styled("█".repeat(w), Style::default().fg(*c))); rem -= w; }
+    }
+    if rem > 0 && !final_segs.is_empty() { bar.push(Span::styled("█".repeat(rem), Style::default().fg(final_segs.last().unwrap().3))); }
+    if empty_w > 0 { bar.push(Span::styled("░".repeat(empty_w), Style::default().fg(EMPTY_COLOR))); }
+    bar.push(Span::styled("]", Style::default().fg(DIM_COLOR)));
+    bar.push(Span::styled(if total >= 1000 { format!(" {}k/200k", total / 1000) } else { format!(" {}/200k", total) }, Style::default().fg(DIM_COLOR)));
+    lines.push(Line::from(bar));
 
-    vec![line1, line2]
+    lines
 }
 
 /// Calculate rainbow color for prompt index with exponential decay to gray.
@@ -478,7 +451,6 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         .filter(|m| m.role == "user")
         .count();
 
-    // Estimate message content height (no margin, full width)
     let content_height = estimate_content_height(app, area.width);
     let fixed_height = 1 + queued_height + input_height; // status + queued + input
     let available_height = area.height;
@@ -580,10 +552,8 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         let estimated_content_width = (area.width as f32 * 0.7) as u16;
 
         if let Some(widget_rect) = info_widget::calculate_layout(
-            area.width,
-            area.height,
             chunks[0], // messages area
-            estimated_content_width,
+            &[estimated_content_width],
             &widget_data,
         ) {
             info_widget::render(frame, widget_rect, &widget_data);
