@@ -4830,8 +4830,80 @@ impl super::TuiState for App {
         self.queue_mode
     }
 
-    fn context_info(&self) -> &crate::prompt::ContextInfo {
-        &self.context_info
+    fn context_info(&self) -> crate::prompt::ContextInfo {
+        use crate::message::{ContentBlock, Role};
+
+        let mut info = self.context_info.clone();
+
+        // Compute dynamic stats from conversation
+        let mut user_chars = 0usize;
+        let mut user_count = 0usize;
+        let mut asst_chars = 0usize;
+        let mut asst_count = 0usize;
+        let mut tool_call_chars = 0usize;
+        let mut tool_call_count = 0usize;
+        let mut tool_result_chars = 0usize;
+        let mut tool_result_count = 0usize;
+
+        for msg in &self.messages {
+            match msg.role {
+                Role::User => user_count += 1,
+                Role::Assistant => asst_count += 1,
+            }
+
+            for block in &msg.content {
+                match block {
+                    ContentBlock::Text { text, .. } => {
+                        match msg.role {
+                            Role::User => user_chars += text.len(),
+                            Role::Assistant => asst_chars += text.len(),
+                        }
+                    }
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        tool_call_count += 1;
+                        tool_call_chars += name.len() + input.to_string().len();
+                    }
+                    ContentBlock::ToolResult { content, .. } => {
+                        tool_result_count += 1;
+                        tool_result_chars += content.len();
+                    }
+                }
+            }
+        }
+
+        // Estimate tool definitions size
+        // jcode has ~25 built-in tools, each ~500 chars in definition
+        // This is a rough estimate since we can't easily call async from here
+        let tool_defs_count = 25;
+        let tool_defs_chars = tool_defs_count * 500;
+
+        info.user_messages_chars = user_chars;
+        info.user_messages_count = user_count;
+        info.assistant_messages_chars = asst_chars;
+        info.assistant_messages_count = asst_count;
+        info.tool_calls_chars = tool_call_chars;
+        info.tool_calls_count = tool_call_count;
+        info.tool_results_chars = tool_result_chars;
+        info.tool_results_count = tool_result_count;
+        info.tool_defs_chars = tool_defs_chars;
+        info.tool_defs_count = tool_defs_count;
+
+        // Update total
+        info.total_chars = info.system_prompt_chars
+            + info.env_context_chars
+            + info.project_agents_md_chars
+            + info.project_claude_md_chars
+            + info.global_agents_md_chars
+            + info.global_claude_md_chars
+            + info.skills_chars
+            + info.selfdev_chars
+            + info.tool_defs_chars
+            + info.user_messages_chars
+            + info.assistant_messages_chars
+            + info.tool_calls_chars
+            + info.tool_results_chars;
+
+        info
     }
 
     fn info_widget_data(&self) -> super::info_widget::InfoWidgetData {
