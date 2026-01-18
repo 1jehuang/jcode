@@ -684,10 +684,16 @@ async fn handle_client(
 
             Request::ResumeSession { id, session_id } => {
                 // Load the specified session into this client's agent
-                let result = {
+                let (result, is_canary) = {
                     let mut agent_guard = agent.lock().await;
-                    agent_guard.restore_session(&session_id)
+                    let result = agent_guard.restore_session(&session_id);
+                    let is_canary = agent_guard.is_canary();
+                    (result, is_canary)
                 };
+
+                if result.is_ok() && is_canary {
+                    registry.register_selfdev_tools().await;
+                }
 
                 match result {
                     Ok(()) => {

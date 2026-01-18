@@ -3,7 +3,7 @@
 
 use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
 use crate::logging;
-use crate::message::{ContentBlock, Role, StreamEvent, ToolCall};
+use crate::message::{ContentBlock, Role, StreamEvent, ToolCall, ToolDefinition};
 use crate::protocol::{HistoryMessage, ServerEvent};
 use crate::provider::Provider;
 use crate::session::Session;
@@ -59,6 +59,8 @@ You are working on the jcode codebase itself. You have the `selfdev` tool availa
 6. Once satisfied, use `selfdev { action: "promote" }` to make it stable
 
 Use this to iterate quickly on jcode features and fixes."#;
+
+const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
 
 pub struct Agent {
     provider: Arc<dyn Provider>,
@@ -266,6 +268,18 @@ impl Agent {
         prompt
     }
 
+    pub fn is_canary(&self) -> bool {
+        self.session.is_canary
+    }
+
+    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        let mut tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
+        if !self.session.is_canary {
+            tools.retain(|tool| tool.name != "selfdev");
+        }
+        tools
+    }
+
     /// Restore a session by ID (loads from disk)
     pub fn restore_session(&mut self, session_id: &str) -> Result<()> {
         let session = Session::load(session_id)?;
@@ -386,7 +400,7 @@ impl Agent {
         let trace = trace_enabled();
 
         loop {
-            let tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
+            let tools = self.tool_definitions().await;
 
             let system_prompt = self.build_system_prompt();
 
@@ -655,16 +669,23 @@ impl Agent {
                 tool_calls.len()
             ));
 
-            // If provider handles tools internally (like Claude Agent SDK), don't re-execute
+            // If provider handles tools internally (like Claude Agent SDK), only run native tools locally
             if self.provider.handles_tools_internally() {
-                logging::info("Provider handles tools internally - task complete");
-                // Don't execute tools - they were already executed by the provider
-                // The SDK completed the task, so we're done
-                break;
+                tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
+                if tool_calls.is_empty() {
+                    logging::info("Provider handles tools internally - task complete");
+                    break;
+                }
+                logging::info("Provider handles tools internally - executing native tools locally");
             }
 
             // Execute tools and add results
             for tc in tool_calls {
+                if tc.name == "selfdev" && !self.session.is_canary {
+                    return Err(anyhow::anyhow!(
+                        "Tool 'selfdev' is only available in self-dev mode"
+                    ));
+                }
                 if let Some(allowed) = self.allowed_tools.as_ref() {
                     if !allowed.contains(&tc.name) {
                         return Err(anyhow::anyhow!("Tool '{}' is not allowed", tc.name));
@@ -675,8 +696,6 @@ impl Agent {
                     .clone()
                     .unwrap_or_else(|| self.session.id.clone());
 
-                // Tools that jcode handles natively (not via SDK)
-                const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
                 let is_native_tool = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
 
                 // Check if SDK already executed this tool
@@ -856,7 +875,7 @@ impl Agent {
         let trace = trace_enabled();
 
         loop {
-            let tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
+            let tools = self.tool_definitions().await;
 
             let system_prompt = self.build_system_prompt();
 
@@ -1030,13 +1049,21 @@ impl Agent {
                 break;
             }
 
-            // If provider handles tools internally, don't re-execute
+            // If provider handles tools internally, only run native tools locally
             if self.provider.handles_tools_internally() {
-                break;
+                tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
+                if tool_calls.is_empty() {
+                    break;
+                }
             }
 
             // Execute tools and add results
             for tc in tool_calls {
+                if tc.name == "selfdev" && !self.session.is_canary {
+                    return Err(anyhow::anyhow!(
+                        "Tool 'selfdev' is only available in self-dev mode"
+                    ));
+                }
                 if let Some(allowed) = self.allowed_tools.as_ref() {
                     if !allowed.contains(&tc.name) {
                         return Err(anyhow::anyhow!("Tool '{}' is not allowed", tc.name));
@@ -1047,8 +1074,6 @@ impl Agent {
                     .clone()
                     .unwrap_or_else(|| self.session.id.clone());
 
-                // Tools that jcode handles natively (not via SDK)
-                const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
                 let is_native_tool = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
 
                 // Check if SDK already executed this tool
@@ -1135,17 +1160,9 @@ impl Agent {
         let trace = trace_enabled();
 
         loop {
-            let tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
+            let tools = self.tool_definitions().await;
 
-            let system_prompt = if let Some(ref skill_name) = self.active_skill {
-                if let Some(skill) = self.skills.get(skill_name) {
-                    format!("{}\n\n{}", SYSTEM_PROMPT, skill.get_prompt())
-                } else {
-                    SYSTEM_PROMPT.to_string()
-                }
-            } else {
-                SYSTEM_PROMPT.to_string()
-            };
+            let system_prompt = self.build_system_prompt();
 
             let messages = self.session.messages_for_provider();
 
@@ -1312,10 +1329,18 @@ impl Agent {
             }
 
             if self.provider.handles_tools_internally() {
-                break;
+                tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
+                if tool_calls.is_empty() {
+                    break;
+                }
             }
 
             for tc in tool_calls {
+                if tc.name == "selfdev" && !self.session.is_canary {
+                    return Err(anyhow::anyhow!(
+                        "Tool 'selfdev' is only available in self-dev mode"
+                    ));
+                }
                 if let Some(allowed) = self.allowed_tools.as_ref() {
                     if !allowed.contains(&tc.name) {
                         return Err(anyhow::anyhow!("Tool '{}' is not allowed", tc.name));
@@ -1326,8 +1351,6 @@ impl Agent {
                     .clone()
                     .unwrap_or_else(|| self.session.id.clone());
 
-                // Tools that jcode handles natively (not via SDK)
-                const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
                 let is_native_tool = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
 
                 if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
