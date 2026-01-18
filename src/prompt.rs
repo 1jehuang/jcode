@@ -15,6 +15,7 @@ pub struct SkillInfo {
 /// Information about what's loaded in the context window
 #[derive(Debug, Clone, Default)]
 pub struct ContextInfo {
+    // === Static (System Prompt) ===
     /// Base system prompt size (chars)
     pub system_prompt_chars: usize,
     /// Environment context size (chars)
@@ -39,6 +40,29 @@ pub struct ContextInfo {
     pub skills_chars: usize,
     /// Self-dev section size (chars)
     pub selfdev_chars: usize,
+
+    // === Dynamic (Conversation) ===
+    /// Tool definitions sent to API (chars)
+    pub tool_defs_chars: usize,
+    /// Number of tool definitions
+    pub tool_defs_count: usize,
+    /// User messages total size (chars)
+    pub user_messages_chars: usize,
+    /// Number of user messages
+    pub user_messages_count: usize,
+    /// Assistant messages total size (chars)
+    pub assistant_messages_chars: usize,
+    /// Number of assistant messages
+    pub assistant_messages_count: usize,
+    /// Tool calls size (chars)
+    pub tool_calls_chars: usize,
+    /// Number of tool calls
+    pub tool_calls_count: usize,
+    /// Tool results size (chars)
+    pub tool_results_chars: usize,
+    /// Number of tool results
+    pub tool_results_count: usize,
+
     /// Total system prompt size (chars)
     pub total_chars: usize,
 }
