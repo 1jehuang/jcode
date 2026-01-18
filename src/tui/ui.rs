@@ -640,13 +640,7 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
         Style::default().fg(DIM_COLOR),
     )));
 
-    // Line 3-4: Context info (labels + color-coded bar)
-    let context_info = app.context_info();
-    if context_info.total_chars > 0 {
-        lines.extend(render_context_bar(&context_info, width as usize));
-    }
-
-    // Line 4+: Recent changes in a box (from git log, embedded at build time)
+    // Line 3+: Recent changes in a box (from git log, embedded at build time)
     let changelog = env!("JCODE_CHANGELOG");
     let term_width = width as usize;
     if !changelog.is_empty() && term_width > 20 {
@@ -768,6 +762,12 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
             format!("server: {}", parts.join(", ")),
             Style::default().fg(DIM_COLOR),
         )));
+    }
+
+    // Context window info (at the end of header)
+    let context_info = app.context_info();
+    if context_info.total_chars > 0 {
+        lines.extend(render_context_bar(&context_info, width as usize));
     }
 
     // Blank line after header
