@@ -348,13 +348,30 @@ impl App {
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
         let skills = SkillRegistry::load().unwrap_or_default();
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
+        let session = Session::create(None, None);
+
+        // Pre-compute context info so it shows on startup
+        let available_skills: Vec<crate::prompt::SkillInfo> = skills
+            .list()
+            .iter()
+            .map(|s| crate::prompt::SkillInfo {
+                name: s.name.clone(),
+                description: s.description.clone(),
+            })
+            .collect();
+        let (_, context_info) = crate::prompt::build_system_prompt_with_context(
+            None,
+            &available_skills,
+            session.is_canary,
+        );
+
         Self {
             provider,
             registry,
             skills,
             mcp_manager,
             messages: Vec::new(),
-            session: Session::create(None, None),
+            session,
             display_messages: Vec::new(),
             input: String::new(),
             cursor_pos: 0,
@@ -372,7 +389,7 @@ impl App {
             total_output_tokens: 0,
             context_limit: 200_000, // Claude's context window
             context_warning_shown: false,
-            context_info: crate::prompt::ContextInfo::default(),
+            context_info,
             last_stream_activity: None,
             status: ProcessingStatus::default(),
             subagent_status: None,

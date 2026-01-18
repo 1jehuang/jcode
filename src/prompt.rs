@@ -12,6 +12,71 @@ pub struct SkillInfo {
     pub description: String,
 }
 
+/// Information about what's loaded in the context window
+#[derive(Debug, Clone, Default)]
+pub struct ContextInfo {
+    /// Base system prompt size (chars)
+    pub system_prompt_chars: usize,
+    /// Environment context size (chars)
+    pub env_context_chars: usize,
+    /// Whether project AGENTS.md was loaded
+    pub has_project_agents_md: bool,
+    /// Project AGENTS.md size (chars)
+    pub project_agents_md_chars: usize,
+    /// Whether project CLAUDE.md was loaded
+    pub has_project_claude_md: bool,
+    /// Project CLAUDE.md size (chars)
+    pub project_claude_md_chars: usize,
+    /// Whether global ~/.AGENTS.md was loaded
+    pub has_global_agents_md: bool,
+    /// Global AGENTS.md size (chars)
+    pub global_agents_md_chars: usize,
+    /// Whether global ~/.CLAUDE.md was loaded
+    pub has_global_claude_md: bool,
+    /// Global CLAUDE.md size (chars)
+    pub global_claude_md_chars: usize,
+    /// Skills section size (chars)
+    pub skills_chars: usize,
+    /// Self-dev section size (chars)
+    pub selfdev_chars: usize,
+    /// Total system prompt size (chars)
+    pub total_chars: usize,
+}
+
+impl ContextInfo {
+    /// Rough estimate of tokens (chars / 4 is a common approximation)
+    pub fn estimated_tokens(&self) -> usize {
+        self.total_chars / 4
+    }
+
+    /// Get breakdown as (label, chars, icon) tuples for display
+    pub fn breakdown(&self) -> Vec<(&'static str, usize, &'static str)> {
+        let mut parts = vec![
+            ("sys", self.system_prompt_chars, "⚙"),
+            ("env", self.env_context_chars, "🌍"),
+        ];
+        if self.has_project_agents_md {
+            parts.push(("agents", self.project_agents_md_chars, "📋"));
+        }
+        if self.has_project_claude_md {
+            parts.push(("claude", self.project_claude_md_chars, "📝"));
+        }
+        if self.has_global_agents_md {
+            parts.push(("~agents", self.global_agents_md_chars, "📋"));
+        }
+        if self.has_global_claude_md {
+            parts.push(("~claude", self.global_claude_md_chars, "📝"));
+        }
+        if self.skills_chars > 0 {
+            parts.push(("skills", self.skills_chars, "🔧"));
+        }
+        if self.selfdev_chars > 0 {
+            parts.push(("dev", self.selfdev_chars, "🛠"));
+        }
+        parts
+    }
+}
+
 /// Build the full system prompt with dynamic context
 pub fn build_system_prompt(skill_prompt: Option<&str>, available_skills: &[SkillInfo]) -> String {
     build_system_prompt_with_selfdev(skill_prompt, available_skills, false)
@@ -23,22 +88,48 @@ pub fn build_system_prompt_with_selfdev(
     available_skills: &[SkillInfo],
     is_selfdev: bool,
 ) -> String {
+    let (prompt, _) = build_system_prompt_with_context(skill_prompt, available_skills, is_selfdev);
+    prompt
+}
+
+/// Build the full system prompt and return context info about what was loaded
+pub fn build_system_prompt_with_context(
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+) -> (String, ContextInfo) {
     let mut parts = vec![DEFAULT_SYSTEM_PROMPT.to_string()];
+    let mut info = ContextInfo::default();
+
+    info.system_prompt_chars = DEFAULT_SYSTEM_PROMPT.len();
 
     // Add environment context
     if let Some(env_context) = build_env_context() {
+        info.env_context_chars = env_context.len();
         parts.push(env_context);
     }
 
     // Add self-dev tools section when in canary mode
     if is_selfdev {
-        parts.push(build_selfdev_prompt());
+        let selfdev_prompt = build_selfdev_prompt();
+        info.selfdev_chars = selfdev_prompt.len();
+        parts.push(selfdev_prompt);
     }
 
-    // Add CLAUDE.md instructions
-    if let Some(claude_md) = load_claude_md_files() {
-        parts.push(claude_md);
+    // Add AGENTS.md and CLAUDE.md instructions with tracking
+    let (md_content, md_info) = load_claude_md_files_with_info();
+    if let Some(content) = md_content {
+        parts.push(content);
     }
+    // Merge file info
+    info.has_project_agents_md = md_info.has_project_agents_md;
+    info.project_agents_md_chars = md_info.project_agents_md_chars;
+    info.has_project_claude_md = md_info.has_project_claude_md;
+    info.project_claude_md_chars = md_info.project_claude_md_chars;
+    info.has_global_agents_md = md_info.has_global_agents_md;
+    info.global_agents_md_chars = md_info.global_agents_md_chars;
+    info.has_global_claude_md = md_info.has_global_claude_md;
+    info.global_claude_md_chars = md_info.global_claude_md_chars;
 
     // Add available skills list
     if !available_skills.is_empty() {
@@ -49,6 +140,7 @@ pub fn build_system_prompt_with_selfdev(
         skills_section.push_str(
             "\n\nWhen a user asks about available skills or capabilities, mention these skills.",
         );
+        info.skills_chars = skills_section.len();
         parts.push(skills_section);
     }
 
@@ -57,7 +149,10 @@ pub fn build_system_prompt_with_selfdev(
         parts.push(format!("# Active Skill\n\n{}", skill));
     }
 
-    parts.join("\n\n")
+    let prompt = parts.join("\n\n");
+    info.total_chars = prompt.len();
+
+    (prompt, info)
 }
 
 /// Build self-dev tools prompt section
@@ -159,38 +254,62 @@ fn get_git_info() -> Option<String> {
     }
 }
 
-/// Load CLAUDE.md files from project and home directory
+/// Load AGENTS.md and CLAUDE.md files from project and home directory
+/// Order: AGENTS.md (generic) first, then CLAUDE.md (Claude-specific overrides)
 fn load_claude_md_files() -> Option<String> {
-    let mut contents = vec![];
+    let (content, _) = load_claude_md_files_with_info();
+    content
+}
 
-    // Project CLAUDE.md (current directory)
-    let project_path = Path::new("CLAUDE.md");
-    if project_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(project_path) {
-            contents.push(format!(
-                "# Project Instructions (CLAUDE.md)\n\n{}",
-                content.trim()
-            ));
+/// Load AGENTS.md and CLAUDE.md files with tracking info
+fn load_claude_md_files_with_info() -> (Option<String>, ContextInfo) {
+    let mut contents = vec![];
+    let mut info = ContextInfo::default();
+
+    // Helper to load a file if it exists, returns (formatted_content, raw_size)
+    let load_file = |path: &Path, label: &str| -> Option<(String, usize)> {
+        if path.exists() {
+            std::fs::read_to_string(path).ok().map(|content| {
+                let raw_size = content.len();
+                let formatted = format!("# {}\n\n{}", label, content.trim());
+                (formatted, raw_size)
+            })
+        } else {
+            None
         }
+    };
+
+    // Project-level files (current directory)
+    // AGENTS.md first (generic), then CLAUDE.md (Claude-specific)
+    if let Some((content, size)) = load_file(Path::new("AGENTS.md"), "Project Instructions (AGENTS.md)") {
+        info.has_project_agents_md = true;
+        info.project_agents_md_chars = size;
+        contents.push(content);
+    }
+    if let Some((content, size)) = load_file(Path::new("CLAUDE.md"), "Project Instructions (CLAUDE.md)") {
+        info.has_project_claude_md = true;
+        info.project_claude_md_chars = size;
+        contents.push(content);
     }
 
-    // Home directory CLAUDE.md
+    // Home directory files
     if let Some(home) = dirs::home_dir() {
-        let home_path = home.join("CLAUDE.md");
-        if home_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&home_path) {
-                contents.push(format!(
-                    "# Global Instructions (~/.CLAUDE.md)\n\n{}",
-                    content.trim()
-                ));
-            }
+        if let Some((content, size)) = load_file(&home.join("AGENTS.md"), "Global Instructions (~/.AGENTS.md)") {
+            info.has_global_agents_md = true;
+            info.global_agents_md_chars = size;
+            contents.push(content);
+        }
+        if let Some((content, size)) = load_file(&home.join("CLAUDE.md"), "Global Instructions (~/.CLAUDE.md)") {
+            info.has_global_claude_md = true;
+            info.global_claude_md_chars = size;
+            contents.push(content);
         }
     }
 
     if contents.is_empty() {
-        None
+        (None, info)
     } else {
-        Some(contents.join("\n\n"))
+        (Some(contents.join("\n\n")), info)
     }
 }
 
