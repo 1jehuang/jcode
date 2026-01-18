@@ -1,10 +1,7 @@
 //! InfoWidget - A floating information panel that appears in empty screen space
 //!
-//! This widget polls periodically to detect available empty space on the right side
-//! of the terminal and displays contextual information like todos, client count, etc.
-//!
-//! Design: Check every ~10 seconds for empty space, resize/show/hide accordingly.
-//! Uses a global state to track polling across frames.
+//! This widget finds the largest empty rectangle on the right side of the
+//! visible message area and renders a compact info panel there.
 
 use crate::todo::TodoItem;
 use ratatui::{
@@ -12,7 +9,6 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 /// Minimum width needed to show the widget
 const MIN_WIDGET_WIDTH: u16 = 24;
@@ -20,10 +16,6 @@ const MIN_WIDGET_WIDTH: u16 = 24;
 const MAX_WIDGET_WIDTH: u16 = 40;
 /// Minimum height needed to show the widget
 const MIN_WIDGET_HEIGHT: u16 = 5;
-/// How often to recalculate widget visibility/position
-const POLL_INTERVAL: Duration = Duration::from_secs(10);
-/// Minimum content width before we consider showing the widget
-const MIN_CONTENT_WIDTH: u16 = 60;
 
 /// Data to display in the info widget
 #[derive(Debug, Default, Clone)]
@@ -35,7 +27,9 @@ pub struct InfoWidgetData {
 
 impl InfoWidgetData {
     pub fn is_empty(&self) -> bool {
-        self.todos.is_empty() && self.client_count.is_none()
+        self.todos.is_empty()
+            && self.client_count.is_none()
+            && self.session_tokens.is_none()
     }
 }
 
@@ -48,12 +42,6 @@ struct WidgetState {
     enabled: bool,
     /// Calculated position and size
     rect: Rect,
-    /// Terminal size at time of calculation
-    term_size: (u16, u16),
-    /// Max content width at time of calculation
-    max_content_width: u16,
-    /// Last time we recalculated the layout
-    last_poll: Option<Instant>,
 }
 
 impl Default for WidgetState {
@@ -62,9 +50,6 @@ impl Default for WidgetState {
             visible: false,
             enabled: true,
             rect: Rect::default(),
-            term_size: (0, 0),
-            max_content_width: 0,
-            last_poll: None,
         }
     }
 }
@@ -79,9 +64,6 @@ static WIDGET_STATE: Mutex<WidgetState> = Mutex::new(WidgetState {
         width: 0,
         height: 0,
     },
-    term_size: (0, 0),
-    max_content_width: 0,
-    last_poll: None,
 });
 
 /// Toggle widget visibility (user preference)
@@ -96,32 +78,11 @@ pub fn is_enabled() -> bool {
     WIDGET_STATE.lock().map(|s| s.enabled).unwrap_or(true)
 }
 
-/// Check if we should recalculate the layout (poll interval elapsed or inputs changed)
-fn should_recalculate(state: &WidgetState, term_width: u16, term_height: u16, max_content_width: u16) -> bool {
-    // Always recalculate if terminal size changed
-    if state.term_size != (term_width, term_height) {
-        return true;
-    }
-
-    // Recalculate if content width changed significantly
-    if (state.max_content_width as i32 - max_content_width as i32).abs() > 10 {
-        return true;
-    }
-
-    // Otherwise, check poll interval
-    match state.last_poll {
-        None => true,
-        Some(last) => last.elapsed() >= POLL_INTERVAL,
-    }
-}
-
 /// Calculate the widget layout based on available space
 /// Returns the Rect where the widget should be drawn, or None if it shouldn't show
 pub fn calculate_layout(
-    term_width: u16,
-    term_height: u16,
     messages_area: Rect,
-    max_content_width: u16,
+    free_widths: &[u16],
     data: &InfoWidgetData,
 ) -> Option<Rect> {
     let mut state = match WIDGET_STATE.lock() {
@@ -141,49 +102,25 @@ pub fn calculate_layout(
         return None;
     }
 
-    // Check if we need to recalculate
-    if !should_recalculate(&state, term_width, term_height, max_content_width) {
-        return if state.visible {
-            Some(state.rect)
-        } else {
-            None
-        };
-    }
-
-    // Update poll time and cache
-    state.last_poll = Some(Instant::now());
-    state.term_size = (term_width, term_height);
-    state.max_content_width = max_content_width;
-
-    // Calculate available empty space on the right
-    // Only show widget if there's clearly empty space
-    let effective_content_width = max_content_width.max(MIN_CONTENT_WIDTH);
-    let empty_on_right = term_width.saturating_sub(effective_content_width);
-
-    if empty_on_right < MIN_WIDGET_WIDTH {
+    if free_widths.is_empty() || messages_area.height == 0 || messages_area.width == 0 {
         state.visible = false;
         return None;
     }
 
-    // Calculate widget dimensions
-    let widget_width = empty_on_right.min(MAX_WIDGET_WIDTH);
-
-    // Calculate needed height based on content
     let needed_height = calculate_needed_height(data);
+    let best = find_largest_empty_rect(free_widths, MIN_WIDGET_WIDTH, MIN_WIDGET_HEIGHT)?;
+    let (top, height, max_width) = best;
 
-    // Position in the messages area, right-aligned with some padding
-    let available_height = messages_area.height.saturating_sub(4); // Leave room at top/bottom
+    let widget_width = max_width.min(MAX_WIDGET_WIDTH);
+    let widget_height = needed_height.min(height);
 
-    if available_height < MIN_WIDGET_HEIGHT {
+    if widget_height < MIN_WIDGET_HEIGHT || widget_width < MIN_WIDGET_WIDTH {
         state.visible = false;
         return None;
     }
 
-    let widget_height = needed_height.min(available_height);
-
-    // Position: right side with 1 char padding, vertically centered in upper portion
-    let x = term_width.saturating_sub(widget_width).saturating_sub(1);
-    let y = messages_area.y + 3; // Below header
+    let x = messages_area.x + messages_area.width.saturating_sub(widget_width);
+    let y = messages_area.y + top;
 
     let rect = Rect::new(x, y, widget_width, widget_height);
 
@@ -191,6 +128,40 @@ pub fn calculate_layout(
     state.rect = rect;
 
     Some(rect)
+}
+
+fn find_largest_empty_rect(
+    free_widths: &[u16],
+    min_width: u16,
+    min_height: u16,
+) -> Option<(u16, u16, u16)> {
+    let mut best_area: u32 = 0;
+    let mut best: Option<(u16, u16, u16)> = None;
+
+    for start in 0..free_widths.len() {
+        let mut min_w = free_widths[start];
+        if min_w < min_width {
+            continue;
+        }
+        for end in start..free_widths.len() {
+            min_w = min_w.min(free_widths[end]);
+            if min_w < min_width {
+                break;
+            }
+            let height = (end - start + 1) as u16;
+            if height < min_height {
+                continue;
+            }
+            let width = min_w.min(MAX_WIDGET_WIDTH);
+            let area = width as u32 * height as u32;
+            if area > best_area {
+                best_area = area;
+                best = Some((start as u16, height, width));
+            }
+        }
+    }
+
+    best
 }
 
 /// Calculate how much height the widget needs based on its content
