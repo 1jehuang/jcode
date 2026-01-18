@@ -1,17 +1,54 @@
 //! Self-development tool - manage canary builds when working on jcode itself
 
 use crate::build;
+use crate::id;
+use crate::storage;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Deserialize)]
 struct SelfDevInput {
     action: String,
     #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    binary: Option<String>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    lines: Option<usize>,
+    #[serde(default)]
+    clear: Option<bool>,
+    #[serde(default)]
+    env: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TesterInfo {
+    id: String,
+    pid: u32,
+    binary: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    debug_cmd_path: String,
+    debug_response_path: String,
+    stdout_path: String,
+    stderr_path: String,
+    started_at: String,
 }
 
 pub struct SelfDevTool;
@@ -31,7 +68,10 @@ impl Tool for SelfDevTool {
     fn description(&self) -> &str {
         "Self-development tool for working on jcode itself. Only available in self-dev mode. \
          Actions: 'reload' (restart with already-built binary), 'promote' (mark current build as stable), \
-         'status' (show build versions), 'rollback' (switch to stable)."
+         'status' (show build versions), 'rollback' (switch to stable), \
+         'debug' (enable visual debug capture), 'debug-dump' (write frames), \
+         'spawn-tester' (launch latest self-dev build for manual testing), \
+         'tester' (control a spawned tester)."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -40,17 +80,65 @@ impl Tool for SelfDevTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["reload", "promote", "status", "rollback", "debug", "debug-dump"],
+                    "enum": [
+                        "reload",
+                        "promote",
+                        "status",
+                        "rollback",
+                        "debug",
+                        "debug-dump",
+                        "spawn-tester",
+                        "tester"
+                    ],
                     "description": "Action to perform: 'reload' restarts with already-built binary, \
                                    'promote' marks current canary as stable for other sessions, \
-                                   'status' shows current build versions and any crash history, \
+                                   'status' shows build versions and any crash history, \
                                    'rollback' manually switches back to the stable build, \
                                    'debug' enables visual debugging for TUI issues, \
-                                   'debug-dump' writes captured debug frames to file"
+                                   'debug-dump' writes captured debug frames to file, \
+                                   'spawn-tester' launches latest self-dev build in a separate TUI, \
+                                   'tester' controls a spawned tester"
                 },
                 "message": {
                     "type": "string",
-                    "description": "Optional message for promote action (describes what was changed)"
+                    "description": "Optional message for promote action or tester send"
+                },
+                "detail": {
+                    "type": "string",
+                    "description": "Detail level for tester actions: summary | full"
+                },
+                "binary": {
+                    "type": "string",
+                    "description": "Binary path for spawn-tester (defaults to latest canary or target/release/jcode)"
+                },
+                "args": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Extra args for spawn-tester"
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory for spawn-tester"
+                },
+                "id": {
+                    "type": "string",
+                    "description": "Tester id to control"
+                },
+                "command": {
+                    "type": "string",
+                    "description": "Tester command: status | list | tail-stdout | tail-stderr | send | response | clear-response | get-state | get-last-response | stop. For 'send', use message param with: message:<text>, reload, state, quit, last_response, history, screen, wait, scroll:<dir>, keys:<spec>, input, set_input:<text>, submit, version, help"
+                },
+                "lines": {
+                    "type": "integer",
+                    "description": "Line count for tail commands"
+                },
+                "clear": {
+                    "type": "boolean",
+                    "description": "Whether to clear debug response after reading"
+                },
+                "env": {
+                    "type": "object",
+                    "description": "Environment variables for spawn-tester"
                 }
             },
             "required": ["action"]
@@ -67,8 +155,10 @@ impl Tool for SelfDevTool {
             "rollback" => self.do_rollback().await,
             "debug" => self.do_debug_enable().await,
             "debug-dump" => self.do_debug_dump().await,
+            "spawn-tester" => self.do_spawn_tester(params).await,
+            "tester" => self.do_tester_command(params).await,
             _ => Ok(ToolOutput::new(format!(
-                "Unknown action: {}. Use 'reload', 'promote', 'status', 'rollback', 'debug', or 'debug-dump'.",
+                "Unknown action: {}. Use 'reload', 'promote', 'status', 'rollback', 'debug', 'debug-dump', 'spawn-tester', or 'tester'.",
                 params.action
             ))),
         }
@@ -293,6 +383,249 @@ impl SelfDevTool {
                 "Failed to dump debug frames: {}\n\n\
                  Make sure visual debugging is enabled first with `selfdev debug`.",
                 e
+            ))),
+        }
+    }
+
+    fn tester_manifest_path() -> Result<PathBuf> {
+        Ok(storage::jcode_dir()?.join("testers.json"))
+    }
+
+    fn load_testers() -> Result<Vec<TesterInfo>> {
+        let path = Self::tester_manifest_path()?;
+        if path.exists() {
+            storage::read_json(&path)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    fn save_testers(testers: &[TesterInfo]) -> Result<()> {
+        let path = Self::tester_manifest_path()?;
+        storage::write_json(&path, testers)
+    }
+
+    fn newest_canary_binary() -> Option<PathBuf> {
+        if let Ok(path) = build::canary_binary_path() {
+            if path.exists() {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    fn resolve_binary(binary: Option<String>) -> Result<PathBuf> {
+        if let Some(path) = binary {
+            return Ok(PathBuf::from(path));
+        }
+        if let Some(canary) = Self::newest_canary_binary() {
+            return Ok(canary);
+        }
+        if let Some(repo) = build::get_repo_dir() {
+            let target = repo.join("target/release/jcode");
+            return Ok(target);
+        }
+        Ok(std::env::current_exe()?)
+    }
+
+    fn format_tester_summary(tester: &TesterInfo) -> String {
+        let args = if tester.args.is_empty() {
+            "(none)".to_string()
+        } else {
+            tester.args.join(" ")
+        };
+        format!("{} pid={} bin={} args={}", tester.id, tester.pid, tester.binary, args)
+    }
+
+    fn read_tail(path: &PathBuf, lines: usize) -> Result<String> {
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        let mut out = String::new();
+        let mut total = 0usize;
+        for line in content.lines().rev() {
+            if total >= lines {
+                break;
+            }
+            out.push_str(line);
+            out.push('\n');
+            total += 1;
+        }
+        Ok(out.lines().rev().collect::<Vec<_>>().join("\n"))
+    }
+
+    async fn do_spawn_tester(&self, params: SelfDevInput) -> Result<ToolOutput> {
+        let binary_path = Self::resolve_binary(params.binary)?;
+        if !binary_path.exists() {
+            return Ok(ToolOutput::new(format!(
+                "Binary not found: {}",
+                binary_path.display()
+            )));
+        }
+
+        let id = format!("tester_{}", id::new_id("tui"));
+        let debug_cmd = std::env::temp_dir().join(format!("jcode_debug_cmd_{}", id));
+        let debug_resp = std::env::temp_dir().join(format!("jcode_debug_response_{}", id));
+        let stdout_path = std::env::temp_dir().join(format!("jcode_tester_stdout_{}", id));
+        let stderr_path = std::env::temp_dir().join(format!("jcode_tester_stderr_{}", id));
+
+        let mut cmd = Command::new(&binary_path);
+        cmd.env("JCODE_SELFDEV_MODE", "1");
+        cmd.env("JCODE_DEBUG_CMD_PATH", debug_cmd.to_string_lossy().to_string());
+        cmd.env("JCODE_DEBUG_RESPONSE_PATH", debug_resp.to_string_lossy().to_string());
+        if let Some(env) = params.env.as_ref() {
+            for (key, value) in env {
+                cmd.env(key, value);
+            }
+        }
+        if let Some(cwd) = params.cwd.as_ref() {
+            cmd.current_dir(cwd);
+        }
+
+        let mut args = params.args.unwrap_or_default();
+        if args.is_empty() {
+            args.push("self-dev".to_string());
+        }
+        let has_debug = args.iter().any(|s| s == "--debug-socket");
+        cmd.args(&args);
+        if !has_debug {
+            cmd.arg("--debug-socket");
+        }
+
+        let stdout_file = std::fs::File::create(&stdout_path)?;
+        let stderr_file = std::fs::File::create(&stderr_path)?;
+        cmd.stdout(Stdio::from(stdout_file));
+        cmd.stderr(Stdio::from(stderr_file));
+
+        let child = cmd.spawn()?;
+        let pid = child.id();
+
+        let info = TesterInfo {
+            id: id.clone(),
+            pid,
+            binary: binary_path.to_string_lossy().to_string(),
+            args,
+            cwd: params.cwd,
+            debug_cmd_path: debug_cmd.to_string_lossy().to_string(),
+            debug_response_path: debug_resp.to_string_lossy().to_string(),
+            stdout_path: stdout_path.to_string_lossy().to_string(),
+            stderr_path: stderr_path.to_string_lossy().to_string(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        let mut testers = Self::load_testers()?;
+        testers.push(info);
+        Self::save_testers(&testers)?;
+
+        Ok(ToolOutput::new(format!(
+            "Spawned tester {} (pid {}).\nUse selfdev tester command=\"status\" id=\"{}\" to inspect.",
+            id, pid, id
+        )))
+    }
+
+    async fn do_tester_command(&self, params: SelfDevInput) -> Result<ToolOutput> {
+        let command = params.command.unwrap_or_else(|| "status".to_string());
+        let detail = params.detail.unwrap_or_else(|| "summary".to_string());
+        let lines = params.lines.unwrap_or(40).max(1).min(500);
+
+        let mut testers = Self::load_testers()?;
+        if command == "list" {
+            if testers.is_empty() {
+                return Ok(ToolOutput::new("No active testers.".to_string()));
+            }
+            let entries = testers
+                .iter()
+                .map(|t| Self::format_tester_summary(t))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Ok(ToolOutput::new(entries));
+        }
+
+        let id = match params.id {
+            Some(id) => id,
+            None => {
+                return Ok(ToolOutput::new(
+                    "Missing tester id. Use action=\"tester\" with id.".to_string(),
+                ))
+            }
+        };
+
+        let pos = testers.iter().position(|t| t.id == id);
+        let Some(index) = pos else {
+            return Ok(ToolOutput::new(format!("Tester not found: {}", id)));
+        };
+
+        let tester = testers[index].clone();
+        match command.as_str() {
+            "status" => {
+                let status = if detail == "full" {
+                    serde_json::to_string_pretty(&tester).unwrap_or_default()
+                } else {
+                    Self::format_tester_summary(&tester)
+                };
+                Ok(ToolOutput::new(status))
+            }
+            "tail-stdout" => {
+                let path = PathBuf::from(&tester.stdout_path);
+                let content = Self::read_tail(&path, lines)?;
+                Ok(ToolOutput::new(content))
+            }
+            "tail-stderr" => {
+                let path = PathBuf::from(&tester.stderr_path);
+                let content = Self::read_tail(&path, lines)?;
+                Ok(ToolOutput::new(content))
+            }
+            "send" => {
+                let message = params.message.unwrap_or_default();
+                if message.is_empty() {
+                    return Ok(ToolOutput::new(
+                        "Missing message to send (use message field).".to_string(),
+                    ));
+                }
+                let path = PathBuf::from(&tester.debug_cmd_path);
+                std::fs::write(&path, message)?;
+                Ok(ToolOutput::new("Sent command.".to_string()))
+            }
+            "get-state" => {
+                let path = PathBuf::from(&tester.debug_cmd_path);
+                std::fs::write(&path, "state")?;
+                let response_path = PathBuf::from(&tester.debug_response_path);
+                let content = std::fs::read_to_string(&response_path).unwrap_or_default();
+                Ok(ToolOutput::new(content))
+            }
+            "get-last-response" => {
+                let path = PathBuf::from(&tester.debug_cmd_path);
+                std::fs::write(&path, "last_response")?;
+                let response_path = PathBuf::from(&tester.debug_response_path);
+                let content = std::fs::read_to_string(&response_path).unwrap_or_default();
+                Ok(ToolOutput::new(content))
+            }
+            "response" => {
+                let path = PathBuf::from(&tester.debug_response_path);
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                if params.clear.unwrap_or(false) {
+                    let _ = std::fs::remove_file(&path);
+                }
+                Ok(ToolOutput::new(content))
+            }
+            "clear-response" => {
+                let path = PathBuf::from(&tester.debug_response_path);
+                let _ = std::fs::remove_file(&path);
+                Ok(ToolOutput::new("Cleared response.".to_string()))
+            }
+            "stop" => {
+                #[cfg(unix)]
+                {
+                    let _ = Command::new("kill")
+                        .arg("-TERM")
+                        .arg(tester.pid.to_string())
+                        .output();
+                }
+                testers.remove(index);
+                Self::save_testers(&testers)?;
+                Ok(ToolOutput::new("Stopped tester.".to_string()))
+            }
+            _ => Ok(ToolOutput::new(format!(
+                "Unknown tester command: {}",
+                command
             ))),
         }
     }

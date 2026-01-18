@@ -1,9 +1,11 @@
 mod agent;
 mod auth;
 mod auto_debug;
+mod background;
 mod build;
 mod bus;
 mod compaction;
+mod config;
 mod id;
 mod logging;
 mod mcp;
