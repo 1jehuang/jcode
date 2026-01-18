@@ -48,6 +48,7 @@ similar = "2"            # diffing for edits
 dirs = "5"               # home directory
 anyhow = "1"
 thiserror = "1"
+libc = "0.2"             # Unix system calls (flock)
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 urlencoding = "2"        # URL encoding for web search
@@ -75,3 +76,6 @@ pulldown-cmark = "0.12"
 
 [dev-dependencies]
 async-stream = "0.3"
+
+[build-dependencies]
+dirs = "5"

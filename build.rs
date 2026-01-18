@@ -1,8 +1,10 @@
+use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    // Get Cargo.toml version
-    let cargo_version = env!("CARGO_PKG_VERSION");
+    // Get and increment build number (stored in ~/.jcode/build_number)
+    let build_number = increment_build_number();
 
     // Get git commit hash
     let output = Command::new("git")
@@ -45,21 +47,46 @@ fn main() {
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
 
-    // Build version string: v0.1.0 (abc1234) or v0.1.0-dev (abc1234-dirty)
+    // Build version string with auto-incremented build number
+    // Format: v0.1.47 (abc1234) or v0.1.47-dev (abc1234)
     let version = if dirty {
-        format!("v{}-dev ({})", cargo_version, git_hash)
+        format!("v0.1.{}-dev ({})", build_number, git_hash)
     } else {
-        format!("v{} ({})", cargo_version, git_hash)
+        format!("v0.1.{} ({})", build_number, git_hash)
     };
 
     // Set environment variables for compilation
     println!("cargo:rustc-env=JCODE_GIT_HASH={}", git_hash);
     println!("cargo:rustc-env=JCODE_GIT_DATE={}", git_date);
     println!("cargo:rustc-env=JCODE_VERSION={}", version);
+    println!("cargo:rustc-env=JCODE_BUILD_NUMBER={}", build_number);
     println!("cargo:rustc-env=JCODE_CHANGELOG={}", changelog);
 
-    // Re-run if git HEAD changes or Cargo.toml changes
+    // Re-run if git HEAD changes
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
-    println!("cargo:rerun-if-changed=Cargo.toml");
+}
+
+/// Get and increment the build number stored in ~/.jcode/build_number
+fn increment_build_number() -> u32 {
+    let jcode_dir = dirs::home_dir()
+        .map(|h| h.join(".jcode"))
+        .unwrap_or_else(|| PathBuf::from(".jcode"));
+
+    // Ensure directory exists
+    let _ = fs::create_dir_all(&jcode_dir);
+
+    let build_file = jcode_dir.join("build_number");
+
+    // Read current build number
+    let current = fs::read_to_string(&build_file)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+
+    // Increment and save
+    let next = current + 1;
+    let _ = fs::write(&build_file, next.to_string());
+
+    next
 }
