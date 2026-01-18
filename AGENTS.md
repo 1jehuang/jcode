@@ -6,6 +6,17 @@
 - **Push when done** - Push all commits to remote when finishing a task or session
 - **Rebuild and install when done** - Run `cargo build --release && cp target/release/jcode ~/.local/bin/`
 - **Test before committing** - Run `cargo test` to verify changes
+- **Bump version for releases** - Update version in `Cargo.toml` when making releases
+
+## Versioning
+
+jcode uses semantic versioning (`vX.Y.Z`) defined in `Cargo.toml`.
+
+- **Patch** (0.1.0 → 0.1.1): Bug fixes
+- **Minor** (0.1.0 → 0.2.0): New features, backward compatible
+- **Major** (0.1.0 → 1.0.0): Breaking changes
+
+Bump patch for fixes, minor for features, major for breaking changes. The build auto-appends git hash and `-dev` for dirty trees.
 
 ## Project Structure & Module Organization
 - `src/` is the core library and CLI entry point (`src/main.rs`). Key areas include `src/agent.rs`, `src/provider/`, `src/mcp/`, `src/tool/`, and `src/tui/`.
@@ -35,6 +46,7 @@
 - Integration and provider mocks live in `tests/e2e/`.
 - Before shipping changes that affect providers, run `cargo test` and `cargo run --bin test_api`.
 - Use `scripts/test_e2e.sh` for a full preflight (binary check + targeted suites).
+- **Manual testing** - After making TUI changes, manually test in a real terminal to verify behavior.
 
 ## Commit & Pull Request Guidelines
 - Commit messages are concise, imperative, and often start with verbs like “Add …” or “Fix …” (sometimes `Fix:` prefixes).

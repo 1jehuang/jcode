@@ -46,7 +46,6 @@ const SELFDEV_PROMPT: &str = r#"
 You are working on the jcode codebase itself. You have the `selfdev` tool available:
 
 - `selfdev { action: "reload" }` - Restart with already-built binary (use after `cargo build --release`)
-- `selfdev { action: "rebuild" }` - Build, test, and restart with new code (all-in-one)
 - `selfdev { action: "status" }` - Check build versions and crash history
 - `selfdev { action: "promote" }` - Mark current build as stable for other sessions
 - `selfdev { action: "rollback" }` - Switch back to stable build
@@ -635,47 +634,62 @@ impl Agent {
                     .clone()
                     .unwrap_or_else(|| self.session.id.clone());
 
+                // Tools that jcode handles natively (not via SDK)
+                const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
+                let is_native_tool = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
+
                 // Check if SDK already executed this tool
                 if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
-                    if trace {
-                        eprintln!(
-                            "[trace] using_sdk_result name={} id={} is_error={}",
-                            tc.name, tc.id, sdk_is_error
+                    // For native tools, ignore SDK errors and execute locally
+                    if is_native_tool && sdk_is_error {
+                        if trace {
+                            eprintln!(
+                                "[trace] sdk_error_for_native_tool name={} id={}, executing locally",
+                                tc.name, tc.id
+                            );
+                        }
+                        // Fall through to local execution below
+                    } else {
+                        if trace {
+                            eprintln!(
+                                "[trace] using_sdk_result name={} id={} is_error={}",
+                                tc.name, tc.id, sdk_is_error
+                            );
+                        }
+                        if print_output {
+                            print!("\n  → ");
+                            let preview = if sdk_content.len() > 200 {
+                                format!("{}...", &sdk_content[..200])
+                            } else {
+                                sdk_content.clone()
+                            };
+                            println!("{}", preview.lines().next().unwrap_or("(done via SDK)"));
+                        }
+
+                        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                            session_id: self.session.id.clone(),
+                            message_id: message_id.clone(),
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            status: if sdk_is_error {
+                                ToolStatus::Error
+                            } else {
+                                ToolStatus::Completed
+                            },
+                            title: None,
+                        }));
+
+                        self.session.add_message(
+                            Role::User,
+                            vec![ContentBlock::ToolResult {
+                                tool_use_id: tc.id,
+                                content: sdk_content,
+                                is_error: if sdk_is_error { Some(true) } else { None },
+                            }],
                         );
+                        self.session.save()?;
+                        continue;
                     }
-                    if print_output {
-                        print!("\n  → ");
-                        let preview = if sdk_content.len() > 200 {
-                            format!("{}...", &sdk_content[..200])
-                        } else {
-                            sdk_content.clone()
-                        };
-                        println!("{}", preview.lines().next().unwrap_or("(done via SDK)"));
-                    }
-
-                    Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                        session_id: self.session.id.clone(),
-                        message_id: message_id.clone(),
-                        tool_call_id: tc.id.clone(),
-                        tool_name: tc.name.clone(),
-                        status: if sdk_is_error {
-                            ToolStatus::Error
-                        } else {
-                            ToolStatus::Completed
-                        },
-                        title: None,
-                    }));
-
-                    self.session.add_message(
-                        Role::User,
-                        vec![ContentBlock::ToolResult {
-                            tool_use_id: tc.id,
-                            content: sdk_content,
-                            is_error: if sdk_is_error { Some(true) } else { None },
-                        }],
-                    );
-                    self.session.save()?;
-                    continue;
                 }
 
                 // SDK didn't execute this tool, run it locally
@@ -975,21 +989,29 @@ impl Agent {
                     .clone()
                     .unwrap_or_else(|| self.session.id.clone());
 
+                // Tools that jcode handles natively (not via SDK)
+                const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
+                let is_native_tool = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
+
                 // Check if SDK already executed this tool
                 if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
-                    self.session.add_message(
-                        Role::User,
-                        vec![ContentBlock::ToolResult {
-                            tool_use_id: tc.id,
-                            content: sdk_content,
-                            is_error: if sdk_is_error { Some(true) } else { None },
-                        }],
-                    );
-                    self.session.save()?;
-                    continue;
+                    // For native tools, ignore SDK errors and execute locally
+                    if !(is_native_tool && sdk_is_error) {
+                        self.session.add_message(
+                            Role::User,
+                            vec![ContentBlock::ToolResult {
+                                tool_use_id: tc.id,
+                                content: sdk_content,
+                                is_error: if sdk_is_error { Some(true) } else { None },
+                            }],
+                        );
+                        self.session.save()?;
+                        continue;
+                    }
+                    // Fall through to local execution for native tools with SDK errors
                 }
 
-                // SDK didn't execute this tool, run it locally
+                // SDK didn't execute this tool (or native tool with SDK error), run it locally
                 let ctx = ToolContext {
                     session_id: self.session.id.clone(),
                     message_id: message_id.clone(),
@@ -1229,17 +1251,25 @@ impl Agent {
                     .clone()
                     .unwrap_or_else(|| self.session.id.clone());
 
+                // Tools that jcode handles natively (not via SDK)
+                const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
+                let is_native_tool = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
+
                 if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
-                    self.session.add_message(
-                        Role::User,
-                        vec![ContentBlock::ToolResult {
-                            tool_use_id: tc.id,
-                            content: sdk_content,
-                            is_error: if sdk_is_error { Some(true) } else { None },
-                        }],
-                    );
-                    self.session.save()?;
-                    continue;
+                    // For native tools, ignore SDK errors and execute locally
+                    if !(is_native_tool && sdk_is_error) {
+                        self.session.add_message(
+                            Role::User,
+                            vec![ContentBlock::ToolResult {
+                                tool_use_id: tc.id,
+                                content: sdk_content,
+                                is_error: if sdk_is_error { Some(true) } else { None },
+                            }],
+                        );
+                        self.session.save()?;
+                        continue;
+                    }
+                    // Fall through to local execution for native tools with SDK errors
                 }
 
                 let ctx = ToolContext {

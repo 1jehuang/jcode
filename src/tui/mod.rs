@@ -36,7 +36,7 @@ pub trait TuiState {
     fn streaming_tool_calls(&self) -> Vec<ToolCall>;
     fn elapsed(&self) -> Option<Duration>;
     fn status(&self) -> ProcessingStatus;
-    fn command_suggestions(&self) -> Vec<(&'static str, &'static str)>;
+    fn command_suggestions(&self) -> Vec<(String, &'static str)>;
     fn active_skill(&self) -> Option<String>;
     fn subagent_status(&self) -> Option<String>;
     fn time_since_activity(&self) -> Option<Duration>;

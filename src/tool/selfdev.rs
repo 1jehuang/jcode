@@ -30,8 +30,8 @@ impl Tool for SelfDevTool {
 
     fn description(&self) -> &str {
         "Self-development tool for working on jcode itself. Only available in self-dev mode. \
-         Actions: 'reload' (restart with already-built binary), 'rebuild' (build, test, restart), \
-         'promote' (mark current build as stable), 'status' (show build versions), 'rollback' (switch to stable)."
+         Actions: 'reload' (restart with already-built binary), 'promote' (mark current build as stable), \
+         'status' (show build versions), 'rollback' (switch to stable)."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -40,12 +40,13 @@ impl Tool for SelfDevTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["reload", "rebuild", "promote", "status", "rollback"],
-                    "description": "Action to perform: 'reload' restarts with already-built binary (no rebuild), \
-                                   'rebuild' builds and tests changes then restarts, \
+                    "enum": ["reload", "promote", "status", "rollback", "debug", "debug-dump"],
+                    "description": "Action to perform: 'reload' restarts with already-built binary, \
                                    'promote' marks current canary as stable for other sessions, \
                                    'status' shows current build versions and any crash history, \
-                                   'rollback' manually switches back to the stable build"
+                                   'rollback' manually switches back to the stable build, \
+                                   'debug' enables visual debugging for TUI issues, \
+                                   'debug-dump' writes captured debug frames to file"
                 },
                 "message": {
                     "type": "string",
@@ -61,12 +62,13 @@ impl Tool for SelfDevTool {
 
         match params.action.as_str() {
             "reload" => self.do_reload().await,
-            "rebuild" => self.do_rebuild().await,
             "promote" => self.do_promote(params.message).await,
             "status" => self.do_status().await,
             "rollback" => self.do_rollback().await,
+            "debug" => self.do_debug_enable().await,
+            "debug-dump" => self.do_debug_dump().await,
             _ => Ok(ToolOutput::new(format!(
-                "Unknown action: {}. Use 'reload', 'rebuild', 'promote', 'status', or 'rollback'.",
+                "Unknown action: {}. Use 'reload', 'promote', 'status', 'rollback', 'debug', or 'debug-dump'.",
                 params.action
             ))),
         }
@@ -118,47 +120,6 @@ impl SelfDevTool {
         )))
     }
 
-    async fn do_rebuild(&self) -> Result<ToolOutput> {
-        let repo_dir = build::get_repo_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository directory"))?;
-
-        // Do the build
-        match build::rebuild_canary(&repo_dir) {
-            Ok(hash) => {
-                // Install this version and set as canary (stable stays as safety net)
-                build::install_version(&repo_dir, &hash)?;
-                build::update_canary_symlink(&hash)?;
-
-                // Update manifest - set as canary, keep stable unchanged
-                let mut manifest = build::BuildManifest::load()?;
-                let stable_hash = manifest.stable.clone().unwrap_or_else(|| "none".to_string());
-                manifest.canary = Some(hash.clone());
-                manifest.canary_status = Some(build::CanaryStatus::Testing);
-                manifest.save()?;
-
-                // Write reload info for post-restart display
-                let info_path = crate::storage::jcode_dir()?.join("reload-info");
-                let info = format!("rebuild:{}", hash);
-                std::fs::write(&info_path, &info)?;
-
-                // Write signal file for TUI to pick up
-                let signal_path = crate::storage::jcode_dir()?.join("rebuild-signal");
-                std::fs::write(&signal_path, &hash)?;
-
-                Ok(ToolOutput::new(format!(
-                    "Build successful. Canary: {}\n\
-                     Stable: {} (safety net)\n\n\
-                     **Restarting with new build...** The session will continue automatically.",
-                    hash, stable_hash
-                )))
-            }
-            Err(e) => Ok(ToolOutput::new(format!(
-                "Build failed: {}\n\nFix the issue and try again.",
-                e
-            ))),
-        }
-    }
-
     async fn do_promote(&self, message: Option<String>) -> Result<ToolOutput> {
         let mut manifest = build::BuildManifest::load()?;
 
@@ -193,8 +154,40 @@ impl SelfDevTool {
 
         let mut status = String::new();
 
-        // Current versions
-        status.push_str("## Build Status\n\n");
+        // Current running version
+        status.push_str("## Current Version\n\n");
+        status.push_str(&format!(
+            "**Running:** jcode {}\n",
+            env!("JCODE_VERSION")
+        ));
+
+        // Working tree status
+        if let Some(repo_dir) = build::get_repo_dir() {
+            let output = std::process::Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(&repo_dir)
+                .output()
+                .ok();
+
+            if let Some(output) = output {
+                let changes: Vec<&str> = std::str::from_utf8(&output.stdout)
+                    .unwrap_or("")
+                    .lines()
+                    .collect();
+                if changes.is_empty() {
+                    status.push_str("**Working tree:** clean\n");
+                } else {
+                    status.push_str(&format!(
+                        "**Working tree:** {} uncommitted change{}\n",
+                        changes.len(),
+                        if changes.len() == 1 { "" } else { "s" }
+                    ));
+                }
+            }
+        }
+
+        // Build versions
+        status.push_str("\n## Build Status\n\n");
 
         if let Some(ref stable) = manifest.stable {
             status.push_str(&format!("**Stable:** {}\n", stable));
@@ -272,5 +265,35 @@ impl SelfDevTool {
              **Restarting...** The session will continue automatically.",
             stable_hash
         )))
+    }
+
+    async fn do_debug_enable(&self) -> Result<ToolOutput> {
+        use crate::tui::visual_debug;
+
+        visual_debug::enable();
+
+        Ok(ToolOutput::new(
+            "Visual debugging enabled. Frames are being captured.\n\n\
+             Use `selfdev debug-dump` to write captured frames to file for analysis.\n\
+             The debug file will contain detailed frame-by-frame TUI state."
+                .to_string(),
+        ))
+    }
+
+    async fn do_debug_dump(&self) -> Result<ToolOutput> {
+        use crate::tui::visual_debug;
+
+        match visual_debug::dump_to_file() {
+            Ok(path) => Ok(ToolOutput::new(format!(
+                "Debug frames written to: {}\n\n\
+                 You can read this file to analyze TUI rendering issues.",
+                path.display()
+            ))),
+            Err(e) => Ok(ToolOutput::new(format!(
+                "Failed to dump debug frames: {}\n\n\
+                 Make sure visual debugging is enabled first with `selfdev debug`.",
+                e
+            ))),
+        }
     }
 }

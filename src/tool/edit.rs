@@ -381,4 +381,17 @@ mod tests {
         assert!(ctx.contains("line 5"), "Should include line 5");
         assert!(ctx.contains("line 3"), "Should include line 3");
     }
+
+    #[test]
+    fn test_extract_context_range_past_end() {
+        let content = "line 1\nline 2\nline 3\nline 4\nline 5";
+
+        // Edit range extends past the end of the file.
+        let (start, end, ctx) = extract_context(content, 4, 10, 1);
+
+        assert_eq!(start, 3, "Should start at line 3 (4 - 1)");
+        assert_eq!(end, 5, "Should clamp to last line");
+        assert!(ctx.contains("line 3"), "Should include line 3");
+        assert!(ctx.contains("line 5"), "Should include line 5");
+    }
 }

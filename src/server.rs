@@ -49,8 +49,12 @@ pub struct SharedContext {
     pub from_name: Option<String>,
 }
 
-/// Default socket path for main communication
+/// Socket path for main communication
+/// Can be overridden via JCODE_SOCKET env var
 pub fn socket_path() -> PathBuf {
+    if let Ok(custom) = std::env::var("JCODE_SOCKET") {
+        return PathBuf::from(custom);
+    }
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir());
@@ -58,11 +62,20 @@ pub fn socket_path() -> PathBuf {
 }
 
 /// Debug socket path for testing/introspection
+/// Derived from main socket path
 pub fn debug_socket_path() -> PathBuf {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    runtime_dir.join("jcode-debug.sock")
+    let main_path = socket_path();
+    let filename = main_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("jcode.sock");
+    let debug_filename = filename.replace(".sock", "-debug.sock");
+    main_path.with_file_name(debug_filename)
+}
+
+/// Set custom socket path (sets JCODE_SOCKET env var)
+pub fn set_socket_path(path: &str) {
+    std::env::set_var("JCODE_SOCKET", path);
 }
 
 /// Server state
@@ -276,6 +289,11 @@ impl Server {
 
         eprintln!("Server listening on {:?}", self.socket_path);
         eprintln!("Debug socket on {:?}", self.debug_socket_path);
+
+        // Spawn selfdev signal monitor (checks for reload/rollback signals)
+        tokio::spawn(async {
+            monitor_selfdev_signals().await;
+        });
 
         // Spawn the bus monitor for swarm coordination
         let monitor_file_touches = Arc::clone(&self.file_touches);
@@ -644,15 +662,24 @@ async fn handle_client(
             Request::Reload { id } => {
                 // Notify this client that server is reloading
                 let _ = client_event_tx.send(ServerEvent::Reloading { new_socket: None });
-                let _ = client_event_tx.send(ServerEvent::Done { id });
 
-                // Spawn reload process (will exec into new binary)
+                // Spawn reload process with progress streaming
+                let progress_tx = client_event_tx.clone();
                 tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    if let Err(e) = do_server_reload() {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    if let Err(e) = do_server_reload_with_progress(progress_tx.clone()).await {
+                        let _ = progress_tx.send(ServerEvent::ReloadProgress {
+                            step: "error".to_string(),
+                            message: format!("Reload failed: {}", e),
+                            success: Some(false),
+                            output: None,
+                        });
                         eprintln!("Reload failed: {}", e);
                     }
                 });
+
+                // Send Done after starting the reload (client will reconnect after server restarts)
+                let _ = client_event_tx.send(ServerEvent::Done { id });
             }
 
             Request::ResumeSession { id, session_id } => {
@@ -1334,6 +1361,7 @@ fn get_repo_dir() -> Option<PathBuf> {
 }
 
 /// Server hot-reload: pull, build, and exec into new binary
+#[allow(dead_code)]
 fn do_server_reload() -> Result<()> {
     use std::os::unix::process::CommandExt;
 
@@ -1377,4 +1405,125 @@ fn do_server_reload() -> Result<()> {
 
     // exec() only returns on error
     Err(anyhow::anyhow!("Failed to exec: {}", err))
+}
+
+/// Server hot-reload with progress streaming to client
+/// This just restarts with the existing binary - no rebuild
+async fn do_server_reload_with_progress(
+    tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
+) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let send_progress = |step: &str, message: &str, success: Option<bool>, output: Option<String>| {
+        let _ = tx.send(ServerEvent::ReloadProgress {
+            step: step.to_string(),
+            message: message.to_string(),
+            success,
+            output,
+        });
+    };
+
+    // Step 1: Find repo
+    send_progress("init", "🔄 Starting hot-reload...", None, None);
+
+    let repo_dir = get_repo_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
+
+    send_progress("init", &format!("📁 Repository: {}", repo_dir.display()), Some(true), None);
+
+    // Step 2: Check for binary
+    let exe = repo_dir.join("target/release/jcode");
+    if !exe.exists() {
+        send_progress("verify", "❌ No binary found at target/release/jcode", Some(false), None);
+        send_progress("verify", "💡 Run 'cargo build --release' first, then use 'selfdev reload'", Some(false), None);
+        anyhow::bail!("No binary found. Build first with 'cargo build --release'");
+    }
+
+    // Step 3: Get binary info
+    let metadata = std::fs::metadata(&exe)?;
+    let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
+    let modified = metadata.modified().ok();
+
+    let age_str = if let Some(mod_time) = modified {
+        if let Ok(elapsed) = mod_time.elapsed() {
+            let secs = elapsed.as_secs();
+            if secs < 60 {
+                format!("{} seconds ago", secs)
+            } else if secs < 3600 {
+                format!("{} minutes ago", secs / 60)
+            } else if secs < 86400 {
+                format!("{} hours ago", secs / 3600)
+            } else {
+                format!("{} days ago", secs / 86400)
+            }
+        } else {
+            "unknown".to_string()
+        }
+    } else {
+        "unknown".to_string()
+    };
+
+    send_progress("verify", &format!("✓ Binary: {:.1} MB, built {}", size_mb, age_str), Some(true), None);
+
+    // Step 4: Show current git state (informational)
+    let head_output = ProcessCommand::new("git")
+        .args(["log", "--oneline", "-1"])
+        .current_dir(&repo_dir)
+        .output();
+
+    if let Ok(output) = head_output {
+        let head_str = String::from_utf8_lossy(&output.stdout);
+        send_progress("git", &format!("📍 HEAD: {}", head_str.trim()), Some(true), None);
+    }
+
+    // Step 5: Exec
+    send_progress("exec", "🚀 Restarting server with existing binary...", None, None);
+
+    // Small delay to ensure the progress message is sent
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    eprintln!("Exec'ing into binary: {:?}", exe);
+
+    // Exec into new binary with serve command
+    let err = ProcessCommand::new(&exe).arg("serve").exec();
+
+    // exec() only returns on error
+    Err(anyhow::anyhow!("Failed to exec: {}", err))
+}
+
+/// Monitor for selfdev signal files and exit with appropriate codes
+/// This allows the canary wrapper to handle reload/rollback requests
+async fn monitor_selfdev_signals() {
+    use tokio::time::{interval, Duration};
+
+    let mut check_interval = interval(Duration::from_millis(500));
+
+    loop {
+        check_interval.tick().await;
+
+        let jcode_dir = match crate::storage::jcode_dir() {
+            Ok(dir) => dir,
+            Err(_) => continue,
+        };
+
+        // Check for rebuild signal (reload with new canary)
+        let rebuild_path = jcode_dir.join("rebuild-signal");
+        if rebuild_path.exists() {
+            if let Ok(_hash) = std::fs::read_to_string(&rebuild_path) {
+                let _ = std::fs::remove_file(&rebuild_path);
+                eprintln!("Server: reload signal received, exiting with code 42");
+                std::process::exit(42);
+            }
+        }
+
+        // Check for rollback signal (switch to stable)
+        let rollback_path = jcode_dir.join("rollback-signal");
+        if rollback_path.exists() {
+            if let Ok(_hash) = std::fs::read_to_string(&rollback_path) {
+                let _ = std::fs::remove_file(&rollback_path);
+                eprintln!("Server: rollback signal received, exiting with code 43");
+                std::process::exit(43);
+            }
+        }
+    }
 }
