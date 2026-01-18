@@ -779,19 +779,20 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                     };
 
                     // For edit tools, count line changes
-                    let (additions, deletions) =
-                        if matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit") {
-                            diff_change_counts(&msg.content)
-                        } else {
-                            (0, 0)
-                        };
+                    let is_edit_tool =
+                        matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit");
+                    let (additions, deletions) = if is_edit_tool {
+                        diff_change_counts(&msg.content)
+                    } else {
+                        (0, 0)
+                    };
 
                     let mut tool_line = vec![
                         Span::styled(format!("  {} ", icon), Style::default().fg(icon_color)),
                         Span::styled(tc.name.clone(), Style::default().fg(TOOL_COLOR)),
                         Span::styled(format!(" {}", summary), Style::default().fg(DIM_COLOR)),
                     ];
-                    if additions > 0 || deletions > 0 {
+                    if is_edit_tool {
                         tool_line.push(Span::styled(" (", Style::default().fg(DIM_COLOR)));
                         tool_line.push(Span::styled(
                             format!("+{}", additions),
@@ -808,9 +809,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                     lines.push(Line::from(tool_line));
 
                     // Show diff output for editing tools with syntax highlighting
-                    if app.show_diffs()
-                        && matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit")
-                    {
+                    if app.show_diffs() && is_edit_tool {
                         // Extract file extension for syntax highlighting
                         let file_ext = tc
                             .input
@@ -860,7 +859,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                             if truncated && !shown_truncation && i >= half_point {
                                 let skipped = total_changes - MAX_DIFF_LINES;
                                 lines.push(Line::from(Span::styled(
-                                    format!("    ... {} more changes ...", skipped),
+                                    format!("  ... {} more changes ...", skipped),
                                     Style::default().fg(DIM_COLOR),
                                 )));
                                 shown_truncation = true;
@@ -874,7 +873,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
                             // Build the line with syntax-highlighted content
                             let mut spans: Vec<Span<'static>> = vec![
-                                Span::styled("    ", Style::default()),
+                                Span::styled("  ", Style::default()),
                                 Span::styled(line.prefix.clone(), Style::default().fg(base_color)),
                             ];
 
@@ -894,7 +893,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                         // Show summary if there were changes
                         if total_changes > 0 && truncated {
                             lines.push(Line::from(Span::styled(
-                                format!("    (+{} -{} total)", additions, deletions),
+                                format!("  (+{} -{} total)", additions, deletions),
                                 Style::default().fg(DIM_COLOR),
                             )));
                         }
@@ -1605,23 +1604,23 @@ fn collect_diff_lines(content: &str) -> Vec<ParsedDiffLine> {
 }
 
 fn parse_diff_line(raw_line: &str) -> Option<ParsedDiffLine> {
-    let line = raw_line.trim();
-    if line.is_empty() || line == "..." {
+    let trimmed = raw_line.trim();
+    if trimmed.is_empty() || trimmed == "..." {
         return None;
     }
-    if line.starts_with("diff --git ")
-        || line.starts_with("index ")
-        || line.starts_with("--- ")
-        || line.starts_with("+++ ")
-        || line.starts_with("@@ ")
-        || line.starts_with("\\ No newline")
+    if trimmed.starts_with("diff --git ")
+        || trimmed.starts_with("index ")
+        || trimmed.starts_with("--- ")
+        || trimmed.starts_with("+++ ")
+        || trimmed.starts_with("@@ ")
+        || trimmed.starts_with("\\ No newline")
     {
         return None;
     }
 
     // Compact diff format: "42- old" / "42+ new"
-    if let Some(pos) = line.find("- ") {
-        let (prefix, content) = line.split_at(pos + 2);
+    if let Some(pos) = trimmed.find("- ") {
+        let (prefix, content) = trimmed.split_at(pos + 2);
         if !prefix.is_empty() && prefix[..pos].chars().all(|c| c.is_ascii_digit()) {
             return Some(ParsedDiffLine {
                 kind: DiffLineKind::Del,
@@ -1630,8 +1629,8 @@ fn parse_diff_line(raw_line: &str) -> Option<ParsedDiffLine> {
             });
         }
     }
-    if let Some(pos) = line.find("+ ") {
-        let (prefix, content) = line.split_at(pos + 2);
+    if let Some(pos) = trimmed.find("+ ") {
+        let (prefix, content) = trimmed.split_at(pos + 2);
         if !prefix.is_empty() && prefix[..pos].chars().all(|c| c.is_ascii_digit()) {
             return Some(ParsedDiffLine {
                 kind: DiffLineKind::Add,
@@ -1642,18 +1641,18 @@ fn parse_diff_line(raw_line: &str) -> Option<ParsedDiffLine> {
     }
 
     // Unified diff format: "+added" / "-removed"
-    if let Some(rest) = line.strip_prefix('+') {
+    if let Some(rest) = raw_line.strip_prefix('+') {
         return Some(ParsedDiffLine {
             kind: DiffLineKind::Add,
-            prefix: "+ ".to_string(),
-            content: rest.trim_start().to_string(),
+            prefix: "+".to_string(),
+            content: rest.to_string(),
         });
     }
-    if let Some(rest) = line.strip_prefix('-') {
+    if let Some(rest) = raw_line.strip_prefix('-') {
         return Some(ParsedDiffLine {
             kind: DiffLineKind::Del,
-            prefix: "- ".to_string(),
-            content: rest.trim_start().to_string(),
+            prefix: "-".to_string(),
+            content: rest.to_string(),
         });
     }
 
