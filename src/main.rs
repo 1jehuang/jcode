@@ -896,73 +896,30 @@ fn run_update() -> Result<()> {
     Ok(())
 }
 
-/// List available sessions for resume
+/// List available sessions for resume - interactive picker
 fn list_sessions() -> Result<()> {
-    let sessions_dir = storage::jcode_dir()?.join("sessions");
+    match tui::session_picker::pick_session()? {
+        Some(session_id) => {
+            // User selected a session - exec into jcode with that session
+            use std::os::unix::process::CommandExt;
+            let exe = std::env::current_exe()?;
+            let cwd = std::env::current_dir()?;
 
-    if !sessions_dir.exists() {
-        eprintln!("No sessions found.");
-        return Ok(());
-    }
+            let err = ProcessCommand::new(&exe)
+                .arg("--resume")
+                .arg(&session_id)
+                .current_dir(cwd)
+                .exec();
 
-    let mut sessions: Vec<(String, session::Session)> = Vec::new();
-
-    for entry in std::fs::read_dir(&sessions_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().map(|e| e == "json").unwrap_or(false) {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if let Ok(session) = session::Session::load(stem) {
-                    sessions.push((stem.to_string(), session));
-                }
-            }
+            // exec() only returns on error
+            Err(anyhow::anyhow!("Failed to exec: {}", err))
+        }
+        None => {
+            // User cancelled
+            eprintln!("No session selected.");
+            Ok(())
         }
     }
-
-    if sessions.is_empty() {
-        eprintln!("No sessions found.");
-        return Ok(());
-    }
-
-    // Sort by updated_at descending (most recent first)
-    sessions.sort_by(|a, b| b.1.updated_at.cmp(&a.1.updated_at));
-
-    eprintln!("\n\x1b[1mAvailable sessions:\x1b[0m\n");
-
-    for (id, session) in sessions.iter().take(20) {
-        let display_name = session.display_name();
-        let title = session.title.as_deref().unwrap_or("Untitled");
-        let age = chrono::Utc::now().signed_duration_since(session.updated_at);
-        let age_str = if age.num_days() > 0 {
-            format!("{}d ago", age.num_days())
-        } else if age.num_hours() > 0 {
-            format!("{}h ago", age.num_hours())
-        } else {
-            format!("{}m ago", age.num_minutes())
-        };
-
-        let canary_marker = if session.is_canary {
-            " \x1b[33m[self-dev]\x1b[0m"
-        } else {
-            ""
-        };
-        let msg_count = session.messages.len();
-
-        eprintln!("  \x1b[1;36m{}\x1b[0m  \x1b[2m{}\x1b[0m", display_name, id);
-        eprintln!(
-            "    {} ({} msgs, {}){}",
-            title, msg_count, age_str, canary_marker
-        );
-        eprintln!();
-    }
-
-    if sessions.len() > 20 {
-        eprintln!("  ... and {} more sessions", sessions.len() - 20);
-    }
-
-    eprintln!("\x1b[2mTo resume: jcode --resume <session_id or name>\x1b[0m\n");
-
-    Ok(())
 }
 
 /// Self-development mode: run as canary with crash recovery wrapper
@@ -1064,68 +1021,200 @@ const EXIT_DONE: i32 = 0; // Clean exit, stop wrapper
 const EXIT_RELOAD_REQUESTED: i32 = 42; // Agent wants to reload to new canary build
 const EXIT_ROLLBACK_REQUESTED: i32 = 43; // Agent wants to rollback to stable
 
+/// Paths for self-dev shared server
+const SELFDEV_SOCKET: &str = "/tmp/jcode-selfdev.sock";
+const SELFDEV_LOCK: &str = "/tmp/jcode-selfdev.lock";
+
+/// Try to acquire the server lock file (non-blocking)
+/// Returns the lock file handle if acquired, None if already locked
+fn try_acquire_server_lock() -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let lock_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o644)
+        .open(SELFDEV_LOCK)
+        .ok()?;
+
+    // Try non-blocking exclusive lock
+    use std::os::unix::io::AsRawFd;
+    let fd = lock_file.as_raw_fd();
+    let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+
+    if result == 0 {
+        // Write our PID to the lock file
+        use std::io::Write;
+        let mut file = lock_file;
+        let _ = writeln!(file, "{}", std::process::id());
+        Some(file)
+    } else {
+        None
+    }
+}
+
+/// Check if a server is actually responding (not just socket exists)
+async fn is_server_alive(socket_path: &str) -> bool {
+    if !std::path::Path::new(socket_path).exists() {
+        return false;
+    }
+    tokio::net::UnixStream::connect(socket_path).await.is_ok()
+}
+
 /// Wrapper that manages server lifecycle and runs client
-/// Server runs canary code, client auto-reconnects on server restart
+/// Supports dynamic ownership handoff - if server dies, another client can take over
 async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     let repo_dir = get_repo_dir();
     let initial_binary_path = std::path::PathBuf::from(initial_binary);
+    let socket_path = SELFDEV_SOCKET.to_string();
 
-    // Set up unique socket for this self-dev session
-    let socket_path = format!(
-        "/tmp/jcode-selfdev-{}.sock",
-        &session_id[..8.min(session_id.len())]
-    );
     server::set_socket_path(&socket_path);
-
-    // Cleanup any stale socket
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(server::debug_socket_path());
 
     // Shared state for server management
     let should_stop = Arc::new(AtomicBool::new(false));
     let server_crashed = Arc::new(AtomicBool::new(false));
 
-    // Start server manager task
-    let stop_flag = Arc::clone(&should_stop);
-    let crash_flag = Arc::clone(&server_crashed);
-    let socket = socket_path.clone();
-    let initial_bin = initial_binary_path.clone();
-    let sess_id = session_id.to_string();
-    let repo = repo_dir.clone();
+    // Track if we currently own the server (can change during runtime)
+    let is_owner = Arc::new(AtomicBool::new(false));
+    let server_manager: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+    let lock_file: Arc<tokio::sync::Mutex<Option<std::fs::File>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
 
-    let server_manager = tokio::spawn(async move {
-        run_server_manager(
-            &sess_id,
-            &initial_bin,
-            &socket,
-            stop_flag,
-            crash_flag,
-            repo.as_ref(),
-        )
-        .await
-    });
+    // Try to become server owner or connect to existing
+    let server_alive = is_server_alive(&socket_path).await;
 
-    // Wait for server to be ready
-    eprintln!("Waiting for server on {}...", socket_path);
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() > std::time::Duration::from_secs(30) {
-            should_stop.store(true, Ordering::SeqCst);
-            server_manager.abort();
-            anyhow::bail!("Server failed to start within 30 seconds");
-        }
-        if std::path::Path::new(&socket_path).exists() {
-            if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
-                break;
+    if !server_alive {
+        // Server not running - try to become owner
+        if let Some(lock) = try_acquire_server_lock() {
+            eprintln!("Acquired server lock, starting self-dev server...");
+            *lock_file.lock().await = Some(lock);
+            is_owner.store(true, Ordering::SeqCst);
+
+            // Cleanup stale socket
+            let _ = std::fs::remove_file(&socket_path);
+            let _ = std::fs::remove_file(server::debug_socket_path());
+
+            // Start server manager
+            let stop_flag = Arc::clone(&should_stop);
+            let crash_flag = Arc::clone(&server_crashed);
+            let socket = socket_path.clone();
+            let initial_bin = initial_binary_path.clone();
+            let sess_id = session_id.to_string();
+            let repo = repo_dir.clone();
+
+            let handle = tokio::spawn(async move {
+                run_server_manager(
+                    &sess_id,
+                    &initial_bin,
+                    &socket,
+                    stop_flag,
+                    crash_flag,
+                    repo.as_ref(),
+                )
+                .await
+            });
+            *server_manager.lock().await = Some(handle);
+
+            // Wait for server to be ready
+            let start = std::time::Instant::now();
+            loop {
+                if start.elapsed() > std::time::Duration::from_secs(30) {
+                    should_stop.store(true, Ordering::SeqCst);
+                    if let Some(mgr) = server_manager.lock().await.take() {
+                        mgr.abort();
+                    }
+                    anyhow::bail!("Server failed to start within 30 seconds");
+                }
+                if is_server_alive(&socket_path).await {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            eprintln!("Self-dev server ready on {}", socket_path);
+        } else {
+            // Someone else has the lock, wait for them to start server
+            eprintln!("Waiting for another client to start the server...");
+            let start = std::time::Instant::now();
+            loop {
+                if start.elapsed() > std::time::Duration::from_secs(10) {
+                    // They didn't start it, try to take over
+                    break;
+                }
+                if is_server_alive(&socket_path).await {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    } else {
+        eprintln!("Connecting to existing self-dev server on {}...", socket_path);
     }
 
-    eprintln!("Server ready, starting TUI client...");
+    // Set up ownership takeover callback for when server dies
+    let is_owner_clone = Arc::clone(&is_owner);
+    let should_stop_clone = Arc::clone(&should_stop);
+    let server_crashed_clone = Arc::clone(&server_crashed);
+    let server_manager_clone = Arc::clone(&server_manager);
+    let lock_file_clone = Arc::clone(&lock_file);
+    let initial_binary_for_takeover = initial_binary_path.clone();
+    let repo_dir_for_takeover = repo_dir.clone();
+    let session_id_for_takeover = session_id.to_string();
+    let socket_for_takeover = socket_path.clone();
+
+    // Spawn a background task that monitors server health and takes over if needed
+    let ownership_monitor = tokio::spawn(async move {
+        let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(2));
+
+        loop {
+            check_interval.tick().await;
+
+            if should_stop_clone.load(Ordering::SeqCst) {
+                break;
+            }
+
+            // If we're not owner and server is dead, try to take over
+            if !is_owner_clone.load(Ordering::SeqCst) && !is_server_alive(&socket_for_takeover).await {
+                if let Some(lock) = try_acquire_server_lock() {
+                    eprintln!("\n🔄 Server died - taking over as new owner...");
+                    *lock_file_clone.lock().await = Some(lock);
+                    is_owner_clone.store(true, Ordering::SeqCst);
+
+                    // Cleanup stale socket
+                    let _ = std::fs::remove_file(&socket_for_takeover);
+
+                    // Start server manager
+                    let stop_flag = Arc::clone(&should_stop_clone);
+                    let crash_flag = Arc::clone(&server_crashed_clone);
+                    let socket = socket_for_takeover.clone();
+                    let initial_bin = initial_binary_for_takeover.clone();
+                    let sess_id = session_id_for_takeover.clone();
+                    let repo = repo_dir_for_takeover.clone();
+
+                    let handle = tokio::spawn(async move {
+                        run_server_manager(
+                            &sess_id,
+                            &initial_bin,
+                            &socket,
+                            stop_flag,
+                            crash_flag,
+                            repo.as_ref(),
+                        )
+                        .await
+                    });
+                    *server_manager_clone.lock().await = Some(handle);
+
+                    eprintln!("✓ Now managing self-dev server");
+                }
+            }
+        }
+    });
+
+    eprintln!("Starting TUI client...");
 
     // Run client TUI
     let terminal = ratatui::init();
@@ -1148,13 +1237,19 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
     ratatui::restore();
 
-    // Tell server manager to stop
+    // Signal stop to our monitoring tasks
     should_stop.store(true, Ordering::SeqCst);
-    server_manager.abort();
+    ownership_monitor.abort();
 
-    // Cleanup
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(server::debug_socket_path());
+    // Stop our server manager task (but DON'T kill the server process itself)
+    // The server will self-terminate after idle timeout (no clients for 5 min)
+    if let Some(mgr) = server_manager.lock().await.take() {
+        mgr.abort();
+    }
+
+    // Release the lock file (so another client can become owner if needed)
+    // Don't remove the socket or lock file - server is still running
+    let _ = lock_file.lock().await.take();
 
     // Print resume info
     eprintln!();
@@ -1206,11 +1301,11 @@ async fn run_server_manager(
 
         eprintln!("Starting {} server...", version_type);
 
-        // Spawn server
+        // Spawn server (don't kill on drop - let server self-terminate via idle timeout)
         let server_result = TokioCommand::new(&binary_path)
             .arg("serve")
             .current_dir(&cwd)
-            .kill_on_drop(true)
+            .kill_on_drop(false)
             .spawn();
 
         let mut server = match server_result {
@@ -1234,6 +1329,10 @@ async fn run_server_manager(
 
         if exit_code == EXIT_DONE {
             // Clean exit
+            break;
+        } else if exit_code == server::EXIT_IDLE_TIMEOUT {
+            // Server shut down due to idle timeout - don't restart
+            eprintln!("Server shut down (idle timeout). No restart needed.");
             break;
         } else if exit_code == EXIT_RELOAD_REQUESTED {
             // Reload - new binary should already be set via canary symlink
@@ -1326,6 +1425,10 @@ fn inject_crash_context(
     report.push_str(
         "\nI've been rolled back to the stable version. Please investigate and fix the issue.",
     );
+
+    // Mark session as crashed with error details
+    let crash_message = format!("Build {} crashed with exit code {}", build_hash, exit_code);
+    session.mark_crashed(Some(crash_message));
 
     // Add as system message
     session.add_message(

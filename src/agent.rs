@@ -466,7 +466,7 @@ impl Agent {
                     StreamEvent::ThinkingDone { duration_secs } => {
                         // Bridge provides accurate wall-clock timing
                         if print_output {
-                            println!("Thought for {:.1}s", duration_secs);
+                            println!("Thought for {:.1}s\n", duration_secs);
                         }
                     }
                     StreamEvent::TextDelta(text) => {

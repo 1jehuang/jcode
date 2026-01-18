@@ -571,6 +571,8 @@ impl App {
             self.session = session;
             // Clear the saved provider_session_id since it's no longer valid
             self.session.provider_session_id = None;
+            // Mark session as active now that it's being used again
+            self.session.mark_active();
             crate::logging::info(&format!("Restored session: {}", session_id));
 
             // Build stats message
@@ -1812,6 +1814,8 @@ impl App {
 
                     // Handle /quit
                     if trimmed == "/quit" {
+                        self.session.mark_closed();
+                        let _ = self.session.save();
                         self.should_quit = true;
                         return Ok(());
                     }
@@ -2723,7 +2727,8 @@ impl App {
             });
             // Save provider session ID for resume after reload
             self.session.provider_session_id = self.provider_session_id.clone();
-            // Save session and set reload flag
+            // Mark as reloaded and save session
+            self.session.set_status(crate::session::SessionStatus::Reloaded);
             let _ = self.session.save();
             self.reload_requested = Some(self.session.id.clone());
             self.should_quit = true;
@@ -2741,7 +2746,8 @@ impl App {
             });
             // Save provider session ID for resume after rebuild
             self.session.provider_session_id = self.provider_session_id.clone();
-            // Save session and set rebuild flag
+            // Mark as reloaded and save session
+            self.session.set_status(crate::session::SessionStatus::Reloaded);
             let _ = self.session.save();
             self.rebuild_requested = Some(self.session.id.clone());
             self.should_quit = true;
@@ -2911,8 +2917,9 @@ impl App {
         if let Some(pending_time) = self.quit_pending {
             if pending_time.elapsed() < QUIT_TIMEOUT {
                 // Second press within timeout - actually quit
-                // Save session before quitting
+                // Mark session as closed and save
                 self.session.provider_session_id = self.provider_session_id.clone();
+                self.session.mark_closed();
                 let _ = self.session.save();
                 self.should_quit = true;
                 return true;
@@ -3199,7 +3206,8 @@ impl App {
                             self.streaming_text.push_str(&chunk);
                         }
                         // Bridge provides accurate wall-clock timing
-                        let thinking_msg = format!("*Thought for {:.1}s*\n\n", duration_secs);
+                        // Use hard break (two spaces + newline) to ensure line separation
+                        let thinking_msg = format!("*Thought for {:.1}s*  \n\n", duration_secs);
                         self.streaming_text.push_str(&thinking_msg);
                     }
                     StreamEvent::Compaction {
@@ -3751,7 +3759,8 @@ impl App {
                                         if let Some(chunk) = self.stream_buffer.flush() {
                                             self.streaming_text.push_str(&chunk);
                                         }
-                                        let thinking_msg = format!("*Thought for {:.1}s*\n\n", duration_secs);
+                                        // Use hard break (two spaces + newline) to ensure line separation
+                                        let thinking_msg = format!("*Thought for {:.1}s*  \n\n", duration_secs);
                                         self.streaming_text.push_str(&thinking_msg);
                                     }
                                     StreamEvent::Compaction { trigger, pre_tokens } => {
