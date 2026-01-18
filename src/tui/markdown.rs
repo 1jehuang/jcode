@@ -557,6 +557,10 @@ pub fn progress_line(label: &str, progress: f32, width: usize) -> Line<'static> 
 mod tests {
     use super::*;
 
+    fn line_to_string(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
     #[test]
     fn test_simple_markdown() {
         let lines = render_markdown("Hello **world**");
@@ -573,5 +577,26 @@ mod tests {
     fn test_progress_bar() {
         let bar = progress_bar(0.5, 10);
         assert_eq!(bar.chars().count(), 10);
+    }
+
+    #[test]
+    fn test_table_render_basic() {
+        let md = "| A | B |\n| - | - |\n| 1 | 2 |";
+        let lines = render_markdown(md);
+        let rendered: Vec<String> = lines.iter().map(line_to_string).collect();
+
+        assert!(rendered.iter().any(|l| l.contains('│') && l.contains('A') && l.contains('B')));
+        assert!(rendered.iter().any(|l| l.contains('─') && l.contains('┼')));
+    }
+
+    #[test]
+    fn test_table_width_truncation() {
+        let md = "| Column | Value |\n| - | - |\n| very_long_cell_value | 1234567890 |";
+        let lines = render_markdown_with_width(md, Some(20));
+        let rendered: Vec<String> = lines.iter().map(line_to_string).collect();
+
+        assert!(rendered.iter().any(|l| l.contains('…')));
+        let max_len = rendered.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        assert!(max_len <= 20);
     }
 }
