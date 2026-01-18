@@ -21,12 +21,7 @@ const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 const BRIDGE_SCRIPT: &str = include_str!("../../scripts/claude_agent_sdk_bridge.py");
 
 /// Available Claude models
-const AVAILABLE_MODELS: &[&str] = &[
-    "claude-opus-4-5-20251101",
-    "claude-sonnet-4-5-20250929",
-    "claude-sonnet-4-20250514",
-    "claude-haiku-3-5-20241022",
-];
+const AVAILABLE_MODELS: &[&str] = &["claude-opus-4-5-20251101"];
 
 #[derive(Clone)]
 pub struct ClaudeProvider {
@@ -45,6 +40,8 @@ impl ClaudeProvider {
     }
 
     fn tool_names_for_sdk(&self, tools: &[ToolDefinition]) -> Vec<String> {
+        // Pass all tools to SDK including jcode-native ones like selfdev
+        // If SDK fails to execute native tools, jcode's agent will handle them locally
         let mut seen = HashSet::new();
         let mut names = Vec::new();
         for tool in tools {
@@ -133,10 +130,17 @@ impl ClaudeSdkConfig {
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from);
 
-        let model = std::env::var("JCODE_CLAUDE_SDK_MODEL")
+        let mut model = std::env::var("JCODE_CLAUDE_SDK_MODEL")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        if !AVAILABLE_MODELS.contains(&model.as_str()) {
+            eprintln!(
+                "Warning: '{}' is not supported; falling back to '{}'",
+                model, DEFAULT_MODEL
+            );
+            model = DEFAULT_MODEL.to_string();
+        }
 
         let permission_mode = std::env::var("JCODE_CLAUDE_SDK_PERMISSION_MODE")
             .ok()
@@ -718,9 +722,10 @@ impl Provider for ClaudeProvider {
 
     fn set_model(&self, model: &str) -> Result<()> {
         if !AVAILABLE_MODELS.contains(&model) {
-            eprintln!(
-                "Warning: '{}' is not in the known model list, but will try anyway",
-                model
+            anyhow::bail!(
+                "Unsupported Claude model '{}'. Only supported model is '{}'.",
+                model,
+                DEFAULT_MODEL
             );
         }
         if let Ok(mut current) = self.model.write() {

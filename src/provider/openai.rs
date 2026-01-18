@@ -23,14 +23,7 @@ const ORIGINATOR: &str = "codex_cli_rs";
 const CHATGPT_INSTRUCTIONS: &str = include_str!("../prompts/gpt-5.1-codex-max_prompt.md");
 
 /// Available OpenAI/Codex models
-const AVAILABLE_MODELS: &[&str] = &[
-    "gpt-5.2-codex",
-    "gpt-5.1-codex-max",
-    "gpt-5.1-codex",
-    "gpt-5-codex",
-    "o3",
-    "o3-pro",
-];
+const AVAILABLE_MODELS: &[&str] = &["gpt-5.2-codex"];
 
 pub struct OpenAIProvider {
     client: Client,
@@ -41,8 +34,15 @@ pub struct OpenAIProvider {
 impl OpenAIProvider {
     pub fn new(credentials: CodexCredentials) -> Self {
         // Check for model override from environment
-        let model =
+        let mut model =
             std::env::var("JCODE_OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        if !AVAILABLE_MODELS.contains(&model.as_str()) {
+            eprintln!(
+                "Warning: '{}' is not supported; falling back to '{}'",
+                model, DEFAULT_MODEL
+            );
+            model = DEFAULT_MODEL.to_string();
+        }
 
         Self {
             client: Client::new(),
@@ -168,10 +168,11 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
                             content,
                             is_error,
                         } => {
+                            // OpenAI expects output to be a string or array of objects, not an object
                             let output = if is_error == &Some(true) {
-                                serde_json::json!({ "content": content, "success": false })
+                                format!("[Error] {}", content)
                             } else {
-                                serde_json::json!(content)
+                                content.clone()
                             };
                             items.push(serde_json::json!({
                                 "type": "function_call_output",
@@ -474,12 +475,11 @@ impl Provider for OpenAIProvider {
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
-        // Allow any model (OpenAI may have models we don't know about)
-        // But warn if it's not in our known list
         if !AVAILABLE_MODELS.contains(&model) {
-            eprintln!(
-                "Warning: '{}' is not in the known model list, but will try anyway",
-                model
+            anyhow::bail!(
+                "Unsupported OpenAI model '{}'. Only supported model is '{}'.",
+                model,
+                DEFAULT_MODEL
             );
         }
         if let Ok(mut current) = self.model.try_write() {

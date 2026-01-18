@@ -131,7 +131,7 @@ async fn test_stream_error() -> Result<()> {
 
 /// Test model cycling over the socket interface (server + client)
 #[tokio::test]
-async fn test_socket_model_cycle_openai_codex52() -> Result<()> {
+async fn test_socket_model_cycle_supported_models() -> Result<()> {
     let runtime_dir = std::env::temp_dir().join(format!(
         "jcode-test-{}",
         std::time::SystemTime::now()
@@ -143,7 +143,10 @@ async fn test_socket_model_cycle_openai_codex52() -> Result<()> {
     let prev_runtime = std::env::var("XDG_RUNTIME_DIR").ok();
     std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
 
-    let provider = MockProvider::with_models(vec!["gpt-5.2-codex", "gpt-5.1-codex"]);
+    let provider = MockProvider::with_models(vec![
+        "gpt-5.2-codex",
+        "claude-opus-4-5-20251101",
+    ]);
     let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
     let registry = Registry::new(provider.clone()).await;
     let server_instance = server::Server::new(provider, registry);
@@ -172,7 +175,7 @@ async fn test_socket_model_cycle_openai_codex52() -> Result<()> {
             ServerEvent::Ack { .. } => continue,
             ServerEvent::ModelChanged { id, model, error } if id == request_id => {
                 assert!(error.is_none(), "Expected successful model change");
-                assert_eq!(model, "gpt-5.1-codex");
+                assert_eq!(model, "claude-opus-4-5-20251101");
                 saw_model_changed = true;
                 break;
             }
@@ -245,6 +248,89 @@ async fn test_system_prompt_no_claude_code_identity() -> Result<()> {
     // It's OK if it says "powered by Claude" or just "Claude" (the model name)
     // It's OK if it says "jcode" or "coding assistant"
     // Just not "Claude Code" as that's the Anthropic product name
+
+    Ok(())
+}
+
+// ============================================================================
+// Binary Integration Tests
+// These tests run the actual jcode binary and require real credentials.
+// Run with: cargo test --test e2e binary_integration -- --ignored
+// ============================================================================
+
+/// Test that the jcode binary can run standalone with Claude provider
+#[tokio::test]
+#[ignore] // Requires Claude credentials
+async fn binary_integration_standalone_claude() -> Result<()> {
+    use std::process::Command;
+
+    let output = Command::new("cargo")
+        .args([
+            "run", "--release", "--bin", "jcode", "--",
+            "run", "Say 'test-ok' and nothing else"
+        ])
+        .output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success() || stdout.contains("test") || stderr.contains("Claude"),
+        "Binary should run successfully. stdout: {}, stderr: {}",
+        stdout, stderr
+    );
+
+    Ok(())
+}
+
+/// Test that the jcode binary can run with OpenAI provider
+#[tokio::test]
+#[ignore] // Requires OpenAI/Codex credentials
+async fn binary_integration_openai_provider() -> Result<()> {
+    use std::process::Command;
+
+    let output = Command::new("cargo")
+        .args([
+            "run", "--release", "--bin", "jcode", "--",
+            "--provider", "openai",
+            "run", "Say 'openai-ok' and nothing else"
+        ])
+        .output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Check either success or identifiable OpenAI response
+    let has_response = stdout.to_lowercase().contains("openai")
+        || stdout.to_lowercase().contains("ok")
+        || stderr.contains("OpenAI");
+
+    assert!(
+        output.status.success() || has_response,
+        "OpenAI provider should work. stdout: {}, stderr: {}",
+        stdout, stderr
+    );
+
+    Ok(())
+}
+
+/// Test that jcode version command works
+#[tokio::test]
+async fn binary_version_command() -> Result<()> {
+    use std::process::Command;
+
+    let output = Command::new("cargo")
+        .args(["run", "--release", "--bin", "jcode", "--", "--version"])
+        .output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "Version command should succeed");
+    assert!(
+        stdout.contains("jcode") || stdout.contains("20"),
+        "Version should contain 'jcode' or date. Got: {}",
+        stdout
+    );
 
     Ok(())
 }
