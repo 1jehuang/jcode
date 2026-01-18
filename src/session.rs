@@ -9,6 +9,68 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Session exit status - why the session ended
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum SessionStatus {
+    /// Session is currently active/running
+    Active,
+    /// User closed the session normally (Ctrl+C, /quit, etc.)
+    Closed,
+    /// Session crashed (panic, error)
+    Crashed { message: Option<String> },
+    /// Session was reloaded (hot reload)
+    Reloaded,
+    /// Session was compacted (context too large)
+    Compacted,
+    /// Session ended due to rate limiting
+    RateLimited,
+    /// Session ended due to an error
+    Error { message: String },
+}
+
+impl Default for SessionStatus {
+    fn default() -> Self {
+        SessionStatus::Active
+    }
+}
+
+impl SessionStatus {
+    /// Get a short display string for the status
+    pub fn display(&self) -> &'static str {
+        match self {
+            SessionStatus::Active => "active",
+            SessionStatus::Closed => "closed",
+            SessionStatus::Crashed { .. } => "crashed",
+            SessionStatus::Reloaded => "reloaded",
+            SessionStatus::Compacted => "compacted",
+            SessionStatus::RateLimited => "rate limited",
+            SessionStatus::Error { .. } => "error",
+        }
+    }
+
+    /// Get an icon for the status
+    pub fn icon(&self) -> &'static str {
+        match self {
+            SessionStatus::Active => "▶",
+            SessionStatus::Closed => "✓",
+            SessionStatus::Crashed { .. } => "💥",
+            SessionStatus::Reloaded => "🔄",
+            SessionStatus::Compacted => "📦",
+            SessionStatus::RateLimited => "⏳",
+            SessionStatus::Error { .. } => "❌",
+        }
+    }
+
+    /// Get additional detail message if available
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            SessionStatus::Crashed { message } => message.as_deref(),
+            SessionStatus::Error { message } => Some(message.as_str()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredMessage {
     pub id: String,
@@ -48,6 +110,9 @@ pub struct Session {
     /// Memorable short name (e.g., "fox", "oak")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub short_name: Option<String>,
+    /// Session exit status - why it ended (if not active)
+    #[serde(default)]
+    pub status: SessionStatus,
 }
 
 impl Session {
@@ -73,6 +138,7 @@ impl Session {
                 .ok()
                 .map(|p| p.to_string_lossy().to_string()),
             short_name,
+            status: SessionStatus::Active,
         }
     }
 
@@ -93,6 +159,7 @@ impl Session {
                 .ok()
                 .map(|p| p.to_string_lossy().to_string()),
             short_name: Some(short_name),
+            status: SessionStatus::Active,
         }
     }
 
@@ -114,6 +181,31 @@ impl Session {
     pub fn clear_canary(&mut self) {
         self.is_canary = false;
         self.testing_build = None;
+    }
+
+    /// Set the session status
+    pub fn set_status(&mut self, status: SessionStatus) {
+        self.status = status;
+    }
+
+    /// Mark session as closed normally
+    pub fn mark_closed(&mut self) {
+        self.status = SessionStatus::Closed;
+    }
+
+    /// Mark session as crashed
+    pub fn mark_crashed(&mut self, message: Option<String>) {
+        self.status = SessionStatus::Crashed { message };
+    }
+
+    /// Mark session as having an error
+    pub fn mark_error(&mut self, message: String) {
+        self.status = SessionStatus::Error { message };
+    }
+
+    /// Mark session as active (e.g., when resuming)
+    pub fn mark_active(&mut self) {
+        self.status = SessionStatus::Active;
     }
 
     /// Check if this session is working on the jcode repository

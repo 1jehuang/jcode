@@ -174,6 +174,8 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                 if !current_spans.is_empty() {
                     lines.push(Line::from(std::mem::take(&mut current_spans)));
                 }
+                // Add blank line after paragraph for visual separation
+                lines.push(Line::default());
             }
 
             Event::Start(Tag::Item) => {
