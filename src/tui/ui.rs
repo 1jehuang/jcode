@@ -144,11 +144,10 @@ fn format_gpt_name(short: &str) -> String {
     format!("GPT-{}", rest)
 }
 
-/// Render context bar as a visual rectangle showing context window usage
-/// Format: [⚙███🌍██📋███📝███🛠██░░░░░░░░░░░░░░] 12k/200k
-fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-
+/// Render context display as two lines:
+/// Line 1: Labels with token counts - ⚙sys 8k  🌍env 1k  📋AGENTS 2k  📝CLAUDE 3k
+/// Line 2: Color-coded bar         - [████████░░░░░░░░░░░░░░░░░░░░░░░░] 15k/200k
+fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Vec<Line<'static>> {
     // Colors for different context types
     const SYS_COLOR: Color = Color::Rgb(100, 140, 200);    // Blue - system prompt
     const ENV_COLOR: Color = Color::Rgb(100, 180, 140);    // Teal - environment
@@ -161,99 +160,117 @@ fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Li
     // Context window limit (Claude's ~200k tokens ≈ 800k chars)
     const CONTEXT_LIMIT_CHARS: usize = 800_000;
 
-    // Build segments: (icon, chars, color)
-    let mut segments: Vec<(&str, usize, Color)> = Vec::new();
+    // Build segments: (icon, label, chars, color)
+    let mut segments: Vec<(&str, &str, usize, Color)> = Vec::new();
 
-    segments.push(("⚙", info.system_prompt_chars, SYS_COLOR));
+    segments.push(("⚙", "sys", info.system_prompt_chars, SYS_COLOR));
     if info.env_context_chars > 0 {
-        segments.push(("🌍", info.env_context_chars, ENV_COLOR));
+        segments.push(("🌍", "env", info.env_context_chars, ENV_COLOR));
     }
     if info.has_project_agents_md {
-        segments.push(("📋", info.project_agents_md_chars, AGENTS_COLOR));
+        segments.push(("📋", "AGENTS", info.project_agents_md_chars, AGENTS_COLOR));
     }
     if info.has_project_claude_md {
-        segments.push(("📝", info.project_claude_md_chars, CLAUDE_COLOR));
+        segments.push(("📝", "CLAUDE", info.project_claude_md_chars, CLAUDE_COLOR));
     }
     if info.has_global_agents_md {
-        segments.push(("📋", info.global_agents_md_chars, AGENTS_COLOR));
+        segments.push(("📋", "~AGENTS", info.global_agents_md_chars, AGENTS_COLOR));
     }
     if info.has_global_claude_md {
-        segments.push(("📝", info.global_claude_md_chars, CLAUDE_COLOR));
+        segments.push(("📝", "~CLAUDE", info.global_claude_md_chars, CLAUDE_COLOR));
     }
     if info.skills_chars > 0 {
-        segments.push(("🔧", info.skills_chars, SKILLS_COLOR));
+        segments.push(("🔧", "skills", info.skills_chars, SKILLS_COLOR));
     }
     if info.selfdev_chars > 0 {
-        segments.push(("🛠", info.selfdev_chars, DEV_COLOR));
+        segments.push(("🛠", "dev", info.selfdev_chars, DEV_COLOR));
     }
 
-    // Calculate bar dimensions
-    let suffix_len = 10; // " 12k/200k"
-    let bar_inner_width = max_width.saturating_sub(suffix_len + 2).min(50); // +2 for [ ]
+    // === Line 1: Labels with token counts ===
+    // Format: ⚙sys 8k  🌍env 1k  📋AGENTS 2k  📝CLAUDE 3k
+    let mut label_spans: Vec<Span<'static>> = Vec::new();
 
-    if bar_inner_width < 10 {
-        // Too narrow - compact mode: just icons in brackets
-        spans.push(Span::styled("[", Style::default().fg(DIM_COLOR)));
-        for (icon, _, color) in &segments {
-            spans.push(Span::styled(*icon, Style::default().fg(*color)));
+    for (i, (icon, label, chars, color)) in segments.iter().enumerate() {
+        // Icon
+        label_spans.push(Span::styled(*icon, Style::default().fg(*color)));
+
+        // Label
+        label_spans.push(Span::styled(
+            format!("{} ", label),
+            Style::default().fg(*color).dim(),
+        ));
+
+        // Token count (chars / 4 ≈ tokens)
+        let tokens = *chars / 4;
+        let size_str = if tokens >= 1000 {
+            format!("{}k", tokens / 1000)
+        } else {
+            format!("{}", tokens)
+        };
+        label_spans.push(Span::styled(size_str, Style::default().fg(*color)));
+
+        // Separator (except for last)
+        if i < segments.len() - 1 {
+            label_spans.push(Span::styled("  ", Style::default()));
         }
-        spans.push(Span::styled("]", Style::default().fg(DIM_COLOR)));
-    } else {
-        // Visual bar: [⚙███🌍██📋██📝██🛠█░░░░░░░░░░░]
-        spans.push(Span::styled("[", Style::default().fg(DIM_COLOR)));
+    }
 
-        let total_used = info.total_chars;
-        let used_ratio = (total_used as f64) / (CONTEXT_LIMIT_CHARS as f64);
-        let used_width = ((used_ratio * bar_inner_width as f64).ceil() as usize)
-            .max(segments.len() * 2) // At minimum, show all icons (each ~2 chars)
-            .min(bar_inner_width);
-        let empty_width = bar_inner_width.saturating_sub(used_width);
+    let line1 = Line::from(label_spans);
 
-        // Distribute used_width among segments
-        // Each segment gets: icon (2 chars) + proportional fill blocks
-        let icon_total_width: usize = segments.len() * 2; // Each emoji ~2 chars
-        let fill_width = used_width.saturating_sub(icon_total_width);
+    // === Line 2: Color-coded bar ===
+    // Format: [████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 15k/200k
+    let mut bar_spans: Vec<Span<'static>> = Vec::new();
 
-        for (i, (icon, chars, color)) in segments.iter().enumerate() {
-            // Icon
-            spans.push(Span::styled(*icon, Style::default().fg(*color)));
+    let suffix_len = 10; // " 15k/200k"
+    let bar_inner_width = max_width.saturating_sub(suffix_len + 2).min(60); // +2 for [ ]
 
-            // Fill blocks proportional to this segment's size
-            if fill_width > 0 && total_used > 0 {
-                let seg_ratio = (*chars as f64) / (total_used as f64);
-                let mut seg_fill = (seg_ratio * fill_width as f64).round() as usize;
+    bar_spans.push(Span::styled("[", Style::default().fg(DIM_COLOR)));
 
-                // Last segment fills remaining to avoid rounding gaps
-                if i == segments.len() - 1 {
-                    let used_so_far: usize = segments[..i]
-                        .iter()
-                        .map(|(_, c, _)| {
-                            let r = (*c as f64) / (total_used as f64);
-                            (r * fill_width as f64).round() as usize
-                        })
-                        .sum();
-                    seg_fill = fill_width.saturating_sub(used_so_far);
-                }
+    let total_used = info.total_chars;
+    let used_ratio = (total_used as f64) / (CONTEXT_LIMIT_CHARS as f64);
+    let used_width = ((used_ratio * bar_inner_width as f64).ceil() as usize)
+        .max(1)
+        .min(bar_inner_width);
+    let empty_width = bar_inner_width.saturating_sub(used_width);
 
-                if seg_fill > 0 {
-                    spans.push(Span::styled(
-                        "█".repeat(seg_fill),
-                        Style::default().fg(*color),
-                    ));
-                }
-            }
+    // Color-coded filled portion - each segment gets proportional width
+    for (i, (_icon, _label, chars, color)) in segments.iter().enumerate() {
+        if total_used == 0 {
+            break;
         }
 
-        // Empty/remaining capacity shown as dim blocks
-        if empty_width > 0 {
-            spans.push(Span::styled(
-                "░".repeat(empty_width),
-                Style::default().fg(EMPTY_COLOR),
+        let seg_ratio = (*chars as f64) / (total_used as f64);
+        let mut seg_width = (seg_ratio * used_width as f64).round() as usize;
+
+        // Last segment fills remaining to avoid rounding gaps
+        if i == segments.len() - 1 {
+            let used_so_far: usize = segments[..i]
+                .iter()
+                .map(|(_, _, c, _)| {
+                    let r = (*c as f64) / (total_used as f64);
+                    (r * used_width as f64).round() as usize
+                })
+                .sum();
+            seg_width = used_width.saturating_sub(used_so_far);
+        }
+
+        if seg_width > 0 {
+            bar_spans.push(Span::styled(
+                "█".repeat(seg_width),
+                Style::default().fg(*color),
             ));
         }
-
-        spans.push(Span::styled("]", Style::default().fg(DIM_COLOR)));
     }
+
+    // Empty/remaining capacity
+    if empty_width > 0 {
+        bar_spans.push(Span::styled(
+            "░".repeat(empty_width),
+            Style::default().fg(EMPTY_COLOR),
+        ));
+    }
+
+    bar_spans.push(Span::styled("]", Style::default().fg(DIM_COLOR)));
 
     // Token count: used/total
     let est_tokens = info.estimated_tokens();
@@ -262,9 +279,11 @@ fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Li
     } else {
         format!(" {}/200k", est_tokens)
     };
-    spans.push(Span::styled(token_str, Style::default().fg(DIM_COLOR)));
+    bar_spans.push(Span::styled(token_str, Style::default().fg(DIM_COLOR)));
 
-    Line::from(spans)
+    let line2 = Line::from(bar_spans);
+
+    vec![line1, line2]
 }
 
 /// Calculate rainbow color for prompt index with exponential decay to gray.
@@ -752,10 +771,10 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         Style::default().fg(DIM_COLOR),
     )));
 
-    // Line 3: Context info bar (icons showing what's loaded)
+    // Line 3-4: Context info (labels + color-coded bar)
     let context_info = app.context_info();
     if context_info.total_chars > 0 {
-        lines.push(render_context_bar(context_info, area.width as usize));
+        lines.extend(render_context_bar(context_info, area.width as usize));
     }
 
     // Line 4+: Recent changes in a box (from git log, embedded at build time)
