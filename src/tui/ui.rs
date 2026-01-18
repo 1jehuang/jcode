@@ -274,9 +274,9 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         None
     };
 
-    // Calculate queued messages (full count for numbering)
-    let queued_count = app.queued_messages().len();
-    let queued_height = queued_count.min(3) as u16;
+    // Calculate pending messages (queued + interleave) for numbering and layout
+    let pending_count = pending_prompt_count(app);
+    let queued_height = pending_count.min(3) as u16;
 
     // Calculate input height based on content (max 10 lines visible, scrolls if more)
     let available_width = area.width.saturating_sub(3) as usize; // prompt chars
@@ -347,7 +347,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         capture.state.input_preview = app.input().chars().take(100).collect();
         capture.state.cursor_pos = app.cursor_pos();
         capture.state.scroll_offset = app.scroll_offset();
-        capture.state.queued_count = queued_count;
+        capture.state.queued_count = pending_count;
         capture.state.message_count = app.display_messages().len();
         capture.state.streaming_text_len = app.streaming_text().len();
         capture.state.has_suggestions = !suggestions.is_empty();
@@ -355,11 +355,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
 
         // Capture rendered content
         // Queued messages
-        capture.rendered_text.queued_messages = app
-            .queued_messages()
-            .iter()
-            .map(|s| s.chars().take(100).collect())
-            .collect();
+        capture.rendered_text.queued_messages = pending_queue_preview(app);
 
         // Recent display messages (last 5 for context)
         capture.rendered_text.recent_messages = app
@@ -393,7 +389,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         frame,
         app,
         chunks[3],
-        user_count + queued_count + 1,
+        user_count + pending_count + 1,
         &mut debug_capture,
     );
 
@@ -707,17 +703,17 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     lines.push(Line::from(""));
 
     let mut prompt_num = 0usize;
-    // Count total user prompts and queued messages for rainbow coloring
-    // The input prompt is distance 0, queued messages are 1..queued_count,
+    // Count total user prompts and pending messages for rainbow coloring
+    // The input prompt is distance 0, pending messages are 1..pending_count,
     // existing messages continue from there
     let total_prompts = app
         .display_messages()
         .iter()
         .filter(|m| m.role == "user")
         .count();
-    let queued_count = app.queued_messages().len();
-    // Input prompt number is total_prompts + queued_count + 1, so distance for
-    // existing prompt N is: (total_prompts + queued_count + 1) - N
+    let pending_count = pending_prompt_count(app);
+    // Input prompt number is total_prompts + pending_count + 1, so distance for
+    // existing prompt N is: (total_prompts + pending_count + 1) - N
 
     for msg in app.display_messages() {
         // Add spacing between messages
@@ -730,7 +726,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 prompt_num += 1;
                 user_line_indices.push(lines.len()); // Track this line index
                                                      // Calculate distance from input prompt (distance 0)
-                let distance = total_prompts + queued_count + 1 - prompt_num;
+                let distance = total_prompts + pending_count + 1 - prompt_num;
                 let num_color = rainbow_prompt_color(distance);
                 // User messages: rainbow number, blue caret, bright text
                 lines.push(Line::from(vec![
@@ -1078,12 +1074,12 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         let secs = remaining.as_secs();
         let spinner_idx = (elapsed * 4.0) as usize % SPINNER_FRAMES.len();
         let spinner = SPINNER_FRAMES[spinner_idx];
-        let queued = app.queued_messages();
-        let queued_info = if !queued.is_empty() {
-            format!(" (+{} queued)", queued.len())
-        } else {
-            String::new()
-        };
+    let pending_count = pending_prompt_count(app);
+    let queued_info = if pending_count > 0 {
+        format!(" (+{} queued)", pending_count)
+    } else {
+        String::new()
+    };
         // Format time remaining in a human-readable way
         let time_str = if secs >= 3600 {
             let hours = secs / 3600;
@@ -1271,22 +1267,55 @@ fn format_cache_status(
     None
 }
 
+fn pending_prompt_count(app: &dyn TuiState) -> usize {
+    let interleave = app
+        .interleave_message()
+        .map(|msg| !msg.is_empty())
+        .unwrap_or(false);
+    app.queued_messages().len() + if interleave { 1 } else { 0 }
+}
+
+fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
+    let mut previews = Vec::new();
+    if let Some(msg) = app.interleave_message() {
+        if !msg.is_empty() {
+            previews.push(format!("[asap] {}", msg.chars().take(100).collect::<String>()));
+        }
+    }
+    for msg in app.queued_messages() {
+        previews.push(format!(
+            "[wait] {}",
+            msg.chars().take(100).collect::<String>()
+        ));
+    }
+    previews
+}
+
 fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usize) {
-    let queued = app.queued_messages();
-    let queued_count = queued.len();
-    let lines: Vec<Line> = queued
+    let mut items: Vec<(&'static str, &str)> = Vec::new();
+    if let Some(msg) = app.interleave_message() {
+        if !msg.is_empty() {
+            items.push(("[asap] ", msg));
+        }
+    }
+    for msg in app.queued_messages() {
+        items.push(("[wait] ", msg.as_str()));
+    }
+
+    let pending_count = items.len();
+    let lines: Vec<Line> = items
         .iter()
         .take(3)
         .enumerate()
-        .map(|(i, msg)| {
-            // Distance from input prompt: queued_count - i (first queued is furthest from input)
+        .map(|(i, (indicator, msg))| {
+            // Distance from input prompt: pending_count - i (first pending is furthest from input)
             // +1 because the input prompt itself is distance 0
-            let distance = queued_count.saturating_sub(i);
+            let distance = pending_count.saturating_sub(i);
             let num_color = rainbow_prompt_color(distance);
             Line::from(vec![
                 Span::styled(format!("{}", start_num + i), Style::default().fg(num_color)),
-                Span::styled("… ", Style::default().fg(QUEUED_COLOR)),
-                Span::styled(msg.as_str(), Style::default().fg(QUEUED_COLOR).dim()),
+                Span::styled(*indicator, Style::default().fg(QUEUED_COLOR)),
+                Span::styled(*msg, Style::default().fg(QUEUED_COLOR).dim()),
             ])
         })
         .collect();
