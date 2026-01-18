@@ -242,6 +242,8 @@ pub struct App {
     provider_session_id: Option<String>,
     // Cancel flag for interrupting generation
     cancel_requested: bool,
+    // Quit confirmation: tracks when first Ctrl+C was pressed
+    quit_pending: Option<Instant>,
     // Cached MCP server names (updated on connect/disconnect)
     mcp_server_names: Vec<String>,
     // Semantic stream buffer for chunked output
@@ -376,6 +378,7 @@ impl App {
             streaming_tool_calls: Vec::new(),
             provider_session_id: None,
             cancel_requested: false,
+            quit_pending: None,
             mcp_server_names: Vec::new(),
             stream_buffer: StreamBuffer::new(),
             thinking_start: None,
@@ -1627,7 +1630,7 @@ impl App {
         if modifiers.contains(KeyModifiers::CONTROL) {
             match code {
                 KeyCode::Char('c') | KeyCode::Char('d') => {
-                    self.should_quit = true;
+                    self.handle_quit_request();
                     return Ok(());
                 }
                 KeyCode::Char('r') => {
@@ -1996,7 +1999,7 @@ impl App {
         if modifiers.contains(KeyModifiers::CONTROL) {
             match code {
                 KeyCode::Char('c') | KeyCode::Char('d') => {
-                    self.should_quit = true;
+                    self.handle_quit_request();
                     return Ok(());
                 }
                 KeyCode::Char('r') => {
@@ -2301,7 +2304,7 @@ impl App {
                      • `/<skill>` - Activate a skill\n\n\
                      **Available skills:** {}\n\n\
                      **Keyboard shortcuts:**\n\
-                     • `Ctrl+C` / `Ctrl+D` - Quit\n\
+                     • `Ctrl+C` / `Ctrl+D` - Quit (press twice to confirm)\n\
                      • `Ctrl+L` - Clear conversation\n\
                      • `Ctrl+R` - Recover from missing tool outputs\n\
                      • `PageUp/Down` or `Up/Down` - Scroll history\n\
@@ -2868,6 +2871,27 @@ impl App {
 
     fn set_status_notice(&mut self, text: impl Into<String>) {
         self.status_notice = Some((text.into(), Instant::now()));
+    }
+
+    /// Handle quit request (Ctrl+C/Ctrl+D). Returns true if should actually quit.
+    fn handle_quit_request(&mut self) -> bool {
+        const QUIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+        if let Some(pending_time) = self.quit_pending {
+            if pending_time.elapsed() < QUIT_TIMEOUT {
+                // Second press within timeout - actually quit
+                // Save session before quitting
+                self.session.provider_session_id = self.provider_session_id.clone();
+                let _ = self.session.save();
+                self.should_quit = true;
+                return true;
+            }
+        }
+
+        // First press or timeout expired - show warning
+        self.quit_pending = Some(Instant::now());
+        self.set_status_notice("Press Ctrl+C again to quit");
+        false
     }
 
     fn summarize_tool_results_missing(&self) -> Option<String> {
