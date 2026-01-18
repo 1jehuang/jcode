@@ -8,7 +8,6 @@ use super::{ProcessingStatus, TuiState};
 use crate::message::ToolCall;
 use ratatui::{prelude::*, widgets::Paragraph};
 use std::sync::OnceLock;
-use std::time::SystemTime;
 
 // Minimal color palette
 const USER_COLOR: Color = Color::Rgb(138, 180, 248); // Soft blue (caret)
@@ -316,30 +315,35 @@ fn animated_tool_color(elapsed: f32) -> Color {
     Color::Rgb(r, g, b)
 }
 
-/// Get how long ago the binary was last modified
+/// Get how long ago the binary was built (from compile time, not file mtime)
 fn binary_age() -> Option<String> {
-    static BUILD_AGE: OnceLock<Option<String>> = OnceLock::new();
-    BUILD_AGE
-        .get_or_init(|| {
-            let exe = std::env::current_exe().ok()?;
-            let metadata = std::fs::metadata(&exe).ok()?;
-            let modified = metadata.modified().ok()?;
-            let elapsed = SystemTime::now().duration_since(modified).ok()?;
-            let secs = elapsed.as_secs();
+    // Use git date from build time instead of file mtime
+    // This is more accurate and survives selfdev reloads
+    let git_date = env!("JCODE_GIT_DATE");
+    if git_date.is_empty() {
+        return None;
+    }
 
-            let age_str = if secs < 60 {
-                "just now".to_string()
-            } else if secs < 3600 {
-                format!("{}m ago", secs / 60)
-            } else if secs < 86400 {
-                format!("{}h ago", secs / 3600)
-            } else {
-                format!("{}d ago", secs / 86400)
-            };
+    // Parse git date (format: "2024-01-15 14:30:00 -0800")
+    let date = chrono::DateTime::parse_from_str(git_date, "%Y-%m-%d %H:%M:%S %z").ok()?;
+    let elapsed = chrono::Utc::now().signed_duration_since(date);
+    let secs = elapsed.num_seconds();
 
-            Some(age_str)
-        })
-        .clone()
+    if secs < 0 {
+        return Some("future?".to_string());
+    }
+
+    let age_str = if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    };
+
+    Some(age_str)
 }
 
 /// Shorten model name for display (e.g., "claude-opus-4-5-20251101" -> "claude4.5opus")
