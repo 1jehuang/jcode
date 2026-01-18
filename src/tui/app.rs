@@ -168,8 +168,10 @@ pub struct DisplayMessage {
 /// Result from running the TUI
 #[derive(Debug, Default)]
 pub struct RunResult {
-    /// Session ID to reload (hot-reload)
+    /// Session ID to reload (hot-reload, no rebuild)
     pub reload_session: Option<String>,
+    /// Session ID to rebuild (full git pull + cargo build + tests)
+    pub rebuild_session: Option<String>,
     /// Exit code to use (for canary wrapper communication)
     pub exit_code: Option<i32>,
 }
@@ -222,8 +224,10 @@ pub struct App {
     stream_buffer: StreamBuffer,
     // Track thinking start time for extended thinking display
     thinking_start: Option<Instant>,
-    // Hot-reload: if set, exec into new binary with this session ID
+    // Hot-reload: if set, exec into new binary with this session ID (no rebuild)
     reload_requested: Option<String>,
+    // Hot-rebuild: if set, do full git pull + cargo build + tests then exec
+    rebuild_requested: Option<String>,
     // Pasted content storage (displayed as placeholders, expanded on submit)
     pasted_contents: Vec<String>,
     // Debug socket broadcast channel (if enabled)
@@ -265,12 +269,17 @@ pub struct App {
     status_notice: Option<(String, Instant)>,
     // Message to interleave during processing (set via Shift+Enter)
     interleave_message: Option<String>,
+    // Tab completion state: (base_input, suggestion_index)
+    // base_input is the original input before cycling, suggestion_index is current position
+    tab_completion_state: Option<(String, usize)>,
     // Time when app started (for startup animations)
     app_started: Instant,
     // Rate limit state: when rate limit resets (if rate limited)
     rate_limit_reset: Option<Instant>,
     // Message that was being sent when rate limit hit (to auto-retry)
     rate_limit_pending_message: Option<String>,
+    // Store reload info to pass to agent after reconnection (remote mode)
+    reload_info: Vec<String>,
 }
 
 /// A placeholder provider for remote mode (never actually called)
@@ -336,6 +345,7 @@ impl App {
             stream_buffer: StreamBuffer::new(),
             thinking_start: None,
             reload_requested: None,
+            rebuild_requested: None,
             pasted_contents: Vec::new(),
             debug_tx: None,
             remote_provider_name: None,
@@ -358,9 +368,11 @@ impl App {
             model_switch_keys: super::keybind::load_model_switch_keys(),
             status_notice: None,
             interleave_message: None,
+            tab_completion_state: None,
             app_started: Instant::now(),
             rate_limit_reset: None,
             rate_limit_pending_message: None,
+            reload_info: Vec::new(),
         }
     }
 
@@ -498,6 +510,7 @@ impl App {
 
             // Build the reload message based on what triggered it
             // Extract build hash for the AI notification
+            let is_reload = reload_info.is_some();
             let (message, build_hash) = if let Some(info) = reload_info {
                 if let Some(hash) = info.strip_prefix("reload:") {
                     let h = hash.trim().to_string();
@@ -524,33 +537,37 @@ impl App {
                 )
             };
 
-            // Add success message with stats
-            self.display_messages.push(DisplayMessage {
-                role: "system".to_string(),
-                content: message,
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
+            // Add success message with stats (only if there's actual content or a reload happened)
+            if total_turns > 0 || is_reload {
+                self.display_messages.push(DisplayMessage {
+                    role: "system".to_string(),
+                    content: message,
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+            }
 
             // Queue an automatic message to notify the AI that reload completed
-            // Include context so it can orient itself and continue
-            let build_info = build_hash;
-            let cwd = std::env::current_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| "unknown".to_string());
-            let terminal_size = crossterm::terminal::size()
-                .map(|(w, h)| format!("{}x{}", w, h))
-                .unwrap_or_else(|_| "unknown".to_string());
+            // Only do this if there's actually a conversation to continue
+            if total_turns > 0 {
+                let build_info = build_hash;
+                let cwd = std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "unknown".to_string());
+                let terminal_size = crossterm::terminal::size()
+                    .map(|(w, h)| format!("{}x{}", w, h))
+                    .unwrap_or_else(|_| "unknown".to_string());
 
-            self.queued_messages.push(format!(
-                "[Reload complete. Build: {}, CWD: {}, Terminal: {}, Session: {} turns. Continue where you left off.]",
-                build_info,
-                cwd,
-                terminal_size,
-                total_turns
-            ));
+                self.queued_messages.push(format!(
+                    "[Reload complete. Build: {}, CWD: {}, Terminal: {}, Session: {} turns. Continue where you left off.]",
+                    build_info,
+                    cwd,
+                    terminal_size,
+                    total_turns
+                ));
+            }
         } else {
             crate::logging::error(&format!("Failed to restore session: {}", session_id));
         }
@@ -800,6 +817,7 @@ impl App {
 
         Ok(RunResult {
             reload_session: self.reload_requested.take(),
+            rebuild_session: self.rebuild_requested.take(),
             exit_code: self.requested_exit_code,
         })
     }
@@ -816,10 +834,7 @@ impl App {
         'outer: loop {
             // Connect to server
             let mut remote = match RemoteConnection::connect().await {
-                Ok(r) => {
-                    reconnect_attempts = 0;
-                    r
-                }
+                Ok(r) => r,
                 Err(e) => {
                     if reconnect_attempts == 0 {
                         return Err(anyhow::anyhow!(
@@ -853,21 +868,50 @@ impl App {
 
             // Show reconnection message if applicable
             if reconnect_attempts > 0 {
-                self.display_messages
-                    .push(DisplayMessage::system("Reconnected to server."));
-            }
+                // Build success message with reload info if available
+                let reload_details = if !self.reload_info.is_empty() {
+                    format!("\n  {}", self.reload_info.join("\n  "))
+                } else {
+                    String::new()
+                };
 
-            // Resume session if requested (only on first connect, not reconnect)
-            if reconnect_attempts == 0 {
-                if let Some(session_id) = self.resume_session_id.take() {
-                    if let Err(e) = remote.resume_session(&session_id).await {
-                        self.display_messages.push(DisplayMessage::error(format!(
-                            "Failed to resume session: {}",
-                            e
-                        )));
-                    }
+                self.display_messages
+                    .push(DisplayMessage::system(format!("✓ Reconnected successfully.{}", reload_details)));
+
+                // Queue message to notify the agent about the reload
+                if !self.reload_info.is_empty() {
+                    let cwd = std::env::current_dir()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "unknown".to_string());
+                    let reload_summary = self.reload_info.join(", ");
+                    self.queued_messages.push(format!(
+                        "[Reload complete. {}. CWD: {}. Session restored - continue where you left off.]",
+                        reload_summary, cwd
+                    ));
+                    self.reload_info.clear();
                 }
             }
+
+            // Resume session: on first connect use CLI arg, on reconnect use previous session
+            let session_to_resume = if reconnect_attempts == 0 {
+                // First connect: use --resume argument if provided
+                self.resume_session_id.take()
+            } else {
+                // Reconnecting after server reload: restore the session we had before
+                self.remote_session_id.clone()
+            };
+
+            if let Some(session_id) = session_to_resume {
+                if let Err(e) = remote.resume_session(&session_id).await {
+                    self.display_messages.push(DisplayMessage::error(format!(
+                        "Failed to resume session: {}",
+                        e
+                    )));
+                }
+            }
+
+            // Reset reconnect counter after handling both reconnection message and session resume
+            reconnect_attempts = 0;
 
             // Main event loop
             loop {
@@ -1085,12 +1129,47 @@ impl App {
             ServerEvent::Reloading { .. } => {
                 self.display_messages.push(DisplayMessage {
                     role: "system".to_string(),
-                    content: "Server is reloading... Will reconnect shortly.".to_string(),
+                    content: "🔄 Server reload initiated...".to_string(),
                     tool_calls: vec![],
                     duration_secs: None,
-                    title: None,
+                    title: Some("Reload".to_string()),
                     tool_data: None,
                 });
+            }
+            ServerEvent::ReloadProgress { step, message, success, output } => {
+                // Format the progress message with optional output
+                let status_icon = match success {
+                    Some(true) => "✓",
+                    Some(false) => "✗",
+                    None => "→",
+                };
+
+                let mut content = format!("[{}] {}", step, message);
+
+                if let Some(out) = output {
+                    if !out.is_empty() {
+                        content.push_str("\n```\n");
+                        content.push_str(&out);
+                        content.push_str("\n```");
+                    }
+                }
+
+                self.display_messages.push(DisplayMessage {
+                    role: "system".to_string(),
+                    content,
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: Some(format!("Reload: {} {}", status_icon, step)),
+                    tool_data: None,
+                });
+
+                // Store key reload info for agent notification after reconnect
+                if step == "verify" || step == "git" {
+                    self.reload_info.push(message.clone());
+                }
+
+                // Update status notice
+                self.status_notice = Some((format!("Reload: {}", message), std::time::Instant::now()));
             }
             ServerEvent::History {
                 messages,
@@ -1282,16 +1361,19 @@ impl App {
                 self.input.insert(self.cursor_pos, c);
                 self.cursor_pos += 1;
                 self.scroll_offset = 0;
+                self.reset_tab_completion();
             }
             KeyCode::Backspace => {
                 if self.cursor_pos > 0 {
                     self.cursor_pos -= 1;
                     self.input.remove(self.cursor_pos);
+                    self.reset_tab_completion();
                 }
             }
             KeyCode::Delete => {
                 if self.cursor_pos < self.input.len() {
                     self.input.remove(self.cursor_pos);
+                    self.reset_tab_completion();
                 }
             }
             KeyCode::Left => {
@@ -1309,6 +1391,10 @@ impl App {
             }
             KeyCode::End => {
                 self.cursor_pos = self.input.len();
+            }
+            KeyCode::Tab => {
+                // Autocomplete command suggestions
+                self.autocomplete();
             }
             KeyCode::Enter => {
                 if !self.input.is_empty() {
@@ -1332,10 +1418,6 @@ impl App {
 
                     // Handle /model commands (remote mode)
                     if trimmed == "/model" || trimmed == "/models" {
-                        let provider_name = self
-                            .remote_provider_name
-                            .clone()
-                            .unwrap_or_else(|| "remote".to_string());
                         let current = self
                             .remote_provider_model
                             .clone()
@@ -1343,8 +1425,7 @@ impl App {
 
                         if self.remote_available_models.is_empty() {
                             self.display_messages.push(DisplayMessage::system(format!(
-                                "**Available models for {}:**\n  • {} (current)\n\nUse `/model <name>` to switch.",
-                                provider_name,
+                                "**Available models:**\n  • {} (current)\n\nUse `/model <name>` to switch.",
                                 current
                             )));
                             return Ok(());
@@ -1364,8 +1445,8 @@ impl App {
                             .join("\n");
 
                         self.display_messages.push(DisplayMessage::system(format!(
-                            "**Available models for {}:**\n{}\n\nUse `/model <name>` to switch.",
-                            provider_name, model_list
+                            "**Available models:**\n{}\n\nUse `/model <name>` to switch.",
+                            model_list
                         )));
                         return Ok(());
                     }
@@ -1650,16 +1731,19 @@ impl App {
             KeyCode::Char(c) => {
                 self.input.insert(self.cursor_pos, c);
                 self.cursor_pos += 1;
+                self.reset_tab_completion();
             }
             KeyCode::Backspace => {
                 if self.cursor_pos > 0 {
                     self.cursor_pos -= 1;
                     self.input.remove(self.cursor_pos);
+                    self.reset_tab_completion();
                 }
             }
             KeyCode::Delete => {
                 if self.cursor_pos < self.input.len() {
                     self.input.remove(self.cursor_pos);
+                    self.reset_tab_completion();
                 }
             }
             KeyCode::Left => {
@@ -1674,6 +1758,10 @@ impl App {
             }
             KeyCode::Home => self.cursor_pos = 0,
             KeyCode::End => self.cursor_pos = self.input.len(),
+            KeyCode::Tab => {
+                // Autocomplete command suggestions
+                self.autocomplete();
+            }
             KeyCode::Up | KeyCode::PageUp => {
                 // If input is empty and there are queued messages, bring last one back for editing (Up only)
                 if code == KeyCode::Up && self.input.is_empty() && !self.queued_messages.is_empty()
@@ -1787,8 +1875,8 @@ impl App {
                      • `/help` - Show this help\n\
                      • `/model` - List available models\n\
                      • `/model <name>` - Switch to a different model\n\
-                     • `/reload` - Hot-reload with new binary (keeps session)\n\
-                     • `/rebuild` - Build and test new canary (self-dev mode only)\n\
+                     • `/reload` - Restart with existing binary (no rebuild)\n\
+                     • `/rebuild` - Full rebuild (git pull + cargo build + tests)\n\
                      • `/clear` - Clear conversation (Ctrl+L)\n\
                      • `/debug-visual` - Enable visual debugging for TUI issues\n\
                      • `/<skill>` - Activate a skill\n\n\
@@ -1918,8 +2006,7 @@ impl App {
             self.display_messages.push(DisplayMessage {
                 role: "system".to_string(),
                 content: format!(
-                    "**Available models for {}:**\n{}\n\nUse `/model <name>` to switch.",
-                    self.provider.name(),
+                    "**Available models:**\n{}\n\nUse `/model <name>` to switch.",
                     model_list
                 ),
                 tool_calls: vec![],
@@ -2054,7 +2141,7 @@ impl App {
         if trimmed == "/reload" {
             self.display_messages.push(DisplayMessage {
                 role: "system".to_string(),
-                content: "Reloading jcode with new binary...".to_string(),
+                content: "Reloading jcode with existing binary...".to_string(),
                 tool_calls: vec![],
                 duration_secs: None,
                 title: None,
@@ -2069,73 +2156,21 @@ impl App {
             return;
         }
 
-        // /rebuild - Build and test new canary, restart (only in canary/self-dev mode)
         if trimmed == "/rebuild" {
-            if !self.session.is_canary {
-                self.display_messages.push(DisplayMessage {
-                    role: "error".to_string(),
-                    content: "/rebuild is only available in self-dev mode (jcode self-dev)"
-                        .to_string(),
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: None,
-                    tool_data: None,
-                });
-                return;
-            }
-
             self.display_messages.push(DisplayMessage {
                 role: "system".to_string(),
-                content: "Building and testing new canary...".to_string(),
+                content: "Rebuilding jcode (git pull + cargo build + tests)...".to_string(),
                 tool_calls: vec![],
                 duration_secs: None,
                 title: None,
                 tool_data: None,
             });
-
-            // Find jcode repo directory
-            if let Some(repo_dir) = crate::build::get_repo_dir() {
-                match crate::build::rebuild_canary(&repo_dir) {
-                    Ok(hash) => {
-                        self.display_messages.push(DisplayMessage {
-                            role: "system".to_string(),
-                            content: format!(
-                                "Build successful ({}). Restarting with new canary...",
-                                hash
-                            ),
-                            tool_calls: vec![],
-                            duration_secs: None,
-                            title: None,
-                            tool_data: None,
-                        });
-                        // Save session
-                        self.session.provider_session_id = self.provider_session_id.clone();
-                        let _ = self.session.save();
-                        // Exit with code 42 to signal wrapper to respawn with new canary
-                        self.requested_exit_code = Some(42);
-                        self.should_quit = true;
-                    }
-                    Err(e) => {
-                        self.display_messages.push(DisplayMessage {
-                            role: "error".to_string(),
-                            content: format!("Build failed: {}", e),
-                            tool_calls: vec![],
-                            duration_secs: None,
-                            title: None,
-                            tool_data: None,
-                        });
-                    }
-                }
-            } else {
-                self.display_messages.push(DisplayMessage {
-                    role: "error".to_string(),
-                    content: "Could not find jcode repository directory".to_string(),
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: None,
-                    tool_data: None,
-                });
-            }
+            // Save provider session ID for resume after rebuild
+            self.session.provider_session_id = self.provider_session_id.clone();
+            // Save session and set rebuild flag
+            let _ = self.session.save();
+            self.rebuild_requested = Some(self.session.id.clone());
+            self.should_quit = true;
             return;
         }
 
@@ -2442,7 +2477,7 @@ impl App {
                             self.streaming_text.push_str(&chunk);
                         }
                         // Bridge provides accurate wall-clock timing
-                        let thinking_msg = format!("Thought for {:.1}s\n\n", duration_secs);
+                        let thinking_msg = format!("*Thought for {:.1}s*\n\n", duration_secs);
                         self.streaming_text.push_str(&thinking_msg);
                     }
                     StreamEvent::Compaction {
@@ -2961,7 +2996,7 @@ impl App {
                                         if let Some(chunk) = self.stream_buffer.flush() {
                                             self.streaming_text.push_str(&chunk);
                                         }
-                                        let thinking_msg = format!("Thought for {:.1}s\n\n", duration_secs);
+                                        let thinking_msg = format!("*Thought for {:.1}s*\n\n", duration_secs);
                                         self.streaming_text.push_str(&thinking_msg);
                                     }
                                     StreamEvent::Compaction { trigger, pre_tokens } => {
@@ -3352,34 +3387,122 @@ impl App {
         &self.input
     }
 
-    /// Get command suggestions based on current input
-    pub fn command_suggestions(&self) -> Vec<(&'static str, &'static str)> {
-        let input = self.input.trim();
+    /// Get command suggestions based on current input (or base input for cycling)
+    fn get_suggestions_for(&self, input: &str) -> Vec<(String, &'static str)> {
+        let input = input.trim();
 
         // Only show suggestions when input starts with /
         if !input.starts_with('/') {
             return vec![];
         }
 
+        let prefix = input.to_lowercase();
+
+        // Get available models
+        let models: Vec<String> = if self.is_remote {
+            self.remote_available_models.clone()
+        } else {
+            self.provider
+                .available_models()
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        };
+
+        // If input is exactly "/model", show all model options for cycling
+        if prefix == "/model" {
+            return models
+                .into_iter()
+                .map(|m| (format!("/model {}", m), "Switch to this model"))
+                .collect();
+        }
+
+        // Check if this is a "/model " command with a partial model name
+        if let Some(model_prefix) = prefix.strip_prefix("/model ") {
+            return models
+                .into_iter()
+                .filter(|m| model_prefix.is_empty() || m.to_lowercase().starts_with(model_prefix))
+                .map(|m| (format!("/model {}", m), "Switch to this model"))
+                .collect();
+        }
+
         // Built-in commands
-        let mut commands: Vec<(&'static str, &'static str)> = vec![
-            ("/help", "Show help and keyboard shortcuts"),
-            ("/version", "Show current version"),
-            ("/info", "Show session info, tokens, environment"),
-            ("/reload", "Pull, rebuild, and restart (keeps session)"),
-            ("/clear", "Clear conversation history"),
+        let mut commands: Vec<(String, &'static str)> = vec![
+            ("/help".into(), "Show help and keyboard shortcuts"),
+            ("/model".into(), "List or switch models"),
+            ("/clear".into(), "Clear conversation history"),
+            ("/version".into(), "Show current version"),
+            ("/info".into(), "Show session info and tokens"),
+            ("/reload".into(), "Restart with existing binary"),
+            ("/rebuild".into(), "Full rebuild (git pull + build + tests)"),
+            ("/quit".into(), "Exit jcode"),
         ];
-        // Add /rebuild only in canary/self-dev mode
-        if self.session.is_canary {
-            commands.insert(2, ("/rebuild", "Build, test, and restart with new canary"));
+
+        // Add skills as commands
+        let skills = self.skills.list();
+        for skill in skills {
+            commands.push((format!("/{}", skill.name), "Activate skill"));
         }
 
         // Filter by prefix match
-        let prefix = input.to_lowercase();
         commands
             .into_iter()
             .filter(|(cmd, _)| cmd.to_lowercase().starts_with(&prefix))
             .collect()
+    }
+
+    /// Get command suggestions based on current input
+    pub fn command_suggestions(&self) -> Vec<(String, &'static str)> {
+        self.get_suggestions_for(&self.input)
+    }
+
+    /// Autocomplete current input - cycles through suggestions on repeated Tab
+    pub fn autocomplete(&mut self) -> bool {
+        // Get suggestions for current input
+        let current_suggestions = self.get_suggestions_for(&self.input);
+
+        // Check if we're continuing a tab cycle from a previous base
+        if let Some((ref base, idx)) = self.tab_completion_state.clone() {
+            let base_suggestions = self.get_suggestions_for(&base);
+
+            // If current input is in base suggestions AND there are multiple options, continue cycling
+            if base_suggestions.len() > 1
+                && base_suggestions.iter().any(|(cmd, _)| cmd == &self.input)
+            {
+                let next_index = (idx + 1) % base_suggestions.len();
+                let (cmd, _) = &base_suggestions[next_index];
+                self.input = cmd.clone();
+                self.cursor_pos = self.input.len();
+                self.tab_completion_state = Some((base.clone(), next_index));
+                return true;
+            }
+            // Otherwise, fall through to start a new cycle with current input
+        }
+
+        // Start fresh cycle with current input
+        if current_suggestions.is_empty() {
+            self.tab_completion_state = None;
+            return false;
+        }
+
+        // If only one suggestion and it matches exactly, nothing to do
+        if current_suggestions.len() == 1 && current_suggestions[0].0 == self.input {
+            self.tab_completion_state = None;
+            return false;
+        }
+
+        // Apply first suggestion and start tracking the cycle
+        let (cmd, _) = &current_suggestions[0];
+        let base = self.input.clone();
+        self.input = cmd.clone();
+        self.cursor_pos = self.input.len();
+        self.tab_completion_state = Some((base, 0));
+        true
+    }
+
+    /// Reset tab completion state (call when user types/modifies input)
+    pub fn reset_tab_completion(&mut self) {
+        self.tab_completion_state = None;
     }
 
     pub fn cursor_pos(&self) -> usize {
@@ -3787,7 +3910,7 @@ impl super::TuiState for App {
         self.status.clone()
     }
 
-    fn command_suggestions(&self) -> Vec<(&'static str, &'static str)> {
+    fn command_suggestions(&self) -> Vec<(String, &'static str)> {
         App::command_suggestions(self)
     }
 

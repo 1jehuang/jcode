@@ -21,6 +21,7 @@ mod tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
+use provider::Provider;
 use std::io::{self, Write};
 use std::panic;
 use std::process::Command as ProcessCommand;
@@ -97,9 +98,13 @@ struct Args {
     #[arg(long, global = true, num_args = 0..=1, default_missing_value = "")]
     resume: Option<String>,
 
-    /// Run standalone TUI without connecting to server
-    #[arg(long, global = true)]
+    /// Run standalone TUI without connecting to server (DEPRECATED: use server mode)
+    #[arg(long, global = true, hide = true)]
     standalone: bool,
+
+    /// Custom socket path for server/client communication
+    #[arg(long, global = true)]
+    socket: Option<String>,
 
     /// Enable debug socket (broadcasts all TUI state changes)
     #[arg(long, global = true)]
@@ -172,6 +177,11 @@ async fn main() -> Result<()> {
 
     if args.trace {
         std::env::set_var("JCODE_TRACE", "1");
+    }
+
+    // Set custom socket path if provided
+    if let Some(ref socket) = args.socket {
+        server::set_socket_path(socket);
     }
 
     // Check for updates unless --no-update is specified or running Update command
@@ -294,8 +304,10 @@ async fn run_main(mut args: Args) -> Result<()> {
                 return run_self_dev(false, args.resume).await;
             }
 
-            // Check for --standalone flag
+            // Check for --standalone flag (DEPRECATED)
             if args.standalone {
+                eprintln!("\x1b[33m⚠️  Warning: --standalone is deprecated and will be removed in a future version.\x1b[0m");
+                eprintln!("\x1b[33m   The default server/client mode now handles all use cases including self-dev.\x1b[0m\n");
                 let (provider, registry) = init_provider_and_registry(&args.provider).await?;
                 run_tui(provider, registry, args.resume, args.debug_socket).await?;
             } else {
@@ -356,25 +368,28 @@ async fn init_provider_and_registry(
 ) -> Result<(Arc<dyn provider::Provider>, tool::Registry)> {
     let provider: Arc<dyn provider::Provider> = match choice {
         ProviderChoice::Claude | ProviderChoice::ClaudeSubprocess => {
-            eprintln!("Using Claude Agent SDK");
+            // Explicit Claude - use MultiProvider but prefer Claude
+            eprintln!("Using Claude (with multi-provider support)");
             std::env::set_var("JCODE_ACTIVE_PROVIDER", "claude");
-            Arc::new(provider::claude::ClaudeProvider::new())
+            Arc::new(provider::MultiProvider::with_preference(false))
         }
         ProviderChoice::Openai => {
-            let creds = auth::codex::load_credentials()?;
+            // Explicit OpenAI - use MultiProvider but prefer OpenAI
+            eprintln!("Using OpenAI (with multi-provider support)");
             std::env::set_var("JCODE_ACTIVE_PROVIDER", "openai");
-            Arc::new(provider::openai::OpenAIProvider::new(creds))
+            Arc::new(provider::MultiProvider::with_preference(true))
         }
         ProviderChoice::Auto => {
-            // Prefer Claude if Claude Code credentials are present
-            if auth::claude::load_credentials().is_ok() {
-                eprintln!("Using Claude Agent SDK");
-                std::env::set_var("JCODE_ACTIVE_PROVIDER", "claude");
-                Arc::new(provider::claude::ClaudeProvider::new())
-            } else if let Ok(creds) = auth::codex::load_credentials() {
-                eprintln!("Using OpenAI/Codex provider");
-                std::env::set_var("JCODE_ACTIVE_PROVIDER", "openai");
-                Arc::new(provider::openai::OpenAIProvider::new(creds))
+            // Check if we have any credentials
+            let has_claude = auth::claude::load_credentials().is_ok();
+            let has_openai = auth::codex::load_credentials().is_ok();
+
+            if has_claude || has_openai {
+                // Use MultiProvider - it will auto-detect and allow switching
+                let multi = provider::MultiProvider::new();
+                eprintln!("Using {} (use /model to switch models)", multi.name());
+                std::env::set_var("JCODE_ACTIVE_PROVIDER", multi.name().to_lowercase());
+                Arc::new(multi)
             } else {
                 // No credentials - prompt for login
                 eprintln!("No credentials found. Let's log in!\n");
@@ -390,14 +405,13 @@ async fn init_provider_and_registry(
                 match input.trim() {
                     "1" => {
                         eprintln!("\nRun `claude` and complete the login flow, then retry.\n");
-                        Arc::new(provider::claude::ClaudeProvider::new())
+                        Arc::new(provider::MultiProvider::new())
                     }
                     "2" => {
                         let tokens = auth::oauth::login_openai().await?;
                         auth::oauth::save_openai_tokens(&tokens)?;
                         eprintln!("\nSuccessfully logged in to OpenAI!\n");
-                        let creds = auth::codex::load_credentials()?;
-                        Arc::new(provider::openai::OpenAIProvider::new(creds))
+                        Arc::new(provider::MultiProvider::with_preference(true))
                     }
                     _ => {
                         anyhow::bail!("Invalid choice. Run 'jcode login' to try again.");
@@ -469,13 +483,18 @@ async fn run_tui(
         std::process::exit(code);
     }
 
-    // Check for hot-reload request
+    // Check for hot-reload request (no rebuild)
     if let Some(ref reload_session_id) = run_result.reload_session {
         hot_reload(reload_session_id)?;
     }
 
-    // Print resume command for normal exits (not hot-reload)
-    if run_result.reload_session.is_none() {
+    // Check for hot-rebuild request (full git pull + cargo build + tests)
+    if let Some(ref rebuild_session_id) = run_result.rebuild_session {
+        hot_rebuild(rebuild_session_id)?;
+    }
+
+    // Print resume command for normal exits (not hot-reload/rebuild)
+    if run_result.reload_session.is_none() && run_result.rebuild_session.is_none() {
         eprintln!();
         eprintln!(
             "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
@@ -488,7 +507,7 @@ async fn run_tui(
     Ok(())
 }
 
-/// Hot-reload: pull, rebuild, test, and exec into new binary with session restore
+/// Hot-reload: exec into existing binary with session restore (no rebuild)
 fn hot_reload(session_id: &str) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
@@ -508,7 +527,7 @@ fn hot_reload(session_id: &str) -> Result<()> {
             return Err(anyhow::anyhow!("Failed to exec: {}", err));
         } else {
             eprintln!(
-                "Warning: Migration binary not found at {:?}, falling back to rebuild",
+                "Warning: Migration binary not found at {:?}, falling back to local binary",
                 binary_path
             );
         }
@@ -517,7 +536,55 @@ fn hot_reload(session_id: &str) -> Result<()> {
     let repo_dir =
         get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
-    eprintln!("Hot-reloading jcode with session {}...", session_id);
+    // Get the binary path - use the known location in the repo
+    let exe = repo_dir.join("target/release/jcode");
+    if !exe.exists() {
+        anyhow::bail!(
+            "Binary not found at {:?}. Run 'cargo build --release' first.",
+            exe
+        );
+    }
+
+    // Show binary info
+    if let Ok(metadata) = std::fs::metadata(&exe) {
+        let age = metadata
+            .modified()
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .map(|d| {
+                let secs = d.as_secs();
+                if secs < 60 {
+                    format!("{} seconds ago", secs)
+                } else if secs < 3600 {
+                    format!("{} minutes ago", secs / 60)
+                } else {
+                    format!("{} hours ago", secs / 3600)
+                }
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        eprintln!("Reloading with binary built {}...", age);
+    }
+
+    // Build command with --resume flag
+    let err = ProcessCommand::new(&exe)
+        .arg("--resume")
+        .arg(session_id)
+        .current_dir(cwd)
+        .exec();
+
+    // exec() only returns on error
+    Err(anyhow::anyhow!("Failed to exec: {}", err))
+}
+
+/// Hot-rebuild: pull, rebuild, test, and exec into new binary with session restore
+fn hot_rebuild(session_id: &str) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let cwd = std::env::current_dir()?;
+    let repo_dir =
+        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
+
+    eprintln!("Rebuilding jcode with session {}...", session_id);
 
     // Pull latest changes (quiet)
     eprintln!("Pulling latest changes...");
@@ -550,7 +617,7 @@ fn hot_reload(session_id: &str) -> Result<()> {
 
     if !test.success() {
         eprintln!("\n⚠️  Tests failed! Aborting reload to protect your session.");
-        eprintln!("Fix the failing tests and try /reload again.");
+        eprintln!("Fix the failing tests and try /rebuild again.");
         anyhow::bail!("Tests failed - staying on current version");
     }
 
@@ -983,146 +1050,217 @@ const EXIT_DONE: i32 = 0; // Clean exit, stop wrapper
 const EXIT_RELOAD_REQUESTED: i32 = 42; // Agent wants to reload to new canary build
 const EXIT_ROLLBACK_REQUESTED: i32 = 43; // Agent wants to rollback to stable
 
-/// Wrapper that runs canary binary and handles crashes
+/// Wrapper that manages server lifecycle and runs client
+/// Server runs canary code, client auto-reconnects on server restart
 async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()> {
-    use std::process::Stdio;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
-    let cwd = std::env::current_dir()?;
     let repo_dir = get_repo_dir();
     let initial_binary_path = std::path::PathBuf::from(initial_binary);
 
+    // Set up unique socket for this self-dev session
+    let socket_path = format!(
+        "/tmp/jcode-selfdev-{}.sock",
+        &session_id[..8.min(session_id.len())]
+    );
+    server::set_socket_path(&socket_path);
+
+    // Cleanup any stale socket
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_file(server::debug_socket_path());
+
+    // Shared state for server management
+    let should_stop = Arc::new(AtomicBool::new(false));
+    let server_crashed = Arc::new(AtomicBool::new(false));
+
+    // Start server manager task
+    let stop_flag = Arc::clone(&should_stop);
+    let crash_flag = Arc::clone(&server_crashed);
+    let socket = socket_path.clone();
+    let initial_bin = initial_binary_path.clone();
+    let sess_id = session_id.to_string();
+    let repo = repo_dir.clone();
+
+    let server_manager = tokio::spawn(async move {
+        run_server_manager(
+            &sess_id,
+            &initial_bin,
+            &socket,
+            stop_flag,
+            crash_flag,
+            repo.as_ref(),
+        )
+        .await
+    });
+
+    // Wait for server to be ready
+    eprintln!("Waiting for server on {}...", socket_path);
+    let start = std::time::Instant::now();
     loop {
-        // Determine which binary to use:
-        // - If canary exists (set by reload/rebuild), use canary
-        // - Otherwise use stable (set on fresh start)
-        // - Fall back to target/release/jcode if neither exists
-        let canary_path = build::canary_binary_path()?;
-        let stable_path = build::stable_binary_path()?;
-
-        let (binary_path, version_type) = if canary_path.exists() {
-            (canary_path, "canary")
-        } else if stable_path.exists() {
-            (stable_path, "stable")
-        } else if initial_binary_path.exists() {
-            (initial_binary_path.clone(), "dev")
-        } else {
-            anyhow::bail!(
-                "No binary found: canary at {:?}, stable at {:?}, or initial at {:?}",
-                canary_path,
-                stable_path,
-                initial_binary_path
-            );
-        };
-
-        eprintln!("Launching {} session {}...", version_type, session_id);
-
-        // Run the canary binary
-        let mut child = ProcessCommand::new(&binary_path)
-            .arg("--resume")
-            .arg(session_id)
-            .arg("--standalone")
-            .arg("--no-update")
-            .current_dir(&cwd)
-            .stderr(Stdio::piped())
-            .spawn()?;
-
-        let status = child.wait()?;
-        let exit_code = status.code().unwrap_or(-1);
-
-        if exit_code == EXIT_DONE {
-            // Clean exit - done with self-dev
-            eprintln!("Canary session exited cleanly");
-            build::clear_migration_context(session_id)?;
-            break;
+        if start.elapsed() > std::time::Duration::from_secs(30) {
+            should_stop.store(true, Ordering::SeqCst);
+            server_manager.abort();
+            anyhow::bail!("Server failed to start within 30 seconds");
         }
-
-        if exit_code == EXIT_RELOAD_REQUESTED {
-            // Agent requested reload to new canary build - loop and respawn
-            eprintln!("Reload requested, respawning with new canary build...");
-            continue;
-        }
-
-        if exit_code == EXIT_ROLLBACK_REQUESTED {
-            // Agent requested rollback to stable - spawn stable instead
-            eprintln!("Rollback requested, switching to stable build...");
-            let stable_binary = build::stable_binary_path()?;
-            if stable_binary.exists() {
-                let mut child = ProcessCommand::new(&stable_binary)
-                    .arg("--resume")
-                    .arg(session_id)
-                    .arg("--standalone")
-                    .arg("--no-update")
-                    .current_dir(&cwd)
-                    .spawn()?;
-                let _ = child.wait();
-            }
-            break;
-        }
-
-        // Any other exit code is a crash
-        if status.success() {
-            // Shouldn't happen but handle gracefully
-            break;
-        }
-
-        // Crash! Collect info
-        let exit_code = status.code().unwrap_or(-1);
-        eprintln!("\n⚠️  Canary crashed with exit code {}", exit_code);
-
-        // Read stderr if available
-        let stderr_output = if let Some(mut stderr) = child.stderr.take() {
-            use std::io::Read;
-            let mut buf = String::new();
-            stderr.read_to_string(&mut buf).unwrap_or(0);
-            buf
-        } else {
-            String::new()
-        };
-
-        // Get diff from migration context
-        let diff = build::load_migration_context(session_id)?.and_then(|ctx| ctx.diff);
-
-        // Record crash in manifest
-        let hash = build::BuildManifest::load()?.canary.unwrap_or_default();
-        let mut manifest = build::BuildManifest::load()?;
-        manifest.record_crash(&hash, exit_code, &stderr_output, diff)?;
-
-        // Inject crash context into session
-        inject_crash_context(
-            session_id,
-            &hash,
-            exit_code,
-            &stderr_output,
-            repo_dir.as_ref(),
-        )?;
-
-        // Rollback to stable
-        let stable_binary = build::stable_binary_path()?;
-        if stable_binary.exists() {
-            eprintln!("Rolling back to stable version...");
-
-            let mut child = ProcessCommand::new(&stable_binary)
-                .arg("--resume")
-                .arg(session_id)
-                .arg("--standalone")
-                .arg("--no-update")
-                .current_dir(&cwd)
-                .spawn()?;
-
-            let status = child.wait()?;
-            if status.success() {
+        if std::path::Path::new(&socket_path).exists() {
+            if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
                 break;
             }
-            // If stable also crashes, we have bigger problems
-            eprintln!("Stable version also crashed! Exiting.");
-            break;
-        } else {
-            eprintln!("No stable version to rollback to. Exiting.");
-            break;
         }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    Ok(())
+    eprintln!("Server ready, starting TUI client...");
+
+    // Run client TUI
+    let terminal = ratatui::init();
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
+
+    let app = tui::App::new_for_remote(Some(session_id.to_string())).await;
+
+    // Set terminal title
+    let session_name = id::extract_session_name(session_id)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| session_id.to_string());
+    let icon = id::session_icon(&session_name);
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::terminal::SetTitle(format!("{} jcode {} [self-dev]", icon, session_name))
+    );
+
+    let result = app.run_remote(terminal).await;
+
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
+    ratatui::restore();
+
+    // Tell server manager to stop
+    should_stop.store(true, Ordering::SeqCst);
+    server_manager.abort();
+
+    // Cleanup
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_file(server::debug_socket_path());
+
+    // Print resume info
+    eprintln!();
+    eprintln!(
+        "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
+        session_name
+    );
+    eprintln!("  jcode --resume {}", session_id);
+    eprintln!();
+
+    result.map(|_| ())
+}
+
+/// Server manager - spawns and monitors the server process
+/// Restarts on reload/crash, switches to stable on rollback/crash
+async fn run_server_manager(
+    session_id: &str,
+    initial_binary: &std::path::Path,
+    _socket_path: &str,
+    should_stop: Arc<std::sync::atomic::AtomicBool>,
+    server_crashed: Arc<std::sync::atomic::AtomicBool>,
+    repo_dir: Option<&std::path::PathBuf>,
+) {
+    use std::sync::atomic::Ordering;
+    use tokio::process::Command as TokioCommand;
+
+    let cwd = std::env::current_dir().unwrap_or_default();
+
+    loop {
+        if should_stop.load(Ordering::SeqCst) {
+            break;
+        }
+
+        // Select binary
+        let canary_path = build::canary_binary_path().ok();
+        let stable_path = build::stable_binary_path().ok();
+
+        let (binary_path, version_type) = if canary_path
+            .as_ref()
+            .map(|p| p.exists())
+            .unwrap_or(false)
+        {
+            (canary_path.unwrap(), "canary")
+        } else if stable_path
+            .as_ref()
+            .map(|p| p.exists())
+            .unwrap_or(false)
+        {
+            (stable_path.unwrap(), "stable")
+        } else if initial_binary.exists() {
+            (initial_binary.to_path_buf(), "dev")
+        } else {
+            eprintln!("No binary found for server!");
+            break;
+        };
+
+        eprintln!("Starting {} server...", version_type);
+
+        // Spawn server
+        let server_result = TokioCommand::new(&binary_path)
+            .arg("serve")
+            .current_dir(&cwd)
+            .kill_on_drop(true)
+            .spawn();
+
+        let mut server = match server_result {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to spawn server: {}", e);
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        // Wait for server to exit
+        let status = server.wait().await;
+
+        if should_stop.load(Ordering::SeqCst) {
+            break;
+        }
+
+        let exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+        eprintln!("Server exited with code {}", exit_code);
+
+        if exit_code == EXIT_DONE {
+            // Clean exit
+            break;
+        } else if exit_code == EXIT_RELOAD_REQUESTED {
+            // Reload - new binary should already be set via canary symlink
+            eprintln!("Server requested reload...");
+            // Small delay for filesystem sync
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        } else if exit_code == EXIT_ROLLBACK_REQUESTED {
+            // Rollback - use stable
+            eprintln!("Server requested rollback to stable...");
+        } else {
+            // Crash!
+            eprintln!("⚠️  Server crashed with exit code {}", exit_code);
+            server_crashed.store(true, Ordering::SeqCst);
+
+            // Record crash
+            let hash = build::BuildManifest::load()
+                .ok()
+                .and_then(|m| m.canary)
+                .unwrap_or_default();
+            if let Ok(mut manifest) = build::BuildManifest::load() {
+                let diff = build::load_migration_context(session_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|ctx| ctx.diff);
+                let _ = manifest.record_crash(&hash, exit_code, "", diff);
+            }
+
+            // Inject crash context into session
+            let _ = inject_crash_context(session_id, &hash, exit_code, "", repo_dir);
+        }
+
+        // Small delay before restart
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 }
 
 /// Inject crash context into the session so agent can see what happened
