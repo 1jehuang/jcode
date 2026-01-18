@@ -302,7 +302,7 @@ pub struct App {
     // Message to interleave during processing (set via Shift+Enter)
     interleave_message: Option<String>,
     // Queue mode: if true, Enter during processing queues; if false, Enter interleaves immediately
-    // Toggle with Ctrl+Tab
+    // Toggle with Ctrl+Tab or Ctrl+T
     queue_mode: bool,
     // Tab completion state: (base_input, suggestion_index)
     // base_input is the original input before cycling, suggestion_index is current position
@@ -2115,8 +2115,8 @@ impl App {
                     }
                     return Ok(());
                 }
-                KeyCode::Tab => {
-                    // Ctrl+Tab: toggle queue mode (immediate send vs wait until done)
+                KeyCode::Tab | KeyCode::Char('t') => {
+                    // Ctrl+Tab / Ctrl+T: toggle queue mode (immediate send vs wait until done)
                     self.queue_mode = !self.queue_mode;
                     let mode_str = if self.queue_mode {
                         "Queue mode: messages wait until response completes"
@@ -2345,7 +2345,7 @@ impl App {
                      • `PageUp/Down` or `Up/Down` - Scroll history\n\
                      • `{}`/`{}` - Scroll up/down (see `/config`)\n\
                      • `{}`/`{}` - Page up/down (see `/config`)\n\
-                     • `Ctrl+Tab` - Toggle queue mode (wait vs immediate send)\n\
+                     • `Ctrl+Tab` / `Ctrl+T` - Toggle queue mode (wait vs immediate send)\n\
                      • `Ctrl+Up` - Retrieve queued message for editing\n\
                      • `Ctrl+U` - Clear input line\n\
                      • `Ctrl+K` - Kill to end of line\n\
@@ -4826,6 +4826,10 @@ impl super::TuiState for App {
         })
     }
 
+    fn queue_mode(&self) -> bool {
+        self.queue_mode
+    }
+
     fn context_info(&self) -> &crate::prompt::ContextInfo {
         &self.context_info
     }
@@ -5048,6 +5052,53 @@ mod tests {
         // Queued messages are stored in queued_messages, not display_messages
         assert_eq!(app.queued_messages()[0], "test");
         assert!(app.display_messages().is_empty());
+    }
+
+    #[test]
+    fn test_ctrl_tab_toggles_queue_mode() {
+        let mut app = create_test_app();
+
+        assert!(app.queue_mode);
+
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(!app.queue_mode);
+
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(app.queue_mode);
+    }
+
+    #[test]
+    fn test_shift_enter_opposite_send_mode() {
+        let mut app = create_test_app();
+        app.is_processing = true;
+
+        // Default queue mode: Shift+Enter should interleave
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('i'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::SHIFT)
+            .unwrap();
+
+        assert_eq!(app.queued_count(), 0);
+        assert_eq!(app.interleave_message.as_deref(), Some("hi"));
+        assert!(app.input().is_empty());
+
+        // Immediate mode: Shift+Enter should queue instead
+        app.interleave_message = None;
+        app.queue_mode = false;
+        app.handle_key(KeyCode::Char('y'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Char('o'), KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::SHIFT)
+            .unwrap();
+
+        assert_eq!(app.queued_count(), 1);
+        assert_eq!(app.queued_messages()[0], "yo");
+        assert!(app.interleave_message.is_none());
     }
 
     #[test]
