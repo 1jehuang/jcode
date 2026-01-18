@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use super::{EventStream, Provider};
-use crate::message::{Message, StreamEvent, ToolDefinition};
+use crate::message::{CacheControl, ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use crate::storage;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -51,6 +51,34 @@ impl ClaudeProvider {
             }
         }
         names
+    }
+
+    fn apply_prompt_cache_control(&self, messages: &[Message]) -> Vec<Message> {
+        if !self.config.prompt_cache || messages.is_empty() {
+            return messages.to_vec();
+        }
+
+        let mut cloned = messages.to_vec();
+        let mut applied = false;
+        let cache_marker = CacheControl::ephemeral(self.config.prompt_cache_ttl.clone());
+
+        for msg in cloned.iter_mut().rev() {
+            if !matches!(msg.role, Role::User | Role::Assistant) {
+                continue;
+            }
+            for block in msg.content.iter_mut().rev() {
+                if let ContentBlock::Text { cache_control, .. } = block {
+                    *cache_control = Some(cache_marker.clone());
+                    applied = true;
+                    break;
+                }
+            }
+            if applied {
+                break;
+            }
+        }
+
+        cloned
     }
 
     fn resolve_bridge_script(&self) -> Result<PathBuf> {
@@ -107,6 +135,8 @@ struct ClaudeSdkConfig {
     cli_path: Option<String>,
     include_partial_messages: bool,
     max_thinking_tokens: Option<u32>,
+    prompt_cache: bool,
+    prompt_cache_ttl: Option<String>,
 }
 
 impl ClaudeSdkConfig {
@@ -164,6 +194,24 @@ impl ClaudeSdkConfig {
             .ok()
             .and_then(|value| value.parse::<u32>().ok())
             .or_else(|| Some(128000)); // Max 128k tokens for extended thinking
+        let prompt_cache = std::env::var("JCODE_CLAUDE_PROMPT_CACHE")
+            .map(|v| v != "0" && v != "false")
+            .unwrap_or(true);
+        let prompt_cache_ttl = std::env::var("JCODE_CLAUDE_PROMPT_CACHE_TTL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let prompt_cache_ttl = match prompt_cache_ttl.as_deref() {
+            Some("5m") | Some("1h") => prompt_cache_ttl,
+            Some(other) => {
+                eprintln!(
+                    "Warning: Unsupported JCODE_CLAUDE_PROMPT_CACHE_TTL '{}'; expected '5m' or '1h'",
+                    other
+                );
+                None
+            }
+            None => None,
+        };
 
         Self {
             python_bin,
@@ -173,6 +221,8 @@ impl ClaudeSdkConfig {
             cli_path,
             include_partial_messages,
             max_thinking_tokens,
+            prompt_cache,
+            prompt_cache_ttl,
         }
     }
 }
@@ -317,6 +367,10 @@ struct UsageInfo {
     input_tokens: Option<u64>,
     #[serde(default)]
     output_tokens: Option<u64>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -356,10 +410,22 @@ impl ClaudeEventTranslator {
                 if let Some(usage) = message.get("usage") {
                     let input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64());
                     let output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64());
-                    if input_tokens.is_some() || output_tokens.is_some() {
+                    let cache_creation_input_tokens = usage
+                        .get("cache_creation_input_tokens")
+                        .and_then(|v| v.as_u64());
+                    let cache_read_input_tokens = usage
+                        .get("cache_read_input_tokens")
+                        .and_then(|v| v.as_u64());
+                    if input_tokens.is_some()
+                        || output_tokens.is_some()
+                        || cache_creation_input_tokens.is_some()
+                        || cache_read_input_tokens.is_some()
+                    {
                         return vec![StreamEvent::TokenUsage {
                             input_tokens,
                             output_tokens,
+                            cache_read_input_tokens,
+                            cache_creation_input_tokens,
                         }];
                     }
                 }
@@ -404,10 +470,16 @@ impl ClaudeEventTranslator {
             SseEvent::MessageDelta { delta, usage } => {
                 self.last_stop_reason = delta.stop_reason.clone();
                 if let Some(usage) = usage {
-                    if usage.input_tokens.is_some() || usage.output_tokens.is_some() {
+                    if usage.input_tokens.is_some()
+                        || usage.output_tokens.is_some()
+                        || usage.cache_creation_input_tokens.is_some()
+                        || usage.cache_read_input_tokens.is_some()
+                    {
                         return vec![StreamEvent::TokenUsage {
                             input_tokens: usage.input_tokens,
                             output_tokens: usage.output_tokens,
+                            cache_read_input_tokens: usage.cache_read_input_tokens,
+                            cache_creation_input_tokens: usage.cache_creation_input_tokens,
                         }];
                     }
                 }
@@ -554,10 +626,16 @@ impl OutputParser {
             } => {
                 let mut events = Vec::new();
                 if let Some(usage) = usage {
-                    if usage.input_tokens.is_some() || usage.output_tokens.is_some() {
+                    if usage.input_tokens.is_some()
+                        || usage.output_tokens.is_some()
+                        || usage.cache_creation_input_tokens.is_some()
+                        || usage.cache_read_input_tokens.is_some()
+                    {
                         events.push(StreamEvent::TokenUsage {
                             input_tokens: usage.input_tokens,
                             output_tokens: usage.output_tokens,
+                            cache_read_input_tokens: usage.cache_read_input_tokens,
+                            cache_creation_input_tokens: usage.cache_creation_input_tokens,
                         });
                     }
                 }
@@ -588,7 +666,10 @@ impl OutputParser {
                     pre_tokens,
                 }]
             }
-            SdkOutput::Error { message, retry_after_secs } => vec![StreamEvent::Error {
+            SdkOutput::Error {
+                message,
+                retry_after_secs,
+            } => vec![StreamEvent::Error {
                 message,
                 retry_after_secs,
             }],
@@ -617,6 +698,14 @@ impl Provider for ClaudeProvider {
             .read()
             .map(|m| m.clone())
             .unwrap_or_else(|_| self.config.model.clone());
+
+        let cached_messages;
+        let messages = if self.config.prompt_cache {
+            cached_messages = self.apply_prompt_cache_control(messages);
+            cached_messages.as_slice()
+        } else {
+            messages
+        };
 
         let request = ClaudeSdkRequest {
             system,

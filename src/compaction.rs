@@ -206,6 +206,7 @@ impl CompactionManager {
                         "## Previous Conversation Summary\n\n{}\n\n---\n\n",
                         summary.text
                     ),
+                    cache_control: None,
                 };
 
                 let mut result = Vec::with_capacity(self.messages.len() + 1);
@@ -281,7 +282,7 @@ impl CompactionManager {
         msg.content
             .iter()
             .map(|block| match block {
-                ContentBlock::Text { text } => text.len(),
+                ContentBlock::Text { text, .. } => text.len(),
                 ContentBlock::ToolUse { input, .. } => input.to_string().len() + 50,
                 ContentBlock::ToolResult { content, .. } => content.len() + 20,
             })
@@ -292,7 +293,7 @@ impl CompactionManager {
         msg.content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.clone()),
+                ContentBlock::Text { text, .. } => Some(text.clone()),
                 ContentBlock::ToolResult { content, .. } => Some(content.clone()),
                 _ => None,
             })
@@ -371,7 +372,7 @@ async fn generate_summary(
 
         for block in &msg.content {
             match block {
-                ContentBlock::Text { text } => {
+                ContentBlock::Text { text, .. } => {
                     conversation_text.push_str(text);
                     conversation_text.push('\n');
                 }
@@ -397,6 +398,7 @@ async fn generate_summary(
         role: Role::User,
         content: vec![ContentBlock::Text {
             text: format!("{}\n\n---\n\n{}", conversation_text, SUMMARY_PROMPT),
+            cache_control: None,
         }],
     }];
 
@@ -438,6 +440,7 @@ mod tests {
             role,
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
+                cache_control: None,
             }],
         }
     }

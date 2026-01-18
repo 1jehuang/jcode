@@ -168,7 +168,14 @@ pub enum ServerEvent {
 
     /// Token usage update
     #[serde(rename = "tokens")]
-    TokenUsage { input: u64, output: u64 },
+    TokenUsage {
+        input: u64,
+        output: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_read_input: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_creation_input: Option<u64>,
+    },
 
     /// Message/turn completed
     #[serde(rename = "done")]
@@ -283,10 +290,7 @@ pub enum ServerEvent {
 
     /// Response to comm_list request
     #[serde(rename = "comm_members")]
-    CommMembers {
-        id: u64,
-        members: Vec<AgentInfo>,
-    },
+    CommMembers { id: u64, members: Vec<AgentInfo> },
 }
 
 /// A shared context entry

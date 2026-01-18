@@ -244,7 +244,11 @@ fn format_status_for_debug(app: &dyn TuiState) -> String {
             if let Some(notice) = app.status_notice() {
                 format!("Idle (notice: {})", notice)
             } else if let Some((input, output)) = app.total_session_tokens() {
-                format!("Idle (session: {}k in, {}k out)", input / 1000, output / 1000)
+                format!(
+                    "Idle (session: {}k in, {}k out)",
+                    input / 1000,
+                    output / 1000
+                )
             } else {
                 "Idle".to_string()
             }
@@ -373,8 +377,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         // Streaming text preview
         let streaming = app.streaming_text();
         if !streaming.is_empty() {
-            capture.rendered_text.streaming_text_preview =
-                streaming.chars().take(500).collect();
+            capture.rendered_text.streaming_text_preview = streaming.chars().take(500).collect();
         }
 
         // Status line content
@@ -386,7 +389,13 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     if queued_height > 0 {
         draw_queued(frame, app, chunks[2], user_count + 1);
     }
-    draw_input(frame, app, chunks[3], user_count + queued_count + 1, &mut debug_capture);
+    draw_input(
+        frame,
+        app,
+        chunks[3],
+        user_count + queued_count + 1,
+        &mut debug_capture,
+    );
 
     // Record the frame capture if enabled
     if let Some(capture) = debug_capture {
@@ -764,21 +773,26 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                     };
 
                     // For edit tools, count line changes
-                    let line_change_summary = if matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit") {
-                        let additions = msg.content.lines()
-                            .filter(|l| l.trim().starts_with("+ "))
-                            .count();
-                        let deletions = msg.content.lines()
-                            .filter(|l| l.trim().starts_with("- "))
-                            .count();
-                        if additions > 0 || deletions > 0 {
-                            format!(" (+{} -{})", additions, deletions)
+                    let line_change_summary =
+                        if matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit") {
+                            let additions = msg
+                                .content
+                                .lines()
+                                .filter(|l| l.trim().starts_with("+ "))
+                                .count();
+                            let deletions = msg
+                                .content
+                                .lines()
+                                .filter(|l| l.trim().starts_with("- "))
+                                .count();
+                            if additions > 0 || deletions > 0 {
+                                format!(" (+{} -{})", additions, deletions)
+                            } else {
+                                String::new()
+                            }
                         } else {
                             String::new()
-                        }
-                    } else {
-                        String::new()
-                    };
+                        };
 
                     lines.push(Line::from(vec![
                         Span::styled(format!("  {} ", icon), Style::default().fg(icon_color)),
@@ -1028,8 +1042,10 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
 fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let (input_tokens, output_tokens) = app.streaming_tokens();
+    let (cache_read_tokens, cache_creation_tokens) = app.streaming_cache_tokens();
     let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
     let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
+    let cache_status = format_cache_status(cache_read_tokens, cache_creation_tokens);
 
     let line = if let Some(notice) = app.status_notice() {
         Line::from(vec![Span::styled(
@@ -1073,7 +1089,10 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         Line::from(vec![
             Span::styled(spinner, Style::default().fg(Color::Rgb(255, 193, 7))),
             Span::styled(
-                format!(" Rate limited. Auto-retry in {}...{}", time_str, queued_info),
+                format!(
+                    " Rate limited. Auto-retry in {}...{}",
+                    time_str, queued_info
+                ),
                 Style::default().fg(Color::Rgb(255, 193, 7)),
             ),
         ])
@@ -1097,6 +1116,7 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 } else {
                     String::new()
                 };
+                let usage_str = format_usage_line(tokens_str, cache_status.clone());
                 // Show stale indicator if no activity for >2s
                 let stale_str = match stale_secs {
                     Some(s) if s > 2.0 => format!(" (idle {:.0}s)", s),
@@ -1105,24 +1125,31 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 Line::from(vec![
                     Span::styled(spinner, Style::default().fg(AI_COLOR)),
                     Span::styled(
-                        format!(" {}{} {:.1}s", tokens_str, stale_str, elapsed),
+                        format!(" {}{} {:.1}s", usage_str, stale_str, elapsed),
                         Style::default().fg(DIM_COLOR),
                     ),
                 ])
             }
             ProcessingStatus::RunningTool(ref name) => {
                 let tokens_str = if input_tokens > 0 || output_tokens > 0 {
-                    format!("↑{} ↓{} ", input_tokens, output_tokens)
+                    format!("↑{} ↓{}", input_tokens, output_tokens)
                 } else {
                     String::new()
                 };
+                let usage_str = format_usage_line(tokens_str, cache_status.clone());
                 // Animated progress dots - split on both sides of the command
                 let half_width = 5;
                 let progress = ((elapsed * 2.0) % 1.0) as f32; // Cycle every 0.5s
                 let filled_pos = ((progress * half_width as f32) as usize) % half_width;
                 // Left dots: animate from right to left (towards command)
                 let left_bar: String = (0..half_width)
-                    .map(|i| if i == (half_width - 1 - filled_pos) { '●' } else { '·' })
+                    .map(|i| {
+                        if i == (half_width - 1 - filled_pos) {
+                            '●'
+                        } else {
+                            '·'
+                        }
+                    })
                     .collect();
                 // Right dots: animate from left to right (away from command)
                 let right_bar: String = (0..half_width)
@@ -1145,7 +1172,7 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                     .unwrap_or_default();
                 Line::from(vec![
                     Span::styled(left_bar, Style::default().fg(anim_color)),
-                    Span::styled(format!(" {}", tokens_str), Style::default().fg(DIM_COLOR)),
+                    Span::styled(format!(" {}", usage_str), Style::default().fg(DIM_COLOR)),
                     Span::styled(name.to_string(), Style::default().fg(anim_color).bold()),
                     Span::styled(status_suffix, Style::default().fg(DIM_COLOR)),
                     Span::styled(tool_detail, Style::default().fg(DIM_COLOR)),
@@ -1186,6 +1213,43 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, area);
+}
+
+fn format_usage_line(tokens_str: String, cache_status: Option<String>) -> String {
+    let mut parts = Vec::new();
+    if !tokens_str.is_empty() {
+        parts.push(tokens_str);
+    }
+    if let Some(cache) = cache_status {
+        parts.push(cache);
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        parts.join(" • ")
+    }
+}
+
+fn format_cache_status(
+    cache_read_tokens: Option<u64>,
+    cache_creation_tokens: Option<u64>,
+) -> Option<String> {
+    if cache_read_tokens.is_none() && cache_creation_tokens.is_none() {
+        return None;
+    }
+
+    let read = cache_read_tokens.unwrap_or(0);
+    let write = cache_creation_tokens.unwrap_or(0);
+
+    if read > 0 && write > 0 {
+        Some(format!("cache r{} w{}", read, write))
+    } else if read > 0 {
+        Some(format!("cache hit {}", read))
+    } else if write > 0 {
+        Some(format!("cache write {}", write))
+    } else {
+        Some("cache miss".to_string())
+    }
 }
 
 fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usize) {

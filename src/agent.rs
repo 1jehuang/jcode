@@ -132,6 +132,7 @@ impl Agent {
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
+                cache_control: None,
             }],
         );
         self.session.save()?;
@@ -147,6 +148,7 @@ impl Agent {
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
+                cache_control: None,
             }],
         );
         self.session.save()?;
@@ -172,7 +174,10 @@ impl Agent {
             );
             self.session.add_message(
                 Role::User,
-                vec![ContentBlock::Text { text: alert_text }],
+                vec![ContentBlock::Text {
+                    text: alert_text,
+                    cache_control: None,
+                }],
             );
         }
 
@@ -180,6 +185,7 @@ impl Agent {
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
+                cache_control: None,
             }],
         );
         self.session.save()?;
@@ -202,7 +208,10 @@ impl Agent {
             );
             self.session.add_message(
                 Role::User,
-                vec![ContentBlock::Text { text: alert_text }],
+                vec![ContentBlock::Text {
+                    text: alert_text,
+                    cache_control: None,
+                }],
             );
         }
 
@@ -210,6 +219,7 @@ impl Agent {
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
+                cache_control: None,
             }],
         );
         self.session.save()?;
@@ -280,7 +290,7 @@ impl Agent {
                     .content
                     .iter()
                     .filter_map(|c| {
-                        if let ContentBlock::Text { text } = c {
+                        if let ContentBlock::Text { text, .. } = c {
                             Some(text.clone())
                         } else {
                             None
@@ -421,6 +431,8 @@ impl Agent {
             let mut current_tool_input = String::new();
             let mut usage_input: Option<u64> = None;
             let mut usage_output: Option<u64> = None;
+            let mut usage_cache_read: Option<u64> = None;
+            let mut usage_cache_creation: Option<u64> = None;
             let mut saw_message_end = false;
             let mut _thinking_start: Option<Instant> = None;
             // Track tool results from SDK (already executed by Claude Agent SDK)
@@ -519,6 +531,8 @@ impl Agent {
                     StreamEvent::TokenUsage {
                         input_tokens,
                         output_tokens,
+                        cache_read_input_tokens,
+                        cache_creation_input_tokens,
                     } => {
                         if let Some(input) = input_tokens {
                             usage_input = Some(input);
@@ -526,11 +540,19 @@ impl Agent {
                         if let Some(output) = output_tokens {
                             usage_output = Some(output);
                         }
+                        if cache_read_input_tokens.is_some() {
+                            usage_cache_read = cache_read_input_tokens;
+                        }
+                        if cache_creation_input_tokens.is_some() {
+                            usage_cache_creation = cache_creation_input_tokens;
+                        }
                         if trace {
                             eprintln!(
-                                "[trace] token_usage input={} output={}",
+                                "[trace] token_usage input={} output={} cache_read={} cache_write={}",
                                 usage_input.unwrap_or(0),
-                                usage_output.unwrap_or(0)
+                                usage_output.unwrap_or(0),
+                                usage_cache_read.unwrap_or(0),
+                                usage_cache_creation.unwrap_or(0)
                             );
                         }
                     }
@@ -569,10 +591,28 @@ impl Agent {
                 }
             }
 
-            if print_output && (usage_input.is_some() || usage_output.is_some()) {
+            if print_output
+                && (usage_input.is_some()
+                    || usage_output.is_some()
+                    || usage_cache_read.is_some()
+                    || usage_cache_creation.is_some())
+            {
                 let input = usage_input.unwrap_or(0);
                 let output = usage_output.unwrap_or(0);
-                print!("\n[Tokens] upload: {} download: {}\n", input, output);
+                let cache_read = usage_cache_read.unwrap_or(0);
+                let cache_creation = usage_cache_creation.unwrap_or(0);
+                let cache_str = if usage_cache_read.is_some() || usage_cache_creation.is_some() {
+                    format!(
+                        " cache_read: {} cache_write: {}",
+                        cache_read, cache_creation
+                    )
+                } else {
+                    String::new()
+                };
+                print!(
+                    "\n[Tokens] upload: {} download: {}{}\n",
+                    input, output, cache_str
+                );
                 io::stdout().flush()?;
             }
 
@@ -581,6 +621,7 @@ impl Agent {
             if !text_content.is_empty() {
                 content_blocks.push(ContentBlock::Text {
                     text: text_content.clone(),
+                    cache_control: None,
                 });
             }
             for tc in &tool_calls {
@@ -837,6 +878,8 @@ impl Agent {
             let mut current_tool_input = String::new();
             let mut usage_input: Option<u64> = None;
             let mut usage_output: Option<u64> = None;
+            let mut usage_cache_read: Option<u64> = None;
+            let mut usage_cache_creation: Option<u64> = None;
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
             // Track tool_use_id -> name for tool results
@@ -916,12 +959,20 @@ impl Agent {
                     StreamEvent::TokenUsage {
                         input_tokens,
                         output_tokens,
+                        cache_read_input_tokens,
+                        cache_creation_input_tokens,
                     } => {
                         if let Some(input) = input_tokens {
                             usage_input = Some(input);
                         }
                         if let Some(output) = output_tokens {
                             usage_output = Some(output);
+                        }
+                        if cache_read_input_tokens.is_some() {
+                            usage_cache_read = cache_read_input_tokens;
+                        }
+                        if cache_creation_input_tokens.is_some() {
+                            usage_cache_creation = cache_creation_input_tokens;
                         }
                     }
                     StreamEvent::MessageEnd { .. } => {}
@@ -937,10 +988,16 @@ impl Agent {
             }
 
             // Send token usage
-            if usage_input.is_some() || usage_output.is_some() {
+            if usage_input.is_some()
+                || usage_output.is_some()
+                || usage_cache_read.is_some()
+                || usage_cache_creation.is_some()
+            {
                 let _ = event_tx.send(ServerEvent::TokenUsage {
                     input: usage_input.unwrap_or(0),
                     output: usage_output.unwrap_or(0),
+                    cache_read_input: usage_cache_read,
+                    cache_creation_input: usage_cache_creation,
                 });
             }
 
@@ -949,6 +1006,7 @@ impl Agent {
             if !text_content.is_empty() {
                 content_blocks.push(ContentBlock::Text {
                     text: text_content.clone(),
+                    cache_control: None,
                 });
             }
             for tc in &tool_calls {
@@ -1107,6 +1165,8 @@ impl Agent {
             let mut current_tool_input = String::new();
             let mut usage_input: Option<u64> = None;
             let mut usage_output: Option<u64> = None;
+            let mut usage_cache_read: Option<u64> = None;
+            let mut usage_cache_creation: Option<u64> = None;
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
             let mut tool_id_to_name: std::collections::HashMap<String, String> =
@@ -1183,12 +1243,20 @@ impl Agent {
                     StreamEvent::TokenUsage {
                         input_tokens,
                         output_tokens,
+                        cache_read_input_tokens,
+                        cache_creation_input_tokens,
                     } => {
                         if let Some(input) = input_tokens {
                             usage_input = Some(input);
                         }
                         if let Some(output) = output_tokens {
                             usage_output = Some(output);
+                        }
+                        if cache_read_input_tokens.is_some() {
+                            usage_cache_read = cache_read_input_tokens;
+                        }
+                        if cache_creation_input_tokens.is_some() {
+                            usage_cache_creation = cache_creation_input_tokens;
                         }
                     }
                     StreamEvent::MessageEnd { .. } => {}
@@ -1203,10 +1271,16 @@ impl Agent {
                 }
             }
 
-            if usage_input.is_some() || usage_output.is_some() {
+            if usage_input.is_some()
+                || usage_output.is_some()
+                || usage_cache_read.is_some()
+                || usage_cache_creation.is_some()
+            {
                 let _ = event_tx.send(ServerEvent::TokenUsage {
                     input: usage_input.unwrap_or(0),
                     output: usage_output.unwrap_or(0),
+                    cache_read_input: usage_cache_read,
+                    cache_creation_input: usage_cache_creation,
                 });
             }
 
@@ -1214,6 +1288,7 @@ impl Agent {
             if !text_content.is_empty() {
                 content_blocks.push(ContentBlock::Text {
                     text: text_content.clone(),
+                    cache_control: None,
                 });
             }
             for tc in &tool_calls {

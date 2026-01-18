@@ -162,7 +162,6 @@ impl FrameBuffer {
     }
 }
 
-
 /// Enable visual debugging
 pub fn enable() {
     VISUAL_DEBUG_ENABLED.store(true, Ordering::SeqCst);
@@ -222,11 +221,7 @@ pub fn dump_to_file() -> std::io::Result<PathBuf> {
     let mut file = File::create(&path)?;
 
     writeln!(file, "=== JCODE VISUAL DEBUG DUMP ===")?;
-    writeln!(
-        file,
-        "Generated: {:?}",
-        std::time::SystemTime::now()
-    )?;
+    writeln!(file, "Generated: {:?}", std::time::SystemTime::now())?;
     writeln!(file, "Total frames captured: {}", buffer.next_frame_id)?;
     writeln!(file, "Frames in buffer: {}", buffer.frames.len())?;
     writeln!(file)?;
@@ -234,7 +229,11 @@ pub fn dump_to_file() -> std::io::Result<PathBuf> {
     // First, show frames with anomalies
     let anomaly_frames = buffer.frames_with_anomalies();
     if !anomaly_frames.is_empty() {
-        writeln!(file, "=== FRAMES WITH ANOMALIES ({}) ===", anomaly_frames.len())?;
+        writeln!(
+            file,
+            "=== FRAMES WITH ANOMALIES ({}) ===",
+            anomaly_frames.len()
+        )?;
         for frame in anomaly_frames {
             write_frame(&mut file, frame)?;
         }
@@ -268,7 +267,11 @@ fn write_frame(file: &mut File, frame: &FrameCapture) -> std::io::Result<()> {
     writeln!(file, "  scroll_offset: {}", frame.state.scroll_offset)?;
     writeln!(file, "  queued_count: {}", frame.state.queued_count)?;
     writeln!(file, "  message_count: {}", frame.state.message_count)?;
-    writeln!(file, "  streaming_text_len: {}", frame.state.streaming_text_len)?;
+    writeln!(
+        file,
+        "  streaming_text_len: {}",
+        frame.state.streaming_text_len
+    )?;
     writeln!(file, "  has_suggestions: {}", frame.state.has_suggestions)?;
     writeln!(file, "  status: {}", frame.state.status)?;
 

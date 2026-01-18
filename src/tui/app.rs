@@ -36,9 +36,12 @@ fn parse_rate_limit_error(error: &str) -> Option<Duration> {
     let error_lower = error.to_lowercase();
 
     // Check if this is a rate limit error
-    if !error_lower.contains("rate limit") && !error_lower.contains("rate_limit")
-        && !error_lower.contains("429") && !error_lower.contains("too many requests")
-        && !error_lower.contains("hit your limit") {
+    if !error_lower.contains("rate limit")
+        && !error_lower.contains("rate_limit")
+        && !error_lower.contains("429")
+        && !error_lower.contains("too many requests")
+        && !error_lower.contains("hit your limit")
+    {
         return None;
     }
 
@@ -48,7 +51,10 @@ fn parse_rate_limit_error(error: &str) -> Option<Duration> {
     if let Some(idx) = error_lower.find("retry") {
         let after = &error_lower[idx..];
         for word in after.split_whitespace() {
-            if let Ok(secs) = word.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u64>() {
+            if let Ok(secs) = word
+                .trim_matches(|c: char| !c.is_ascii_digit())
+                .parse::<u64>()
+            {
                 if secs > 0 && secs < 86400 {
                     return Some(Duration::from_secs(secs));
                 }
@@ -74,7 +80,10 @@ fn parse_rate_limit_error(error: &str) -> Option<Duration> {
     if let Some(idx) = error_lower.find("reset") {
         let after = &error_lower[idx..];
         for word in after.split_whitespace() {
-            if let Ok(secs) = word.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u64>() {
+            if let Ok(secs) = word
+                .trim_matches(|c: char| !c.is_ascii_digit())
+                .parse::<u64>()
+            {
                 if secs > 0 && secs < 86400 {
                     return Some(Duration::from_secs(secs));
                 }
@@ -197,6 +206,8 @@ pub struct App {
     // Live token usage (per turn)
     streaming_input_tokens: u64,
     streaming_output_tokens: u64,
+    streaming_cache_read_tokens: Option<u64>,
+    streaming_cache_creation_tokens: Option<u64>,
     // Total session token usage (accumulated across all turns)
     total_input_tokens: u64,
     total_output_tokens: u64,
@@ -277,6 +288,8 @@ pub struct App {
     tab_completion_state: Option<(String, usize)>,
     // Time when app started (for startup animations)
     app_started: Instant,
+    // Binary modification time when client started (for smart reload detection)
+    client_binary_mtime: Option<std::time::SystemTime>,
     // Rate limit state: when rate limit resets (if rate limited)
     rate_limit_reset: Option<Instant>,
     // Message that was being sent when rate limit hit (to auto-retry)
@@ -332,6 +345,8 @@ impl App {
             queued_messages: Vec::new(),
             streaming_input_tokens: 0,
             streaming_output_tokens: 0,
+            streaming_cache_read_tokens: None,
+            streaming_cache_creation_tokens: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             context_limit: 200_000, // Claude's context window
@@ -374,6 +389,10 @@ impl App {
             queue_mode: true, // Default to queue mode (wait until done)
             tab_completion_state: None,
             app_started: Instant::now(),
+            client_binary_mtime: std::env::current_exe()
+                .ok()
+                .and_then(|p| std::fs::metadata(&p).ok())
+                .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
             rate_limit_pending_message: None,
             reload_info: Vec::new(),
@@ -393,6 +412,25 @@ impl App {
     /// Get the current session ID
     pub fn session_id(&self) -> &str {
         &self.session.id
+    }
+
+    /// Check if there's a newer binary on disk than when we started
+    fn has_newer_binary(&self) -> bool {
+        let Some(startup_mtime) = self.client_binary_mtime else {
+            return false;
+        };
+
+        // Check the release binary in the repo
+        if let Some(repo_dir) = crate::build::get_repo_dir() {
+            let exe = repo_dir.join("target/release/jcode");
+            if let Ok(metadata) = std::fs::metadata(&exe) {
+                if let Ok(current_mtime) = metadata.modified() {
+                    return current_mtime > startup_mtime;
+                }
+            }
+        }
+
+        false
     }
 
     /// Initialize MCP servers (call after construction)
@@ -453,7 +491,7 @@ impl App {
                     .content
                     .iter()
                     .filter_map(|c| {
-                        if let ContentBlock::Text { text } = c {
+                        if let ContentBlock::Text { text, .. } = c {
                             Some(text.clone())
                         } else {
                             None
@@ -827,7 +865,7 @@ impl App {
     }
 
     /// Run the TUI in remote mode, connecting to a server
-    pub async fn run_remote(mut self, mut terminal: DefaultTerminal) -> Result<Option<String>> {
+    pub async fn run_remote(mut self, mut terminal: DefaultTerminal) -> Result<RunResult> {
         use super::backend::RemoteConnection;
 
         let mut event_stream = EventStream::new();
@@ -879,8 +917,10 @@ impl App {
                     String::new()
                 };
 
-                self.display_messages
-                    .push(DisplayMessage::system(format!("✓ Reconnected successfully.{}", reload_details)));
+                self.display_messages.push(DisplayMessage::system(format!(
+                    "✓ Reconnected successfully.{}",
+                    reload_details
+                )));
 
                 // Queue message to notify the agent about the reload
                 if !self.reload_info.is_empty() {
@@ -993,7 +1033,11 @@ impl App {
             }
         }
 
-        Ok(self.reload_requested.take())
+        Ok(RunResult {
+            reload_session: self.reload_requested.take(),
+            rebuild_session: self.rebuild_requested.take(),
+            exit_code: self.requested_exit_code,
+        })
     }
 
     /// Handle a server event in remote mode
@@ -1081,9 +1125,20 @@ impl App {
                 self.streaming_tool_calls.clear();
                 self.status = ProcessingStatus::Streaming;
             }
-            ServerEvent::TokenUsage { input, output } => {
+            ServerEvent::TokenUsage {
+                input,
+                output,
+                cache_read_input,
+                cache_creation_input,
+            } => {
                 self.streaming_input_tokens = input;
                 self.streaming_output_tokens = output;
+                if cache_read_input.is_some() {
+                    self.streaming_cache_read_tokens = cache_read_input;
+                }
+                if cache_creation_input.is_some() {
+                    self.streaming_cache_creation_tokens = cache_creation_input;
+                }
             }
             ServerEvent::Done { id } => {
                 // Only process Done for our current message request
@@ -1140,7 +1195,12 @@ impl App {
                     tool_data: None,
                 });
             }
-            ServerEvent::ReloadProgress { step, message, success, output } => {
+            ServerEvent::ReloadProgress {
+                step,
+                message,
+                success,
+                output,
+            } => {
                 // Format the progress message with optional output
                 let status_icon = match success {
                     Some(true) => "✓",
@@ -1173,7 +1233,8 @@ impl App {
                 }
 
                 // Update status notice
-                self.status_notice = Some((format!("Reload: {}", message), std::time::Instant::now()));
+                self.status_notice =
+                    Some((format!("Reload: {}", message), std::time::Instant::now()));
             }
             ServerEvent::History {
                 messages,
@@ -1408,9 +1469,75 @@ impl App {
                     self.cursor_pos = 0;
                     let trimmed = expanded.trim();
 
-                    // Handle /reload
+                    // Handle /reload - smart reload: client and/or server if newer binary exists
                     if trimmed == "/reload" {
+                        let client_needs_reload = self.has_newer_binary();
+                        // TODO: Check if server needs reload (would need protocol support)
+                        let server_needs_reload = client_needs_reload; // Assume same binary
+
+                        if !client_needs_reload && !server_needs_reload {
+                            self.display_messages.push(DisplayMessage::system(
+                                "No newer binary found. Nothing to reload.".to_string(),
+                            ));
+                            return Ok(());
+                        }
+
+                        // Reload server first (if needed), then client
+                        if server_needs_reload {
+                            self.display_messages.push(DisplayMessage::system(
+                                "Reloading server with newer binary...".to_string(),
+                            ));
+                            remote.reload().await?;
+                        }
+
+                        if client_needs_reload {
+                            self.display_messages.push(DisplayMessage::system(
+                                "Reloading client with newer binary...".to_string(),
+                            ));
+                            let session_id = self
+                                .remote_session_id
+                                .clone()
+                                .unwrap_or_else(|| crate::id::new_id("ses"));
+                            self.reload_requested = Some(session_id);
+                            self.should_quit = true;
+                        }
+                        return Ok(());
+                    }
+
+                    // Handle /client-reload - force reload CLIENT binary
+                    if trimmed == "/client-reload" {
+                        self.display_messages.push(DisplayMessage::system(
+                            "Reloading client...".to_string(),
+                        ));
+                        let session_id = self
+                            .remote_session_id
+                            .clone()
+                            .unwrap_or_else(|| crate::id::new_id("ses"));
+                        self.reload_requested = Some(session_id);
+                        self.should_quit = true;
+                        return Ok(());
+                    }
+
+                    // Handle /server-reload - force reload SERVER (keeps client running)
+                    if trimmed == "/server-reload" {
+                        self.display_messages.push(DisplayMessage::system(
+                            "Reloading server...".to_string(),
+                        ));
                         remote.reload().await?;
+                        return Ok(());
+                    }
+
+                    // Handle /rebuild - rebuild and reload CLIENT binary
+                    if trimmed == "/rebuild" {
+                        self.display_messages.push(DisplayMessage::system(
+                            "Rebuilding (git pull + cargo build + tests)...".to_string(),
+                        ));
+                        let session_id = self
+                            .remote_session_id
+                            .clone()
+                            .unwrap_or_else(|| crate::id::new_id("ses"));
+                        self.rebuild_requested = Some(session_id);
+                        self.should_quit = true;
                         return Ok(());
                     }
 
@@ -1807,8 +1934,7 @@ impl App {
             KeyCode::Up | KeyCode::PageUp => {
                 // Scroll up (increase offset from bottom)
                 // Use generous estimate - UI will clamp to actual content
-                let max_estimate =
-                    self.display_messages.len() * 100 + self.streaming_text.len();
+                let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
                 let inc = if code == KeyCode::PageUp { 10 } else { 1 };
                 self.scroll_offset = (self.scroll_offset + inc).min(max_estimate);
             }
@@ -1901,6 +2027,12 @@ impl App {
                     )
                 })
                 .unwrap_or_default();
+            let remote_reload_help = if self.is_remote {
+                "\n                     • `/client-reload` - Force reload client binary\n\
+                     • `/server-reload` - Force reload server binary"
+            } else {
+                ""
+            };
             self.display_messages.push(DisplayMessage {
                 role: "system".to_string(),
                 content: format!(
@@ -1908,8 +2040,8 @@ impl App {
                      • `/help` - Show this help\n\
                      • `/model` - List available models\n\
                      • `/model <name>` - Switch to a different model\n\
-                     • `/reload` - Restart with existing binary (no rebuild)\n\
-                     • `/rebuild` - Full rebuild (git pull + cargo build + tests)\n\
+                     • `/reload` - Smart reload (client/server if newer binary exists)\n\
+                     • `/rebuild` - Full rebuild (git pull + cargo build + tests){}\n\
                      • `/clear` - Clear conversation (Ctrl+L)\n\
                      • `/debug-visual` - Enable visual debugging for TUI issues\n\
                      • `/<skill>` - Activate a skill\n\n\
@@ -1924,6 +2056,7 @@ impl App {
                      • `Ctrl+K` - Kill to end of line\n\
                      {}\n\
                      {}",
+                    remote_reload_help,
                     self.skills
                         .list()
                         .iter()
@@ -2116,10 +2249,14 @@ impl App {
                 .count();
 
             // Session duration
-            let session_duration = chrono::Utc::now()
-                .signed_duration_since(self.session.created_at);
+            let session_duration =
+                chrono::Utc::now().signed_duration_since(self.session.created_at);
             let duration_str = if session_duration.num_hours() > 0 {
-                format!("{}h {}m", session_duration.num_hours(), session_duration.num_minutes() % 60)
+                format!(
+                    "{}h {}m",
+                    session_duration.num_hours(),
+                    session_duration.num_minutes() % 60
+                )
             } else if session_duration.num_minutes() > 0 {
                 format!("{}m", session_duration.num_minutes())
             } else {
@@ -2129,12 +2266,19 @@ impl App {
             // Build info string
             let mut info = String::new();
             info.push_str(&format!("**Version:** {}\n", version));
-            info.push_str(&format!("**Session:** {} ({})\n",
+            info.push_str(&format!(
+                "**Session:** {} ({})\n",
                 self.session.short_name.as_deref().unwrap_or("unnamed"),
-                &self.session.id[..8]));
-            info.push_str(&format!("**Duration:** {} ({} turns)\n", duration_str, turn_count));
-            info.push_str(&format!("**Tokens:** ↑{} ↓{}\n",
-                self.total_input_tokens, self.total_output_tokens));
+                &self.session.id[..8]
+            ));
+            info.push_str(&format!(
+                "**Duration:** {} ({} turns)\n",
+                duration_str, turn_count
+            ));
+            info.push_str(&format!(
+                "**Tokens:** ↑{} ↓{}\n",
+                self.total_input_tokens, self.total_output_tokens
+            ));
             info.push_str(&format!("**Terminal:** {}\n", terminal_size));
             info.push_str(&format!("**CWD:** {}\n", cwd));
 
@@ -2143,7 +2287,10 @@ impl App {
                 info.push_str(&format!("**Model:** {}\n", model));
             }
             if let Some(ref provider_id) = self.provider_session_id {
-                info.push_str(&format!("**Provider Session:** {}...\n", &provider_id[..provider_id.len().min(16)]));
+                info.push_str(&format!(
+                    "**Provider Session:** {}...\n",
+                    &provider_id[..provider_id.len().min(16)]
+                ));
             }
 
             // Self-dev specific
@@ -2174,9 +2321,21 @@ impl App {
         }
 
         if trimmed == "/reload" {
+            // Smart reload: check if there's a newer binary
+            if !self.has_newer_binary() {
+                self.display_messages.push(DisplayMessage {
+                    role: "system".to_string(),
+                    content: "No newer binary found. Nothing to reload.\nUse /rebuild to build a new version.".to_string(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+                return;
+            }
             self.display_messages.push(DisplayMessage {
                 role: "system".to_string(),
-                content: "Reloading jcode with existing binary...".to_string(),
+                content: "Reloading with newer binary...".to_string(),
                 tool_calls: vec![],
                 duration_secs: None,
                 title: None,
@@ -2237,7 +2396,7 @@ impl App {
         // Add user message to display (show placeholder to user, not full paste)
         self.display_messages.push(DisplayMessage {
             role: "user".to_string(),
-            content: raw_input,  // Show placeholder to user (condensed view)
+            content: raw_input, // Show placeholder to user (condensed view)
             tool_calls: vec![],
             duration_secs: None,
             title: None,
@@ -2249,6 +2408,7 @@ impl App {
             Role::User,
             vec![ContentBlock::Text {
                 text: input.clone(),
+                cache_control: None,
             }],
         );
         let _ = self.session.save();
@@ -2261,6 +2421,8 @@ impl App {
         self.streaming_tool_calls.clear();
         self.streaming_input_tokens = 0;
         self.streaming_output_tokens = 0;
+        self.streaming_cache_read_tokens = None;
+        self.streaming_cache_creation_tokens = None;
         self.processing_started = Some(Instant::now());
         self.pending_turn = true;
     }
@@ -2287,14 +2449,21 @@ impl App {
             });
 
             self.messages.push(Message::user(&combined));
-            self.session
-                .add_message(Role::User, vec![ContentBlock::Text { text: combined }]);
+            self.session.add_message(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: combined,
+                    cache_control: None,
+                }],
+            );
             let _ = self.session.save();
             self.streaming_text.clear();
             self.stream_buffer.clear();
             self.streaming_tool_calls.clear();
             self.streaming_input_tokens = 0;
             self.streaming_output_tokens = 0;
+            self.streaming_cache_read_tokens = None;
+            self.streaming_cache_creation_tokens = None;
             self.processing_started = Some(Instant::now());
             self.status = ProcessingStatus::Sending;
 
@@ -2451,6 +2620,8 @@ impl App {
                     StreamEvent::TokenUsage {
                         input_tokens,
                         output_tokens,
+                        cache_read_input_tokens,
+                        cache_creation_input_tokens,
                     } => {
                         if let Some(input) = input_tokens {
                             self.streaming_input_tokens = input;
@@ -2459,6 +2630,12 @@ impl App {
                         }
                         if let Some(output) = output_tokens {
                             self.streaming_output_tokens = output;
+                        }
+                        if cache_read_input_tokens.is_some() {
+                            self.streaming_cache_read_tokens = cache_read_input_tokens;
+                        }
+                        if cache_creation_input_tokens.is_some() {
+                            self.streaming_cache_creation_tokens = cache_creation_input_tokens;
                         }
                     }
                     StreamEvent::MessageEnd { .. } => {
@@ -2471,7 +2648,10 @@ impl App {
                             break;
                         }
                     }
-                    StreamEvent::Error { message, retry_after_secs } => {
+                    StreamEvent::Error {
+                        message,
+                        retry_after_secs,
+                    } => {
                         // Check if this is a rate limit error
                         // First try the explicit retry_after_secs, then fall back to parsing message
                         let reset_duration = retry_after_secs
@@ -2548,6 +2728,7 @@ impl App {
             if !text_content.is_empty() {
                 content_blocks.push(ContentBlock::Text {
                     text: text_content.clone(),
+                    cache_control: None,
                 });
             }
             for tc in &tool_calls {
@@ -2848,6 +3029,7 @@ impl App {
                                             if !text_content.is_empty() {
                                                 content_blocks.push(ContentBlock::Text {
                                                     text: text_content.clone(),
+                                                    cache_control: None,
                                                 });
                                             }
                                             for tc in &tool_calls {
@@ -2992,7 +3174,12 @@ impl App {
                                             current_tool_input.clear();
                                         }
                                     }
-                                    StreamEvent::TokenUsage { input_tokens, output_tokens } => {
+                                    StreamEvent::TokenUsage {
+                                        input_tokens,
+                                        output_tokens,
+                                        cache_read_input_tokens,
+                                        cache_creation_input_tokens,
+                                    } => {
                                         if let Some(input) = input_tokens {
                                             self.streaming_input_tokens = input;
                                             self.check_context_warning(input);
@@ -3000,9 +3187,19 @@ impl App {
                                         if let Some(output) = output_tokens {
                                             self.streaming_output_tokens = output;
                                         }
+                                        if cache_read_input_tokens.is_some() {
+                                            self.streaming_cache_read_tokens = cache_read_input_tokens;
+                                        }
+                                        if cache_creation_input_tokens.is_some() {
+                                            self.streaming_cache_creation_tokens =
+                                                cache_creation_input_tokens;
+                                        }
                                         self.broadcast_debug(super::backend::DebugEvent::TokenUsage {
                                             input_tokens: self.streaming_input_tokens,
                                             output_tokens: self.streaming_output_tokens,
+                                            cache_read_input_tokens: self.streaming_cache_read_tokens,
+                                            cache_creation_input_tokens: self
+                                                .streaming_cache_creation_tokens,
                                         });
                                     }
                                     StreamEvent::MessageEnd { .. } => {
@@ -3099,6 +3296,7 @@ impl App {
             if !text_content.is_empty() {
                 content_blocks.push(ContentBlock::Text {
                     text: text_content.clone(),
+                    cache_control: None,
                 });
             }
             for tc in &tool_calls {
@@ -3468,10 +3666,16 @@ impl App {
             ("/clear".into(), "Clear conversation history"),
             ("/version".into(), "Show current version"),
             ("/info".into(), "Show session info and tokens"),
-            ("/reload".into(), "Restart with existing binary"),
+            ("/reload".into(), "Smart reload (if newer binary exists)"),
             ("/rebuild".into(), "Full rebuild (git pull + build + tests)"),
             ("/quit".into(), "Exit jcode"),
         ];
+
+        // Add client-reload and server-reload commands in remote mode
+        if self.is_remote {
+            commands.push(("/client-reload".into(), "Force reload client binary"));
+            commands.push(("/server-reload".into(), "Force reload server binary"));
+        }
 
         // Add skills as commands
         let skills = self.skills.list();
@@ -3791,6 +3995,8 @@ impl App {
             session_id: self.provider_session_id.clone(),
             input_tokens: self.streaming_input_tokens,
             output_tokens: self.streaming_output_tokens,
+            cache_read_input_tokens: self.streaming_cache_read_tokens,
+            cache_creation_input_tokens: self.streaming_cache_creation_tokens,
             queued_messages: self.queued_messages.clone(),
         }
     }
@@ -3931,6 +4137,13 @@ impl super::TuiState for App {
 
     fn streaming_tokens(&self) -> (u64, u64) {
         (self.streaming_input_tokens, self.streaming_output_tokens)
+    }
+
+    fn streaming_cache_tokens(&self) -> (Option<u64>, Option<u64>) {
+        (
+            self.streaming_cache_read_tokens,
+            self.streaming_cache_creation_tokens,
+        )
     }
 
     fn streaming_tool_calls(&self) -> Vec<ToolCall> {
@@ -4387,7 +4600,7 @@ mod tests {
         // Model receives expanded content (actual pasted text)
         assert_eq!(app.messages.len(), 1);
         match &app.messages[0].content[0] {
-            crate::message::ContentBlock::Text { text } => {
+            crate::message::ContentBlock::Text { text, .. } => {
                 assert_eq!(text, "A: pasted content B");
             }
             _ => panic!("Expected Text content block"),
@@ -4417,7 +4630,7 @@ mod tests {
         );
         // Model receives expanded content
         match &app.messages[0].content[0] {
-            crate::message::ContentBlock::Text { text } => {
+            crate::message::ContentBlock::Text { text, .. } => {
                 assert_eq!(text, "first second\nline");
             }
             _ => panic!("Expected Text content block"),
@@ -4436,6 +4649,7 @@ mod tests {
             Role::User,
             vec![ContentBlock::Text {
                 text: "test message".to_string(),
+                cache_control: None,
             }],
         );
         session.provider_session_id = Some("fake-uuid".to_string());

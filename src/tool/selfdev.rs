@@ -98,7 +98,10 @@ impl SelfDevTool {
 
         // Update manifest - set as canary, keep stable unchanged
         let mut manifest = build::BuildManifest::load()?;
-        let stable_hash = manifest.stable.clone().unwrap_or_else(|| "none".to_string());
+        let stable_hash = manifest
+            .stable
+            .clone()
+            .unwrap_or_else(|| "none".to_string());
         manifest.canary = Some(hash.clone());
         manifest.canary_status = Some(build::CanaryStatus::Testing);
         manifest.save()?;
@@ -156,10 +159,7 @@ impl SelfDevTool {
 
         // Current running version
         status.push_str("## Current Version\n\n");
-        status.push_str(&format!(
-            "**Running:** jcode {}\n",
-            env!("JCODE_VERSION")
-        ));
+        status.push_str(&format!("**Running:** jcode {}\n", env!("JCODE_VERSION")));
 
         // Working tree status
         if let Some(repo_dir) = build::get_repo_dir() {

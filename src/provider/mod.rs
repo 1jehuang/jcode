@@ -53,13 +53,9 @@ pub trait Provider: Send + Sync {
 }
 
 /// Available models (shown in /model list)
-pub const ALL_CLAUDE_MODELS: &[&str] = &[
-    "claude-opus-4-5-20251101",
-];
+pub const ALL_CLAUDE_MODELS: &[&str] = &["claude-opus-4-5-20251101"];
 
-pub const ALL_OPENAI_MODELS: &[&str] = &[
-    "gpt-5.2-codex",
-];
+pub const ALL_OPENAI_MODELS: &[&str] = &["gpt-5.2-codex"];
 
 /// Detect which provider a model belongs to
 pub fn provider_for_model(model: &str) -> Option<&'static str> {
@@ -159,14 +155,20 @@ impl Provider for MultiProvider {
         match self.active_provider() {
             ActiveProvider::Claude => {
                 if let Some(ref claude) = self.claude {
-                    claude.complete(messages, tools, system, resume_session_id).await
+                    claude
+                        .complete(messages, tools, system, resume_session_id)
+                        .await
                 } else {
-                    Err(anyhow::anyhow!("Claude credentials not available. Run `claude` to log in."))
+                    Err(anyhow::anyhow!(
+                        "Claude credentials not available. Run `claude` to log in."
+                    ))
                 }
             }
             ActiveProvider::OpenAI => {
                 if let Some(ref openai) = self.openai {
-                    openai.complete(messages, tools, system, resume_session_id).await
+                    openai
+                        .complete(messages, tools, system, resume_session_id)
+                        .await
                 } else {
                     Err(anyhow::anyhow!("OpenAI credentials not available. Run `jcode login --provider openai` to log in."))
                 }
@@ -183,12 +185,16 @@ impl Provider for MultiProvider {
 
     fn model(&self) -> String {
         match self.active_provider() {
-            ActiveProvider::Claude => {
-                self.claude.as_ref().map(|c| c.model()).unwrap_or_else(|| "claude-opus-4-5-20251101".to_string())
-            }
-            ActiveProvider::OpenAI => {
-                self.openai.as_ref().map(|o| o.model()).unwrap_or_else(|| "gpt-5.2-codex".to_string())
-            }
+            ActiveProvider::Claude => self
+                .claude
+                .as_ref()
+                .map(|c| c.model())
+                .unwrap_or_else(|| "claude-opus-4-5-20251101".to_string()),
+            ActiveProvider::OpenAI => self
+                .openai
+                .as_ref()
+                .map(|o| o.model())
+                .unwrap_or_else(|| "gpt-5.2-codex".to_string()),
         }
     }
 
@@ -252,12 +258,16 @@ impl Provider for MultiProvider {
 
     fn handles_tools_internally(&self) -> bool {
         match self.active_provider() {
-            ActiveProvider::Claude => {
-                self.claude.as_ref().map(|c| c.handles_tools_internally()).unwrap_or(false)
-            }
-            ActiveProvider::OpenAI => {
-                self.openai.as_ref().map(|o| o.handles_tools_internally()).unwrap_or(false)
-            }
+            ActiveProvider::Claude => self
+                .claude
+                .as_ref()
+                .map(|c| c.handles_tools_internally())
+                .unwrap_or(false),
+            ActiveProvider::OpenAI => self
+                .openai
+                .as_ref()
+                .map(|o| o.handles_tools_internally())
+                .unwrap_or(false),
         }
     }
 }

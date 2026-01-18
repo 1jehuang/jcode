@@ -98,8 +98,12 @@ impl Tool for CommunicateTool {
 
         match params.action.as_str() {
             "share" => {
-                let key = params.key.ok_or_else(|| anyhow::anyhow!("'key' is required for share action"))?;
-                let value = params.value.ok_or_else(|| anyhow::anyhow!("'value' is required for share action"))?;
+                let key = params
+                    .key
+                    .ok_or_else(|| anyhow::anyhow!("'key' is required for share action"))?;
+                let value = params
+                    .value
+                    .ok_or_else(|| anyhow::anyhow!("'value' is required for share action"))?;
 
                 let request = json!({
                     "type": "comm_share",
@@ -132,16 +136,24 @@ impl Tool for CommunicateTool {
                             if entries.is_empty() {
                                 Ok(ToolOutput::new("No shared context found."))
                             } else {
-                                let mut output = String::from("Shared context from other agents:\n\n");
+                                let mut output =
+                                    String::from("Shared context from other agents:\n\n");
                                 for entry in entries {
-                                    let key = entry.get("key").and_then(|k| k.as_str()).unwrap_or("?");
-                                    let value = entry.get("value").and_then(|v| v.as_str()).unwrap_or("?");
+                                    let key =
+                                        entry.get("key").and_then(|k| k.as_str()).unwrap_or("?");
+                                    let value =
+                                        entry.get("value").and_then(|v| v.as_str()).unwrap_or("?");
                                     let from = entry
                                         .get("from_name")
                                         .and_then(|f| f.as_str())
-                                        .or_else(|| entry.get("from_session").and_then(|f| f.as_str()))
+                                        .or_else(|| {
+                                            entry.get("from_session").and_then(|f| f.as_str())
+                                        })
                                         .unwrap_or("unknown");
-                                    output.push_str(&format!("  {} (from {}): {}\n", key, from, value));
+                                    output.push_str(&format!(
+                                        "  {} (from {}): {}\n",
+                                        key, from, value
+                                    ));
                                 }
                                 Ok(ToolOutput::new(output))
                             }
@@ -154,7 +166,9 @@ impl Tool for CommunicateTool {
             }
 
             "message" => {
-                let message = params.message.ok_or_else(|| anyhow::anyhow!("'message' is required for message action"))?;
+                let message = params
+                    .message
+                    .ok_or_else(|| anyhow::anyhow!("'message' is required for message action"))?;
 
                 let request = json!({
                     "type": "comm_message",
