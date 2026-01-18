@@ -727,6 +727,10 @@ impl TuiState for ClientApp {
         &self.queued_messages
     }
 
+    fn interleave_message(&self) -> Option<&str> {
+        None
+    }
+
     fn scroll_offset(&self) -> usize {
         self.scroll_offset
     }

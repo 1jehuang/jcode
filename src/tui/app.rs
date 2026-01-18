@@ -4180,6 +4180,10 @@ impl super::TuiState for App {
         &self.queued_messages
     }
 
+    fn interleave_message(&self) -> Option<&str> {
+        self.interleave_message.as_deref()
+    }
+
     fn scroll_offset(&self) -> usize {
         self.scroll_offset
     }
