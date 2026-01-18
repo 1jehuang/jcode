@@ -416,6 +416,11 @@ fn format_status_for_debug(app: &dyn TuiState) -> String {
     }
 }
 
+struct PreparedMessages {
+    wrapped_lines: Vec<Line<'static>>,
+    wrapped_user_indices: Vec<usize>,
+}
+
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     let area = frame.area();
 
@@ -451,7 +456,8 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         .filter(|m| m.role == "user")
         .count();
 
-    let content_height = estimate_content_height(app, area.width);
+    let prepared = prepare_messages(app, area.width);
+    let content_height = prepared.wrapped_lines.len().max(1) as u16;
     let fixed_height = 1 + queued_height + input_height; // status + queued + input
     let available_height = area.height;
 
@@ -531,7 +537,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         capture.rendered_text.status_line = format_status_for_debug(app);
     }
 
-    draw_messages(frame, app, chunks[0]);
+    let visible_free_widths = draw_messages(frame, app, chunks[0], &prepared);
     draw_status(frame, app, chunks[1]);
     if queued_height > 0 {
         draw_queued(frame, app, chunks[2], user_count + 1);
@@ -547,15 +553,9 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     // Draw info widget overlay (if there's space and content)
     let widget_data = app.info_widget_data();
     if !widget_data.is_empty() {
-        // Estimate max content width based on messages
-        // For now, use a simple heuristic: 70% of terminal width or less
-        let estimated_content_width = (area.width as f32 * 0.7) as u16;
-
-        if let Some(widget_rect) = info_widget::calculate_layout(
-            chunks[0], // messages area
-            &[estimated_content_width],
-            &widget_data,
-        ) {
+        if let Some(widget_rect) =
+            info_widget::calculate_layout(chunks[0], &visible_free_widths, &widget_data)
+        {
             info_widget::render(frame, widget_rect, &widget_data);
         }
     }
@@ -566,108 +566,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     }
 }
 
-/// Estimate how many lines the message content will take
-fn estimate_content_height(app: &dyn TuiState, width: u16) -> u16 {
-    let width = width as usize;
-    if width == 0 {
-        return 1;
-    }
-
-    let mut lines = 0u16;
-
-    // Header is always visible: agent name + model/build + context + changelog box (up to 7 lines) + blank = 11 lines minimum
-    lines += 11;
-    // Plus optional MCP line
-    if !app.mcp_servers().is_empty() {
-        lines += 1;
-    }
-    // Plus optional skills line
-    if !app.available_skills().is_empty() {
-        lines += 1;
-    }
-    // Plus optional server stats line
-    let client_count = app.connected_clients().unwrap_or(0);
-    let session_count = app.server_sessions().len();
-    if client_count > 0 || session_count > 1 {
-        lines += 1;
-    }
-
-    for msg in app.display_messages() {
-        // Spacing between messages
-        if lines > 0 && msg.role != "tool" {
-            lines += 1;
-        }
-
-        match msg.role.as_str() {
-            "user" => {
-                // User messages can wrap - estimate based on content length
-                // Format is "N› content" so add ~4 chars for prefix
-                let msg_len = msg.content.len() + 4;
-                let wrap_lines = (msg_len / width).max(1);
-                lines += wrap_lines as u16;
-            }
-            "assistant" => {
-                // Rough estimate: count newlines + wrap estimate
-                let content_lines = msg.content.lines().count().max(1);
-                let avg_line_len = msg.content.len() / content_lines.max(1);
-                let wrap_factor = if avg_line_len > width {
-                    (avg_line_len / width) + 1
-                } else {
-                    1
-                };
-                lines += (content_lines * wrap_factor) as u16;
-
-                // Tool badges
-                if !msg.tool_calls.is_empty() {
-                    lines += 1;
-                }
-                // Duration
-                if msg.duration_secs.is_some() {
-                    lines += 1;
-                }
-            }
-            "tool" => {
-                lines += 1;
-                // Diff lines for edit tools (only if diffs are shown)
-                if app.show_diffs() {
-                    if let Some(ref tc) = msg.tool_data {
-                        if tc.name == "edit" || tc.name == "Edit" {
-                            lines += 10; // Rough estimate for diff
-                        }
-                    }
-                }
-            }
-            _ => {
-                lines += 1;
-            }
-        }
-    }
-
-    // Streaming content
-    if app.is_processing() {
-        let streaming = app.streaming_text();
-        if !streaming.is_empty() {
-            // Estimate with wrapping
-            let content_lines = streaming.lines().count().max(1);
-            let avg_line_len = streaming.len() / content_lines.max(1);
-            let wrap_factor = if avg_line_len > width {
-                (avg_line_len / width) + 1
-            } else {
-                1
-            };
-            lines += (content_lines * wrap_factor) as u16;
-        }
-        // Active tool calls
-        lines += app.streaming_tool_calls().len() as u16;
-    }
-
-    // Add small buffer for estimation errors (prevents micro-scrolling)
-    lines += 2;
-
-    lines
-}
-
-fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
+fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
     let mut lines: Vec<Line> = Vec::new();
     let mut user_line_indices: Vec<usize> = Vec::new(); // Track which lines are user prompts
 
@@ -741,15 +640,15 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         Style::default().fg(DIM_COLOR),
     )));
 
-    // Line 3+: Context info (vertical list + summary bar)
+    // Line 3-4: Context info (labels + color-coded bar)
     let context_info = app.context_info();
     if context_info.total_chars > 0 {
-        lines.extend(render_context_bar(&context_info, area.width as usize));
+        lines.extend(render_context_bar(&context_info, width as usize));
     }
 
     // Line 4+: Recent changes in a box (from git log, embedded at build time)
     let changelog = env!("JCODE_CHANGELOG");
-    let term_width = area.width as usize;
+    let term_width = width as usize;
     if !changelog.is_empty() && term_width > 20 {
         let changelog_lines: Vec<&str> = changelog.lines().collect();
         if !changelog_lines.is_empty() {
@@ -897,7 +796,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             "user" => {
                 prompt_num += 1;
                 user_line_indices.push(lines.len()); // Track this line index
-                                                     // Calculate distance from input prompt (distance 0)
+                // Calculate distance from input prompt (distance 0)
                 let distance = total_prompts + pending_count + 1 - prompt_num;
                 let num_color = rainbow_prompt_color(distance);
                 // User messages: rainbow number, blue caret, bright text
@@ -910,7 +809,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             "assistant" => {
                 // AI messages: render markdown flush left
                 // Pass width for table rendering (leave some margin)
-                let content_width = area.width.saturating_sub(4) as usize;
+                let content_width = width.saturating_sub(4) as usize;
                 let md_lines =
                     markdown::render_markdown_with_width(&msg.content, Some(content_width));
                 for md_line in md_lines {
@@ -1104,7 +1003,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 lines.push(Line::from(""));
             }
             // Use markdown rendering to match final display
-            let content_width = area.width.saturating_sub(4) as usize;
+            let content_width = width.saturating_sub(4) as usize;
             let md_lines =
                 markdown::render_markdown_with_width(app.streaming_text(), Some(content_width));
             lines.extend(md_lines);
@@ -1113,8 +1012,8 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     }
 
     // Wrap lines and track which wrapped indices correspond to user lines
-    let full_width = area.width as usize;
-    let user_width = area.width.saturating_sub(2) as usize; // Leave margin for right bar
+    let full_width = width as usize;
+    let user_width = width.saturating_sub(2) as usize; // Leave margin for right bar
     let mut wrapped_user_indices: Vec<usize> = Vec::new();
     let mut wrapped_idx = 0usize;
 
@@ -1137,6 +1036,53 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         wrapped_idx += count;
     }
 
+    PreparedMessages {
+        wrapped_lines,
+        wrapped_user_indices,
+    }
+}
+
+fn compute_visible_free_widths(
+    lines: &[Line],
+    user_line_indices: &[usize],
+    scroll: usize,
+    area: Rect,
+) -> Vec<u16> {
+    let visible_height = area.height as usize;
+    let mut mask = vec![false; lines.len()];
+    for &idx in user_line_indices {
+        if idx < mask.len() {
+            mask[idx] = true;
+        }
+    }
+
+    let mut widths = Vec::with_capacity(visible_height);
+    for row in 0..visible_height {
+        let line_idx = scroll + row;
+        let free = if line_idx < lines.len() {
+            let mut used = lines[line_idx].width().min(area.width as usize) as u16;
+            if mask[line_idx] && area.width > 0 {
+                used = used.saturating_add(1).min(area.width);
+            }
+            area.width.saturating_sub(used)
+        } else {
+            area.width
+        };
+        widths.push(free);
+    }
+
+    widths
+}
+
+fn draw_messages(
+    frame: &mut Frame,
+    app: &dyn TuiState,
+    area: Rect,
+    prepared: &PreparedMessages,
+) -> Vec<u16> {
+    let wrapped_lines = &prepared.wrapped_lines;
+    let wrapped_user_indices = &prepared.wrapped_user_indices;
+
     // Calculate scroll position
     let total_lines = wrapped_lines.len();
     let visible_height = area.height as usize;
@@ -1151,13 +1097,15 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         max_scroll
     };
 
-    let paragraph = Paragraph::new(wrapped_lines).scroll((scroll as u16, 0));
+    let visible_free_widths =
+        compute_visible_free_widths(wrapped_lines, wrapped_user_indices, scroll, area);
 
+    let paragraph = Paragraph::new(wrapped_lines.clone()).scroll((scroll as u16, 0));
     frame.render_widget(paragraph, area);
 
     // Draw right bar for visible user lines
     let right_x = area.x + area.width.saturating_sub(1);
-    for &line_idx in &wrapped_user_indices {
+    for &line_idx in wrapped_user_indices {
         // Check if this line is visible after scroll
         if line_idx >= scroll && line_idx < scroll + visible_height {
             let screen_y = area.y + (line_idx - scroll) as u16;
@@ -1172,9 +1120,8 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         }
     }
 
-    // Show scroll indicators
+    // Content above indicator (top-right) when user has scrolled up
     if scroll > 0 {
-        // Content above indicator (top-right, offset to not overlap bar)
         let indicator = format!("↑{}", scroll);
         let indicator_area = Rect {
             x: area.x + area.width.saturating_sub(indicator.len() as u16 + 2),
@@ -1204,6 +1151,8 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         )]));
         frame.render_widget(indicator_widget, indicator_area);
     }
+
+    visible_free_widths
 }
 
 fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
