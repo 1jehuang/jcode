@@ -65,6 +65,34 @@ fn animated_header_span(text: &str, elapsed: f32) -> Span<'static> {
     Span::styled(text.to_string(), Style::default().fg(color))
 }
 
+/// Extract semantic version from full version string (e.g., "v0.1.0-dev (abc123)" -> "v0.1.0")
+fn semver() -> &'static str {
+    static SEMVER: OnceLock<String> = OnceLock::new();
+    SEMVER.get_or_init(|| {
+        let full = env!("JCODE_VERSION");
+        // Extract just the version part (before any space or -dev suffix for display)
+        if let Some(space_pos) = full.find(' ') {
+            full[..space_pos].trim_end_matches("-dev").to_string()
+        } else {
+            full.trim_end_matches("-dev").to_string()
+        }
+    })
+}
+
+/// Create multi-color spans for the header line
+fn header_spans(icon: &str, session: &str, model: &str, elapsed: f32) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(format!("{} ", icon), Style::default().fg(HEADER_ICON_COLOR)),
+        Span::styled("JCode ".to_string(), Style::default().fg(HEADER_NAME_COLOR)),
+        Span::styled(
+            format!("{} ", capitalize(session)),
+            Style::default().fg(HEADER_SESSION_COLOR),
+        ),
+        Span::styled("· ".to_string(), Style::default().fg(DIM_COLOR)),
+        animated_header_span(model, elapsed),
+    ]
+}
+
 /// Capitalize first letter of a string
 fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
@@ -524,16 +552,15 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         // Full agent name with animated color during startup
         // Format: "JCode Fox · Claude 4.5 Opus"
         let nice_model = format_model_name(&short_model);
-        let header_text = format!(
-            "{} JCode {} · {}",
-            icon,
-            capitalize(&session_name),
-            nice_model
-        );
-        mode_parts.push(animated_header_span(&header_text, anim_elapsed));
+        mode_parts.extend(header_spans(
+            &icon,
+            &session_name,
+            &nice_model,
+            anim_elapsed,
+        ));
     } else {
         mode_parts.push(Span::styled(
-            format!("JCode {}", env!("JCODE_VERSION")),
+            format!("JCode {}", semver()),
             Style::default().fg(DIM_COLOR),
         ));
     }
@@ -571,10 +598,10 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
     lines.push(Line::from(mode_parts));
 
-    // Line 2: Model ID and build age (dimmed)
+    // Line 2: Model ID, version, and build age (dimmed)
     let build_info = binary_age().unwrap_or_else(|| "unknown".to_string());
     lines.push(Line::from(Span::styled(
-        format!("{} · built {}", model, build_info),
+        format!("{} · {} · built {}", model, semver(), build_info),
         Style::default().fg(DIM_COLOR),
     )));
 
@@ -1568,11 +1595,11 @@ fn wrap_input_text<'a>(
     (lines, cursor_line, cursor_col)
 }
 
-// Colors for diff display (high-contrast, color-blind friendly)
-const DIFF_ADD_COLOR: Color = Color::Rgb(70, 165, 245); // Blue for additions
-const DIFF_DEL_COLOR: Color = Color::Rgb(245, 140, 80); // Orange for deletions
-const DIFF_HIGHLIGHT_ADD: Color = Color::Rgb(150, 210, 255); // Brighter blue highlight
-const DIFF_HIGHLIGHT_DEL: Color = Color::Rgb(255, 190, 140); // Brighter orange highlight
+// Colors for diff display (classic green/red)
+const DIFF_ADD_COLOR: Color = Color::Rgb(100, 200, 100); // Green for additions
+const DIFF_DEL_COLOR: Color = Color::Rgb(200, 100, 100); // Red for deletions
+const DIFF_HIGHLIGHT_ADD: Color = Color::Rgb(150, 255, 150); // Brighter green highlight
+const DIFF_HIGHLIGHT_DEL: Color = Color::Rgb(255, 130, 130); // Brighter red highlight
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DiffLineKind {
@@ -1694,8 +1721,8 @@ fn tint_span_with_diff_color(span: Span<'static>, diff_color: Color) -> Span<'st
         _ => return span, // Can't tint indexed colors easily
     };
 
-    // Blend: 60% syntax color + 40% diff color for clearer diff emphasis
-    let blend = |s: u8, d: u8| -> u8 { ((s as u16 * 60 + d as u16 * 40) / 100) as u8 };
+    // Blend: 70% syntax color + 30% diff color
+    let blend = |s: u8, d: u8| -> u8 { ((s as u16 * 70 + d as u16 * 30) / 100) as u8 };
 
     let tinted = Color::Rgb(blend(sr, dr), blend(sg, dg), blend(sb, db));
     Span::styled(span.content, span.style.fg(tinted))

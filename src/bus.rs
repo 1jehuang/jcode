@@ -88,6 +88,28 @@ pub struct FileTouch {
     pub summary: Option<String>,
 }
 
+/// Status of a background task
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum BackgroundTaskStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+/// Event sent when a background task completes
+#[derive(Debug, Clone)]
+pub struct BackgroundTaskCompleted {
+    pub task_id: String,
+    pub tool_name: String,
+    pub session_id: String,
+    pub status: BackgroundTaskStatus,
+    pub exit_code: Option<i32>,
+    pub output_preview: String,
+    pub output_file: PathBuf,
+    pub duration_secs: f64,
+}
+
 #[derive(Clone, Debug)]
 pub enum BusEvent {
     ToolUpdated(ToolEvent),
@@ -95,6 +117,8 @@ pub enum BusEvent {
     SubagentStatus(SubagentStatus),
     /// File was touched by an agent (for swarm conflict detection)
     FileTouch(FileTouch),
+    /// Background task completed
+    BackgroundTaskCompleted(BackgroundTaskCompleted),
 }
 
 pub struct Bus {

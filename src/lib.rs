@@ -1,8 +1,10 @@
 pub mod agent;
 pub mod auth;
 pub mod auto_debug;
+pub mod background;
 pub mod build;
 pub mod bus;
+pub mod config;
 pub mod compaction;
 pub mod id;
 pub mod logging;

@@ -4,6 +4,7 @@
 mod apply_patch;
 mod bash;
 mod batch;
+mod bg;
 mod codesearch;
 mod communicate;
 mod conversation_search;
@@ -207,6 +208,10 @@ impl Registry {
         tools_map.insert(
             "todoread".to_string(),
             Arc::new(todo::TodoReadTool::new()) as Arc<dyn Tool>,
+        );
+        tools_map.insert(
+            "bg".to_string(),
+            Arc::new(bg::BgTool::new()) as Arc<dyn Tool>,
         );
 
         // Add batch with a reference to the registry

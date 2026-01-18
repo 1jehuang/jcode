@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 #![allow(dead_code)]
 
-use super::keybind::ModelSwitchKeys;
+use super::keybind::{ModelSwitchKeys, ScrollKeys};
 use super::stream_buffer::StreamBuffer;
-use crate::bus::{Bus, BusEvent, ToolEvent, ToolStatus};
+use crate::bus::{BackgroundTaskStatus, Bus, BusEvent, ToolEvent, ToolStatus};
+use crate::id;
 use crate::mcp::McpManager;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall};
 use crate::provider::Provider;
@@ -14,6 +15,7 @@ use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,11 +24,17 @@ use tokio::time::interval;
 
 /// Debug command file path
 fn debug_cmd_path() -> PathBuf {
+    if let Ok(path) = std::env::var("JCODE_DEBUG_CMD_PATH") {
+        return PathBuf::from(path);
+    }
     std::env::temp_dir().join("jcode_debug_cmd")
 }
 
 /// Debug response file path
 fn debug_response_path() -> PathBuf {
+    if let Ok(path) = std::env::var("JCODE_DEBUG_RESPONSE_PATH") {
+        return PathBuf::from(path);
+    }
     std::env::temp_dir().join("jcode_debug_response")
 }
 
@@ -261,6 +269,8 @@ pub struct App {
     current_message_id: Option<u64>,
     // Whether running in remote mode
     is_remote: bool,
+    // Remember tool call ids that already have outputs
+    tool_result_ids: HashSet<String>,
     // Current session ID (from server in remote mode)
     remote_session_id: Option<String>,
     // All sessions on the server (remote mode only)
@@ -281,6 +291,8 @@ pub struct App {
     show_diffs: bool,
     // Keybindings for model switching
     model_switch_keys: ModelSwitchKeys,
+    // Keybindings for scrolling
+    scroll_keys: ScrollKeys,
     // Short-lived notice for status feedback (model switch, toggle diff, etc.)
     status_notice: Option<(String, Instant)>,
     // Message to interleave during processing (set via Shift+Enter)
@@ -390,6 +402,7 @@ impl App {
             requested_exit_code: None,
             show_diffs: true, // Default to showing diffs
             model_switch_keys: super::keybind::load_model_switch_keys(),
+            scroll_keys: super::keybind::load_scroll_keys(),
             status_notice: None,
             interleave_message: None,
             queue_mode: true, // Default to queue mode (wait until done)
@@ -726,14 +739,19 @@ impl App {
                 self.submit_input();
                 "OK: reload triggered".to_string()
             } else if cmd == "state" {
-                // Return current state
-                format!(
-                    "state: processing={}, messages={}, display={}, provider_session={:?}",
-                    self.is_processing,
-                    self.messages.len(),
-                    self.display_messages.len(),
-                    self.provider_session_id
-                )
+                // Return current state as JSON for easier parsing
+                serde_json::json!({
+                    "processing": self.is_processing,
+                    "messages": self.messages.len(),
+                    "display_messages": self.display_messages.len(),
+                    "input": self.input,
+                    "cursor_pos": self.cursor_pos,
+                    "scroll_offset": self.scroll_offset,
+                    "queued_messages": self.queued_messages.len(),
+                    "provider_session_id": self.provider_session_id,
+                    "model": self.provider.name(),
+                    "version": env!("JCODE_VERSION"),
+                }).to_string()
             } else if cmd == "quit" {
                 self.should_quit = true;
                 "OK: quitting".to_string()
@@ -745,8 +763,106 @@ impl App {
                     .find(|m| m.role == "assistant" || m.role == "error")
                     .map(|m| format!("last_response: [{}] {}", m.role, m.content))
                     .unwrap_or_else(|| "last_response: none".to_string())
+            } else if cmd == "history" {
+                // Return all messages as JSON
+                let msgs: Vec<serde_json::Value> = self.display_messages.iter().map(|m| {
+                    serde_json::json!({
+                        "role": m.role,
+                        "content": m.content,
+                        "tool_calls": m.tool_calls,
+                    })
+                }).collect();
+                serde_json::to_string_pretty(&msgs).unwrap_or_else(|_| "[]".to_string())
+            } else if cmd == "screen" {
+                // Capture current visual state
+                use super::visual_debug;
+                visual_debug::enable(); // Ensure enabled
+                // Force a frame dump to file and return path
+                match visual_debug::dump_to_file() {
+                    Ok(path) => format!("screen: {}", path.display()),
+                    Err(e) => format!("screen error: {}", e),
+                }
+            } else if cmd == "wait" {
+                // Return whether we're still processing
+                if self.is_processing {
+                    "wait: processing".to_string()
+                } else {
+                    "wait: idle".to_string()
+                }
+            } else if cmd.starts_with("scroll:") {
+                let dir = cmd.strip_prefix("scroll:").unwrap_or("");
+                match dir {
+                    "up" => {
+                        if self.scroll_offset > 0 {
+                            self.scroll_offset = self.scroll_offset.saturating_sub(5);
+                        }
+                        format!("scroll: up to {}", self.scroll_offset)
+                    }
+                    "down" => {
+                        self.scroll_offset += 5;
+                        format!("scroll: down to {}", self.scroll_offset)
+                    }
+                    "top" => {
+                        self.scroll_offset = 0;
+                        "scroll: top".to_string()
+                    }
+                    "bottom" => {
+                        // Set to a large value; rendering will clamp it
+                        self.scroll_offset = usize::MAX / 2;
+                        "scroll: bottom".to_string()
+                    }
+                    _ => format!("scroll error: unknown direction '{}'", dir),
+                }
+            } else if cmd.starts_with("keys:") {
+                // Parse and inject key events
+                // Format: keys:ctrl+r or keys:enter or keys:a,b,c (multiple)
+                let keys_str = cmd.strip_prefix("keys:").unwrap_or("");
+                let mut results = Vec::new();
+                for key_spec in keys_str.split(',') {
+                    match self.parse_and_inject_key(key_spec.trim()) {
+                        Ok(desc) => results.push(format!("OK: {}", desc)),
+                        Err(e) => results.push(format!("ERR: {}", e)),
+                    }
+                }
+                results.join("\n")
+            } else if cmd == "input" {
+                // Return current input buffer
+                format!("input: {:?}", self.input)
+            } else if cmd.starts_with("set_input:") {
+                // Set input buffer directly
+                let new_input = cmd.strip_prefix("set_input:").unwrap_or("");
+                self.input = new_input.to_string();
+                self.cursor_pos = self.input.len();
+                format!("OK: input set to {:?}", self.input)
+            } else if cmd == "submit" {
+                // Submit current input
+                if self.input.is_empty() {
+                    "submit error: input is empty".to_string()
+                } else {
+                    self.submit_input();
+                    "OK: submitted".to_string()
+                }
+            } else if cmd == "version" {
+                format!("version: {}", env!("JCODE_VERSION"))
+            } else if cmd == "help" {
+                "Debug commands:\n\
+                 - message:<text> - inject and submit a message\n\
+                 - reload - trigger /reload\n\
+                 - state - get current state as JSON\n\
+                 - quit - exit the TUI\n\
+                 - last_response - get last assistant message\n\
+                 - history - get all messages as JSON\n\
+                 - screen - dump visual debug frames\n\
+                 - wait - check if processing\n\
+                 - scroll:<up|down|top|bottom> - control scroll\n\
+                 - keys:<keyspec> - inject key events (e.g. keys:ctrl+r)\n\
+                 - input - get current input buffer\n\
+                 - set_input:<text> - set input buffer\n\
+                 - submit - submit current input\n\
+                 - version - get version\n\
+                 - help - show this help".to_string()
             } else {
-                format!("ERROR: unknown command '{}'", cmd)
+                format!("ERROR: unknown command '{}'. Use 'help' for list.", cmd)
             };
 
             // Write response
@@ -754,6 +870,56 @@ impl App {
             return Some(response);
         }
         None
+    }
+
+    /// Parse a key specification and inject it as an event
+    fn parse_and_inject_key(&mut self, key_spec: &str) -> Result<String, String> {
+        let key_spec = key_spec.to_lowercase();
+        let parts: Vec<&str> = key_spec.split('+').collect();
+
+        let mut modifiers = KeyModifiers::empty();
+        let mut key_part = "";
+
+        for part in &parts {
+            match *part {
+                "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
+                "alt" => modifiers |= KeyModifiers::ALT,
+                "shift" => modifiers |= KeyModifiers::SHIFT,
+                _ => key_part = part,
+            }
+        }
+
+        let key_code = match key_part {
+            "enter" | "return" => KeyCode::Enter,
+            "esc" | "escape" => KeyCode::Esc,
+            "tab" => KeyCode::Tab,
+            "backspace" | "bs" => KeyCode::Backspace,
+            "delete" | "del" => KeyCode::Delete,
+            "up" => KeyCode::Up,
+            "down" => KeyCode::Down,
+            "left" => KeyCode::Left,
+            "right" => KeyCode::Right,
+            "home" => KeyCode::Home,
+            "end" => KeyCode::End,
+            "pageup" | "pgup" => KeyCode::PageUp,
+            "pagedown" | "pgdn" => KeyCode::PageDown,
+            "space" => KeyCode::Char(' '),
+            s if s.len() == 1 => KeyCode::Char(s.chars().next().unwrap()),
+            s if s.starts_with('f') && s.len() <= 3 => {
+                if let Ok(n) = s[1..].parse::<u8>() {
+                    KeyCode::F(n)
+                } else {
+                    return Err(format!("Invalid function key: {}", s));
+                }
+            }
+            _ => return Err(format!("Unknown key: {}", key_part)),
+        };
+
+        // Create and handle the key event
+        let key_event = crossterm::event::KeyEvent::new(key_code, modifiers);
+        self.handle_key_event(key_event);
+
+        Ok(format!("injected {:?} with {:?}", key_code, modifiers))
     }
 
     /// Check for selfdev signal files (rebuild-signal, rollback-signal)
@@ -803,6 +969,8 @@ impl App {
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<RunResult> {
         let mut event_stream = EventStream::new();
         let mut redraw_interval = interval(Duration::from_millis(50));
+        // Subscribe to bus for background task completion notifications
+        let mut bus_receiver = Bus::global().subscribe();
 
         loop {
             // Draw UI
@@ -865,6 +1033,51 @@ impl App {
                                 self.handle_paste(text);
                             }
                             _ => {}
+                        }
+                    }
+                    // Handle background task completion notifications
+                    bus_event = bus_receiver.recv() => {
+                        if let Ok(BusEvent::BackgroundTaskCompleted(task)) = bus_event {
+                            // Only show notifications for tasks from this session
+                            if task.session_id == self.session.id {
+                                let status_str = match task.status {
+                                    BackgroundTaskStatus::Completed => "✓ completed",
+                                    BackgroundTaskStatus::Failed => "✗ failed",
+                                    BackgroundTaskStatus::Running => "running",
+                                };
+                                let notification = format!(
+                                    "[Background Task Completed]\n\
+                                     Task: {} ({})\n\
+                                     Status: {}\n\
+                                     Duration: {:.1}s\n\
+                                     Exit code: {}\n\n\
+                                     Output preview:\n{}\n\n\
+                                     Use `bg action=\"output\" task_id=\"{}\"` for full output.",
+                                    task.task_id,
+                                    task.tool_name,
+                                    status_str,
+                                    task.duration_secs,
+                                    task.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "N/A".to_string()),
+                                    task.output_preview,
+                                    task.task_id,
+                                );
+                                self.display_messages.push(DisplayMessage::system(notification.clone()));
+                                // If not currently processing, inject as a message for the agent
+                                if !self.is_processing {
+                                    self.messages.push(Message {
+                                        role: Role::User,
+                                        content: vec![ContentBlock::Text {
+                                            text: notification,
+                                            cache_control: None,
+                                        }],
+                                    });
+                                    self.session.add_message(Role::User, vec![ContentBlock::Text {
+                                        text: format!("[Background task {} completed]", task.task_id),
+                                        cache_control: None,
+                                    }]);
+                                    let _ = self.session.save();
+                                }
+                            }
                         }
                     }
                 }
@@ -1384,22 +1597,18 @@ impl App {
             }
         }
 
-        // Handle Ctrl+Shift combos
-        if modifiers.contains(KeyModifiers::CONTROL) && modifiers.contains(KeyModifiers::SHIFT) {
+        // Handle configurable scroll keys (default: Alt+K/J/U/D)
+        if let Some(amount) = self.scroll_keys.scroll_amount(code.clone(), modifiers) {
             let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
-            match code {
-                KeyCode::Char('K') => {
-                    // Ctrl+Shift+K: scroll up
-                    self.scroll_offset = (self.scroll_offset + 3).min(max_estimate);
-                    return Ok(());
-                }
-                KeyCode::Char('J') => {
-                    // Ctrl+Shift+J: scroll down
-                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
-                    return Ok(());
-                }
-                _ => {}
+            if amount < 0 {
+                // Scroll up (increase offset)
+                self.scroll_offset =
+                    (self.scroll_offset + (-amount) as usize).min(max_estimate);
+            } else {
+                // Scroll down (decrease offset)
+                self.scroll_offset = self.scroll_offset.saturating_sub(amount as usize);
             }
+            return Ok(());
         }
 
         // Shift+Tab: toggle diff view
@@ -1419,6 +1628,10 @@ impl App {
             match code {
                 KeyCode::Char('c') | KeyCode::Char('d') => {
                     self.should_quit = true;
+                    return Ok(());
+                }
+                KeyCode::Char('r') => {
+                    self.recover_session_without_tools();
                     return Ok(());
                 }
                 KeyCode::Char('l') if !self.is_processing => {
@@ -1447,22 +1660,6 @@ impl App {
                     let start = self.find_word_boundary_back();
                     self.input.drain(start..self.cursor_pos);
                     self.cursor_pos = start;
-                    return Ok(());
-                }
-                _ => {}
-            }
-        }
-
-        // Scroll with Ctrl+Shift
-        if modifiers.contains(KeyModifiers::CONTROL) && modifiers.contains(KeyModifiers::SHIFT) {
-            let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
-            match code {
-                KeyCode::Char('K') => {
-                    self.scroll_offset = (self.scroll_offset + 3).min(max_estimate);
-                    return Ok(());
-                }
-                KeyCode::Char('J') => {
-                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
                     return Ok(());
                 }
                 _ => {}
@@ -1726,6 +1923,11 @@ impl App {
         self.processing_started = None;
     }
 
+    /// Handle a key event (wrapper for debug injection)
+    fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) {
+        let _ = self.handle_key(event.code, event.modifiers);
+    }
+
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
         if let Some(direction) = self
             .model_switch_keys
@@ -1764,22 +1966,18 @@ impl App {
             }
         }
 
-        // Handle Ctrl+Shift combos (scrolling)
-        if modifiers.contains(KeyModifiers::CONTROL) && modifiers.contains(KeyModifiers::SHIFT) {
+        // Handle configurable scroll keys (default: Alt+K/J/U/D)
+        if let Some(amount) = self.scroll_keys.scroll_amount(code.clone(), modifiers) {
             let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
-            match code {
-                KeyCode::Char('K') => {
-                    // Ctrl+Shift+K: scroll up
-                    self.scroll_offset = (self.scroll_offset + 3).min(max_estimate);
-                    return Ok(());
-                }
-                KeyCode::Char('J') => {
-                    // Ctrl+Shift+J: scroll down
-                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
-                    return Ok(());
-                }
-                _ => {}
+            if amount < 0 {
+                // Scroll up (increase offset)
+                self.scroll_offset =
+                    (self.scroll_offset + (-amount) as usize).min(max_estimate);
+            } else {
+                // Scroll down (decrease offset)
+                self.scroll_offset = self.scroll_offset.saturating_sub(amount as usize);
             }
+            return Ok(());
         }
 
         // Shift+Tab: toggle diff view
@@ -1799,6 +1997,10 @@ impl App {
             match code {
                 KeyCode::Char('c') | KeyCode::Char('d') => {
                     self.should_quit = true;
+                    return Ok(());
+                }
+                KeyCode::Char('r') => {
+                    self.recover_session_without_tools();
                     return Ok(());
                 }
                 KeyCode::Char('l') if !self.is_processing => {
@@ -2087,6 +2289,9 @@ impl App {
                 content: format!(
                     "**Commands:**\n\
                      • `/help` - Show this help\n\
+                     • `/config` - Show current configuration\n\
+                     • `/config init` - Create default config file (~/.jcode/config.toml)\n\
+                     • `/config edit` - Open config file in $EDITOR\n\
                      • `/model` - List available models\n\
                      • `/model <name>` - Switch to a different model\n\
                      • `/reload` - Smart reload (client/server if newer binary exists)\n\
@@ -2098,7 +2303,10 @@ impl App {
                      **Keyboard shortcuts:**\n\
                      • `Ctrl+C` / `Ctrl+D` - Quit\n\
                      • `Ctrl+L` - Clear conversation\n\
+                     • `Ctrl+R` - Recover from missing tool outputs\n\
                      • `PageUp/Down` or `Up/Down` - Scroll history\n\
+                     • `{}`/`{}` - Scroll up/down (see `/config`)\n\
+                     • `{}`/`{}` - Page up/down (see `/config`)\n\
                      • `Ctrl+Tab` - Toggle queue mode (wait vs immediate send)\n\
                      • `Ctrl+Up` - Retrieve queued message for editing\n\
                      • `Ctrl+U` - Clear input line\n\
@@ -2112,6 +2320,10 @@ impl App {
                         .map(|s| format!("/{}", s.name))
                         .collect::<Vec<_>>()
                         .join(", "),
+                    self.scroll_keys.up_label,
+                    self.scroll_keys.down_label,
+                    self.scroll_keys.page_up_label,
+                    self.scroll_keys.page_down_label,
                     model_next,
                     model_prev
                 ),
@@ -2131,6 +2343,91 @@ impl App {
             self.active_skill = None;
             self.session = Session::create(None, None);
             self.provider_session_id = None;
+            return;
+        }
+
+        // Handle /config command
+        if trimmed == "/config" {
+            use crate::config::config;
+            self.display_messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: config().display_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            return;
+        }
+
+        if trimmed == "/config init" || trimmed == "/config create" {
+            use crate::config::Config;
+            match Config::create_default_config_file() {
+                Ok(path) => {
+                    self.display_messages.push(DisplayMessage {
+                        role: "system".to_string(),
+                        content: format!(
+                            "Created default config file at:\n`{}`\n\nEdit this file to customize your keybindings and settings.",
+                            path.display()
+                        ),
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                }
+                Err(e) => {
+                    self.display_messages.push(DisplayMessage {
+                        role: "system".to_string(),
+                        content: format!("Failed to create config file: {}", e),
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                }
+            }
+            return;
+        }
+
+        if trimmed == "/config edit" {
+            use crate::config::Config;
+            if let Some(path) = Config::path() {
+                if !path.exists() {
+                    // Create default config first
+                    if let Err(e) = Config::create_default_config_file() {
+                        self.display_messages.push(DisplayMessage {
+                            role: "system".to_string(),
+                            content: format!("Failed to create config file: {}", e),
+                            tool_calls: vec![],
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
+                        });
+                        return;
+                    }
+                }
+
+                // Open in editor
+                let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
+                self.display_messages.push(DisplayMessage {
+                    role: "system".to_string(),
+                    content: format!(
+                        "Opening config in editor...\n`{} {}`\n\n*Restart jcode after editing for changes to take effect.*",
+                        editor,
+                        path.display()
+                    ),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+
+                // Spawn editor in background (user will see it after jcode exits or in another terminal)
+                let _ = std::process::Command::new(&editor)
+                    .arg(&path)
+                    .spawn();
+            }
             return;
         }
 
@@ -2573,8 +2870,114 @@ impl App {
         self.status_notice = Some((text.into(), Instant::now()));
     }
 
+    fn summarize_tool_results_missing(&self) -> Option<String> {
+        if self.tool_result_ids.is_empty() {
+            return None;
+        }
+        let mut known_ids = HashSet::new();
+        for msg in &self.messages {
+            if let Role::User = msg.role {
+                for block in &msg.content {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                        known_ids.insert(tool_use_id.clone());
+                    }
+                }
+            }
+        }
+        let missing: Vec<String> = self
+            .tool_result_ids
+            .difference(&known_ids)
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return None;
+        }
+        let sample = missing
+            .iter()
+            .take(3)
+            .map(|id| format!("`{}`", id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let count = missing.len();
+        let suffix = if count > 3 { "..." } else { "" };
+        Some(format!("Missing tool outputs for {} call(s): {}{}", count, sample, suffix))
+    }
+
+    /// Rebuild current session into a new one without tool calls
+    fn recover_session_without_tools(&mut self) {
+        let old_session = self.session.clone();
+        let old_messages = old_session.messages.clone();
+
+        let new_session_id = format!("session_recovery_{}", id::new_id("rec"));
+        let mut new_session =
+            Session::create_with_id(new_session_id, Some(old_session.id.clone()), None);
+        new_session.title = old_session.title.clone();
+        new_session.provider_session_id = old_session.provider_session_id.clone();
+
+        self.messages.clear();
+        self.display_messages.clear();
+        self.queued_messages.clear();
+        self.pasted_contents.clear();
+        self.active_skill = None;
+        self.provider_session_id = None;
+        self.tool_result_ids.clear();
+        self.session = new_session;
+
+        for msg in old_messages {
+            let role = msg.role.clone();
+            let kept_blocks: Vec<ContentBlock> = msg
+                .content
+                .into_iter()
+                .filter(|block| matches!(block, ContentBlock::Text { .. }))
+                .collect();
+            if kept_blocks.is_empty() {
+                continue;
+            }
+            self.messages.push(Message {
+                role: role.clone(),
+                content: kept_blocks.clone(),
+            });
+            self.display_messages.push(DisplayMessage {
+                role: match role {
+                    Role::User => "user".to_string(),
+                    Role::Assistant => "assistant".to_string(),
+                },
+                content: kept_blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text, .. } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            let _ = self.session.add_message(role, kept_blocks);
+        }
+        let _ = self.session.save();
+
+        self.display_messages.push(DisplayMessage::system(format!(
+            "Recovery complete. New session: {}. Tool calls stripped; context preserved.",
+            self.session.id
+        )));
+        self.set_status_notice("Recovered session");
+    }
+
     async fn run_turn(&mut self) -> Result<()> {
         loop {
+            if let Some(summary) = self.summarize_tool_results_missing() {
+                let message = format!(
+                    "Tool outputs are missing for this turn. {}\n\nPress Ctrl+R to recover into a new session with context copied.",
+                    summary
+                );
+                self.display_messages.push(DisplayMessage::error(message));
+                self.set_status_notice("Recovery needed");
+                return Ok(());
+            }
+
             let tools = self.registry.definitions(None).await;
 
             // Build system prompt with active skill
@@ -2767,6 +3170,7 @@ impl App {
                         is_error,
                     } => {
                         // SDK already executed this tool, store result for later
+                        self.tool_result_ids.insert(tool_use_id.clone());
                         sdk_tool_results.insert(tool_use_id, (content, is_error));
                     }
                 }
@@ -2796,6 +3200,9 @@ impl App {
                 });
                 let message_id = self.session.add_message(Role::Assistant, content_clone);
                 let _ = self.session.save();
+                for tc in &tool_calls {
+                    self.tool_result_ids.insert(tc.id.clone());
+                }
                 Some(message_id)
             } else {
                 None
@@ -2953,6 +3360,16 @@ impl App {
         let mut redraw_interval = interval(Duration::from_millis(50));
 
         loop {
+            if let Some(summary) = self.summarize_tool_results_missing() {
+                let message = format!(
+                    "Tool outputs are missing for this turn. {}\n\nPress Ctrl+R to recover into a new session with context copied.",
+                    summary
+                );
+                self.display_messages.push(DisplayMessage::error(message));
+                self.set_status_notice("Recovery needed");
+                return Ok(());
+            }
+
             let tools = self.registry.definitions(None).await;
             let system_prompt = self.build_system_prompt();
 
@@ -3299,6 +3716,7 @@ impl App {
                                     }
                                     StreamEvent::ToolResult { tool_use_id, content, is_error } => {
                                         // SDK already executed this tool
+                                        self.tool_result_ids.insert(tool_use_id.clone());
                                         // Find the tool name from our tracking
                                         let tool_name = self.streaming_tool_calls
                                             .iter()
@@ -3366,6 +3784,9 @@ impl App {
                 });
                 let message_id = self.session.add_message(Role::Assistant, content_clone);
                 let _ = self.session.save();
+                for tc in &tool_calls {
+                    self.tool_result_ids.insert(tc.id.clone());
+                }
                 Some(message_id)
             } else {
                 None

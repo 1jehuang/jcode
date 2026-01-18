@@ -1,3 +1,4 @@
+use crate::config::config;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 #[derive(Clone, Debug)]
@@ -37,6 +38,8 @@ impl ModelSwitchKeys {
 }
 
 pub fn load_model_switch_keys() -> ModelSwitchKeys {
+    let cfg = config();
+
     let default_next = KeyBinding {
         code: KeyCode::Tab,
         modifiers: KeyModifiers::CONTROL,
@@ -46,13 +49,13 @@ pub fn load_model_switch_keys() -> ModelSwitchKeys {
         modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
     };
 
-    let next_raw =
-        std::env::var("JCODE_MODEL_SWITCH_KEY").unwrap_or_else(|_| "ctrl+tab".to_string());
-    let prev_raw = std::env::var("JCODE_MODEL_SWITCH_PREV_KEY")
-        .unwrap_or_else(|_| "ctrl+shift+tab".to_string());
-
-    let (next, next_label) = parse_or_default(&next_raw, default_next, "Ctrl+Tab");
-    let (prev, prev_label) = parse_optional(&prev_raw, default_prev, "Ctrl+Shift+Tab");
+    let (next, next_label) =
+        parse_or_default(&cfg.keybindings.model_switch_next, default_next, "Ctrl+Tab");
+    let (prev, prev_label) = parse_optional(
+        &cfg.keybindings.model_switch_prev,
+        default_prev,
+        "Ctrl+Shift+Tab",
+    );
 
     ModelSwitchKeys {
         next,
@@ -161,6 +164,78 @@ fn normalize_key(code: KeyCode, modifiers: KeyModifiers) -> (KeyCode, KeyModifie
         (KeyCode::Tab, modifiers | KeyModifiers::SHIFT)
     } else {
         (code, modifiers)
+    }
+}
+
+/// Configurable scroll keybindings
+#[derive(Clone, Debug)]
+pub struct ScrollKeys {
+    pub up: KeyBinding,
+    pub down: KeyBinding,
+    pub page_up: KeyBinding,
+    pub page_down: KeyBinding,
+    pub up_label: String,
+    pub down_label: String,
+    pub page_up_label: String,
+    pub page_down_label: String,
+}
+
+impl ScrollKeys {
+    /// Check if a key matches scroll up (returns scroll amount, negative = up)
+    pub fn scroll_amount(&self, code: KeyCode, modifiers: KeyModifiers) -> Option<i32> {
+        if self.up.matches(code.clone(), modifiers) {
+            return Some(-3); // Scroll up 3 lines
+        }
+        if self.down.matches(code.clone(), modifiers) {
+            return Some(3); // Scroll down 3 lines
+        }
+        if self.page_up.matches(code.clone(), modifiers) {
+            return Some(-10); // Page up
+        }
+        if self.page_down.matches(code, modifiers) {
+            return Some(10); // Page down
+        }
+        None
+    }
+}
+
+pub fn load_scroll_keys() -> ScrollKeys {
+    let cfg = config();
+
+    // Default to Alt+K/J for scroll - more terminal compatible than Ctrl+Shift
+    let default_up = KeyBinding {
+        code: KeyCode::Char('k'),
+        modifiers: KeyModifiers::ALT,
+    };
+    let default_down = KeyBinding {
+        code: KeyCode::Char('j'),
+        modifiers: KeyModifiers::ALT,
+    };
+    let default_page_up = KeyBinding {
+        code: KeyCode::Char('u'),
+        modifiers: KeyModifiers::ALT,
+    };
+    let default_page_down = KeyBinding {
+        code: KeyCode::Char('d'),
+        modifiers: KeyModifiers::ALT,
+    };
+
+    let (up, up_label) = parse_or_default(&cfg.keybindings.scroll_up, default_up, "Alt+K");
+    let (down, down_label) = parse_or_default(&cfg.keybindings.scroll_down, default_down, "Alt+J");
+    let (page_up, page_up_label) =
+        parse_or_default(&cfg.keybindings.scroll_page_up, default_page_up, "Alt+U");
+    let (page_down, page_down_label) =
+        parse_or_default(&cfg.keybindings.scroll_page_down, default_page_down, "Alt+D");
+
+    ScrollKeys {
+        up,
+        down,
+        page_up,
+        page_down,
+        up_label,
+        down_label,
+        page_up_label,
+        page_down_label,
     }
 }
 
