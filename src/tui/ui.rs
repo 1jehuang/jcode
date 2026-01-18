@@ -859,7 +859,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                             if truncated && !shown_truncation && i >= half_point {
                                 let skipped = total_changes - MAX_DIFF_LINES;
                                 lines.push(Line::from(Span::styled(
-                                    format!("  ... {} more changes ...", skipped),
+                                    format!("... {} more changes ...", skipped),
                                     Style::default().fg(DIM_COLOR),
                                 )));
                                 shown_truncation = true;
@@ -872,10 +872,8 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                             };
 
                             // Build the line with syntax-highlighted content
-                            let mut spans: Vec<Span<'static>> = vec![
-                                Span::styled("  ", Style::default()),
-                                Span::styled(line.prefix.clone(), Style::default().fg(base_color)),
-                            ];
+                            let mut spans: Vec<Span<'static>> =
+                                vec![Span::styled(line.prefix.clone(), Style::default().fg(base_color))];
 
                             // Apply syntax highlighting to content
                             if !line.content.is_empty() {
@@ -893,7 +891,7 @@ fn draw_messages(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                         // Show summary if there were changes
                         if total_changes > 0 && truncated {
                             lines.push(Line::from(Span::styled(
-                                format!("  (+{} -{} total)", additions, deletions),
+                                format!("(+{} -{} total)", additions, deletions),
                                 Style::default().fg(DIM_COLOR),
                             )));
                         }
