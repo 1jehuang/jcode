@@ -4,6 +4,7 @@ mod core;
 pub mod info_widget;
 mod keybind;
 mod markdown;
+pub mod session_picker;
 mod stream_buffer;
 mod ui;
 pub mod visual_debug;
