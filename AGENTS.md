@@ -10,13 +10,19 @@
 
 ## Versioning
 
-jcode uses semantic versioning (`vX.Y.Z`) defined in `Cargo.toml`.
+jcode uses **auto-incrementing** semantic versioning (`v0.1.X`).
 
-- **Patch** (0.1.0 → 0.1.1): Bug fixes
-- **Minor** (0.1.0 → 0.2.0): New features, backward compatible
-- **Major** (0.1.0 → 1.0.0): Breaking changes
+**Automatic (patch):**
+- Build number auto-increments on every `cargo build`
+- Stored in `~/.jcode/build_number`
+- Example: `v0.1.1` → `v0.1.2` → `v0.1.3` ...
 
-Bump patch for fixes, minor for features, major for breaking changes. The build auto-appends git hash and `-dev` for dirty trees.
+**Manual (major/minor):**
+- For big changes, manually update major/minor version in `Cargo.toml`
+- **Minor** (0.1.x → 0.2.0): New features, significant enhancements
+- **Major** (0.x.x → 1.0.0): Breaking changes to CLI, config, or APIs
+
+The build also includes git hash and `-dev` suffix for uncommitted changes (e.g., `v0.1.47-dev (abc1234)`).
 
 ## Project Structure & Module Organization
 - `src/` is the core library and CLI entry point (`src/main.rs`). Key areas include `src/agent.rs`, `src/provider/`, `src/mcp/`, `src/tool/`, and `src/tui/`.
