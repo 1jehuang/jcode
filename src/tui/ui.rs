@@ -285,6 +285,165 @@ fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Ve
     lines
 }
 
+fn render_context_compact_bar(
+    info: &crate::prompt::ContextInfo,
+    max_width: usize,
+) -> Vec<Line<'static>> {
+    const SYS_COLOR: Color = Color::Rgb(100, 140, 200);
+    const DOCS_COLOR: Color = Color::Rgb(200, 160, 100);
+    const TOOLS_COLOR: Color = Color::Rgb(100, 200, 200);
+    const MSGS_COLOR: Color = Color::Rgb(138, 180, 248);
+    const TOOL_IO_COLOR: Color = Color::Rgb(255, 183, 77);
+    const OTHER_COLOR: Color = Color::Rgb(150, 150, 150);
+    const EMPTY_COLOR: Color = Color::Rgb(50, 50, 50);
+
+    let sys = info.system_prompt_chars / 4;
+    let docs = (info.project_agents_md_chars
+        + info.project_claude_md_chars
+        + info.global_agents_md_chars
+        + info.global_claude_md_chars)
+        / 4;
+    let tools = info.tool_defs_chars / 4;
+    let msgs = (info.user_messages_chars + info.assistant_messages_chars) / 4;
+    let tool_io = (info.tool_calls_chars + info.tool_results_chars) / 4;
+    let other = (info.env_context_chars + info.skills_chars + info.selfdev_chars) / 4;
+
+    let mut sections: Vec<(usize, Color)> = Vec::new();
+    if sys > 0 {
+        sections.push((sys, SYS_COLOR));
+    }
+    if docs > 0 {
+        sections.push((docs, DOCS_COLOR));
+    }
+    if tools > 0 {
+        sections.push((tools, TOOLS_COLOR));
+    }
+    if msgs > 0 {
+        sections.push((msgs, MSGS_COLOR));
+    }
+    if tool_io > 0 {
+        sections.push((tool_io, TOOL_IO_COLOR));
+    }
+    if other > 0 {
+        sections.push((other, OTHER_COLOR));
+    }
+
+    let total: usize = sections.iter().map(|(t, _)| *t).sum();
+    if total == 0 {
+        return Vec::new();
+    }
+
+    let bar_width = max_width.saturating_sub(6).max(12).min(48);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+
+    let mut remaining = bar_width;
+    for (tokens, color) in sections.iter() {
+        if remaining == 0 {
+            break;
+        }
+        let mut w = ((*tokens as f64 / total as f64) * bar_width as f64)
+            .round()
+            .max(1.0) as usize;
+        if w > remaining {
+            w = remaining;
+        }
+        spans.push(Span::styled("█".repeat(w), Style::default().fg(*color)));
+        remaining = remaining.saturating_sub(w);
+    }
+
+    if remaining > 0 {
+        spans.push(Span::styled("░".repeat(remaining), Style::default().fg(EMPTY_COLOR)));
+    }
+
+    vec![Line::from(spans)]
+}
+
+fn render_rounded_box(
+    title: &str,
+    content: Vec<Line<'static>>,
+    max_width: usize,
+    border_style: Style,
+) -> Vec<Line<'static>> {
+    if content.is_empty() || max_width < 6 {
+        return Vec::new();
+    }
+
+    let max_content_width = content
+        .iter()
+        .map(|line| line.width())
+        .max()
+        .unwrap_or(0)
+        .min(max_width.saturating_sub(4));
+
+    if max_content_width < 6 {
+        return Vec::new();
+    }
+
+    let box_width = max_content_width + 4; // "│ " + content + " │"
+    let title_text = format!(" {} ", title);
+    let title_len = title_text.chars().count();
+    let border_chars = box_width.saturating_sub(title_len + 2);
+    let left_border = "─".repeat(border_chars / 2);
+    let right_border = "─".repeat(border_chars - border_chars / 2);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("╭{}{}{}╮", left_border, title_text, right_border),
+        border_style,
+    )));
+
+    for line in content {
+        let truncated = truncate_line_to_width(&line, max_content_width);
+        let padding = max_content_width.saturating_sub(truncated.width());
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        spans.push(Span::styled("│ ", border_style));
+        spans.extend(truncated.spans);
+        if padding > 0 {
+            spans.push(Span::raw(" ".repeat(padding)));
+        }
+        spans.push(Span::styled(" │", border_style));
+        lines.push(Line::from(spans));
+    }
+
+    let bottom_border = "─".repeat(box_width.saturating_sub(2));
+    lines.push(Line::from(Span::styled(
+        format!("╰{}╯", bottom_border),
+        border_style,
+    )));
+
+    lines
+}
+
+fn truncate_line_to_width(line: &Line<'static>, width: usize) -> Line<'static> {
+    if width == 0 {
+        return Line::from("");
+    }
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut remaining = width;
+    for span in &line.spans {
+        if remaining == 0 {
+            break;
+        }
+        let text = span.content.as_ref();
+        let len = text.chars().count();
+        if len <= remaining {
+            spans.push(span.clone());
+            remaining -= len;
+        } else {
+            let clipped: String = text.chars().take(remaining).collect();
+            spans.push(Span::styled(clipped, span.style));
+            remaining = 0;
+        }
+    }
+
+    if spans.is_empty() {
+        Line::from("")
+    } else {
+        Line::from(spans)
+    }
+}
+
 /// Calculate rainbow color for prompt index with exponential decay to gray.
 /// `distance` is how many prompts back from the most recent (0 = most recent).
 fn rainbow_prompt_color(distance: usize) -> Color {
@@ -825,73 +984,32 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     if !changelog.is_empty() && term_width > 20 {
         let changelog_lines: Vec<&str> = changelog.lines().collect();
         if !changelog_lines.is_empty() {
-            // Determine box width based on terminal width (leave some margin)
-            let available_width = term_width.saturating_sub(2); // Leave margin
             const MAX_LINES: usize = 5;
+            let available_width = term_width.saturating_sub(2); // Leave margin
+            let display_lines = changelog_lines.len().min(MAX_LINES);
+            let has_more = changelog_lines.len() > MAX_LINES;
 
-            // Cap content width to available space minus box chars (│ + space + space + │ = 4)
-            let max_content_width = changelog_lines
-                .iter()
-                .take(MAX_LINES)
-                .map(|l| l.chars().count())
-                .max()
-                .unwrap_or(0)
-                .min(available_width.saturating_sub(4));
-
-            // Minimum usable width
-            if max_content_width >= 10 {
-                let box_width = max_content_width + 4; // +4 for "│ " and " │"
-
-                // Top border with title centered: ──── Updates ────
-                let title = " Updates ";
-                let title_len = title.chars().count();
-                let border_chars = box_width.saturating_sub(title_len + 2); // -2 for corners
-                let left_border = "─".repeat(border_chars / 2);
-                let right_border = "─".repeat(border_chars - border_chars / 2);
-                lines.push(Line::from(Span::styled(
-                    format!("┌{}{}{}┐", left_border, title, right_border),
-                    Style::default().fg(DIM_COLOR),
-                )));
-
-                // Content lines (truncate each line if too long, limit total lines)
-                let display_lines = changelog_lines.len().min(MAX_LINES);
-                let has_more = changelog_lines.len() > MAX_LINES;
-
-                for line in changelog_lines.iter().take(display_lines) {
-                    let truncated = if line.chars().count() > max_content_width {
-                        format!(
-                            "{}…",
-                            line.chars()
-                                .take(max_content_width.saturating_sub(1))
-                                .collect::<String>()
-                        )
-                    } else {
-                        line.to_string()
-                    };
-                    let padding = max_content_width.saturating_sub(truncated.chars().count());
-                    lines.push(Line::from(Span::styled(
-                        format!("│ {}{} │", truncated, " ".repeat(padding)),
-                        Style::default().fg(DIM_COLOR),
-                    )));
-                }
-
-                // Show truncation indicator if there are more
-                if has_more {
-                    let more_text = format!("…{} more", changelog_lines.len() - MAX_LINES);
-                    let padding = max_content_width.saturating_sub(more_text.chars().count());
-                    lines.push(Line::from(Span::styled(
-                        format!("│ {}{} │", more_text, " ".repeat(padding)),
-                        Style::default().fg(DIM_COLOR),
-                    )));
-                }
-
-                // Bottom border
-                let bottom_border = "─".repeat(box_width.saturating_sub(2));
-                lines.push(Line::from(Span::styled(
-                    format!("└{}┘", bottom_border),
+            let mut content: Vec<Line> = Vec::new();
+            for line in changelog_lines.iter().take(display_lines) {
+                content.push(Line::from(Span::styled(
+                    line.to_string(),
                     Style::default().fg(DIM_COLOR),
                 )));
             }
+            if has_more {
+                content.push(Line::from(Span::styled(
+                    format!("…{} more", changelog_lines.len() - MAX_LINES),
+                    Style::default().fg(DIM_COLOR),
+                )));
+            }
+
+            let boxed = render_rounded_box(
+                "Updates",
+                content,
+                available_width,
+                Style::default().fg(DIM_COLOR),
+            );
+            lines.extend(boxed);
         }
     }
 
@@ -944,7 +1062,25 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     // Context window info (at the end of header)
     let context_info = app.context_info();
     if context_info.total_chars > 0 {
-        lines.extend(render_context_bar(&context_info, width as usize));
+        let max_header_lines: usize = 12;
+        let current_lines = lines.len();
+        let expanded = render_context_bar(&context_info, width as usize);
+        let should_compact = width < 90
+            || current_lines + expanded.len() + 2 > max_header_lines;
+        let context_lines = if should_compact {
+            render_context_compact_bar(&context_info, width as usize)
+        } else {
+            expanded
+        };
+        if !context_lines.is_empty() {
+            let boxed = render_rounded_box(
+                "Context",
+                context_lines,
+                width as usize,
+                Style::default().fg(DIM_COLOR),
+            );
+            lines.extend(boxed);
+        }
     }
 
     // Blank line after header
