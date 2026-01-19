@@ -9,6 +9,8 @@ mod codesearch;
 mod communicate;
 mod conversation_search;
 mod edit;
+mod remember;
+mod session_search;
 mod glob;
 mod grep;
 mod invalid;
@@ -229,6 +231,18 @@ impl Registry {
         tools_map.insert(
             "communicate".to_string(),
             Arc::new(communicate::CommunicateTool::new()) as Arc<dyn Tool>,
+        );
+
+        // Cross-session search (RAG over past sessions)
+        tools_map.insert(
+            "session_search".to_string(),
+            Arc::new(session_search::SessionSearchTool::new()) as Arc<dyn Tool>,
+        );
+
+        // Simple remember tool for persisting learnings
+        tools_map.insert(
+            "remember".to_string(),
+            Arc::new(remember::RememberTool::new()) as Arc<dyn Tool>,
         );
 
         // Populate the registry
