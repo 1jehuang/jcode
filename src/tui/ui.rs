@@ -1000,13 +1000,11 @@ fn prepare_streaming_cached(
         };
     }
 
-    if cache.key.as_ref() == Some(&key)
-        && cache.is_plain
-        && is_plain
-        && streaming.starts_with(&cache.text)
-    {
+    if cache.key.as_ref() == Some(&key) && streaming.starts_with(&cache.text) {
         let append = &streaming[cache.text.len()..];
-        if !append.is_empty() {
+        if !append.is_empty()
+            && (cache.is_plain || streaming_allows_plain_append(&cache.text, append))
+        {
             let style = streaming_plain_style(&cache.wrapped_lines);
             append_plain_text_lines(
                 &mut cache.wrapped_lines,
@@ -1016,12 +1014,12 @@ fn prepare_streaming_cached(
                 style,
             );
             cache.text = streaming.to_string();
-        }
 
-        return PreparedMessages {
-            wrapped_lines: cache.wrapped_lines.clone(),
-            wrapped_user_indices: Vec::new(),
-        };
+            return PreparedMessages {
+                wrapped_lines: cache.wrapped_lines.clone(),
+                wrapped_user_indices: Vec::new(),
+            };
+        }
     }
 
     let prepared = prepare_streaming_full(streaming, width, prefix_blank);
@@ -1047,7 +1045,7 @@ fn is_plain_streaming_text(text: &str) -> bool {
     if text.is_empty() {
         return true;
     }
-    if text.contains('`') || text.contains('*') || text.contains('_') || text.contains('|') {
+    if contains_markdown_markers(text) {
         return false;
     }
     for line in text.lines() {
@@ -1064,6 +1062,69 @@ fn is_plain_streaming_text(text: &str) -> bool {
         }
     }
     true
+}
+
+fn streaming_allows_plain_append(prev: &str, append: &str) -> bool {
+    if append.is_empty() {
+        return false;
+    }
+    if contains_markdown_markers(append) {
+        return false;
+    }
+    if markdown_has_open_code_block(prev) {
+        return false;
+    }
+    if markdown_table_might_be_open(prev) {
+        return false;
+    }
+    true
+}
+
+fn contains_markdown_markers(text: &str) -> bool {
+    if text.contains('`') || text.contains('*') || text.contains('_') || text.contains('|') {
+        return true;
+    }
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') || trimmed.starts_with('>') || trimmed.starts_with("```") {
+            return true;
+        }
+        if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
+            return true;
+        }
+    }
+    false
+}
+
+fn markdown_has_open_code_block(text: &str) -> bool {
+    let mut open = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            open = !open;
+        }
+    }
+    open
+}
+
+fn markdown_table_might_be_open(text: &str) -> bool {
+    let mut last_non_empty: Option<&str> = None;
+    let mut has_sep = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        last_non_empty = Some(trimmed);
+        if trimmed.contains('|') && trimmed.contains("---") {
+            has_sep = true;
+        }
+    }
+    if let Some(last) = last_non_empty {
+        has_sep && last.contains('|')
+    } else {
+        false
+    }
 }
 
 fn streaming_plain_style(lines: &[Line<'static>]) -> Style {

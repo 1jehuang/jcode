@@ -453,24 +453,30 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     }
 
     let mut result: Vec<Line<'static>> = Vec::new();
-    let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len());
     let mut current_width = 0;
 
     for span in line.spans {
         let style = span.style;
-        let text = span.content.to_string();
+        let text = span.content.as_ref();
 
         // Process each word/chunk in the span
-        let mut remaining = text.as_str();
+        let mut remaining = text;
         while !remaining.is_empty() {
             // Find next break point (space or full chunk if no space)
             let (chunk, rest) = if let Some(space_idx) = remaining.find(' ') {
                 let (word, after_space) = remaining.split_at(space_idx);
                 // Include the space in the word
                 if after_space.len() > 1 {
-                    (format!("{} ", word), &after_space[1..])
+                    let mut buf = String::with_capacity(word.len() + 1);
+                    buf.push_str(word);
+                    buf.push(' ');
+                    (buf, &after_space[1..])
                 } else {
-                    (format!("{} ", word), "")
+                    let mut buf = String::with_capacity(word.len() + 1);
+                    buf.push_str(word);
+                    buf.push(' ');
+                    (buf, "")
                 }
             } else {
                 (remaining.to_string(), "")
