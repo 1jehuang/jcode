@@ -2,35 +2,6 @@
 
 A Rust coding agent that uses the official **Claude Agent SDK** (Claude Code) or **ChatGPT Pro** via OAuth.
 
-## Screenshots
-
-<details open>
-<summary><strong>Main Interface</strong></summary>
-
-![Main UI](docs/screenshots/main-ui.png)
-
-*The main interface showing the InfoWidget with context usage, tool counts, and the input area.*
-
-</details>
-
-<details>
-<summary><strong>Command Palette</strong></summary>
-
-![Command Palette](docs/screenshots/session-picker.png)
-
-*The command palette (triggered with `/`) showing available commands and shortcuts.*
-
-</details>
-
-<details>
-<summary><strong>Streaming Response</strong></summary>
-
-![Streaming](docs/screenshots/streaming.png)
-
-*A streaming response in progress, showing the "sending..." status indicator.*
-
-</details>
-
 ## Features
 
 - **No API keys needed** - Uses Claude Code CLI credentials and Codex OAuth
@@ -447,53 +418,87 @@ UI Layout:
 
 ### InfoWidget (Floating Panel)
 
-See the [Main Interface screenshot](#screenshots) above. The InfoWidget shows:
+A smart floating panel that finds empty screen space on the right side and displays contextual information:
 
-- **Model info**: Current model name and reasoning effort level
-- **Session count**: Active sessions in the swarm
-- **Context bar**: Visual progress bar of token usage (e.g., "4k/200k")
-- **Tool categories**: Breakdown of available tools by category
-- **Todo list**: Current tasks with status icons (◐ in_progress, ✓ completed, ○ pending)
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ [opus-4.5] [fox] [▶ streaming]                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  User: Help me refactor the auth module      ┌────────────────────────────┐ │
+│                                              │ ⚡ opus-4.5 (hi)           │ │
+│  Assistant: I'll analyze the code...         │ 2 sessions                 │ │
+│                                              │ Ctx 45k/200k 22%           │ │
+│  Looking at auth.rs, I can see               │ [███████░░░░░░░░░░░░░░░░░] │ │
+│  several opportunities for...                │                            │ │
+│                                              │ Todos                      │ │
+│  ```rust                                     │  ◐ Refactoring auth       │ │
+│  pub fn authenticate(...)                    │  ○ Update tests           │ │
+│  ```                                         │  ○ Add documentation      │ │
+│                                              │                            │ │
+│                                              │        • · ·               │ │
+│                                              └────────────────────────────┘ │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ > |                                                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-**Controls:**
-- Toggle visibility: `Ctrl+I`
-- Auto-positions in largest empty screen area
-- Pages between expanded views every 30 seconds
+**Features:**
+- Auto-positions in largest empty rectangle on right side
+- Shows model name, reasoning effort, session count
+- Context usage bar (tokens used / limit)
+- Todo list with status icons (◐ in_progress, ✓ completed, ○ pending)
+- Auto-pages between expanded views every 30 seconds
+- Toggle with keyboard shortcut (Ctrl+I)
 
-### Command Palette
+### Session Picker (Interactive Browser)
 
-Press `/` to open the command palette (see [screenshot](#screenshots)):
+When resuming sessions (`jcode --resume` or `/sessions` command), shows an interactive browser:
 
-| Command | Description |
-|---------|-------------|
-| `/help` | Show all commands |
-| `/model` | Switch AI model |
-| `/clear` | Clear conversation |
-| `/version` | Show version info |
-| `/info` | Toggle InfoWidget |
-| `/sessions` | Browse past sessions |
+```
+┌──────────────────────────────────────┬──────────────────────────────────────┐
+│ Sessions (12)                        │ Preview: fox                         │
+├──────────────────────────────────────┤──────────────────────────────────────┤
+│ > 🦊 fox        ▶ active  5 min ago │ User:                                │
+│   🌳 oak        ✓ closed  2 hrs ago │ Help me fix the auth bug             │
+│   🌊 river      ✓ closed  1 day ago │                                      │
+│   ⭐ star       💥 crashed 2 days   │ Assistant:                           │
+│   🌙 moon       ✓ closed  3 days    │ I'll look at the auth module.        │
+│   🔥 ember      ✓ closed  1 week    │ Let me read the relevant files...    │
+│                                      │                                      │
+│                                      │ [read] src/auth/mod.rs (245 lines)  │
+│                                      │                                      │
+│                                      │ I found the issue on line 142...    │
+│                                      │                                      │
+│ ↑/↓ Navigate  Enter Select  q Quit  │ 12 messages · 45k tokens             │
+└──────────────────────────────────────┴──────────────────────────────────────┘
+```
 
-### Session Picker
-
-When resuming sessions (`jcode --resume` or `/sessions`), an interactive browser shows:
-
+**Features:**
 - Split view: session list (left) + conversation preview (right)
-- Session status: ▶ active, ✓ closed, 💥 crashed, 🔄 reloaded
+- Shows session status icons (▶ active, ✓ closed, 💥 crashed, 🔄 reloaded)
 - Memorable animal names with emoji icons
 - Message count, token estimate, timestamps
-- Keyboard navigation: `↑/↓` navigate, `Enter` select, `q` quit
+- Keyboard navigation (↑/↓/Enter/q)
 
 ### Visual Debug Mode
 
-Frame-by-frame capture for debugging rendering:
+Frame-by-frame capture system for debugging rendering issues:
 
 ```
 /debug-visual on    # Enable capture
-/debug-visual off   # Disable
-/debug-visual dump  # Write to ~/.jcode/visual-debug.txt
+/debug-visual off   # Disable capture
+/debug-visual dump  # Write frames to file
 ```
 
-Captures terminal dimensions, layout areas, state snapshots, and rendered text. Ring buffer keeps last 100 frames.
+Captures for each frame:
+- Terminal dimensions and layout areas
+- State snapshot (processing, input, scroll position)
+- Rendered text content (stripped of ANSI codes)
+- Detected anomalies (layout overflow, missing content)
+
+Ring buffer keeps last 100 frames for analysis.
 
 </details>
 

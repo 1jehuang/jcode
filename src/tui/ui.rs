@@ -956,10 +956,10 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
 
     lines.push(Line::from(mode_parts));
 
-    // Line 2: Model ID, version, and build age (dimmed)
+    // Line 2: Model ID, version, and build age (dimmed) + how to switch models
     let build_info = binary_age().unwrap_or_else(|| "unknown".to_string());
     lines.push(Line::from(Span::styled(
-        format!("{} · {} · built {}", model, semver(), build_info),
+        format!("{} · {} · built {} · /model to switch", model, semver(), build_info),
         Style::default().fg(DIM_COLOR),
     )));
 
