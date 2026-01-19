@@ -4,11 +4,11 @@ A Rust coding agent that uses the official **Claude Agent SDK** (Claude Code) or
 
 ## Demo
 
-https://github.com/user-attachments/assets/jcode_demo.mp4
+https://github.com/user-attachments/assets/demo.mp4
 
 *Demo: Opening a terminal, running jcode, and asking it to take a screenshot of the focused window.*
 
-![Screenshot](screenshot.png)
+![Screenshot](assets/screenshot.png)
 
 ## Features
 
