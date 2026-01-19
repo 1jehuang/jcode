@@ -10,6 +10,14 @@ https://github.com/user-attachments/assets/demo.mp4
 
 ![Screenshot](assets/screenshot.png)
 
+### Niri Demo
+
+https://github.com/user-attachments/assets/niri-demo.mp4
+
+*Demo: Opening a kitty terminal via kitten socket, running jcode, and asking how to take a screenshot of the focused window on niri.*
+
+![Niri Screenshot](assets/niri-screenshot.png)
+
 ## Features
 
 - **No API keys needed** - Uses Claude Code CLI credentials and Codex OAuth
