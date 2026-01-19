@@ -18,6 +18,7 @@ pub use backend::{DebugEvent, DebugMessage, RemoteConnection};
 pub use core::TuiCore;
 
 use crate::message::ToolCall;
+use ratatui::prelude::Frame;
 use std::time::Duration;
 
 /// Trait for TUI state - implemented by both App and ClientApp
@@ -72,4 +73,9 @@ pub trait TuiState {
     fn context_info(&self) -> crate::prompt::ContextInfo;
     /// Get info widget data (todos, client count, etc.)
     fn info_widget_data(&self) -> info_widget::InfoWidgetData;
+}
+
+/// Public wrapper to render a single frame (used by benchmarks/tools).
+pub fn render_frame(frame: &mut Frame<'_>, state: &dyn TuiState) {
+    ui::draw(frame, state);
 }
