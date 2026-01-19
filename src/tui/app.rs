@@ -5689,11 +5689,19 @@ impl super::TuiState for App {
             None
         };
 
+        let (model, reasoning_effort) = if self.is_remote {
+            (self.remote_provider_model.clone(), None)
+        } else {
+            (Some(self.provider.model()), self.provider.reasoning_effort())
+        };
+
         super::info_widget::InfoWidgetData {
             todos,
             context_info,
             queue_mode: Some(self.queue_mode),
             context_limit: Some(self.context_limit as usize),
+            model,
+            reasoning_effort,
         }
     }
 }

@@ -569,6 +569,10 @@ impl Provider for OpenAIProvider {
     fn available_models(&self) -> Vec<&'static str> {
         AVAILABLE_MODELS.to_vec()
     }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        self.reasoning_effort.clone()
+    }
 }
 
 fn should_refresh_token(status: StatusCode, body: &str) -> bool {

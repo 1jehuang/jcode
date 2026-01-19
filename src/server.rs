@@ -486,9 +486,18 @@ async fn handle_client(
     let mut processing_message_id: Option<u64> = None;
 
     // Create a new session for this client
-    let new_agent = Agent::new(Arc::clone(&provider), registry.clone());
+    let mut new_agent = Agent::new(Arc::clone(&provider), registry.clone());
     let client_session_id = new_agent.session_id().to_string();
     let friendly_name = new_agent.session_short_name().map(|s| s.to_string());
+
+    // Auto-detect jcode repo and enable self-dev mode
+    let cwd = std::env::current_dir().ok();
+    let in_jcode_repo = cwd.as_ref().map(|p| crate::build::is_jcode_repo(p)).unwrap_or(false);
+    if in_jcode_repo {
+        new_agent.set_canary("self-dev");
+        registry.register_selfdev_tools().await;
+    }
+
     let agent = Arc::new(Mutex::new(new_agent));
     {
         let mut sessions_guard = sessions.write().await;
@@ -645,8 +654,16 @@ async fn handle_client(
 
             Request::Clear { id } => {
                 // Clear this client's session (create new agent)
-                let new_agent = Agent::new(Arc::clone(&provider), registry.clone());
+                let mut new_agent = Agent::new(Arc::clone(&provider), registry.clone());
                 let new_id = new_agent.session_id().to_string();
+
+                // Auto-detect jcode repo and enable self-dev mode
+                let cwd = std::env::current_dir().ok();
+                let in_jcode_repo = cwd.as_ref().map(|p| crate::build::is_jcode_repo(p)).unwrap_or(false);
+                if in_jcode_repo {
+                    new_agent.set_canary("self-dev");
+                    // selfdev tools should already be registered from initial connection
+                }
 
                 // Replace the agent in place
                 let mut agent_guard = agent.lock().await;

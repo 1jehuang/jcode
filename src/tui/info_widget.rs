@@ -27,6 +27,8 @@ pub struct InfoWidgetData {
     pub context_info: Option<ContextInfo>,
     pub queue_mode: Option<bool>,
     pub context_limit: Option<usize>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
     // TODO: Add swarm/subagent status summary to the info widget.
 }
 
@@ -35,6 +37,7 @@ impl InfoWidgetData {
         self.todos.is_empty()
             && self.context_info.is_none()
             && self.queue_mode.is_none()
+            && self.model.is_none()
     }
 }
 
@@ -258,7 +261,6 @@ enum InfoPageKind {
     CompactOnly,
     TodosExpanded,
     ContextExpanded,
-    QueueExpanded,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -290,7 +292,6 @@ fn compute_page_layout(
     let mut candidates: Vec<InfoPage> = Vec::new();
     let context_compact = compact_context_height(data);
     let todos_compact = compact_todos_height(data);
-    let queue_compact = compact_queue_height(data);
 
     let context_expanded = expanded_context_height(data);
     if context_expanded > 0 {
@@ -305,14 +306,6 @@ fn compute_page_layout(
         candidates.push(InfoPage {
             kind: InfoPageKind::TodosExpanded,
             height: compact_height - todos_compact + todos_expanded,
-        });
-    }
-
-    let queue_expanded = expanded_queue_height(data);
-    if queue_expanded > 0 {
-        candidates.push(InfoPage {
-            kind: InfoPageKind::QueueExpanded,
-            height: compact_height - queue_compact + queue_expanded,
         });
     }
 
@@ -368,7 +361,6 @@ fn render_page(kind: InfoPageKind, data: &InfoWidgetData, inner: Rect) -> Vec<Li
         InfoPageKind::CompactOnly => render_sections(data, inner, None),
         InfoPageKind::TodosExpanded => render_sections(data, inner, Some(InfoPageKind::TodosExpanded)),
         InfoPageKind::ContextExpanded => render_sections(data, inner, Some(InfoPageKind::ContextExpanded)),
-        InfoPageKind::QueueExpanded => render_sections(data, inner, Some(InfoPageKind::QueueExpanded)),
     }
 }
 
@@ -397,8 +389,19 @@ fn compact_queue_height(data: &InfoWidgetData) -> u16 {
     }
 }
 
+fn compact_model_height(data: &InfoWidgetData) -> u16 {
+    if data.model.is_some() {
+        1
+    } else {
+        0
+    }
+}
+
 fn compact_overview_height(data: &InfoWidgetData) -> u16 {
-    compact_context_height(data) + compact_todos_height(data) + compact_queue_height(data)
+    compact_model_height(data)
+        + compact_context_height(data)
+        + compact_todos_height(data)
+        + compact_queue_height(data)
 }
 
 fn expanded_context_height(data: &InfoWidgetData) -> u16 {
@@ -422,13 +425,6 @@ fn expanded_todos_height(data: &InfoWidgetData) -> u16 {
     height
 }
 
-fn expanded_queue_height(data: &InfoWidgetData) -> u16 {
-    if data.queue_mode.is_some() {
-        2
-    } else {
-        0
-    }
-}
 
 fn render_sections(
     data: &InfoWidgetData,
@@ -436,6 +432,11 @@ fn render_sections(
     focus: Option<InfoPageKind>,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Model info at the top
+    if data.model.is_some() {
+        lines.extend(render_model_info(data, inner));
+    }
 
     if let Some(info) = &data.context_info {
         if info.total_chars > 0 {
@@ -456,11 +457,7 @@ fn render_sections(
     }
 
     if data.queue_mode.is_some() {
-        if matches!(focus, Some(InfoPageKind::QueueExpanded)) {
-            lines.extend(render_queue_expanded(data, inner));
-        } else {
-            lines.extend(render_queue_compact(data, inner));
-        }
+        lines.extend(render_queue_compact(data, inner));
     }
 
     lines
@@ -546,29 +543,6 @@ fn render_todos_compact(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static
     ]
 }
 
-fn render_queue_expanded(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static>> {
-    let Some(queue_mode) = data.queue_mode else {
-        return Vec::new();
-    };
-
-    let (mode_text, mode_color) = if queue_mode {
-        ("Wait until done", Color::Rgb(255, 200, 100))
-    } else {
-        ("Send ASAP", Color::Rgb(120, 200, 120))
-    };
-
-    vec![
-        Line::from(vec![Span::styled(
-            "Queue",
-            Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
-        )]),
-        Line::from(vec![
-            Span::styled("Mode: ", Style::default().fg(Color::Rgb(140, 140, 150))),
-            Span::styled(mode_text, Style::default().fg(mode_color)),
-        ]),
-    ]
-}
-
 fn render_queue_compact(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static>> {
     let Some(queue_mode) = data.queue_mode else {
         return Vec::new();
@@ -584,6 +558,91 @@ fn render_queue_compact(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static
         Span::styled("Queue: ", Style::default().fg(Color::Rgb(140, 140, 150))),
         Span::styled(mode_text, Style::default().fg(mode_color)),
     ])]
+}
+
+fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    let Some(model) = &data.model else {
+        return Vec::new();
+    };
+
+    // Extract short model name (e.g., "claude-opus-4-5-20251101" -> "opus-4.5")
+    let short_name = shorten_model_name(model);
+    let max_len = inner.width.saturating_sub(2) as usize;
+
+    let mut spans = vec![
+        Span::styled("⚡ ", Style::default().fg(Color::Rgb(140, 180, 255))),
+        Span::styled(
+            if short_name.len() > max_len.saturating_sub(2) {
+                format!("{}...", &short_name[..max_len.saturating_sub(5)])
+            } else {
+                short_name
+            },
+            Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
+        ),
+    ];
+
+    // Add reasoning effort if present
+    if let Some(effort) = &data.reasoning_effort {
+        let effort_short = match effort.as_str() {
+            "xhigh" => "xhi",
+            "high" => "hi",
+            "medium" => "med",
+            "low" => "lo",
+            "none" => "∅",
+            other => other,
+        };
+        spans.push(Span::styled(" ", Style::default()));
+        spans.push(Span::styled(
+            format!("({})", effort_short),
+            Style::default().fg(Color::Rgb(255, 200, 100)),
+        ));
+    }
+
+    vec![Line::from(spans)]
+}
+
+fn shorten_model_name(model: &str) -> String {
+    // Handle common model name patterns
+    if model.contains("claude") {
+        if model.contains("opus-4-5") || model.contains("opus-4.5") {
+            return "opus-4.5".to_string();
+        }
+        if model.contains("sonnet-4") {
+            return "sonnet-4".to_string();
+        }
+        if model.contains("sonnet-3-5") || model.contains("sonnet-3.5") {
+            return "sonnet-3.5".to_string();
+        }
+        if model.contains("haiku") {
+            return "haiku".to_string();
+        }
+        // Fallback: extract the model family
+        if let Some(idx) = model.find("claude-") {
+            let rest = &model[idx + 7..];
+            if let Some(end) = rest.find('-') {
+                return rest[..end].to_string();
+            }
+        }
+    }
+
+    if model.contains("gpt") {
+        // e.g., "gpt-5.2-codex" -> "gpt-5.2"
+        if let Some(start) = model.find("gpt-") {
+            let rest = &model[start..];
+            // Find second dash after version number
+            let parts: Vec<&str> = rest.splitn(3, '-').collect();
+            if parts.len() >= 2 {
+                return format!("{}-{}", parts[0], parts[1]);
+            }
+        }
+    }
+
+    // Fallback: truncate long names
+    if model.len() > 15 {
+        format!("{}…", &model[..14])
+    } else {
+        model.to_string()
+    }
 }
 
 fn render_context_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {

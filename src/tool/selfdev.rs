@@ -227,9 +227,14 @@ impl SelfDevTool {
         // Write stable version file (triggers auto-migration in other sessions)
         build::write_stable_version(&canary_hash)?;
 
-        // Update manifest
+        // Clear canary symlink since it's now promoted to stable
+        build::clear_canary_symlink()?;
+
+        // Update manifest - clear all canary state
         manifest.stable = Some(canary_hash.clone());
-        manifest.canary_status = Some(build::CanaryStatus::Passed);
+        manifest.canary = None;
+        manifest.canary_session = None;
+        manifest.canary_status = None;
         manifest.save()?;
 
         let msg = message.unwrap_or_else(|| "Promoted to stable".to_string());
