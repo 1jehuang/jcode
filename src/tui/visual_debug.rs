@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use ratatui::layout::Rect;
+use serde::Serialize;
 
 /// Global flag to enable visual debugging (set via /debug-visual command)
 static VISUAL_DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -27,7 +28,7 @@ fn get_frame_buffer() -> &'static Mutex<FrameBuffer> {
 }
 
 /// A captured frame with all render context
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FrameCapture {
     /// Frame number (monotonically increasing)
     pub frame_id: u64,
@@ -46,7 +47,7 @@ pub struct FrameCapture {
 }
 
 /// Captured layout computation
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct LayoutCapture {
     /// Whether packed layout was used (vs scrolling)
     pub use_packed: bool,
@@ -67,7 +68,7 @@ pub struct LayoutCapture {
 }
 
 /// Rect capture (serializable)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct RectCapture {
     pub x: u16,
     pub y: u16,
@@ -87,7 +88,7 @@ impl From<Rect> for RectCapture {
 }
 
 /// State snapshot at render time
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct StateSnapshot {
     pub is_processing: bool,
     pub input_len: usize,
@@ -102,7 +103,7 @@ pub struct StateSnapshot {
 }
 
 /// Actual rendered text content
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct RenderedText {
     /// Status line text (spinner, tokens, elapsed, etc.)
     pub status_line: String,
@@ -119,7 +120,7 @@ pub struct RenderedText {
 }
 
 /// Captured message for debugging
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct MessageCapture {
     pub role: String,
     pub content_preview: String,
@@ -247,6 +248,126 @@ pub fn dump_to_file() -> std::io::Result<PathBuf> {
     }
 
     Ok(path)
+}
+
+/// Return the most recent frame capture.
+pub fn latest_frame() -> Option<FrameCapture> {
+    let buffer = get_frame_buffer().lock().ok()?;
+    buffer.frames.back().cloned()
+}
+
+/// Return the most recent frame as a JSON string.
+pub fn latest_frame_json() -> Option<String> {
+    let frame = latest_frame()?;
+    serde_json::to_string_pretty(&frame).ok()
+}
+
+/// Return the most recent frame as a normalized JSON string (for stable diffs).
+/// Strips timestamps, UUIDs, session IDs, and other non-deterministic values.
+pub fn latest_frame_json_normalized() -> Option<String> {
+    let frame = latest_frame()?;
+    let normalized = normalize_frame(&frame);
+    serde_json::to_string_pretty(&normalized).ok()
+}
+
+/// Normalize a frame capture for stable comparisons.
+/// Replaces timestamps, UUIDs, session IDs, and other volatile values with placeholders.
+pub fn normalize_frame(frame: &FrameCapture) -> serde_json::Value {
+    let json = serde_json::to_value(frame).unwrap_or(serde_json::Value::Null);
+    normalize_json_value(json)
+}
+
+/// Recursively normalize JSON values, replacing volatile content.
+fn normalize_json_value(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+
+    match value {
+        Value::String(s) => Value::String(normalize_string(&s)),
+        Value::Array(arr) => Value::Array(arr.into_iter().map(normalize_json_value).collect()),
+        Value::Object(map) => {
+            let mut new_map = serde_json::Map::new();
+            for (k, v) in map {
+                // Skip timestamp fields entirely or normalize them
+                if k == "timestamp" || k == "created_at" || k == "updated_at" {
+                    new_map.insert(k, Value::String("<TIMESTAMP>".to_string()));
+                } else if k == "frame_id" {
+                    // Keep frame_id but note it's sequential
+                    new_map.insert(k, v);
+                } else {
+                    new_map.insert(k, normalize_json_value(v));
+                }
+            }
+            Value::Object(new_map)
+        }
+        other => other,
+    }
+}
+
+/// Normalize a string by replacing volatile patterns with placeholders.
+fn normalize_string(s: &str) -> String {
+    use regex::Regex;
+    use std::sync::OnceLock;
+
+    // Cached regex patterns for performance
+    static UUID_RE: OnceLock<Regex> = OnceLock::new();
+    static SESSION_ID_RE: OnceLock<Regex> = OnceLock::new();
+    static TIMESTAMP_RE: OnceLock<Regex> = OnceLock::new();
+    static ISO_DATE_RE: OnceLock<Regex> = OnceLock::new();
+    static DURATION_RE: OnceLock<Regex> = OnceLock::new();
+    static PATH_RE: OnceLock<Regex> = OnceLock::new();
+    static ELAPSED_RE: OnceLock<Regex> = OnceLock::new();
+    static TOKENS_RE: OnceLock<Regex> = OnceLock::new();
+
+    let uuid_re = UUID_RE.get_or_init(|| {
+        Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+            .unwrap()
+    });
+    let session_id_re = SESSION_ID_RE.get_or_init(|| {
+        Regex::new(r"session_[0-9a-zA-Z_]+").unwrap()
+    });
+    let timestamp_re = TIMESTAMP_RE.get_or_init(|| {
+        Regex::new(r"\d{10,13}").unwrap() // Unix timestamps (10-13 digits)
+    });
+    let iso_date_re = ISO_DATE_RE.get_or_init(|| {
+        Regex::new(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}").unwrap()
+    });
+    let duration_re = DURATION_RE.get_or_init(|| {
+        Regex::new(r"\d+(\.\d+)?s").unwrap() // Duration like "1.5s"
+    });
+    let path_re = PATH_RE.get_or_init(|| {
+        Regex::new(r"/(?:home|Users)/[^/\s]+").unwrap() // Home directory paths
+    });
+    let elapsed_re = ELAPSED_RE.get_or_init(|| {
+        Regex::new(r"\d+m?\d*s").unwrap() // Elapsed time like "5s" or "1m30s"
+    });
+    let tokens_re = TOKENS_RE.get_or_init(|| {
+        Regex::new(r"\d+[kK]? tokens?").unwrap() // Token counts
+    });
+
+    let mut result = s.to_string();
+
+    // Replace in order of specificity (most specific first)
+    result = uuid_re.replace_all(&result, "<UUID>").to_string();
+    result = session_id_re.replace_all(&result, "<SESSION_ID>").to_string();
+    result = iso_date_re.replace_all(&result, "<ISO_DATE>").to_string();
+    result = elapsed_re.replace_all(&result, "<ELAPSED>").to_string();
+    result = tokens_re.replace_all(&result, "<TOKENS>").to_string();
+    result = duration_re.replace_all(&result, "<DURATION>").to_string();
+    result = path_re.replace_all(&result, "<HOME>").to_string();
+
+    // Only replace long timestamps that aren't part of other patterns
+    if result.len() < 20 {
+        result = timestamp_re.replace_all(&result, "<TIMESTAMP>").to_string();
+    }
+
+    result
+}
+
+/// Compare two frames for semantic equality (ignoring volatile fields).
+pub fn frames_equal_normalized(a: &FrameCapture, b: &FrameCapture) -> bool {
+    let norm_a = normalize_frame(a);
+    let norm_b = normalize_frame(b);
+    norm_a == norm_b
 }
 
 fn write_frame(file: &mut File, frame: &FrameCapture) -> std::io::Result<()> {

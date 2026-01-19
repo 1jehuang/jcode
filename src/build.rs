@@ -60,10 +60,13 @@ pub fn is_jcode_repo(dir: &std::path::Path) -> bool {
 #[serde(rename_all = "snake_case")]
 pub enum CanaryStatus {
     /// Build is currently being tested
+    #[serde(alias = "Testing")]
     Testing,
     /// Build passed all tests and is ready for promotion
+    #[serde(alias = "Passed")]
     Passed,
     /// Build failed testing
+    #[serde(alias = "Failed")]
     Failed,
 }
 
