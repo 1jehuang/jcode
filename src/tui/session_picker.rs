@@ -7,6 +7,7 @@ use crate::id::session_icon;
 use crate::message::{ContentBlock, Role};
 use crate::session::{Session, SessionStatus};
 use crate::storage;
+use crate::tui::markdown;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -26,10 +27,14 @@ pub struct SessionInfo {
     pub icon: String,
     pub title: String,
     pub message_count: usize,
+    pub user_message_count: usize,
+    pub assistant_message_count: usize,
+    pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_message_time: chrono::DateTime<chrono::Utc>,
     pub working_dir: Option<String>,
     pub is_canary: bool,
     pub status: SessionStatus,
+    pub estimated_tokens: usize,
     pub messages_preview: Vec<PreviewMessage>,
 }
 
@@ -59,7 +64,27 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
                     let short_name = session.display_name().to_string();
                     let icon = session_icon(&short_name);
 
-                    // Extract preview messages (last 10)
+                    // Count messages and estimate tokens
+                    let mut user_message_count = 0;
+                    let mut assistant_message_count = 0;
+                    let mut total_chars = 0;
+
+                    for msg in &session.messages {
+                        match msg.role {
+                            Role::User => user_message_count += 1,
+                            Role::Assistant => assistant_message_count += 1,
+                        }
+                        for block in &msg.content {
+                            if let ContentBlock::Text { text, .. } = block {
+                                total_chars += text.len();
+                            }
+                        }
+                    }
+
+                    // Rough token estimate: ~4 chars per token
+                    let estimated_tokens = total_chars / 4;
+
+                    // Extract preview messages (last 20)
                     let messages_preview: Vec<PreviewMessage> = session
                         .messages
                         .iter()
@@ -101,16 +126,36 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
                         })
                         .collect();
 
+                    // Infer status for sessions that appear stale
+                    // If status is Active but session hasn't been updated in > 2 minutes,
+                    // it's likely from before status tracking or crashed without cleanup
+                    let status = if session.status == SessionStatus::Active {
+                        let now = chrono::Utc::now();
+                        let age = now.signed_duration_since(session.updated_at);
+                        if age.num_seconds() > 120 {
+                            // Session is stale - treat as closed
+                            SessionStatus::Closed
+                        } else {
+                            session.status.clone()
+                        }
+                    } else {
+                        session.status.clone()
+                    };
+
                     sessions.push(SessionInfo {
                         id: stem.to_string(),
                         short_name,
                         icon: icon.to_string(),
                         title: session.title.unwrap_or_else(|| "Untitled".to_string()),
                         message_count: session.messages.len(),
+                        user_message_count,
+                        assistant_message_count,
+                        created_at: session.created_at,
                         last_message_time: session.updated_at,
                         working_dir: session.working_dir,
                         is_canary: session.is_canary,
-                        status: session.status.clone(),
+                        status,
+                        estimated_tokens,
                         messages_preview,
                     });
                 }
@@ -207,8 +252,9 @@ impl SessionPicker {
         }
         let i = match self.list_state.selected() {
             Some(i) => {
+                // Don't wrap - stay at bottom
                 if i >= self.sessions.len() - 1 {
-                    0
+                    i
                 } else {
                     i + 1
                 }
@@ -225,8 +271,9 @@ impl SessionPicker {
         }
         let i = match self.list_state.selected() {
             Some(i) => {
+                // Don't wrap - stay at top
                 if i == 0 {
-                    self.sessions.len() - 1
+                    0
                 } else {
                     i - 1
                 }
@@ -246,18 +293,25 @@ impl SessionPicker {
     }
 
     fn render_session_list(&mut self, frame: &mut Frame, area: Rect) {
+        // Colors
+        const DIM: Color = Color::Rgb(100, 100, 100);
+        const DIMMER: Color = Color::Rgb(70, 70, 70);
+        const USER_CLR: Color = Color::Rgb(138, 180, 248);
+        const ACCENT: Color = Color::Rgb(186, 139, 255);
+
         let items: Vec<ListItem> = self
             .sessions
             .iter()
             .enumerate()
             .map(|(idx, session)| {
                 let is_selected = self.list_state.selected() == Some(idx);
-                let time_ago = format_time_ago(session.last_message_time);
+                let last_msg_ago = format_time_ago(session.last_message_time);
+                let created_ago = format_time_ago(session.created_at);
 
-                // First line: icon + name + time
+                // Name style
                 let name_style = if is_selected {
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(Color::Rgb(140, 220, 160))
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::White)
@@ -267,61 +321,72 @@ impl SessionPicker {
 
                 // Status indicator with color
                 let (status_icon, status_color) = match &session.status {
-                    SessionStatus::Active => ("▶", Color::Green),
-                    SessionStatus::Closed => ("✓", Color::DarkGray),
-                    SessionStatus::Crashed { .. } => ("💥", Color::Red),
-                    SessionStatus::Reloaded => ("🔄", Color::Blue),
-                    SessionStatus::Compacted => ("📦", Color::Yellow),
-                    SessionStatus::RateLimited => ("⏳", Color::Magenta),
-                    SessionStatus::Error { .. } => ("❌", Color::Red),
+                    SessionStatus::Active => ("▶", Color::Rgb(100, 200, 100)),
+                    SessionStatus::Closed => ("✓", DIM),
+                    SessionStatus::Crashed { .. } => ("💥", Color::Rgb(220, 100, 100)),
+                    SessionStatus::Reloaded => ("🔄", USER_CLR),
+                    SessionStatus::Compacted => ("📦", Color::Rgb(255, 193, 7)),
+                    SessionStatus::RateLimited => ("⏳", ACCENT),
+                    SessionStatus::Error { .. } => ("❌", Color::Rgb(220, 100, 100)),
                 };
 
+                // Line 1: icon + name + status + last message time
                 let line1 = Line::from(vec![
-                    Span::styled(format!("{} ", session.icon), Style::default()),
+                    Span::styled(format!("{} ", session.icon), Style::default().fg(Color::Rgb(110, 210, 255))),
                     Span::styled(&session.short_name, name_style),
-                    Span::styled(canary_marker, Style::default().fg(Color::Yellow)),
+                    Span::styled(canary_marker, Style::default().fg(Color::Rgb(255, 193, 7))),
                     Span::styled(format!(" {}", status_icon), Style::default().fg(status_color)),
-                    Span::styled(
-                        format!("  {}", time_ago),
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::styled(format!("  last: {}", last_msg_ago), Style::default().fg(DIM)),
                 ]);
 
-                // Second line: title (truncated) + message count
-                let title_display = if session.title.chars().count() > 35 {
-                    format!("{}...", safe_truncate(&session.title, 32))
+                // Line 2: title (truncated)
+                let title_display = if session.title.chars().count() > 45 {
+                    format!("{}...", safe_truncate(&session.title, 42))
                 } else {
                     session.title.clone()
                 };
-
                 let line2 = Line::from(vec![
                     Span::styled("   ", Style::default()),
-                    Span::styled(title_display, Style::default().fg(Color::Gray)),
-                    Span::styled(
-                        format!("  ({} msgs)", session.message_count),
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::styled(title_display, Style::default().fg(Color::Rgb(180, 180, 180))),
                 ]);
 
-                // Third line: working dir (if available)
-                let line3 = if let Some(ref dir) = session.working_dir {
-                    let dir_display = if dir.chars().count() > 40 {
-                        // Safe suffix truncation
+                // Line 3: stats - user msgs, assistant msgs, tokens
+                let tokens_display = if session.estimated_tokens >= 1000 {
+                    format!("~{}k tok", session.estimated_tokens / 1000)
+                } else {
+                    format!("~{} tok", session.estimated_tokens)
+                };
+                let line3 = Line::from(vec![
+                    Span::styled("   ", Style::default()),
+                    Span::styled(format!("{}", session.user_message_count), Style::default().fg(USER_CLR)),
+                    Span::styled(" user", Style::default().fg(DIMMER)),
+                    Span::styled(" · ", Style::default().fg(DIMMER)),
+                    Span::styled(format!("{}", session.assistant_message_count), Style::default().fg(Color::Rgb(129, 199, 132))),
+                    Span::styled(" assistant", Style::default().fg(DIMMER)),
+                    Span::styled(" · ", Style::default().fg(DIMMER)),
+                    Span::styled(tokens_display, Style::default().fg(DIMMER)),
+                ]);
+
+                // Line 4: created time + working dir
+                let dir_part = if let Some(ref dir) = session.working_dir {
+                    let dir_display = if dir.chars().count() > 30 {
                         let chars: Vec<char> = dir.chars().collect();
-                        let suffix: String = chars.iter().rev().take(37).collect::<Vec<_>>().into_iter().rev().collect();
+                        let suffix: String = chars.iter().rev().take(27).collect::<Vec<_>>().into_iter().rev().collect();
                         format!("...{}", suffix)
                     } else {
                         dir.clone()
                     };
-                    Line::from(vec![
-                        Span::styled("   ", Style::default()),
-                        Span::styled(dir_display, Style::default().fg(Color::DarkGray)),
-                    ])
+                    format!("  📁 {}", dir_display)
                 } else {
-                    Line::from("")
+                    String::new()
                 };
+                let line4 = Line::from(vec![
+                    Span::styled("   ", Style::default()),
+                    Span::styled(format!("created: {}", created_ago), Style::default().fg(DIMMER)),
+                    Span::styled(dir_part, Style::default().fg(DIMMER)),
+                ]);
 
-                ListItem::new(vec![line1, line2, line3, Line::from("")])
+                ListItem::new(vec![line1, line2, line3, line4, Line::from("")])
             })
             .collect();
 
@@ -330,11 +395,11 @@ impl SessionPicker {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" Sessions (↑↓ navigate, Enter select, Esc quit) ")
-                    .border_style(Style::default().fg(Color::Cyan)),
+                    .border_style(Style::default().fg(Color::Rgb(138, 180, 248))),
             )
             .highlight_style(
                 Style::default()
-                    .bg(Color::DarkGray)
+                    .bg(Color::Rgb(40, 44, 52))
                     .add_modifier(Modifier::BOLD),
             );
 
@@ -342,6 +407,13 @@ impl SessionPicker {
     }
 
     fn render_preview(&self, frame: &mut Frame, area: Rect) {
+        // Colors matching the actual TUI
+        const USER_COLOR: Color = Color::Rgb(138, 180, 248); // Soft blue
+        const USER_TEXT: Color = Color::Rgb(220, 220, 220);  // Bright white for user text
+        const DIM_COLOR: Color = Color::Rgb(100, 100, 100);  // Dim gray
+        const HEADER_ICON_COLOR: Color = Color::Rgb(110, 210, 255); // Cyan
+        const HEADER_SESSION_COLOR: Color = Color::Rgb(140, 220, 160); // Soft green
+
         let Some(session) = self.selected_session() else {
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -357,49 +429,55 @@ impl SessionPicker {
         // Build preview content
         let mut lines: Vec<Line> = Vec::new();
 
-        // Header with session info
+        // Header matching TUI style
         lines.push(Line::from(vec![
             Span::styled(
-                format!("{} {} ", session.icon, session.short_name),
+                format!("{} ", session.icon),
+                Style::default().fg(HEADER_ICON_COLOR),
+            ),
+            Span::styled(
+                &session.short_name,
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(HEADER_SESSION_COLOR)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format_time_ago(session.last_message_time),
-                Style::default().fg(Color::DarkGray),
+                format!("  {}", format_time_ago(session.last_message_time)),
+                Style::default().fg(DIM_COLOR),
             ),
         ]));
 
+        // Title
         lines.push(Line::from(vec![Span::styled(
             &session.title,
             Style::default().fg(Color::White),
         )]));
 
+        // Working directory
         if let Some(ref dir) = session.working_dir {
             lines.push(Line::from(vec![Span::styled(
                 format!("📁 {}", dir),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(DIM_COLOR),
             )]));
         }
 
         // Status line with details
         let (status_icon, status_text, status_color) = match &session.status {
-            SessionStatus::Active => ("▶", "Active".to_string(), Color::Green),
+            SessionStatus::Active => ("▶", "Active".to_string(), Color::Rgb(100, 200, 100)),
             SessionStatus::Closed => ("✓", "Closed normally".to_string(), Color::DarkGray),
             SessionStatus::Crashed { message } => {
                 let text = match message {
                     Some(msg) => format!("Crashed: {}", safe_truncate(msg, 40)),
                     None => "Crashed".to_string(),
                 };
-                ("💥", text, Color::Red)
+                ("💥", text, Color::Rgb(220, 100, 100))
             }
-            SessionStatus::Reloaded => ("🔄", "Reloaded".to_string(), Color::Blue),
-            SessionStatus::Compacted => ("📦", "Compacted (context too large)".to_string(), Color::Yellow),
-            SessionStatus::RateLimited => ("⏳", "Rate limited".to_string(), Color::Magenta),
+            SessionStatus::Reloaded => ("🔄", "Reloaded".to_string(), Color::Rgb(138, 180, 248)),
+            SessionStatus::Compacted => ("📦", "Compacted (context too large)".to_string(), Color::Rgb(255, 193, 7)),
+            SessionStatus::RateLimited => ("⏳", "Rate limited".to_string(), Color::Rgb(186, 139, 255)),
             SessionStatus::Error { message } => {
                 let text = format!("Error: {}", safe_truncate(message, 40));
-                ("❌", text, Color::Red)
+                ("❌", text, Color::Rgb(220, 100, 100))
             }
         };
         lines.push(Line::from(vec![
@@ -410,63 +488,99 @@ impl SessionPicker {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
             "─".repeat(area.width.saturating_sub(4) as usize),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Rgb(60, 60, 60)),
         )]));
         lines.push(Line::from(""));
 
-        // Messages preview
+        // Messages preview - styled like the actual TUI
+        let mut prompt_num = 0;
         for msg in &session.messages_preview {
-            let (role_style, role_prefix) = match msg.role.as_str() {
-                "user" => (Style::default().fg(Color::Green), "You: "),
-                "assistant" => (Style::default().fg(Color::Blue), "AI: "),
-                _ => (Style::default().fg(Color::Gray), ""),
-            };
-
             // Truncate long messages for preview
-            let content = if msg.content.chars().count() > 500 {
-                format!("{}...", safe_truncate(&msg.content, 497))
+            let content = if msg.content.chars().count() > 800 {
+                format!("{}...", safe_truncate(&msg.content, 797))
             } else {
                 msg.content.clone()
             };
 
-            // Skip empty messages
+            // Skip empty messages and tool results
             if content.trim().is_empty() {
                 continue;
             }
 
-            lines.push(Line::from(vec![Span::styled(
-                role_prefix,
-                role_style.add_modifier(Modifier::BOLD),
-            )]));
-
-            // Wrap content into multiple lines
-            for line in content.lines().take(10) {
-                let max_width = (area.width as usize).saturating_sub(6);
-                let display_line = if line.chars().count() > max_width {
-                    let truncate_at = max_width.saturating_sub(3);
-                    format!("{}...", safe_truncate(line, truncate_at))
-                } else {
-                    line.to_string()
-                };
-                lines.push(Line::from(vec![Span::styled(
-                    format!("  {}", display_line),
-                    Style::default().fg(Color::Gray),
-                )]));
+            // Skip tool-related content (starts with [Tool:)
+            if content.starts_with("[Tool:") {
+                continue;
             }
-            lines.push(Line::from(""));
+
+            match msg.role.as_str() {
+                "user" => {
+                    prompt_num += 1;
+                    // User messages: number + "› " + content (like TUI)
+                    let first_line = content.lines().next().unwrap_or("");
+                    let max_width = (area.width as usize).saturating_sub(8);
+                    let display = if first_line.chars().count() > max_width {
+                        format!("{}...", safe_truncate(first_line, max_width.saturating_sub(3)))
+                    } else {
+                        first_line.to_string()
+                    };
+
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{}", prompt_num), Style::default().fg(USER_COLOR)),
+                        Span::styled("› ", Style::default().fg(USER_COLOR)),
+                        Span::styled(display, Style::default().fg(USER_TEXT)),
+                    ]));
+
+                    // Show additional lines if any (indented)
+                    for line in content.lines().skip(1).take(3) {
+                        let display = if line.chars().count() > max_width {
+                            format!("{}...", safe_truncate(line, max_width.saturating_sub(3)))
+                        } else {
+                            line.to_string()
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled("  ", Style::default()),
+                            Span::styled(display, Style::default().fg(USER_TEXT)),
+                        ]));
+                    }
+                    if content.lines().count() > 4 {
+                        lines.push(Line::from(vec![
+                            Span::styled("  ", Style::default()),
+                            Span::styled("...", Style::default().fg(DIM_COLOR)),
+                        ]));
+                    }
+                    lines.push(Line::from("")); // Spacing after user message
+                }
+                "assistant" => {
+                    // AI messages: use actual markdown renderer
+                    let max_width = (area.width as usize).saturating_sub(4);
+                    let md_lines = markdown::render_markdown_with_width(&content, Some(max_width));
+
+                    // Take first 12 lines of rendered markdown
+                    for md_line in md_lines.into_iter().take(12) {
+                        lines.push(md_line);
+                    }
+                    if content.lines().count() > 12 {
+                        lines.push(Line::from(vec![
+                            Span::styled("...", Style::default().fg(DIM_COLOR)),
+                        ]));
+                    }
+                    lines.push(Line::from("")); // Spacing after assistant message
+                }
+                _ => {}
+            }
         }
 
         if session.messages_preview.is_empty() {
             lines.push(Line::from(vec![Span::styled(
                 "(empty session)",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(DIM_COLOR),
             )]));
         }
 
         let block = Block::default()
             .borders(Borders::ALL)
             .title(" Preview (Shift+↑↓ scroll) ")
-            .border_style(Style::default().fg(Color::Cyan));
+            .border_style(Style::default().fg(Color::Rgb(138, 180, 248)));
 
         let paragraph = Paragraph::new(lines)
             .block(block)
@@ -564,4 +678,39 @@ pub fn pick_session() -> Result<Option<String>> {
 
     let picker = SessionPicker::new(sessions);
     picker.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_status_inference() {
+        // Load sessions and check status inference
+        let sessions = load_sessions().unwrap();
+        
+        for session in &sessions {
+            let age = chrono::Utc::now()
+                .signed_duration_since(session.last_message_time)
+                .num_seconds();
+            
+            eprintln!(
+                "Session {}: age={}s, status={:?}",
+                session.short_name,
+                age,
+                session.status
+            );
+            
+            // Sessions older than 2 minutes should NOT show as Active
+            // (unless they have a different explicit status)
+            if age > 120 {
+                assert!(
+                    session.status != SessionStatus::Active,
+                    "Session {} is {}s old but shows as Active",
+                    session.short_name,
+                    age
+                );
+            }
+        }
+    }
 }

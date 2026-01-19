@@ -3,11 +3,12 @@ pub mod backend;
 mod core;
 pub mod info_widget;
 mod keybind;
-mod markdown;
+pub(crate) mod markdown;
 pub mod session_picker;
 mod stream_buffer;
 mod ui;
 pub mod visual_debug;
+pub mod test_harness;
 
 // ClientApp is deprecated - use App::new_for_remote().run_remote() instead
 #[deprecated(note = "Use App::new_for_remote().run_remote() instead")]

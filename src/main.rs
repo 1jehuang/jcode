@@ -1228,6 +1228,10 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
         }
     });
 
+    let session_name = id::extract_session_name(session_id)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| session_id.to_string());
+
     eprintln!("Starting TUI client...");
 
     // Run client TUI
@@ -1241,9 +1245,6 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
     let app = tui::App::new_for_remote(Some(session_id.to_string())).await;
 
     // Set terminal title
-    let session_name = id::extract_session_name(session_id)
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| session_id.to_string());
     let icon = id::session_icon(&session_name);
     let _ = crossterm::execute!(
         std::io::stdout(),
@@ -1257,6 +1258,8 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     }
     ratatui::restore();
+
+    let run_result = result?;
 
     // Signal stop to our monitoring tasks
     should_stop.store(true, Ordering::SeqCst);
@@ -1272,7 +1275,44 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
     // Don't remove the socket or lock file - server is still running
     let _ = lock_file.lock().await.take();
 
-    // Print resume info
+    // Check if reload/rollback was requested - exec into new binary
+    if let Some(code) = run_result.exit_code {
+        if code == EXIT_RELOAD_REQUESTED || code == EXIT_ROLLBACK_REQUESTED {
+            use std::os::unix::process::CommandExt;
+
+            let action = if code == EXIT_RELOAD_REQUESTED { "reload" } else { "rollback" };
+            eprintln!("\n🔄 Client {} requested, restarting with new binary...", action);
+
+            // Small delay for filesystem sync
+            std::thread::sleep(std::time::Duration::from_millis(200));
+
+            // Get the appropriate binary (canary for reload, stable for rollback)
+            let binary_path = if code == EXIT_RELOAD_REQUESTED {
+                build::canary_binary_path().ok()
+            } else {
+                build::stable_binary_path().ok()
+            };
+
+            let binary = binary_path
+                .filter(|p| p.exists())
+                .or_else(|| initial_binary_path.exists().then(|| initial_binary_path.clone()))
+                .ok_or_else(|| anyhow::anyhow!("No binary found for reload"))?;
+
+            let cwd = std::env::current_dir()?;
+
+            // Exec into the new binary with self-dev mode and session resume
+            let err = ProcessCommand::new(&binary)
+                .arg("self-dev")
+                .arg("--resume")
+                .arg(session_id)
+                .current_dir(cwd)
+                .exec();
+
+            return Err(anyhow::anyhow!("Failed to exec: {}", err));
+        }
+    }
+
+    // Print resume info for normal exit
     eprintln!();
     eprintln!(
         "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
@@ -1281,7 +1321,7 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
     eprintln!("  jcode --resume {}", session_id);
     eprintln!();
 
-    result.map(|_| ())
+    Ok(())
 }
 
 /// Server manager - spawns and monitors the server process

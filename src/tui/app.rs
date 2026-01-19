@@ -13,9 +13,10 @@ use crate::session::Session;
 use crate::skill::SkillRegistry;
 use crate::tool::{Registry, ToolContext};
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -199,6 +200,96 @@ pub struct RunResult {
     pub exit_code: Option<i32>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct DebugSnapshot {
+    state: serde_json::Value,
+    frame: Option<crate::tui::visual_debug::FrameCapture>,
+    recent_messages: Vec<DebugMessage>,
+    queued_messages: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DebugMessage {
+    role: String,
+    content: String,
+    tool_calls: Vec<String>,
+    duration_secs: Option<f32>,
+    title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DebugAssertion {
+    field: String,
+    op: String,
+    value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DebugAssertResult {
+    ok: bool,
+    field: String,
+    op: String,
+    expected: serde_json::Value,
+    actual: serde_json::Value,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DebugStepResult {
+    step: String,
+    ok: bool,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DebugScript {
+    steps: Vec<String>,
+    assertions: Vec<DebugAssertion>,
+    wait_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DebugRunReport {
+    ok: bool,
+    steps: Vec<DebugStepResult>,
+    assertions: Vec<DebugAssertResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DebugEvent {
+    at_ms: u64,
+    kind: String,
+    detail: String,
+}
+
+struct DebugTrace {
+    enabled: bool,
+    started_at: Instant,
+    events: Vec<DebugEvent>,
+}
+
+impl DebugTrace {
+    fn new() -> Self {
+        Self {
+            enabled: false,
+            started_at: Instant::now(),
+            events: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, kind: &str, detail: String) {
+        if !self.enabled {
+            return;
+        }
+        let at_ms = self.started_at.elapsed().as_millis() as u64;
+        self.events.push(DebugEvent {
+            at_ms,
+            kind: kind.to_string(),
+            detail,
+        });
+    }
+}
+
 /// TUI Application state
 pub struct App {
     provider: Arc<dyn Provider>,
@@ -320,6 +411,8 @@ pub struct App {
     rate_limit_pending_message: Option<String>,
     // Store reload info to pass to agent after reconnection (remote mode)
     reload_info: Vec<String>,
+    // Debug trace for scripted testing
+    debug_trace: DebugTrace,
 }
 
 /// A placeholder provider for remote mode (never actually called)
@@ -443,6 +536,7 @@ impl App {
             rate_limit_reset: None,
             rate_limit_pending_message: None,
             reload_info: Vec::new(),
+            debug_trace: DebugTrace::new(),
         }
     }
 
@@ -750,6 +844,377 @@ impl App {
         false
     }
 
+    fn build_debug_snapshot(&self) -> DebugSnapshot {
+        let frame = crate::tui::visual_debug::latest_frame();
+        let recent_messages = self
+            .display_messages
+            .iter()
+            .rev()
+            .take(20)
+            .map(|msg| DebugMessage {
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+                tool_calls: msg.tool_calls.clone(),
+                duration_secs: msg.duration_secs,
+                title: msg.title.clone(),
+            })
+            .collect::<Vec<_>>();
+        DebugSnapshot {
+            state: serde_json::json!({
+                "processing": self.is_processing,
+                "messages": self.messages.len(),
+                "display_messages": self.display_messages.len(),
+                "input": self.input,
+                "cursor_pos": self.cursor_pos,
+                "scroll_offset": self.scroll_offset,
+                "queued_messages": self.queued_messages.len(),
+                "provider_session_id": self.provider_session_id,
+                "model": self.provider.name(),
+                "version": env!("JCODE_VERSION"),
+            }),
+            frame,
+            recent_messages,
+            queued_messages: self.queued_messages.clone(),
+        }
+    }
+
+    fn eval_assertions(&self, assertions: &[DebugAssertion]) -> Vec<DebugAssertResult> {
+        let snapshot = self.build_debug_snapshot();
+        let mut results = Vec::new();
+        for assertion in assertions {
+            let actual = self.lookup_snapshot_value(&snapshot, &assertion.field);
+            let expected = assertion.value.clone();
+            let op = assertion.op.as_str();
+            let ok = match op {
+                "eq" => actual == expected,
+                "ne" => actual != expected,
+                "contains" => match (&actual, &expected) {
+                    (serde_json::Value::String(a), serde_json::Value::String(b)) => a.contains(b),
+                    (serde_json::Value::Array(a), _) => a.contains(&expected),
+                    _ => false,
+                },
+                "not_contains" => match (&actual, &expected) {
+                    (serde_json::Value::String(a), serde_json::Value::String(b)) => !a.contains(b),
+                    (serde_json::Value::Array(a), _) => !a.contains(&expected),
+                    _ => true,
+                },
+                "exists" => actual != serde_json::Value::Null,
+                "not_exists" => actual == serde_json::Value::Null,
+                "gt" => match (&actual, &expected) {
+                    (serde_json::Value::Number(a), serde_json::Value::Number(b)) => {
+                        a.as_f64().unwrap_or(0.0) > b.as_f64().unwrap_or(0.0)
+                    }
+                    _ => false,
+                },
+                "gte" => match (&actual, &expected) {
+                    (serde_json::Value::Number(a), serde_json::Value::Number(b)) => {
+                        a.as_f64().unwrap_or(0.0) >= b.as_f64().unwrap_or(0.0)
+                    }
+                    _ => false,
+                },
+                "lt" => match (&actual, &expected) {
+                    (serde_json::Value::Number(a), serde_json::Value::Number(b)) => {
+                        a.as_f64().unwrap_or(0.0) < b.as_f64().unwrap_or(0.0)
+                    }
+                    _ => false,
+                },
+                "lte" => match (&actual, &expected) {
+                    (serde_json::Value::Number(a), serde_json::Value::Number(b)) => {
+                        a.as_f64().unwrap_or(0.0) <= b.as_f64().unwrap_or(0.0)
+                    }
+                    _ => false,
+                },
+                "len" => match &actual {
+                    serde_json::Value::String(s) => {
+                        expected.as_u64().map(|e| s.len() as u64 == e).unwrap_or(false)
+                    }
+                    serde_json::Value::Array(a) => {
+                        expected.as_u64().map(|e| a.len() as u64 == e).unwrap_or(false)
+                    }
+                    serde_json::Value::Object(o) => {
+                        expected.as_u64().map(|e| o.len() as u64 == e).unwrap_or(false)
+                    }
+                    _ => false,
+                },
+                "len_gt" => match &actual {
+                    serde_json::Value::String(s) => {
+                        expected.as_u64().map(|e| s.len() as u64 > e).unwrap_or(false)
+                    }
+                    serde_json::Value::Array(a) => {
+                        expected.as_u64().map(|e| a.len() as u64 > e).unwrap_or(false)
+                    }
+                    _ => false,
+                },
+                "len_lt" => match &actual {
+                    serde_json::Value::String(s) => {
+                        expected.as_u64().map(|e| (s.len() as u64) < e).unwrap_or(false)
+                    }
+                    serde_json::Value::Array(a) => {
+                        expected.as_u64().map(|e| (a.len() as u64) < e).unwrap_or(false)
+                    }
+                    _ => false,
+                },
+                "matches" => match (&actual, &expected) {
+                    (serde_json::Value::String(a), serde_json::Value::String(pattern)) => {
+                        regex::Regex::new(pattern).map(|re| re.is_match(a)).unwrap_or(false)
+                    }
+                    _ => false,
+                },
+                "not_matches" => match (&actual, &expected) {
+                    (serde_json::Value::String(a), serde_json::Value::String(pattern)) => {
+                        regex::Regex::new(pattern).map(|re| !re.is_match(a)).unwrap_or(true)
+                    }
+                    _ => true,
+                },
+                "starts_with" => match (&actual, &expected) {
+                    (serde_json::Value::String(a), serde_json::Value::String(b)) => a.starts_with(b),
+                    _ => false,
+                },
+                "ends_with" => match (&actual, &expected) {
+                    (serde_json::Value::String(a), serde_json::Value::String(b)) => a.ends_with(b),
+                    _ => false,
+                },
+                "is_empty" => match &actual {
+                    serde_json::Value::String(s) => s.is_empty(),
+                    serde_json::Value::Array(a) => a.is_empty(),
+                    serde_json::Value::Object(o) => o.is_empty(),
+                    serde_json::Value::Null => true,
+                    _ => false,
+                },
+                "is_not_empty" => match &actual {
+                    serde_json::Value::String(s) => !s.is_empty(),
+                    serde_json::Value::Array(a) => !a.is_empty(),
+                    serde_json::Value::Object(o) => !o.is_empty(),
+                    serde_json::Value::Null => false,
+                    _ => true,
+                },
+                "is_true" => actual == serde_json::Value::Bool(true),
+                "is_false" => actual == serde_json::Value::Bool(false),
+                _ => false,
+            };
+            let message = if ok {
+                "ok".to_string()
+            } else {
+                format!("expected {} {} {:?}, got {:?}", assertion.field, op, expected, actual)
+            };
+            results.push(DebugAssertResult {
+                ok,
+                field: assertion.field.clone(),
+                op: assertion.op.clone(),
+                expected,
+                actual,
+                message,
+            });
+        }
+        results
+    }
+
+    fn handle_assertions(&mut self, raw: &str) -> String {
+        let parsed: Result<Vec<DebugAssertion>, _> = serde_json::from_str(raw);
+        let assertions = match parsed {
+            Ok(a) => a,
+            Err(e) => {
+                return format!("assert parse error: {}", e);
+            }
+        };
+        let results = self.eval_assertions(&assertions);
+        serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    fn handle_script_run(&mut self, raw: &str) -> String {
+        let parsed: Result<DebugScript, _> = serde_json::from_str(raw);
+        let script = match parsed {
+            Ok(s) => s,
+            Err(e) => return format!("run parse error: {}", e),
+        };
+
+        let mut steps = Vec::new();
+        let mut ok = true;
+        for step in &script.steps {
+            let detail = self.execute_script_step(step);
+            let step_ok = !detail.starts_with("ERR");
+            if !step_ok {
+                ok = false;
+            }
+            steps.push(DebugStepResult {
+                step: step.clone(),
+                ok: step_ok,
+                detail,
+            });
+        }
+
+        if let Some(wait_ms) = script.wait_ms {
+            let _ = self.apply_wait_ms(wait_ms);
+        }
+
+        let assertions = self.eval_assertions(&script.assertions);
+        if assertions.iter().any(|a| !a.ok) {
+            ok = false;
+        }
+
+        let report = DebugRunReport {
+            ok,
+            steps,
+            assertions,
+        };
+
+        serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    fn apply_wait_ms(&mut self, wait_ms: u64) -> String {
+        let deadline = Instant::now() + Duration::from_millis(wait_ms);
+        while Instant::now() < deadline {
+            if !self.is_processing {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        self.debug_trace.record("wait", format!("{}ms", wait_ms));
+        format!("waited {}ms", wait_ms)
+    }
+
+    fn lookup_snapshot_value(&self, snapshot: &DebugSnapshot, field: &str) -> serde_json::Value {
+        let parts: Vec<&str> = field.split('.').collect();
+        if parts.is_empty() {
+            return serde_json::Value::Null;
+        }
+        match parts[0] {
+            "state" => Self::lookup_json_path(&snapshot.state, &parts[1..]),
+            "frame" => {
+                if let Some(frame) = &snapshot.frame {
+                    let value = serde_json::to_value(frame).unwrap_or(serde_json::Value::Null);
+                    Self::lookup_json_path(&value, &parts[1..])
+                } else {
+                    serde_json::Value::Null
+                }
+            }
+            "recent_messages" => {
+                let value = serde_json::to_value(&snapshot.recent_messages)
+                    .unwrap_or(serde_json::Value::Null);
+                Self::lookup_json_path(&value, &parts[1..])
+            }
+            "queued_messages" => {
+                let value = serde_json::to_value(&snapshot.queued_messages)
+                    .unwrap_or(serde_json::Value::Null);
+                Self::lookup_json_path(&value, &parts[1..])
+            }
+            _ => serde_json::Value::Null,
+        }
+    }
+
+    fn lookup_json_path(value: &serde_json::Value, parts: &[&str]) -> serde_json::Value {
+        let mut current = value;
+        for part in parts {
+            if let Ok(index) = part.parse::<usize>() {
+                if let Some(v) = current.get(index) {
+                    current = v;
+                    continue;
+                }
+            }
+            if let Some(v) = current.get(part) {
+                current = v;
+                continue;
+            }
+            return serde_json::Value::Null;
+        }
+        current.clone()
+    }
+
+    fn execute_script_step(&mut self, step: &str) -> String {
+        let trimmed = step.trim();
+        if trimmed.is_empty() {
+            return "ERR: empty step".to_string();
+        }
+        if trimmed.starts_with("keys:") {
+            let keys_str = trimmed.strip_prefix("keys:").unwrap_or("");
+            let mut results = Vec::new();
+            for key_spec in keys_str.split(',') {
+                match self.parse_and_inject_key(key_spec.trim()) {
+                    Ok(desc) => {
+                        self.debug_trace.record("key", desc.clone());
+                        results.push(format!("OK: {}", desc));
+                    }
+                    Err(e) => results.push(format!("ERR: {}", e)),
+                }
+            }
+            return results.join("\n");
+        }
+        if trimmed.starts_with("set_input:") {
+            let new_input = trimmed.strip_prefix("set_input:").unwrap_or("");
+            self.input = new_input.to_string();
+            self.cursor_pos = self.input.len();
+            self.debug_trace
+                .record("input", format!("set:{}", self.input));
+            return format!("OK: input set to {:?}", self.input);
+        }
+        if trimmed == "submit" {
+            if self.input.is_empty() {
+                return "ERR: input is empty".to_string();
+            }
+            self.submit_input();
+            self.debug_trace.record("input", "submitted".to_string());
+            return "OK: submitted".to_string();
+        }
+        if trimmed.starts_with("message:") {
+            let msg = trimmed.strip_prefix("message:").unwrap_or("");
+            self.input = msg.to_string();
+            self.submit_input();
+            self.debug_trace
+                .record("message", format!("submitted:{}", msg));
+            return format!("OK: queued message '{}'", msg);
+        }
+        if trimmed.starts_with("scroll:") {
+            let dir = trimmed.strip_prefix("scroll:").unwrap_or("");
+            return match dir {
+                "up" => {
+                    if self.scroll_offset > 0 {
+                        self.scroll_offset = self.scroll_offset.saturating_sub(5);
+                    }
+                    format!("scroll: up to {}", self.scroll_offset)
+                }
+                "down" => {
+                    self.scroll_offset += 5;
+                    format!("scroll: down to {}", self.scroll_offset)
+                }
+                "top" => {
+                    self.scroll_offset = 0;
+                    "scroll: top".to_string()
+                }
+                "bottom" => {
+                    self.scroll_offset = usize::MAX / 2;
+                    "scroll: bottom".to_string()
+                }
+                _ => format!("ERR: unknown scroll '{}'", dir),
+            };
+        }
+        if trimmed == "reload" {
+            self.input = "/reload".to_string();
+            self.submit_input();
+            self.debug_trace.record("reload", "triggered".to_string());
+            return "OK: reload triggered".to_string();
+        }
+        if trimmed == "snapshot" {
+            let snapshot = self.build_debug_snapshot();
+            return serde_json::to_string_pretty(&snapshot)
+                .unwrap_or_else(|_| "{}".to_string());
+        }
+        if trimmed.starts_with("wait:") {
+            let raw = trimmed.strip_prefix("wait:").unwrap_or("0");
+            if let Ok(ms) = raw.parse::<u64>() {
+                return self.apply_wait_ms(ms);
+            }
+            return format!("ERR: invalid wait '{}'", raw);
+        }
+        if trimmed == "wait" {
+            return if self.is_processing {
+                "wait: processing".to_string()
+            } else {
+                "wait: idle".to_string()
+            };
+        }
+        format!("ERR: unknown step '{}'", trimmed)
+    }
+
     fn check_debug_command(&mut self) -> Option<String> {
         let cmd_path = debug_cmd_path();
         if let Ok(cmd) = std::fs::read_to_string(&cmd_path) {
@@ -757,16 +1222,22 @@ impl App {
             let _ = std::fs::remove_file(&cmd_path);
             let cmd = cmd.trim();
 
+            self.debug_trace
+                .record("cmd", format!("{}", cmd.to_string()));
+
             let response = if cmd.starts_with("message:") {
                 let msg = cmd.strip_prefix("message:").unwrap_or("");
                 // Inject the message as if user typed it
                 self.input = msg.to_string();
                 self.submit_input();
+                self.debug_trace
+                    .record("message", format!("submitted:{}", msg));
                 format!("OK: queued message '{}'", msg)
             } else if cmd == "reload" {
                 // Trigger reload
                 self.input = "/reload".to_string();
                 self.submit_input();
+                self.debug_trace.record("reload", "triggered".to_string());
                 "OK: reload triggered".to_string()
             } else if cmd == "state" {
                 // Return current state as JSON for easier parsing
@@ -781,7 +1252,28 @@ impl App {
                     "provider_session_id": self.provider_session_id,
                     "model": self.provider.name(),
                     "version": env!("JCODE_VERSION"),
-                }).to_string()
+                })
+                .to_string()
+            } else if cmd == "snapshot" {
+                let snapshot = self.build_debug_snapshot();
+                serde_json::to_string_pretty(&snapshot).unwrap_or_else(|_| "{}".to_string())
+            } else if cmd == "trace-start" {
+                self.debug_trace.enabled = true;
+                self.debug_trace.started_at = Instant::now();
+                self.debug_trace.events.clear();
+                "OK: trace started".to_string()
+            } else if cmd == "trace-stop" {
+                self.debug_trace.enabled = false;
+                "OK: trace stopped".to_string()
+            } else if cmd == "trace" {
+                serde_json::to_string_pretty(&self.debug_trace.events)
+                    .unwrap_or_else(|_| "[]".to_string())
+            } else if cmd.starts_with("assert:") {
+                let raw = cmd.strip_prefix("assert:").unwrap_or("");
+                self.handle_assertions(raw)
+            } else if cmd.starts_with("run:") {
+                let raw = cmd.strip_prefix("run:").unwrap_or("");
+                self.handle_script_run(raw)
             } else if cmd == "quit" {
                 self.should_quit = true;
                 "OK: quitting".to_string()
@@ -795,13 +1287,17 @@ impl App {
                     .unwrap_or_else(|| "last_response: none".to_string())
             } else if cmd == "history" {
                 // Return all messages as JSON
-                let msgs: Vec<serde_json::Value> = self.display_messages.iter().map(|m| {
-                    serde_json::json!({
-                        "role": m.role,
-                        "content": m.content,
-                        "tool_calls": m.tool_calls,
+                let msgs: Vec<serde_json::Value> = self
+                    .display_messages
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "role": m.role,
+                            "content": m.content,
+                            "tool_calls": m.tool_calls,
+                        })
                     })
-                }).collect();
+                    .collect();
                 serde_json::to_string_pretty(&msgs).unwrap_or_else(|_| "[]".to_string())
             } else if cmd == "screen" {
                 // Capture current visual state
@@ -812,6 +1308,16 @@ impl App {
                     Ok(path) => format!("screen: {}", path.display()),
                     Err(e) => format!("screen error: {}", e),
                 }
+            } else if cmd == "screen-json" {
+                use super::visual_debug;
+                visual_debug::enable();
+                visual_debug::latest_frame_json()
+                    .unwrap_or_else(|| "screen-json: no frames captured".to_string())
+            } else if cmd == "screen-json-normalized" {
+                use super::visual_debug;
+                visual_debug::enable();
+                visual_debug::latest_frame_json_normalized()
+                    .unwrap_or_else(|| "screen-json-normalized: no frames captured".to_string())
             } else if cmd == "wait" {
                 // Return whether we're still processing
                 if self.is_processing {
@@ -850,7 +1356,11 @@ impl App {
                 let mut results = Vec::new();
                 for key_spec in keys_str.split(',') {
                     match self.parse_and_inject_key(key_spec.trim()) {
-                        Ok(desc) => results.push(format!("OK: {}", desc)),
+                        Ok(desc) => {
+                            self.debug_trace
+                                .record("key", format!("{}", desc));
+                            results.push(format!("OK: {}", desc));
+                        }
                         Err(e) => results.push(format!("ERR: {}", e)),
                     }
                 }
@@ -863,6 +1373,8 @@ impl App {
                 let new_input = cmd.strip_prefix("set_input:").unwrap_or("");
                 self.input = new_input.to_string();
                 self.cursor_pos = self.input.len();
+                self.debug_trace
+                    .record("input", format!("set:{}", self.input));
                 format!("OK: input set to {:?}", self.input)
             } else if cmd == "submit" {
                 // Submit current input
@@ -870,7 +1382,154 @@ impl App {
                     "submit error: input is empty".to_string()
                 } else {
                     self.submit_input();
+                    self.debug_trace.record("input", "submitted".to_string());
                     "OK: submitted".to_string()
+                }
+            // Test harness commands
+            } else if cmd == "record-start" {
+                use super::test_harness;
+                test_harness::start_recording();
+                "OK: event recording started".to_string()
+            } else if cmd == "record-stop" {
+                use super::test_harness;
+                test_harness::stop_recording();
+                "OK: event recording stopped".to_string()
+            } else if cmd == "record-events" {
+                use super::test_harness;
+                test_harness::get_recorded_events_json()
+            } else if cmd == "clock-enable" {
+                use super::test_harness;
+                test_harness::enable_test_clock();
+                "OK: test clock enabled".to_string()
+            } else if cmd == "clock-disable" {
+                use super::test_harness;
+                test_harness::disable_test_clock();
+                "OK: test clock disabled".to_string()
+            } else if cmd.starts_with("clock-advance:") {
+                use super::test_harness;
+                let ms_str = cmd.strip_prefix("clock-advance:").unwrap_or("0");
+                match ms_str.parse::<u64>() {
+                    Ok(ms) => {
+                        test_harness::advance_clock(std::time::Duration::from_millis(ms));
+                        format!("OK: clock advanced {}ms", ms)
+                    }
+                    Err(_) => "clock-advance error: invalid ms value".to_string(),
+                }
+            } else if cmd == "clock-now" {
+                use super::test_harness;
+                format!("clock: {}ms", test_harness::now_ms())
+            } else if cmd.starts_with("replay:") {
+                use super::test_harness;
+                let json = cmd.strip_prefix("replay:").unwrap_or("[]");
+                match test_harness::EventPlayer::from_json(json) {
+                    Ok(mut player) => {
+                        player.start();
+                        let mut results = Vec::new();
+                        // Process immediate events (offset 0)
+                        while let Some(event) = player.next_event() {
+                            results.push(format!("{:?}", event));
+                        }
+                        format!("replay: {} events processed, {} remaining", results.len(), player.remaining())
+                    }
+                    Err(e) => format!("replay error: {}", e),
+                }
+            } else if cmd.starts_with("bundle-start:") {
+                let name = cmd.strip_prefix("bundle-start:").unwrap_or("test");
+                // Store bundle name for later
+                std::env::set_var("JCODE_TEST_BUNDLE", name);
+                format!("OK: test bundle '{}' started", name)
+            } else if cmd == "bundle-save" {
+                use super::test_harness::TestBundle;
+                let name = std::env::var("JCODE_TEST_BUNDLE").unwrap_or_else(|_| "unnamed".to_string());
+                let bundle = TestBundle::new(&name);
+                let path = TestBundle::default_path(&name);
+                match bundle.save(&path) {
+                    Ok(_) => format!("OK: bundle saved to {}", path.display()),
+                    Err(e) => format!("bundle-save error: {}", e),
+                }
+            } else if cmd.starts_with("script:") {
+                use super::test_harness::TestScript;
+                let json = cmd.strip_prefix("script:").unwrap_or("{}");
+                match TestScript::from_json(json) {
+                    Ok(script) => {
+                        // Execute the script steps
+                        let mut results = Vec::new();
+                        for step in &script.steps {
+                            let step_result = match step {
+                                super::test_harness::TestStep::Message { content } => {
+                                    self.input = content.clone();
+                                    self.submit_input();
+                                    format!("message: {}", content)
+                                }
+                                super::test_harness::TestStep::SetInput { text } => {
+                                    self.input = text.clone();
+                                    self.cursor_pos = self.input.len();
+                                    format!("set_input: {}", text)
+                                }
+                                super::test_harness::TestStep::Submit => {
+                                    if !self.input.is_empty() {
+                                        self.submit_input();
+                                        "submit: OK".to_string()
+                                    } else {
+                                        "submit: skipped (empty)".to_string()
+                                    }
+                                }
+                                super::test_harness::TestStep::WaitIdle { timeout_ms } => {
+                                    let _ = self.apply_wait_ms(timeout_ms.unwrap_or(30000));
+                                    "wait_idle: done".to_string()
+                                }
+                                super::test_harness::TestStep::Wait { ms } => {
+                                    std::thread::sleep(std::time::Duration::from_millis(*ms));
+                                    format!("wait: {}ms", ms)
+                                }
+                                super::test_harness::TestStep::Checkpoint { name } => {
+                                    format!("checkpoint: {}", name)
+                                }
+                                super::test_harness::TestStep::Command { cmd } => {
+                                    format!("command: {} (nested commands not supported)", cmd)
+                                }
+                                super::test_harness::TestStep::Keys { keys } => {
+                                    let mut key_results = Vec::new();
+                                    for key_spec in keys.split(',') {
+                                        match self.parse_and_inject_key(key_spec.trim()) {
+                                            Ok(desc) => key_results.push(format!("OK: {}", desc)),
+                                            Err(e) => key_results.push(format!("ERR: {}", e)),
+                                        }
+                                    }
+                                    format!("keys: {}", key_results.join(", "))
+                                }
+                                super::test_harness::TestStep::Scroll { direction } => {
+                                    match direction.as_str() {
+                                        "up" => self.scroll_offset = self.scroll_offset.saturating_add(5),
+                                        "down" => self.scroll_offset = self.scroll_offset.saturating_sub(5),
+                                        "top" => self.scroll_offset = usize::MAX,
+                                        "bottom" => self.scroll_offset = 0,
+                                        _ => {}
+                                    }
+                                    format!("scroll: {}", direction)
+                                }
+                                super::test_harness::TestStep::Assert { assertions } => {
+                                    let parsed: Vec<DebugAssertion> = assertions.iter()
+                                        .filter_map(|a| serde_json::from_value(a.clone()).ok())
+                                        .collect();
+                                    let results = self.eval_assertions(&parsed);
+                                    let passed = results.iter().all(|r| r.ok);
+                                    format!("assert: {} ({}/{})", if passed { "PASS" } else { "FAIL" },
+                                        results.iter().filter(|r| r.ok).count(), results.len())
+                                }
+                                super::test_harness::TestStep::Snapshot { name } => {
+                                    format!("snapshot: {}", name)
+                                }
+                            };
+                            results.push(step_result);
+                        }
+                        serde_json::json!({
+                            "script": script.name,
+                            "steps": results,
+                            "completed": true
+                        }).to_string()
+                    }
+                    Err(e) => format!("script error: {}", e),
                 }
             } else if cmd == "version" {
                 format!("version: {}", env!("JCODE_VERSION"))
@@ -879,16 +1538,36 @@ impl App {
                  - message:<text> - inject and submit a message\n\
                  - reload - trigger /reload\n\
                  - state - get current state as JSON\n\
+                 - snapshot - get combined state + frame snapshot JSON\n\
+                 - assert:<json> - run assertions (see docs)\n\
+                 - run:<json> - run scripted steps + assertions\n\
+                 - trace-start - start recording trace events\n\
+                 - trace-stop - stop recording trace events\n\
+                 - trace - dump trace events JSON\n\
                  - quit - exit the TUI\n\
                  - last_response - get last assistant message\n\
                  - history - get all messages as JSON\n\
                  - screen - dump visual debug frames\n\
+                 - screen-json - dump latest visual frame JSON\n\
+                 - screen-json-normalized - dump normalized frame (for diffs)\n\
                  - wait - check if processing\n\
+                 - wait:<ms> - block until idle or timeout\n\
                  - scroll:<up|down|top|bottom> - control scroll\n\
                  - keys:<keyspec> - inject key events (e.g. keys:ctrl+r)\n\
                  - input - get current input buffer\n\
                  - set_input:<text> - set input buffer\n\
                  - submit - submit current input\n\
+                 - record-start - start event recording\n\
+                 - record-stop - stop event recording\n\
+                 - record-events - get recorded events JSON\n\
+                 - clock-enable - enable deterministic test clock\n\
+                 - clock-disable - disable test clock\n\
+                 - clock-advance:<ms> - advance test clock\n\
+                 - clock-now - get current clock time\n\
+                 - replay:<json> - replay recorded events\n\
+                 - bundle-start:<name> - start test bundle\n\
+                 - bundle-save - save test bundle\n\
+                 - script:<json> - run test script\n\
                  - version - get version\n\
                  - help - show this help".to_string()
             } else {
@@ -1061,6 +1740,21 @@ impl App {
                             Some(Ok(Event::Paste(text))) => {
                                 // Handle bracketed paste from terminal
                                 self.handle_paste(text);
+                            }
+                            Some(Ok(Event::Mouse(mouse))) => {
+                                // Handle mouse scroll wheel for scrolling
+                                // Note: scroll_offset 0 = bottom, higher = scrolled up
+                                match mouse.kind {
+                                    MouseEventKind::ScrollUp => {
+                                        // Scroll up in the view (increase offset)
+                                        self.scroll_offset = self.scroll_offset.saturating_add(3);
+                                    }
+                                    MouseEventKind::ScrollDown => {
+                                        // Scroll down in the view (decrease offset towards 0)
+                                        self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                                    }
+                                    _ => {}
+                                }
                             }
                             _ => {}
                         }
@@ -1297,6 +1991,21 @@ impl App {
                             }
                             Some(Ok(Event::Paste(text))) => {
                                 self.handle_paste(text);
+                            }
+                            Some(Ok(Event::Mouse(mouse))) => {
+                                // Handle mouse scroll wheel for scrolling
+                                // Note: scroll_offset 0 = bottom, higher = scrolled up
+                                match mouse.kind {
+                                    MouseEventKind::ScrollUp => {
+                                        // Scroll up in the view (increase offset)
+                                        self.scroll_offset = self.scroll_offset.saturating_add(3);
+                                    }
+                                    MouseEventKind::ScrollDown => {
+                                        // Scroll down in the view (decrease offset towards 0)
+                                        self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                                    }
+                                    _ => {}
+                                }
                             }
                             _ => {}
                         }
