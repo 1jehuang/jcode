@@ -82,6 +82,22 @@ pub fn set_socket_path(path: &str) {
 /// Idle timeout for self-dev server (5 minutes)
 const IDLE_TIMEOUT_SECS: u64 = 300;
 
+/// Self-dev socket path (used for detection when env var isn't set)
+const SELFDEV_SOCKET: &str = "/tmp/jcode-selfdev.sock";
+
+fn is_selfdev_env() -> bool {
+    if std::env::var("JCODE_SELFDEV_MODE").is_ok() {
+        return true;
+    }
+    if std::env::var("JCODE_SOCKET").ok().as_deref() == Some(SELFDEV_SOCKET) {
+        return true;
+    }
+    std::env::current_dir()
+        .ok()
+        .map(|p| crate::build::is_jcode_repo(&p))
+        .unwrap_or(false)
+}
+
 /// Exit code when server shuts down due to idle timeout
 pub const EXIT_IDLE_TIMEOUT: i32 = 44;
 
@@ -491,10 +507,8 @@ async fn handle_client(
     let client_session_id = new_agent.session_id().to_string();
     let friendly_name = new_agent.session_short_name().map(|s| s.to_string());
 
-    // Auto-detect jcode repo and enable self-dev mode
-    let cwd = std::env::current_dir().ok();
-    let in_jcode_repo = cwd.as_ref().map(|p| crate::build::is_jcode_repo(p)).unwrap_or(false);
-    if in_jcode_repo {
+    // Enable self-dev mode when running in a self-dev environment
+    if is_selfdev_env() {
         new_agent.set_canary("self-dev");
         registry.register_selfdev_tools().await;
     }
@@ -658,10 +672,8 @@ async fn handle_client(
                 let mut new_agent = Agent::new(Arc::clone(&provider), registry.clone());
                 let new_id = new_agent.session_id().to_string();
 
-                // Auto-detect jcode repo and enable self-dev mode
-                let cwd = std::env::current_dir().ok();
-                let in_jcode_repo = cwd.as_ref().map(|p| crate::build::is_jcode_repo(p)).unwrap_or(false);
-                if in_jcode_repo {
+                // Enable self-dev mode when running in a self-dev environment
+                if is_selfdev_env() {
                     new_agent.set_canary("self-dev");
                     // selfdev tools should already be registered from initial connection
                 }
@@ -779,6 +791,9 @@ async fn handle_client(
                 let (result, is_canary) = {
                     let mut agent_guard = agent.lock().await;
                     let result = agent_guard.restore_session(&session_id);
+                    if is_selfdev_env() {
+                        agent_guard.set_canary("self-dev");
+                    }
                     let is_canary = agent_guard.is_canary();
                     (result, is_canary)
                 };

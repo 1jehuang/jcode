@@ -999,6 +999,9 @@ fn list_sessions() -> Result<()> {
 
 /// Self-development mode: run as canary with crash recovery wrapper
 async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Result<()> {
+    // Ensure self-dev env is set for subprocesses (server, agent, tools)
+    std::env::set_var("JCODE_SELFDEV_MODE", "1");
+
     let repo_dir =
         get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 

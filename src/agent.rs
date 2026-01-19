@@ -318,6 +318,9 @@ impl Agent {
     }
 
     async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        if self.session.is_canary {
+            self.registry.register_selfdev_tools().await;
+        }
         let mut tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
         if !self.session.is_canary {
             tools.retain(|tool| tool.name != "selfdev");
