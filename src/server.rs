@@ -728,9 +728,9 @@ async fn handle_client(
             }
 
             Request::GetHistory { id } => {
-                let messages = {
+                let (messages, is_canary) = {
                     let agent_guard = agent.lock().await;
-                    agent_guard.get_history()
+                    (agent_guard.get_history(), agent_guard.is_canary())
                 };
 
                 // Get all session IDs and client count
@@ -757,6 +757,7 @@ async fn handle_client(
                     total_tokens: None,
                     all_sessions,
                     client_count: Some(current_client_count),
+                    is_canary: Some(is_canary),
                 };
                 let json = encode_event(&event);
                 let mut w = writer.lock().await;
@@ -805,9 +806,9 @@ async fn handle_client(
                 match result {
                     Ok(()) => {
                         // Send updated history to client
-                        let messages = {
+                        let (messages, is_canary) = {
                             let agent_guard = agent.lock().await;
-                            agent_guard.get_history()
+                            (agent_guard.get_history(), agent_guard.is_canary())
                         };
 
                         let (all_sessions, current_client_count) = {
@@ -833,6 +834,7 @@ async fn handle_client(
                             total_tokens: None,
                             all_sessions,
                             client_count: Some(current_client_count),
+                            is_canary: Some(is_canary),
                         };
                         let json = encode_event(&event);
                         let mut w = writer.lock().await;

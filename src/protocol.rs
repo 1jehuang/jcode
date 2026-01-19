@@ -232,6 +232,9 @@ pub enum ServerEvent {
         /// Number of connected clients
         #[serde(skip_serializing_if = "Option::is_none")]
         client_count: Option<usize>,
+        /// Whether this session is in canary/self-dev mode
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_canary: Option<bool>,
     },
 
     /// Server is reloading (clients should reconnect)
