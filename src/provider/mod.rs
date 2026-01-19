@@ -55,6 +55,11 @@ pub trait Provider: Send + Sync {
     fn handles_tools_internally(&self) -> bool {
         false
     }
+
+    /// Returns true if jcode should use its own compaction for this provider.
+    fn supports_compaction(&self) -> bool {
+        false
+    }
 }
 
 /// Available models (shown in /model list)
@@ -280,6 +285,21 @@ impl Provider for MultiProvider {
         match self.active_provider() {
             ActiveProvider::Claude => None,
             ActiveProvider::OpenAI => self.openai.as_ref().and_then(|o| o.reasoning_effort()),
+        }
+    }
+
+    fn supports_compaction(&self) -> bool {
+        match self.active_provider() {
+            ActiveProvider::Claude => self
+                .claude
+                .as_ref()
+                .map(|c| c.supports_compaction())
+                .unwrap_or(false),
+            ActiveProvider::OpenAI => self
+                .openai
+                .as_ref()
+                .map(|o| o.supports_compaction())
+                .unwrap_or(false),
         }
     }
 }

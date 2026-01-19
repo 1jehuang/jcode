@@ -42,6 +42,13 @@ pub struct Summary {
     pub original_turn_count: usize,
 }
 
+/// Event emitted when compaction is applied
+#[derive(Debug, Clone)]
+pub struct CompactionEvent {
+    pub trigger: String,
+    pub pre_tokens: Option<u64>,
+}
+
 /// Result from background compaction task
 struct CompactionResult {
     summary: String,
@@ -70,6 +77,9 @@ pub struct CompactionManager {
 
     /// Full conversation history for RAG (never compacted)
     full_history: Vec<Message>,
+
+    /// Last compaction event (if any)
+    last_compaction: Option<CompactionEvent>,
 }
 
 impl CompactionManager {
@@ -82,7 +92,13 @@ impl CompactionManager {
             total_turns: 0,
             token_budget: DEFAULT_TOKEN_BUDGET,
             full_history: Vec::new(),
+            last_compaction: None,
         }
+    }
+
+    /// Reset all compaction state
+    pub fn reset(&mut self) {
+        *self = Self::new();
     }
 
     pub fn with_budget(mut self, budget: usize) -> Self {
@@ -167,6 +183,7 @@ impl CompactionManager {
         // Get result
         match futures::executor::block_on(task) {
             Ok(Ok(result)) => {
+                let pre_tokens = self.token_estimate() as u64;
                 // Create new summary
                 let summary = Summary {
                     text: result.summary,
@@ -179,6 +196,10 @@ impl CompactionManager {
 
                 // Store summary
                 self.active_summary = Some(summary);
+                self.last_compaction = Some(CompactionEvent {
+                    trigger: "background".to_string(),
+                    pre_tokens: Some(pre_tokens),
+                });
 
                 self.pending_cutoff = 0;
             }
@@ -191,6 +212,11 @@ impl CompactionManager {
                 self.pending_cutoff = 0;
             }
         }
+    }
+
+    /// Take the last compaction event (if any)
+    pub fn take_compaction_event(&mut self) -> Option<CompactionEvent> {
+        self.last_compaction.take()
     }
 
     /// Get messages for API call (with summary if compacted)
