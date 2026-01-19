@@ -272,6 +272,10 @@ impl Agent {
         self.session.is_canary
     }
 
+    pub fn set_canary(&mut self, build_hash: &str) {
+        self.session.set_canary(build_hash);
+    }
+
     async fn tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
         if !self.session.is_canary {

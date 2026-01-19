@@ -473,6 +473,13 @@ pub fn update_canary_symlink(hash: &str) -> Result<()> {
     Ok(())
 }
 
+/// Clear canary symlink (called after promotion or when canary is no longer active)
+pub fn clear_canary_symlink() -> Result<()> {
+    let link_path = builds_dir()?.join("canary").join("jcode");
+    let _ = std::fs::remove_file(&link_path);
+    Ok(())
+}
+
 /// Get path to build log file
 pub fn build_log_path() -> Result<PathBuf> {
     Ok(storage::jcode_dir()?.join("build.log"))

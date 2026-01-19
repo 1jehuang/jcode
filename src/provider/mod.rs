@@ -45,6 +45,11 @@ pub trait Provider: Send + Sync {
         vec![]
     }
 
+    /// Get the reasoning effort level (if applicable, e.g., OpenAI)
+    fn reasoning_effort(&self) -> Option<String> {
+        None
+    }
+
     /// Returns true if the provider executes tools internally (e.g., Claude Agent SDK).
     /// When true, jcode should NOT execute tools locally - just record the tool calls.
     fn handles_tools_internally(&self) -> bool {
@@ -268,6 +273,13 @@ impl Provider for MultiProvider {
                 .as_ref()
                 .map(|o| o.handles_tools_internally())
                 .unwrap_or(false),
+        }
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        match self.active_provider() {
+            ActiveProvider::Claude => None,
+            ActiveProvider::OpenAI => self.openai.as_ref().and_then(|o| o.reasoning_effort()),
         }
     }
 }
