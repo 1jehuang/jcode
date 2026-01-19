@@ -332,6 +332,7 @@ impl Agent {
         self.active_skill = None;
         // Don't restore provider_session_id - it's not valid across process restarts
         self.provider_session_id = None;
+        self.session.mark_active();
         self.seed_compaction_from_session();
         Ok(())
     }
