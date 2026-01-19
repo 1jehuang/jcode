@@ -165,6 +165,39 @@ impl Agent {
         &self.session.id
     }
 
+    pub fn message_count(&self) -> usize {
+        self.session.messages.len()
+    }
+
+    pub fn last_assistant_text(&self) -> Option<String> {
+        self.session
+            .messages
+            .iter()
+            .rev()
+            .find(|msg| msg.role == Role::Assistant)
+            .map(|msg| {
+                msg.content
+                    .iter()
+                    .filter_map(|c| {
+                        if let ContentBlock::Text { text, .. } = c {
+                            Some(text.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+    }
+
+    pub fn provider_name(&self) -> String {
+        self.provider.name().to_string()
+    }
+
+    pub fn provider_model(&self) -> String {
+        self.provider.model().to_string()
+    }
+
     /// Get the short/friendly name for this session (e.g., "fox")
     pub fn session_short_name(&self) -> Option<&str> {
         self.session.short_name.as_deref()
@@ -328,6 +361,38 @@ impl Agent {
             tools.retain(|tool| tool.name != "selfdev");
         }
         tools
+    }
+
+    pub async fn tool_names(&self) -> Vec<String> {
+        self.registry.tool_names().await
+    }
+
+    pub async fn execute_tool(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+    ) -> Result<crate::tool::ToolOutput> {
+        if name == "selfdev" && !self.session.is_canary {
+            return Err(anyhow::anyhow!(
+                "Tool 'selfdev' is only available in self-dev mode"
+            ));
+        }
+        if let Some(allowed) = self.allowed_tools.as_ref() {
+            if !allowed.contains(name) {
+                return Err(anyhow::anyhow!("Tool '{}' is not allowed", name));
+            }
+        }
+
+        let call_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| format!("debug-{}", d.as_millis()))
+            .unwrap_or_else(|_| "debug".to_string());
+        let ctx = ToolContext {
+            session_id: self.session.id.clone(),
+            message_id: self.session.id.clone(),
+            tool_call_id: call_id,
+        };
+        self.registry.execute(name, input, ctx).await
     }
 
     /// Restore a session by ID (loads from disk)

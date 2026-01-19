@@ -98,6 +98,16 @@ fn is_selfdev_env() -> bool {
         .unwrap_or(false)
 }
 
+fn debug_control_allowed() -> bool {
+    if is_selfdev_env() {
+        return true;
+    }
+    std::env::var("JCODE_DEBUG_CONTROL")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 /// Exit code when server shuts down due to idle timeout
 pub const EXIT_IDLE_TIMEOUT: i32 = 44;
 
@@ -483,7 +493,7 @@ async fn handle_client(
     provider: Arc<dyn Provider>,
     registry: Registry,
     _global_is_processing: Arc<RwLock<bool>>,
-    _global_session_id: Arc<RwLock<String>>,
+    global_session_id: Arc<RwLock<String>>,
     client_count: Arc<RwLock<usize>>,
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_cwd: Arc<RwLock<HashMap<PathBuf, HashSet<String>>>>,
@@ -506,6 +516,13 @@ async fn handle_client(
     let mut new_agent = Agent::new(Arc::clone(&provider), registry.clone());
     let client_session_id = new_agent.session_id().to_string();
     let friendly_name = new_agent.session_short_name().map(|s| s.to_string());
+
+    {
+        let mut current = global_session_id.write().await;
+        if current.is_empty() || *current != client_session_id {
+            *current = client_session_id.clone();
+        }
+    }
 
     // Enable self-dev mode when running in a self-dev environment
     if is_selfdev_env() {
@@ -762,6 +779,13 @@ async fn handle_client(
                 let json = encode_event(&event);
                 let mut w = writer.lock().await;
                 w.write_all(json.as_bytes()).await?;
+            }
+
+            Request::DebugCommand { id, .. } => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: "debug_command is only supported on the debug socket".to_string(),
+                });
             }
 
             Request::Reload { id } => {
@@ -1251,7 +1275,123 @@ async fn process_message_streaming_mpsc(
     agent.run_once_streaming_mpsc(content, event_tx).await
 }
 
-/// Handle debug socket connections (read-only introspection)
+async fn resolve_debug_session(
+    sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    session_id: &Arc<RwLock<String>>,
+    requested: Option<String>,
+) -> Result<(String, Arc<Mutex<Agent>>)> {
+    let mut target = requested;
+    if target.is_none() {
+        let current = session_id.read().await.clone();
+        if !current.is_empty() {
+            target = Some(current);
+        }
+    }
+
+    let sessions_guard = sessions.read().await;
+    if let Some(id) = target {
+        let agent = sessions_guard
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Unknown session_id '{}'", id))?;
+        return Ok((id, agent));
+    }
+
+    if sessions_guard.len() == 1 {
+        let (id, agent) = sessions_guard.iter().next().unwrap();
+        return Ok((id.clone(), Arc::clone(agent)));
+    }
+
+    Err(anyhow::anyhow!(
+        "No active session found. Connect a client or provide session_id."
+    ))
+}
+
+async fn execute_debug_command(
+    agent: Arc<Mutex<Agent>>,
+    command: &str,
+) -> Result<String> {
+    let trimmed = command.trim();
+
+    if trimmed.starts_with("message:") {
+        let msg = trimmed.strip_prefix("message:").unwrap_or("").trim();
+        let mut agent = agent.lock().await;
+        let output = agent.run_once_capture(msg).await?;
+        return Ok(output);
+    }
+
+    if trimmed.starts_with("tool:") {
+        let raw = trimmed.strip_prefix("tool:").unwrap_or("").trim();
+        if raw.is_empty() {
+            return Err(anyhow::anyhow!("tool: requires a tool name"));
+        }
+        let mut parts = raw.splitn(2, |c: char| c.is_whitespace());
+        let name = parts.next().unwrap_or("").trim();
+        let input_raw = parts.next().unwrap_or("").trim();
+        let input = if input_raw.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str::<serde_json::Value>(input_raw)?
+        };
+        let agent = agent.lock().await;
+        let output = agent.execute_tool(name, input).await?;
+        let payload = serde_json::json!({
+            "output": output.output,
+            "title": output.title,
+            "metadata": output.metadata,
+        });
+        return Ok(
+            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+        );
+    }
+
+    if trimmed == "history" {
+        let agent = agent.lock().await;
+        let history = agent.get_history();
+        return Ok(
+            serde_json::to_string_pretty(&history).unwrap_or_else(|_| "[]".to_string())
+        );
+    }
+
+    if trimmed == "tools" {
+        let agent = agent.lock().await;
+        let tools = agent.tool_names().await;
+        return Ok(
+            serde_json::to_string_pretty(&tools).unwrap_or_else(|_| "[]".to_string())
+        );
+    }
+
+    if trimmed == "last_response" {
+        let agent = agent.lock().await;
+        return Ok(agent
+            .last_assistant_text()
+            .unwrap_or_else(|| "last_response: none".to_string()));
+    }
+
+    if trimmed == "state" {
+        let agent = agent.lock().await;
+        let payload = serde_json::json!({
+            "session_id": agent.session_id(),
+            "messages": agent.message_count(),
+            "is_canary": agent.is_canary(),
+            "provider": agent.provider_name(),
+            "model": agent.provider_model(),
+        });
+        return Ok(
+            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+        );
+    }
+
+    if trimmed == "help" {
+        return Ok(
+            "debug commands: state, history, tools, last_response, message:<text>, tool:<name> <json>, help".to_string()
+        );
+    }
+
+    Err(anyhow::anyhow!("Unknown debug command '{}'", trimmed))
+}
+
+/// Handle debug socket connections (introspection + optional debug control)
 async fn handle_debug_client(
     stream: UnixStream,
     sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
@@ -1304,11 +1444,42 @@ async fn handle_debug_client(
                 writer.write_all(json.as_bytes()).await?;
             }
 
+            Request::DebugCommand {
+                id,
+                command,
+                session_id: requested_session,
+            } => {
+                if !debug_control_allowed() {
+                    let event = ServerEvent::Error {
+                        id,
+                        message: "Debug control is disabled. Set JCODE_DEBUG_CONTROL=1 or run in self-dev mode.".to_string(),
+                    };
+                    let json = encode_event(&event);
+                    writer.write_all(json.as_bytes()).await?;
+                    continue;
+                }
+
+                let result = match resolve_debug_session(&sessions, &session_id, requested_session)
+                    .await
+                {
+                    Ok((_session, agent)) => execute_debug_command(agent, &command).await,
+                    Err(e) => Err(e),
+                };
+
+                let (ok, output) = match result {
+                    Ok(output) => (true, output),
+                    Err(e) => (false, e.to_string()),
+                };
+                let event = ServerEvent::DebugResponse { id, ok, output };
+                let json = encode_event(&event);
+                writer.write_all(json.as_bytes()).await?;
+            }
+
             _ => {
-                // Debug socket only allows read-only operations
+                // Debug socket only allows ping, state, and debug_command
                 let event = ServerEvent::Error {
                     id: request.id(),
-                    message: "Debug socket only allows ping and state queries".to_string(),
+                    message: "Debug socket only allows ping, state, and debug_command".to_string(),
                 };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;
