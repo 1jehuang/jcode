@@ -45,6 +45,10 @@ The build also includes git hash and `-dev` suffix for uncommitted changes (e.g.
 ## Logs
 - Logs are written to `~/.jcode/logs/` (daily files like `jcode-YYYY-MM-DD.log`).
 
+## Install Notes
+- `scripts/install_release.sh` installs a versioned binary and atomically flips the `~/.local/bin/jcode` symlink.
+- Ensure `~/.local/bin` is **before** `~/.cargo/bin` in `PATH` so the symlinked release is used.
+
 ## Coding Style & Naming Conventions
 - Rust 2021 style; format with `cargo fmt`.
 - Files/modules use `snake_case`; types/traits use `CamelCase`; functions use `snake_case`.
