@@ -305,7 +305,7 @@ Event types:    Ack, TextDelta, ToolStart, ToolResult, TurnComplete,
 </details>
 
 <details>
-<summary><strong>TUI Architecture</strong></summary>
+<summary><strong>TUI & Rendering Architecture</strong></summary>
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -329,12 +329,25 @@ Event types:    Ack, TextDelta, ToolStart, ToolResult, TurnComplete,
 │  draw(frame,    │  │  handling   │  │  syntax hilite  │
 │    state)       │  │             │  │                 │
 └─────────────────┘  └─────────────┘  └─────────────────┘
-        │
-        ▼
+
+Rendering Pipeline:
 ┌─────────────────────────────────────────────────────────────────┐
-│                    TuiState Trait                               │
+│                    render_frame(frame, state)                   │
 ├─────────────────────────────────────────────────────────────────┤
-│ Implemented by both App (standalone) and remote connection     │
+│  1. Layout calculation (header, messages, input, status)       │
+│  2. For each DisplayMessage:                                    │
+│     ├─► parse_markdown() → Vec<MarkdownBlock>                  │
+│     ├─► syntax_highlight() for code blocks                     │
+│     └─► wrap_text() for terminal width                         │
+│  3. Render streaming_text with partial markdown                │
+│  4. Render tool call widgets (collapsible, with status icons)  │
+│  5. Render input line with cursor                              │
+│  6. Render status bar (tokens, model, session info)            │
+└─────────────────────────────────────────────────────────────────┘
+
+TuiState Trait (30+ methods):
+┌─────────────────────────────────────────────────────────────────┐
+│ Implemented by both App (standalone) and ClientApp (remote)    │
 │                                                                 │
 │ fn display_messages(&self) -> &[DisplayMessage];               │
 │ fn streaming_text(&self) -> &str;                              │
@@ -344,7 +357,25 @@ Event types:    Ack, TextDelta, ToolStart, ToolResult, TurnComplete,
 │ fn provider_model(&self) -> String;                            │
 │ fn streaming_tokens(&self) -> (u64, u64);                      │
 │ fn status(&self) -> ProcessingStatus;                          │
-│ ... (30+ methods for UI state)                                 │
+│ fn scroll_offset(&self) -> usize;                              │
+│ fn animation_elapsed(&self) -> f32;                            │
+│ ...                                                             │
+└─────────────────────────────────────────────────────────────────┘
+
+Backend Abstraction (backend.rs):
+┌─────────────────────────────────────────────────────────────────┐
+│ ┌─────────────────────┐         ┌─────────────────────┐        │
+│ │   LocalBackend      │         │   RemoteConnection  │        │
+│ │   (standalone mode) │         │   (client mode)     │        │
+│ ├─────────────────────┤         ├─────────────────────┤        │
+│ │ Direct Agent access │         │ Unix socket to      │        │
+│ │ In-process events   │         │ server, JSON events │        │
+│ └─────────────────────┘         └─────────────────────┘        │
+│            │                              │                     │
+│            └──────────┬───────────────────┘                     │
+│                       ▼                                         │
+│              BackendEvent enum                                  │
+│              (TextDelta, ToolStart, ToolDone, etc.)            │
 └─────────────────────────────────────────────────────────────────┘
 
 UI Layout:
@@ -367,6 +398,73 @@ UI Layout:
 │ Streaming... 1.2k in / 456 out                    ◀─ Progress  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**Key Files:**
+- `tui/app.rs` (262KB) - Main application state, event loop
+- `tui/ui.rs` (100KB) - Frame rendering, layout
+- `tui/markdown.rs` (23KB) - Markdown parsing, syntax highlighting
+- `tui/core.rs` (15KB) - Shared state between local/remote modes
+- `tui/backend.rs` (13KB) - Backend abstraction, debug events
+- `tui/client.rs` (34KB) - Remote client implementation
+- `tui/keybind.rs` (8KB) - Keyboard shortcut handling
+
+</details>
+
+<details>
+<summary><strong>Rendering Benchmarks</strong></summary>
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    tui_bench (bin/tui_bench.rs)                 │
+│  Autonomous rendering benchmark for performance testing        │
+└─────────────────────────────────────────────────────────────────┘
+
+Usage:
+  cargo run --release --bin tui_bench -- [OPTIONS]
+
+Options:
+  --frames <N>        Number of frames to render (default: 300)
+  --width <W>         Terminal width (default: 120)
+  --height <H>        Terminal height (default: 40)
+  --turns <N>         Number of message turns (default: 200)
+  --user-len <N>      User message length in chars (default: 120)
+  --assistant-len <N> Assistant message length (default: 600)
+  --stream-chunk <N>  Streaming chunk size (default: 80)
+  --scroll-cycle <N>  Scroll animation cycle length (default: 80)
+  --mode <MODE>       idle | streaming (default: idle)
+
+Benchmark Modes:
+┌─────────────────────────────────────────────────────────────────┐
+│ Idle Mode:                                                      │
+│   - Renders static conversation history                        │
+│   - Tests markdown parsing + layout performance                │
+│   - Simulates scrolling through history                        │
+│                                                                 │
+│ Streaming Mode:                                                 │
+│   - Simulates active streaming response                        │
+│   - Incrementally grows streaming_text each frame              │
+│   - Tests real-time rendering performance                      │
+└─────────────────────────────────────────────────────────────────┘
+
+Output:
+  mode: Idle
+  frames: 300
+  total_ms: 245.67
+  avg_ms: 0.82
+  fps: 1221.3
+
+Performance Targets:
+  - Idle:      < 1ms/frame (1000+ fps headroom)
+  - Streaming: < 2ms/frame (500+ fps headroom)
+  - With 200 turns of history + markdown + syntax highlighting
+```
+
+**What It Measures:**
+- Markdown parsing throughput
+- Syntax highlighting performance
+- Text wrapping and layout calculation
+- Scroll offset handling
+- Widget rendering overhead
 
 </details>
 
@@ -712,6 +810,7 @@ For provider/auth details, see `OAUTH.md`.
 - `cargo test` - Run all tests
 - `cargo run --bin test_api` - Claude Agent SDK smoke test
 - `cargo run --bin jcode-harness` - Tool harness (add `--include-network` for web tools)
+- `cargo run --release --bin tui_bench` - TUI rendering benchmark (see Architecture > Rendering Benchmarks)
 - `scripts/agent_trace.sh` - End-to-end agent smoke test (set `JCODE_PROVIDER=openai|claude`)
 
 ---
