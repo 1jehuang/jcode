@@ -5693,6 +5693,7 @@ impl super::TuiState for App {
             todos,
             context_info,
             queue_mode: Some(self.queue_mode),
+            context_limit: Some(self.context_limit as usize),
         }
     }
 }

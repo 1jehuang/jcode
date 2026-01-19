@@ -112,6 +112,10 @@ struct Args {
     #[arg(long, global = true)]
     debug_socket: bool,
 
+    /// Model to use (e.g., claude-opus-4-5-20251101, gpt-5.2-codex)
+    #[arg(short, long, global = true)]
+    model: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -255,7 +259,7 @@ async fn run_main(mut args: Args) -> Result<()> {
 
     match args.command {
         Some(Command::Serve) => {
-            let (provider, registry) = init_provider_and_registry(&args.provider).await?;
+            let (provider, registry) = init_provider_and_registry(&args.provider, args.model.as_deref()).await?;
             let server = server::Server::new(provider, registry);
             server.run().await?;
         }
@@ -263,7 +267,7 @@ async fn run_main(mut args: Args) -> Result<()> {
             run_client().await?;
         }
         Some(Command::Run { message }) => {
-            let (provider, registry) = init_provider_and_registry(&args.provider).await?;
+            let (provider, registry) = init_provider_and_registry(&args.provider, args.model.as_deref()).await?;
             let mut agent = agent::Agent::new(provider, registry);
             agent.run_once(&message).await?;
         }
@@ -272,7 +276,7 @@ async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::Repl) => {
             // Simple REPL mode (no TUI)
-            let (provider, registry) = init_provider_and_registry(&args.provider).await?;
+            let (provider, registry) = init_provider_and_registry(&args.provider, args.model.as_deref()).await?;
             let mut agent = agent::Agent::new(provider, registry);
             agent.repl().await?;
         }
@@ -310,7 +314,7 @@ async fn run_main(mut args: Args) -> Result<()> {
             if args.standalone {
                 eprintln!("\x1b[33m⚠️  Warning: --standalone is deprecated and will be removed in a future version.\x1b[0m");
                 eprintln!("\x1b[33m   The default server/client mode now handles all use cases including self-dev.\x1b[0m\n");
-                let (provider, registry) = init_provider_and_registry(&args.provider).await?;
+                let (provider, registry) = init_provider_and_registry(&args.provider, args.model.as_deref()).await?;
                 run_tui(provider, registry, args.resume, args.debug_socket).await?;
             } else {
                 // Default: TUI client mode - start server if needed
@@ -367,6 +371,7 @@ async fn run_main(mut args: Args) -> Result<()> {
 
 async fn init_provider_and_registry(
     choice: &ProviderChoice,
+    model: Option<&str>,
 ) -> Result<(Arc<dyn provider::Provider>, tool::Registry)> {
     let provider: Arc<dyn provider::Provider> = match choice {
         ProviderChoice::Claude | ProviderChoice::ClaudeSubprocess => {
@@ -422,6 +427,15 @@ async fn init_provider_and_registry(
             }
         }
     };
+
+    // Apply model selection if specified
+    if let Some(model_name) = model {
+        if let Err(e) = provider.set_model(model_name) {
+            eprintln!("Warning: failed to set model '{}': {}", model_name, e);
+        } else {
+            eprintln!("Using model: {}", model_name);
+        }
+    }
 
     let registry = tool::Registry::new(provider.clone()).await;
     Ok((provider, registry))
