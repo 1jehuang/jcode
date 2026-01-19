@@ -2778,6 +2778,27 @@ impl App {
 
     /// Handle a key event (wrapper for debug injection)
     fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) {
+        // Record the event if recording is active
+        use super::test_harness::{record_event, TestEvent};
+        let modifiers: Vec<String> = {
+            let mut mods = vec![];
+            if event.modifiers.contains(KeyModifiers::CONTROL) {
+                mods.push("ctrl".to_string());
+            }
+            if event.modifiers.contains(KeyModifiers::ALT) {
+                mods.push("alt".to_string());
+            }
+            if event.modifiers.contains(KeyModifiers::SHIFT) {
+                mods.push("shift".to_string());
+            }
+            mods
+        };
+        let code_str = format!("{:?}", event.code);
+        record_event(TestEvent::Key {
+            code: code_str,
+            modifiers,
+        });
+
         let _ = self.handle_key(event.code, event.modifiers);
     }
 
@@ -3387,6 +3408,142 @@ impl App {
                     });
                 }
             }
+            return;
+        }
+
+        // Handle /screenshot-mode command - toggle screenshot automation
+        if trimmed == "/screenshot-mode" || trimmed == "/screenshot-mode on" {
+            use super::screenshot;
+            screenshot::enable();
+            self.display_messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: "Screenshot mode enabled.\n\n\
+                         Run the watcher in another terminal:\n\
+                         ```bash\n\
+                         ./scripts/screenshot_watcher.sh\n\
+                         ```\n\n\
+                         Use `/screenshot <state>` to trigger a capture.\n\
+                         Use `/screenshot-mode off` to disable."
+                    .to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            return;
+        }
+
+        if trimmed == "/screenshot-mode off" {
+            use super::screenshot;
+            screenshot::disable();
+            screenshot::clear_all_signals();
+            self.display_messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: "Screenshot mode disabled.".to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            return;
+        }
+
+        if trimmed.starts_with("/screenshot ") {
+            use super::screenshot;
+            let state_name = trimmed.strip_prefix("/screenshot ").unwrap_or("").trim();
+            if !state_name.is_empty() {
+                screenshot::signal_ready(state_name, serde_json::json!({
+                    "manual_trigger": true,
+                }));
+                self.display_messages.push(DisplayMessage {
+                    role: "system".to_string(),
+                    content: format!("Screenshot signal sent: {}", state_name),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+            }
+            return;
+        }
+
+        // Handle /record command - record user actions for replay
+        if trimmed == "/record" || trimmed == "/record start" {
+            use super::test_harness;
+            test_harness::start_recording();
+            self.display_messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: "🎬 Recording started.\n\n\
+                         All your keystrokes are now being recorded.\n\
+                         Use `/record stop` to stop and save.\n\
+                         Use `/record cancel` to discard."
+                    .to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            return;
+        }
+
+        if trimmed == "/record stop" {
+            use super::test_harness;
+            test_harness::stop_recording();
+            let json = test_harness::get_recorded_events_json();
+            let event_count = json.matches("\"type\"").count();
+
+            // Save to file
+            let recording_dir = dirs::config_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("jcode")
+                .join("recordings");
+            let _ = std::fs::create_dir_all(&recording_dir);
+
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let filename = format!("recording_{}.json", timestamp);
+            let filepath = recording_dir.join(&filename);
+
+            if let Ok(mut file) = std::fs::File::create(&filepath) {
+                use std::io::Write;
+                let _ = file.write_all(json.as_bytes());
+            }
+
+            self.display_messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: format!(
+                    "🎬 Recording stopped.\n\n\
+                     **Events recorded:** {}\n\
+                     **Saved to:** `{}`\n\n\
+                     To replay as video, run:\n\
+                     ```bash\n\
+                     ./scripts/replay_recording.sh {}\n\
+                     ```",
+                    event_count,
+                    filepath.display(),
+                    filepath.display()
+                ),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            return;
+        }
+
+        if trimmed == "/record cancel" {
+            use super::test_harness;
+            test_harness::stop_recording();
+            self.display_messages.push(DisplayMessage {
+                role: "system".to_string(),
+                content: "🎬 Recording cancelled.".to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
             return;
         }
 
@@ -5792,6 +5949,10 @@ impl super::TuiState for App {
             + info.tool_results_chars;
 
         info
+    }
+
+    fn context_limit(&self) -> Option<usize> {
+        Some(self.context_limit as usize)
     }
 
     fn info_widget_data(&self) -> super::info_widget::InfoWidgetData {
