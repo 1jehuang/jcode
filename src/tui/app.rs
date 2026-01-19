@@ -200,6 +200,13 @@ pub struct RunResult {
     pub exit_code: Option<i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendAction {
+    Submit,
+    Queue,
+    Interleave,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct DebugSnapshot {
     state: serde_json::Value,
@@ -1961,22 +1968,50 @@ impl App {
                             Some(server_event) => {
                                 self.handle_server_event(server_event, &mut remote);
 
-                                // Process queued messages after turn completes
-                                if !self.is_processing && !self.queued_messages.is_empty() {
-                                    let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
-                                    self.display_messages.push(DisplayMessage {
-                                        role: "user".to_string(),
-                                        content: combined.clone(),
-                                        tool_calls: vec![],
-                                        duration_secs: None,
-                                        title: None,
-                                        tool_data: None,
-                                    });
-                                    if let Ok(msg_id) = remote.send_message(combined).await {
-                                        self.current_message_id = Some(msg_id);
-                                        self.is_processing = true;
-                                        self.status = ProcessingStatus::Sending;
-                                        self.processing_started = Some(Instant::now());
+                                // Process pending interleave or queued messages after turn completes
+                                if !self.is_processing {
+                                    if let Some(interleave_msg) = self.interleave_message.take() {
+                                        if !interleave_msg.trim().is_empty() {
+                                            self.display_messages.push(DisplayMessage {
+                                                role: "user".to_string(),
+                                                content: interleave_msg.clone(),
+                                                tool_calls: vec![],
+                                                duration_secs: None,
+                                                title: None,
+                                                tool_data: None,
+                                            });
+                                            match remote.send_message(interleave_msg).await {
+                                                Ok(msg_id) => {
+                                                    self.current_message_id = Some(msg_id);
+                                                    self.is_processing = true;
+                                                    self.status = ProcessingStatus::Sending;
+                                                    self.processing_started = Some(Instant::now());
+                                                }
+                                                Err(e) => {
+                                                    self.display_messages.push(DisplayMessage::error(format!(
+                                                        "Failed to send interleaved message: {}",
+                                                        e
+                                                    )));
+                                                }
+                                            }
+                                        }
+                                    } else if !self.queued_messages.is_empty() {
+                                        let combined =
+                                            std::mem::take(&mut self.queued_messages).join("\n\n");
+                                        self.display_messages.push(DisplayMessage {
+                                            role: "user".to_string(),
+                                            content: combined.clone(),
+                                            tool_calls: vec![],
+                                            duration_secs: None,
+                                            title: None,
+                                            tool_data: None,
+                                        });
+                                        if let Ok(msg_id) = remote.send_message(combined).await {
+                                            self.current_message_id = Some(msg_id);
+                                            self.is_processing = true;
+                                            self.status = ProcessingStatus::Sending;
+                                            self.processing_started = Some(Instant::now());
+                                        }
                                     }
                                 }
                             }
@@ -2153,7 +2188,6 @@ impl App {
                     self.processing_started = None;
                     self.streaming_tool_calls.clear();
                     self.current_message_id = None;
-                    self.interleave_message = None;
                     self.thought_line_inserted = false;
                     remote.clear_pending();
                 }
@@ -2413,8 +2447,59 @@ impl App {
                     self.cursor_pos = start;
                     return Ok(());
                 }
+                KeyCode::Tab | KeyCode::Char('t') => {
+                    // Ctrl+Tab / Ctrl+T: toggle queue mode (immediate send vs wait until done)
+                    self.queue_mode = !self.queue_mode;
+                    let mode_str = if self.queue_mode {
+                        "Queue mode: messages wait until response completes"
+                    } else {
+                        "Immediate mode: messages interrupt current response"
+                    };
+                    self.set_status_notice(mode_str);
+                    return Ok(());
+                }
                 _ => {}
             }
+        }
+
+        // Shift+Enter: does opposite of queue_mode during processing
+        if code == KeyCode::Enter && modifiers.contains(KeyModifiers::SHIFT) {
+            if !self.input.is_empty() {
+                let raw_input = std::mem::take(&mut self.input);
+                let expanded = self.expand_paste_placeholders(&raw_input);
+                self.pasted_contents.clear();
+                self.cursor_pos = 0;
+
+                match self.send_action(true) {
+                    SendAction::Submit => {
+                        // Add user message to display
+                        self.display_messages.push(DisplayMessage {
+                            role: "user".to_string(),
+                            content: raw_input,
+                            tool_calls: vec![],
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
+                        });
+                        // Send expanded content to server
+                        let msg_id = remote.send_message(expanded).await?;
+                        self.current_message_id = Some(msg_id);
+                        self.is_processing = true;
+                        self.status = ProcessingStatus::Sending;
+                        self.processing_started = Some(Instant::now());
+                        self.thought_line_inserted = false;
+                    }
+                    SendAction::Queue => {
+                        self.queued_messages.push(expanded);
+                    }
+                    SendAction::Interleave => {
+                        self.interleave_message = Some(expanded);
+                        self.set_status_notice("⚡ Interleaving message...");
+                        remote.cancel().await?;
+                    }
+                }
+            }
+            return Ok(());
         }
 
         // Regular keys
@@ -2593,25 +2678,33 @@ impl App {
                     }
 
                     // Queue message if processing, otherwise send
-                    if self.is_processing {
-                        self.queued_messages.push(expanded);
-                    } else {
-                        // Add user message to display (show placeholder)
-                        self.display_messages.push(DisplayMessage {
-                            role: "user".to_string(),
-                            content: raw_input,
-                            tool_calls: vec![],
-                            duration_secs: None,
-                            title: None,
-                            tool_data: None,
-                        });
-                        // Send expanded content (with actual pasted text) to server
-                        let msg_id = remote.send_message(expanded).await?;
-                        self.current_message_id = Some(msg_id);
-                        self.is_processing = true;
-                        self.status = ProcessingStatus::Sending;
-                        self.processing_started = Some(Instant::now());
-                        self.thought_line_inserted = false;
+                    match self.send_action(false) {
+                        SendAction::Submit => {
+                            // Add user message to display (show placeholder)
+                            self.display_messages.push(DisplayMessage {
+                                role: "user".to_string(),
+                                content: raw_input,
+                                tool_calls: vec![],
+                                duration_secs: None,
+                                title: None,
+                                tool_data: None,
+                            });
+                            // Send expanded content (with actual pasted text) to server
+                            let msg_id = remote.send_message(expanded).await?;
+                            self.current_message_id = Some(msg_id);
+                            self.is_processing = true;
+                            self.status = ProcessingStatus::Sending;
+                            self.processing_started = Some(Instant::now());
+                            self.thought_line_inserted = false;
+                        }
+                        SendAction::Queue => {
+                            self.queued_messages.push(expanded);
+                        }
+                        SendAction::Interleave => {
+                            self.interleave_message = Some(expanded);
+                            self.set_status_notice("⚡ Interleaving message...");
+                            remote.cancel().await?;
+                        }
                     }
                 }
             }
@@ -2879,22 +2972,17 @@ impl App {
         // Shift+Enter: does opposite of queue_mode during processing
         if code == KeyCode::Enter && modifiers.contains(KeyModifiers::SHIFT) {
             if !self.input.is_empty() {
-                if self.is_processing {
-                    // Shift+Enter does the opposite of queue_mode
-                    if self.queue_mode {
-                        // Queue mode is on, so Shift+Enter interleaves
+                match self.send_action(true) {
+                    SendAction::Submit => self.submit_input(),
+                    SendAction::Queue => self.queue_message(),
+                    SendAction::Interleave => {
                         let raw_input = std::mem::take(&mut self.input);
                         let expanded = self.expand_paste_placeholders(&raw_input);
+                        self.pasted_contents.clear();
                         self.interleave_message = Some(expanded);
                         self.cursor_pos = 0;
                         self.set_status_notice("⚡ Interleaving message...");
-                    } else {
-                        // Immediate mode is on, so Shift+Enter queues
-                        self.queue_message();
                     }
-                } else {
-                    // Not processing - just submit normally
-                    self.submit_input();
                 }
             }
             return Ok(());
@@ -2903,21 +2991,17 @@ impl App {
         match code {
             KeyCode::Enter => {
                 if !self.input.is_empty() {
-                    if self.is_processing {
-                        // Enter behavior depends on queue_mode
-                        if self.queue_mode {
-                            // Queue mode: queue the message
-                            self.queue_message();
-                        } else {
-                            // Immediate mode: interleave immediately
+                    match self.send_action(false) {
+                        SendAction::Submit => self.submit_input(),
+                        SendAction::Queue => self.queue_message(),
+                        SendAction::Interleave => {
                             let raw_input = std::mem::take(&mut self.input);
                             let expanded = self.expand_paste_placeholders(&raw_input);
+                            self.pasted_contents.clear();
                             self.interleave_message = Some(expanded);
                             self.cursor_pos = 0;
                             self.set_status_notice("⚡ Interleaving message...");
                         }
-                    } else {
-                        self.submit_input();
                     }
                 }
             }
@@ -3024,6 +3108,23 @@ impl App {
         self.pasted_contents.clear();
         self.cursor_pos = 0;
         self.queued_messages.push(expanded);
+    }
+
+    fn send_action(&self, shift: bool) -> SendAction {
+        if !self.is_processing {
+            return SendAction::Submit;
+        }
+        if shift {
+            if self.queue_mode {
+                SendAction::Interleave
+            } else {
+                SendAction::Queue
+            }
+        } else if self.queue_mode {
+            SendAction::Queue
+        } else {
+            SendAction::Interleave
+        }
     }
 
     fn insert_thought_line(&mut self, line: String) {
@@ -5610,27 +5711,51 @@ impl super::TuiState for App {
         let mut tool_result_chars = 0usize;
         let mut tool_result_count = 0usize;
 
-        for msg in &self.messages {
-            match msg.role {
-                Role::User => user_count += 1,
-                Role::Assistant => asst_count += 1,
-            }
-
-            for block in &msg.content {
-                match block {
-                    ContentBlock::Text { text, .. } => {
-                        match msg.role {
-                            Role::User => user_chars += text.len(),
-                            Role::Assistant => asst_chars += text.len(),
+        if self.is_remote {
+            for msg in &self.display_messages {
+                match msg.role.as_str() {
+                    "user" => {
+                        user_count += 1;
+                        user_chars += msg.content.len();
+                    }
+                    "assistant" => {
+                        asst_count += 1;
+                        asst_chars += msg.content.len();
+                    }
+                    "tool" => {
+                        tool_result_count += 1;
+                        tool_result_chars += msg.content.len();
+                        if let Some(tool) = &msg.tool_data {
+                            tool_call_count += 1;
+                            tool_call_chars += tool.name.len() + tool.input.to_string().len();
                         }
                     }
-                    ContentBlock::ToolUse { name, input, .. } => {
-                        tool_call_count += 1;
-                        tool_call_chars += name.len() + input.to_string().len();
-                    }
-                    ContentBlock::ToolResult { content, .. } => {
-                        tool_result_count += 1;
-                        tool_result_chars += content.len();
+                    _ => {}
+                }
+            }
+        } else {
+            for msg in &self.messages {
+                match msg.role {
+                    Role::User => user_count += 1,
+                    Role::Assistant => asst_count += 1,
+                }
+
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text { text, .. } => {
+                            match msg.role {
+                                Role::User => user_chars += text.len(),
+                                Role::Assistant => asst_chars += text.len(),
+                            }
+                        }
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            tool_call_count += 1;
+                            tool_call_chars += name.len() + input.to_string().len();
+                        }
+                        ContentBlock::ToolResult { content, .. } => {
+                            tool_result_count += 1;
+                            tool_result_chars += content.len();
+                        }
                     }
                 }
             }
@@ -5695,6 +5820,15 @@ impl super::TuiState for App {
             (Some(self.provider.model()), self.provider.reasoning_effort())
         };
 
+        let (session_count, client_count) = if self.is_remote {
+            (
+                Some(self.remote_sessions.len()),
+                self.remote_client_count,
+            )
+        } else {
+            (None, None)
+        };
+
         super::info_widget::InfoWidgetData {
             todos,
             context_info,
@@ -5702,6 +5836,8 @@ impl super::TuiState for App {
             context_limit: Some(self.context_limit as usize),
             model,
             reasoning_effort,
+            session_count,
+            client_count,
         }
     }
 }
@@ -6001,6 +6137,23 @@ mod tests {
         assert_eq!(app.queued_count(), 0);
         assert_eq!(app.input(), "hello");
         assert_eq!(app.cursor_pos(), 5); // Cursor at end
+    }
+
+    #[test]
+    fn test_send_action_modes() {
+        let mut app = create_test_app();
+        app.is_processing = true;
+        app.queue_mode = false;
+
+        assert_eq!(app.send_action(false), SendAction::Interleave);
+        assert_eq!(app.send_action(true), SendAction::Queue);
+
+        app.queue_mode = true;
+        assert_eq!(app.send_action(false), SendAction::Queue);
+        assert_eq!(app.send_action(true), SendAction::Interleave);
+
+        app.is_processing = false;
+        assert_eq!(app.send_action(false), SendAction::Submit);
     }
 
     #[test]

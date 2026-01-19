@@ -718,7 +718,8 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     let queued_height = pending_count.min(3) as u16;
 
     // Calculate input height based on content (max 10 lines visible, scrolls if more)
-    let available_width = area.width.saturating_sub(3) as usize; // prompt chars
+    let reserved_width = send_mode_reserved_width(app) as u16;
+    let available_width = area.width.saturating_sub(3 + reserved_width) as usize; // prompt + mode icon
     let base_input_height = calculate_input_lines(app.input(), available_width).min(10) as u16;
     // Add 1 line for command suggestions when typing /, or for Shift+Enter hint when processing
     let suggestions = app.command_suggestions();
@@ -1982,7 +1983,6 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         }
     };
 
-    let line = append_send_mode_indicator(line, app);
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, area);
 }
@@ -2010,25 +2010,37 @@ fn format_cache_status(
     None
 }
 
-fn send_mode_label(app: &dyn TuiState) -> (&'static str, Color) {
+fn send_mode_indicator(app: &dyn TuiState) -> (&'static str, Color) {
     if app.queue_mode() {
-        ("⏳ wait", QUEUED_COLOR)
+        ("⏳", QUEUED_COLOR)
     } else {
-        ("⚡ now", ASAP_COLOR)
+        ("⚡", ASAP_COLOR)
     }
 }
 
-fn append_send_mode_indicator<'a>(mut line: Line<'a>, app: &dyn TuiState) -> Line<'a> {
-    let (label, color) = send_mode_label(app);
-    if label.is_empty() {
-        return line;
+fn send_mode_reserved_width(app: &dyn TuiState) -> usize {
+    let (icon, _) = send_mode_indicator(app);
+    if icon.is_empty() {
+        0
+    } else {
+        2 // Reserve a small gutter on the right for the icon
     }
-    if line.width() > 0 {
-        line.spans
-            .push(Span::styled(" • ", Style::default().fg(DIM_COLOR)));
+}
+
+fn draw_send_mode_indicator(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
+    let (icon, color) = send_mode_indicator(app);
+    if icon.is_empty() || area.width == 0 || area.height == 0 {
+        return;
     }
-    line.spans.push(Span::styled(label, Style::default().fg(color)));
-    line
+    let indicator_area = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    let line = Line::from(Span::styled(icon, Style::default().fg(color)));
+    let paragraph = Paragraph::new(line).alignment(Alignment::Right);
+    frame.render_widget(paragraph, indicator_area);
 }
 
 fn pending_prompt_count(app: &dyn TuiState) -> usize {
@@ -2129,8 +2141,9 @@ fn draw_input(
     let num_str = format!("{}", next_prompt);
     // Use char count, not byte count (ellipsis is 3 bytes but 1 char)
     let prompt_len = num_str.chars().count() + prompt_char.chars().count();
+    let reserved_width = send_mode_reserved_width(app);
 
-    let line_width = (area.width as usize).saturating_sub(prompt_len);
+    let line_width = (area.width as usize).saturating_sub(prompt_len + reserved_width);
 
     if line_width == 0 {
         return;
@@ -2176,8 +2189,13 @@ fn draw_input(
     } else if app.is_processing() && !input_text.is_empty() {
         // Show hint for Shift+Enter when processing and user has typed something
         hint_shown = true;
+        let hint = if app.queue_mode() {
+            "  Shift+Enter to send now"
+        } else {
+            "  Shift+Enter to queue"
+        };
         lines.push(Line::from(Span::styled(
-            "  Shift+Enter to send now",
+            hint,
             Style::default().fg(DIM_COLOR),
         )));
     }
@@ -2233,6 +2251,8 @@ fn draw_input(
     let cursor_x = area.x + prompt_len as u16 + cursor_col as u16;
 
     frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+
+    draw_send_mode_indicator(frame, app, area);
 }
 
 /// Wrap input text into lines, handling explicit newlines and tracking cursor position.
