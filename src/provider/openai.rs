@@ -31,6 +31,7 @@ pub struct OpenAIProvider {
     model: Arc<RwLock<String>>,
     prompt_cache_key: Option<String>,
     prompt_cache_retention: Option<String>,
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAIProvider {
@@ -65,6 +66,11 @@ impl OpenAIProvider {
             }
             None => None,
         };
+        let reasoning_effort = crate::config::config()
+            .provider
+            .openai_reasoning_effort
+            .as_deref()
+            .and_then(Self::normalize_reasoning_effort);
 
         Self {
             client: Client::new(),
@@ -72,6 +78,7 @@ impl OpenAIProvider {
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key,
             prompt_cache_retention,
+            reasoning_effort,
         }
     }
 
@@ -118,6 +125,23 @@ impl OpenAIProvider {
 
     fn is_chatgpt_mode(credentials: &CodexCredentials) -> bool {
         !credentials.refresh_token.is_empty() || credentials.id_token.is_some()
+    }
+
+    fn normalize_reasoning_effort(raw: &str) -> Option<String> {
+        let value = raw.trim().to_lowercase();
+        if value.is_empty() {
+            return None;
+        }
+        match value.as_str() {
+            "none" | "low" | "medium" | "high" | "xhigh" => Some(value),
+            other => {
+                eprintln!(
+                    "Warning: Unsupported OpenAI reasoning effort '{}'; expected none|low|medium|high|xhigh. Using 'xhigh'.",
+                    other
+                );
+                Some("xhigh".to_string())
+            }
+        }
     }
 
     fn responses_url(credentials: &CodexCredentials) -> String {
@@ -474,6 +498,10 @@ impl Provider for OpenAIProvider {
             "store": false,
             "include": ["reasoning.encrypted_content"],
         });
+
+        if let Some(ref effort) = self.reasoning_effort {
+            request["reasoning"] = serde_json::json!({ "effort": effort });
+        }
 
         if !is_chatgpt_mode {
             if let Some(key) = self.prompt_cache_key.as_ref() {

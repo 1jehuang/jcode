@@ -252,7 +252,7 @@ const MAX_TODO_LINES: usize = 8;
 
 #[derive(Clone, Copy, Debug)]
 enum InfoPageKind {
-    Overview,
+    CompactOnly,
     TodosExpanded,
     ContextExpanded,
     QueueExpanded,
@@ -275,42 +275,41 @@ fn compute_page_layout(
     _inner_width: usize,
     inner_height: u16,
 ) -> PageLayout {
-    let mut candidates: Vec<InfoPage> = Vec::new();
+    let compact_height = compact_overview_height(data);
+    if compact_height == 0 {
+        return PageLayout {
+            pages: Vec::new(),
+            max_page_height: 0,
+            show_dots: false,
+        };
+    }
 
-    let overview_height = overview_height(data);
-    if overview_height > 0 {
+    let mut candidates: Vec<InfoPage> = Vec::new();
+    let context_compact = compact_context_height(data);
+    let todos_compact = compact_todos_height(data);
+    let queue_compact = compact_queue_height(data);
+
+    let context_expanded = expanded_context_height(data);
+    if context_expanded > 0 {
         candidates.push(InfoPage {
-            kind: InfoPageKind::Overview,
-            height: overview_height,
+            kind: InfoPageKind::ContextExpanded,
+            height: compact_height - context_compact + context_expanded,
         });
     }
 
-    if let Some(info) = &data.context_info {
-        if info.total_chars > 0 {
-            let expanded_height = 2 + context_entries(info).len().min(MAX_CONTEXT_LINES) as u16;
-            candidates.push(InfoPage {
-                kind: InfoPageKind::ContextExpanded,
-                height: expanded_height,
-            });
-        }
-    }
-
-    if !data.todos.is_empty() {
-        let todo_lines = data.todos.len().min(MAX_TODO_LINES);
-        let mut expanded_height = 1 + todo_lines as u16;
-        if data.todos.len() > MAX_TODO_LINES {
-            expanded_height += 1;
-        }
+    let todos_expanded = expanded_todos_height(data);
+    if todos_expanded > 0 {
         candidates.push(InfoPage {
             kind: InfoPageKind::TodosExpanded,
-            height: expanded_height,
+            height: compact_height - todos_compact + todos_expanded,
         });
     }
 
-    if data.queue_mode.is_some() {
+    let queue_expanded = expanded_queue_height(data);
+    if queue_expanded > 0 {
         candidates.push(InfoPage {
             kind: InfoPageKind::QueueExpanded,
-            height: 2,
+            height: compact_height - queue_compact + queue_expanded,
         });
     }
 
@@ -320,11 +319,18 @@ fn compute_page_layout(
         .collect();
 
     if pages.is_empty() {
-        return PageLayout {
-            pages,
-            max_page_height: 0,
-            show_dots: false,
-        };
+        if compact_height <= inner_height {
+            pages.push(InfoPage {
+                kind: InfoPageKind::CompactOnly,
+                height: compact_height,
+            });
+        } else {
+            return PageLayout {
+                pages,
+                max_page_height: 0,
+                show_dots: false,
+            };
+        }
     }
 
     let mut show_dots = false;
@@ -337,9 +343,8 @@ fn compute_page_layout(
         if filtered.len() > 1 {
             pages = filtered;
             show_dots = true;
-        } else if let Some(first) = pages.first().copied() {
-            // Not enough room for pagination dots; keep a single page.
-            pages = vec![first];
+        } else if filtered.len() == 1 {
+            pages = filtered;
         }
     }
     let max_page_height = pages
@@ -357,42 +362,104 @@ fn compute_page_layout(
 
 fn render_page(kind: InfoPageKind, data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
     match kind {
-        InfoPageKind::Overview => render_overview(data, inner),
-        InfoPageKind::TodosExpanded => render_todos_expanded(data, inner),
-        InfoPageKind::ContextExpanded => render_context_expanded(data, inner),
-        InfoPageKind::QueueExpanded => render_queue_expanded(data, inner),
+        InfoPageKind::CompactOnly => render_sections(data, inner, None),
+        InfoPageKind::TodosExpanded => render_sections(data, inner, Some(InfoPageKind::TodosExpanded)),
+        InfoPageKind::ContextExpanded => render_sections(data, inner, Some(InfoPageKind::ContextExpanded)),
+        InfoPageKind::QueueExpanded => render_sections(data, inner, Some(InfoPageKind::QueueExpanded)),
     }
 }
 
-fn overview_height(data: &InfoWidgetData) -> u16 {
-    let mut height = 0u16;
+fn compact_context_height(data: &InfoWidgetData) -> u16 {
     if let Some(info) = &data.context_info {
         if info.total_chars > 0 {
-            height += 1;
+            return 1;
         }
     }
-    if !data.todos.is_empty() {
-        height += 2;
+    0
+}
+
+fn compact_todos_height(data: &InfoWidgetData) -> u16 {
+    if data.todos.is_empty() {
+        0
+    } else {
+        2
     }
+}
+
+fn compact_queue_height(data: &InfoWidgetData) -> u16 {
     if data.queue_mode.is_some() {
+        1
+    } else {
+        0
+    }
+}
+
+fn compact_overview_height(data: &InfoWidgetData) -> u16 {
+    compact_context_height(data) + compact_todos_height(data) + compact_queue_height(data)
+}
+
+fn expanded_context_height(data: &InfoWidgetData) -> u16 {
+    if let Some(info) = &data.context_info {
+        if info.total_chars > 0 {
+            return 2 + context_entries(info).len().min(MAX_CONTEXT_LINES) as u16;
+        }
+    }
+    0
+}
+
+fn expanded_todos_height(data: &InfoWidgetData) -> u16 {
+    if data.todos.is_empty() {
+        return 0;
+    }
+    let todo_lines = data.todos.len().min(MAX_TODO_LINES);
+    let mut height = 1 + todo_lines as u16;
+    if data.todos.len() > MAX_TODO_LINES {
         height += 1;
     }
     height
 }
 
-fn render_overview(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+fn expanded_queue_height(data: &InfoWidgetData) -> u16 {
+    if data.queue_mode.is_some() {
+        2
+    } else {
+        0
+    }
+}
+
+fn render_sections(
+    data: &InfoWidgetData,
+    inner: Rect,
+    focus: Option<InfoPageKind>,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
+
     if let Some(info) = &data.context_info {
         if info.total_chars > 0 {
-            lines.extend(render_context_compact(data, inner));
+            if matches!(focus, Some(InfoPageKind::ContextExpanded)) {
+                lines.extend(render_context_expanded(data, inner));
+            } else {
+                lines.extend(render_context_compact(data, inner));
+            }
         }
     }
+
     if !data.todos.is_empty() {
-        lines.extend(render_todos_compact(data, inner));
+        if matches!(focus, Some(InfoPageKind::TodosExpanded)) {
+            lines.extend(render_todos_expanded(data, inner));
+        } else {
+            lines.extend(render_todos_compact(data, inner));
+        }
     }
+
     if data.queue_mode.is_some() {
-        lines.extend(render_queue_compact(data, inner));
+        if matches!(focus, Some(InfoPageKind::QueueExpanded)) {
+            lines.extend(render_queue_expanded(data, inner));
+        } else {
+            lines.extend(render_queue_compact(data, inner));
+        }
     }
+
     lines
 }
 
