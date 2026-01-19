@@ -5,7 +5,7 @@
 - **Commit as you go** - Make small, focused commits after completing each feature or fix
 - **Push when done** - Push all commits to remote when finishing a task or session
 - **No AI co-author** - Never include `Co-Authored-By` lines in commits
-- **Rebuild and install when done** - Run `cargo build --release && cp target/release/jcode ~/.local/bin/`
+- **Rebuild and install when done** - Run `cargo build --release && scripts/install_release.sh`
 - **Test before committing** - Run `cargo test` to verify changes
 - **Bump version for releases** - Update version in `Cargo.toml` when making releases
 
@@ -41,7 +41,7 @@ kitten @ --to unix:$sock launch --type=os-window ./target/release/jcode --standa
 ## Commands
 
 ```bash
-cargo build --release && cp target/release/jcode ~/.local/bin/  # Build and install
+cargo build --release && scripts/install_release.sh  # Build and install (versioned + symlink)
 cargo test              # Run all tests
 cargo test --test e2e   # Run only e2e tests
 ```
