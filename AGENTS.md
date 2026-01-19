@@ -4,7 +4,7 @@
 
 - **Commit as you go** - Make small, focused commits after completing each feature or fix
 - **Push when done** - Push all commits to remote when finishing a task or session
-- **Rebuild and install when done** - Run `cargo build --release && cp target/release/jcode ~/.local/bin/`
+- **Rebuild and install when done** - Run `cargo build --release && scripts/install_release.sh`
 - **Test before committing** - Run `cargo test` to verify changes
 - **Bump version for releases** - Update version in `Cargo.toml` when making releases
 
@@ -33,7 +33,7 @@ The build also includes git hash and `-dev` suffix for uncommitted changes (e.g.
 
 ## Build, Test, and Development Commands
 - `cargo install --path .`: install the local CLI.
-- `cargo build --release && cp target/release/jcode ~/.local/bin/`: rebuild and install the release binary.
+- `cargo build --release && scripts/install_release.sh`: rebuild and install the release binary (versioned + symlink).
 - `jcode`: launch the TUI.
 - `jcode serve` / `jcode connect`: start the daemon and attach a client.
 - `cargo test`: run unit + integration tests.
