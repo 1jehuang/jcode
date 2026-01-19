@@ -4971,8 +4971,16 @@ impl super::TuiState for App {
             .and_then(|id| crate::todo::load_todos(id).ok())
             .unwrap_or_default();
 
+        let context_info = self.context_info();
+        let context_info = if context_info.total_chars > 0 {
+            Some(context_info)
+        } else {
+            None
+        };
+
         super::info_widget::InfoWidgetData {
             todos,
+            context_info,
         }
     }
 }

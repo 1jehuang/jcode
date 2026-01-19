@@ -3,6 +3,7 @@
 //! This widget finds the largest empty rectangle on the right side of the
 //! visible message area and renders a compact info panel there.
 
+use crate::prompt::ContextInfo;
 use crate::todo::TodoItem;
 use ratatui::{
     prelude::*,
@@ -21,12 +22,13 @@ const MIN_WIDGET_HEIGHT: u16 = 5;
 #[derive(Debug, Default, Clone)]
 pub struct InfoWidgetData {
     pub todos: Vec<TodoItem>,
+    pub context_info: Option<ContextInfo>,
     // TODO: Add swarm/subagent status summary to the info widget.
 }
 
 impl InfoWidgetData {
     pub fn is_empty(&self) -> bool {
-        self.todos.is_empty()
+        self.todos.is_empty() && self.context_info.is_none()
     }
 }
 
@@ -173,6 +175,15 @@ fn calculate_needed_height(data: &InfoWidgetData) -> u16 {
         height += 1; // Spacing
     }
 
+    if let Some(info) = &data.context_info {
+        if info.total_chars > 0 {
+            height += 1; // Header "Context"
+            height += 1; // Total tokens
+            height += context_entries(info).len().min(MAX_CONTEXT_LINES) as u16;
+            height += 1; // Spacing
+        }
+    }
+
     height.max(MIN_WIDGET_HEIGHT)
 }
 
@@ -225,6 +236,80 @@ pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
         }
     }
 
+    if let Some(info) = &data.context_info {
+        if info.total_chars > 0 {
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+
+            lines.push(Line::from(vec![Span::styled(
+                "Context",
+                Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
+            )]));
+
+            let total_k = info.estimated_tokens() / 1000;
+            lines.push(Line::from(vec![
+                Span::styled("∑ ", Style::default().fg(Color::Rgb(160, 160, 170))),
+                Span::styled(
+                    format!("{}k tokens", total_k),
+                    Style::default().fg(Color::Rgb(140, 140, 150)),
+                ),
+            ]));
+
+            let max_items = MAX_CONTEXT_LINES;
+            let max_len = inner.width.saturating_sub(2) as usize;
+            for (icon, label, tokens) in context_entries(info).into_iter().take(max_items) {
+                let mut content = format!("{} {} {}k", icon, label, tokens / 1000);
+                if content.len() > max_len && max_len > 3 {
+                    content.truncate(max_len.saturating_sub(3));
+                    content.push_str("...");
+                }
+                lines.push(Line::from(Span::styled(
+                    content,
+                    Style::default().fg(Color::Rgb(140, 140, 150)),
+                )));
+            }
+        }
+    }
+
     let para = Paragraph::new(lines);
     frame.render_widget(para, inner);
+}
+
+const MAX_CONTEXT_LINES: usize = 5;
+
+fn context_entries(info: &ContextInfo) -> Vec<(&'static str, &'static str, usize)> {
+    let docs_chars = info.project_agents_md_chars
+        + info.project_claude_md_chars
+        + info.global_agents_md_chars
+        + info.global_claude_md_chars;
+    let skills_chars = info.skills_chars + info.selfdev_chars;
+    let msgs_chars = info.user_messages_chars + info.assistant_messages_chars;
+    let tool_io_chars = info.tool_calls_chars + info.tool_results_chars;
+
+    let mut entries: Vec<(&'static str, &'static str, usize)> = Vec::new();
+    if info.system_prompt_chars > 0 {
+        entries.push(("⚙", "sys", info.system_prompt_chars / 4));
+    }
+    if info.env_context_chars > 0 {
+        entries.push(("🌍", "env", info.env_context_chars / 4));
+    }
+    if docs_chars > 0 {
+        entries.push(("📄", "docs", docs_chars / 4));
+    }
+    if skills_chars > 0 {
+        entries.push(("🛠", "skills", skills_chars / 4));
+    }
+    if info.tool_defs_chars > 0 {
+        entries.push(("🔨", "tools", info.tool_defs_chars / 4));
+    }
+    if msgs_chars > 0 {
+        entries.push(("💬", "msgs", msgs_chars / 4));
+    }
+    if tool_io_chars > 0 {
+        entries.push(("⚡", "tool io", tool_io_chars / 4));
+    }
+
+    entries.sort_by(|a, b| b.2.cmp(&a.2));
+    entries
 }
