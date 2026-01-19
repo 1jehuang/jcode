@@ -2,6 +2,14 @@
 
 A Rust coding agent that uses the official **Claude Agent SDK** (Claude Code) or **ChatGPT Pro** via OAuth.
 
+## Demo
+
+https://github.com/user-attachments/assets/jcode_demo.mp4
+
+*Demo: Opening a terminal, running jcode, and asking it to take a screenshot of the focused window.*
+
+![Screenshot](screenshot.png)
+
 ## Features
 
 - **No API keys needed** - Uses Claude Code CLI credentials and Codex OAuth
