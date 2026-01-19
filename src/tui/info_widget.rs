@@ -18,7 +18,7 @@ const MIN_WIDGET_WIDTH: u16 = 24;
 const MAX_WIDGET_WIDTH: u16 = 40;
 /// Minimum height needed to show the widget
 const MIN_WIDGET_HEIGHT: u16 = 5;
-const PAGE_SWITCH_SECONDS: u64 = 6;
+const PAGE_SWITCH_SECONDS: u64 = 30;
 
 /// Data to display in the info widget
 #[derive(Debug, Default, Clone)]
@@ -230,6 +230,12 @@ pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
     let mut lines = render_page(page.kind, data, inner);
 
     if layout.show_dots {
+        let content_height = inner.height.saturating_sub(1) as usize;
+        if lines.len() > content_height {
+            lines.truncate(content_height);
+        } else if lines.len() < content_height {
+            lines.extend(std::iter::repeat(Line::from("")).take(content_height - lines.len()));
+        }
         lines.push(render_pagination_dots(
             layout.pages.len(),
             state.page_index,
@@ -246,12 +252,10 @@ const MAX_TODO_LINES: usize = 8;
 
 #[derive(Clone, Copy, Debug)]
 enum InfoPageKind {
+    Overview,
     TodosExpanded,
-    TodosCompact,
     ContextExpanded,
-    ContextCompact,
     QueueExpanded,
-    QueueCompact,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -273,30 +277,11 @@ fn compute_page_layout(
 ) -> PageLayout {
     let mut candidates: Vec<InfoPage> = Vec::new();
 
-    if !data.todos.is_empty() {
-        let todo_lines = data.todos.len().min(MAX_TODO_LINES);
-        let mut expanded_height = 1 + todo_lines as u16;
-        if data.todos.len() > MAX_TODO_LINES {
-            expanded_height += 1;
-        }
+    let overview_height = overview_height(data);
+    if overview_height > 0 {
         candidates.push(InfoPage {
-            kind: InfoPageKind::TodosExpanded,
-            height: expanded_height,
-        });
-        candidates.push(InfoPage {
-            kind: InfoPageKind::TodosCompact,
-            height: 2,
-        });
-    }
-
-    if data.queue_mode.is_some() {
-        candidates.push(InfoPage {
-            kind: InfoPageKind::QueueExpanded,
-            height: 2,
-        });
-        candidates.push(InfoPage {
-            kind: InfoPageKind::QueueCompact,
-            height: 1,
+            kind: InfoPageKind::Overview,
+            height: overview_height,
         });
     }
 
@@ -307,11 +292,26 @@ fn compute_page_layout(
                 kind: InfoPageKind::ContextExpanded,
                 height: expanded_height,
             });
-            candidates.push(InfoPage {
-                kind: InfoPageKind::ContextCompact,
-                height: 1,
-            });
         }
+    }
+
+    if !data.todos.is_empty() {
+        let todo_lines = data.todos.len().min(MAX_TODO_LINES);
+        let mut expanded_height = 1 + todo_lines as u16;
+        if data.todos.len() > MAX_TODO_LINES {
+            expanded_height += 1;
+        }
+        candidates.push(InfoPage {
+            kind: InfoPageKind::TodosExpanded,
+            height: expanded_height,
+        });
+    }
+
+    if data.queue_mode.is_some() {
+        candidates.push(InfoPage {
+            kind: InfoPageKind::QueueExpanded,
+            height: 2,
+        });
     }
 
     let mut pages: Vec<InfoPage> = candidates
@@ -334,9 +334,12 @@ fn compute_page_layout(
             .copied()
             .filter(|p| p.height + 1 <= inner_height)
             .collect();
-        if !filtered.is_empty() {
+        if filtered.len() > 1 {
             pages = filtered;
-            show_dots = pages.len() > 1;
+            show_dots = true;
+        } else if let Some(first) = pages.first().copied() {
+            // Not enough room for pagination dots; keep a single page.
+            pages = vec![first];
         }
     }
     let max_page_height = pages
@@ -354,13 +357,43 @@ fn compute_page_layout(
 
 fn render_page(kind: InfoPageKind, data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
     match kind {
+        InfoPageKind::Overview => render_overview(data, inner),
         InfoPageKind::TodosExpanded => render_todos_expanded(data, inner),
-        InfoPageKind::TodosCompact => render_todos_compact(data, inner),
         InfoPageKind::ContextExpanded => render_context_expanded(data, inner),
-        InfoPageKind::ContextCompact => render_context_compact(data, inner),
         InfoPageKind::QueueExpanded => render_queue_expanded(data, inner),
-        InfoPageKind::QueueCompact => render_queue_compact(data, inner),
     }
+}
+
+fn overview_height(data: &InfoWidgetData) -> u16 {
+    let mut height = 0u16;
+    if let Some(info) = &data.context_info {
+        if info.total_chars > 0 {
+            height += 1;
+        }
+    }
+    if !data.todos.is_empty() {
+        height += 2;
+    }
+    if data.queue_mode.is_some() {
+        height += 1;
+    }
+    height
+}
+
+fn render_overview(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if let Some(info) = &data.context_info {
+        if info.total_chars > 0 {
+            lines.extend(render_context_compact(data, inner));
+        }
+    }
+    if !data.todos.is_empty() {
+        lines.extend(render_todos_compact(data, inner));
+    }
+    if data.queue_mode.is_some() {
+        lines.extend(render_queue_compact(data, inner));
+    }
+    lines
 }
 
 fn render_todos_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
@@ -615,7 +648,7 @@ fn render_pagination_dots(count: usize, current: usize, width: u16) -> Line<'sta
     }
     let mut dots = String::new();
     for i in 0..count {
-        dots.push(if i == current { '●' } else { '○' });
+        dots.push(if i == current { '•' } else { '·' });
         if i + 1 < count {
             dots.push(' ');
         }
