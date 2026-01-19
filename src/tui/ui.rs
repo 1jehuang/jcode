@@ -180,7 +180,11 @@ fn format_gpt_name(short: &str) -> String {
 
 /// Render context window as vertical list with smart grouping
 /// Items < 5% are grouped by category (docs, msgs, etc.)
-fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Vec<Line<'static>> {
+fn render_context_bar(
+    info: &crate::prompt::ContextInfo,
+    max_width: usize,
+    context_limit: usize,
+) -> Vec<Line<'static>> {
     const SYS_COLOR: Color = Color::Rgb(100, 140, 200);
     const DOCS_COLOR: Color = Color::Rgb(200, 160, 100);
     const TOOLS_COLOR: Color = Color::Rgb(100, 200, 200);
@@ -189,8 +193,8 @@ fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Ve
     const OTHER_COLOR: Color = Color::Rgb(150, 150, 150);
     const EMPTY_COLOR: Color = Color::Rgb(50, 50, 50);
 
-    const LIMIT: usize = 200_000;
     const THRESHOLD: f64 = 5.0;
+    let limit = context_limit.max(1);
 
     // Collect raw: (icon, label, tokens, color, category)
     let mut raw: Vec<(&str, String, usize, Color, &str)> = Vec::new();
@@ -233,7 +237,7 @@ fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Ve
     let mut grouped: std::collections::HashMap<&str, (usize, Vec<String>)> = std::collections::HashMap::new();
 
     for (icon, label, tokens, color, cat) in &raw {
-        let pct = (*tokens as f64 / LIMIT as f64) * 100.0;
+        let pct = (*tokens as f64 / limit as f64) * 100.0;
         if pct >= THRESHOLD || *cat == "system" {
             final_segs.push((icon.to_string(), label.clone(), *tokens, *color));
         } else {
@@ -260,8 +264,22 @@ fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Ve
     let total: usize = final_segs.iter().map(|(_, _, t, _)| *t).sum();
 
     // Summary bar (top)
-    let sum_w = 36.min(max_width.saturating_sub(12)).max(14);
-    let used_w = ((total as f64 / LIMIT as f64) * sum_w as f64)
+    let total_str = if total >= 1000 {
+        format!("{}k", total / 1000)
+    } else {
+        format!("{}", total)
+    };
+    let limit_str = if limit >= 1000 {
+        format!("{}k", limit / 1000)
+    } else {
+        format!("{}", limit)
+    };
+    let tail = format!("{}/{}", total_str, limit_str);
+    let tail_len = tail.chars().count();
+
+    let max_bar = max_width.saturating_sub(tail_len + 3); // "[" + bar + "] " + tail
+    let sum_w = 36.min(max_bar).max(10);
+    let used_w = ((total as f64 / limit as f64) * sum_w as f64)
         .ceil()
         .max(if total > 0 { 1.0 } else { 0.0 })
         .min(sum_w as f64) as usize;
@@ -291,13 +309,8 @@ fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Ve
         bar.push(Span::styled("░".repeat(empty_w), Style::default().fg(EMPTY_COLOR)));
     }
     bar.push(Span::styled("] ", Style::default().fg(DIM_COLOR)));
-    let total_str = if total >= 1000 {
-        format!("{}k", total / 1000)
-    } else {
-        format!("{}", total)
-    };
     bar.push(Span::styled(
-        format!("{}/200k", total_str),
+        tail,
         Style::default().fg(DIM_COLOR),
     ));
     lines.push(Line::from(bar));
@@ -309,10 +322,10 @@ fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Ve
         .max()
         .unwrap_or(8);
     let label_w = max_label_len.max(10).min(18);
-    let line_w = max_width.saturating_sub(4);
+    let line_w = max_width;
 
     for (icon, label, tokens, color) in &final_segs {
-        let pct = (*tokens as f64 / LIMIT as f64 * 100.0).round() as usize;
+        let pct = (*tokens as f64 / limit as f64 * 100.0).round() as usize;
         let token_str = if *tokens >= 1000 {
             format!("{}k", tokens / 1000)
         } else {
@@ -1047,7 +1060,9 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     // Context window info (at the end of header)
     let context_info = app.context_info();
     if context_info.total_chars > 0 {
-        let context_lines = render_context_bar(&context_info, width as usize);
+        let context_width = width.saturating_sub(4) as usize;
+        let context_limit = app.context_limit().unwrap_or(200_000);
+        let context_lines = render_context_bar(&context_info, context_width, context_limit);
         if !context_lines.is_empty() {
             let boxed = render_rounded_box(
                 "Context",
