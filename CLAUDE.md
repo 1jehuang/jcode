@@ -50,6 +50,11 @@ cargo test --test e2e   # Run only e2e tests
 
 Logs are written to `~/.jcode/logs/` (daily files like `jcode-YYYY-MM-DD.log`).
 
+## Install Notes
+
+- `scripts/install_release.sh` installs a versioned binary and atomically flips the `~/.local/bin/jcode` symlink.
+- Ensure `~/.local/bin` is **before** `~/.cargo/bin` in `PATH` so the symlinked release is used.
+
 ## Environment Setup
 
 The Claude provider requires the Claude Agent SDK Python bridge:
