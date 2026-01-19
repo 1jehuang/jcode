@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 use crate::agent::Agent;
+use crate::build;
 use crate::bus::{Bus, BusEvent, FileOp};
 use crate::protocol::{
     decode_request, encode_event, AgentInfo, ContextEntry, HistoryMessage, NotificationType,
@@ -1501,6 +1502,10 @@ fn do_server_reload() -> Result<()> {
 
     if !build.success() {
         anyhow::bail!("Build failed");
+    }
+
+    if let Err(e) = build::install_local_release(&repo_dir) {
+        eprintln!("Warning: install failed: {}", e);
     }
 
     eprintln!("✓ Build complete, restarting server...");

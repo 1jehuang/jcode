@@ -646,6 +646,10 @@ fn hot_rebuild(session_id: &str) -> Result<()> {
 
     eprintln!("✓ All tests passed");
 
+    if let Err(e) = build::install_local_release(&repo_dir) {
+        eprintln!("Warning: install failed: {}", e);
+    }
+
     // Get the binary path - use the known location in the repo
     let exe = repo_dir.join("target/release/jcode");
     if !exe.exists() {
@@ -863,6 +867,10 @@ fn run_auto_update() -> Result<()> {
         anyhow::bail!("cargo build failed");
     }
 
+    if let Err(e) = build::install_local_release(&repo_dir) {
+        eprintln!("Warning: install failed: {}", e);
+    }
+
     // Get new version
     let hash = ProcessCommand::new("git")
         .args(["rev-parse", "--short", "HEAD"])
@@ -910,6 +918,10 @@ fn run_update() -> Result<()> {
 
     if !build.success() {
         anyhow::bail!("cargo build failed");
+    }
+
+    if let Err(e) = build::install_local_release(&repo_dir) {
+        eprintln!("Warning: install failed: {}", e);
     }
 
     // Get new version hash
