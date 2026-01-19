@@ -434,8 +434,12 @@ async fn run_tui(
     debug_socket: bool,
 ) -> Result<()> {
     let terminal = ratatui::init();
+    let mouse_capture = crate::config::config().display.mouse_capture;
     // Enable bracketed paste mode for proper paste handling in terminals like Kitty
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
+    if mouse_capture {
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+    }
     let mut app = tui::App::new(provider, registry);
 
     // Enable debug socket if requested
@@ -474,8 +478,11 @@ async fn run_tui(
 
     app.init_mcp().await;
     let result = app.run(terminal).await;
-    // Disable bracketed paste before restoring terminal
+    // Disable bracketed paste and mouse capture before restoring terminal
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
+    if mouse_capture {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    }
     ratatui::restore();
 
     let run_result = result?;
@@ -733,13 +740,20 @@ async fn run_client() -> Result<()> {
 /// Run TUI client connected to server
 async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
     let terminal = ratatui::init();
+    let mouse_capture = crate::config::config().display.mouse_capture;
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
+    if mouse_capture {
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+    }
 
     // Use App in remote mode - same UI, connects to server
     let app = tui::App::new_for_remote(resume_session).await;
     let result = app.run_remote(terminal).await;
 
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
+    if mouse_capture {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    }
     ratatui::restore();
 
     let run_result = result?;
@@ -1218,7 +1232,11 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
 
     // Run client TUI
     let terminal = ratatui::init();
+    let mouse_capture = crate::config::config().display.mouse_capture;
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
+    if mouse_capture {
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+    }
 
     let app = tui::App::new_for_remote(Some(session_id.to_string())).await;
 
@@ -1235,6 +1253,9 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
     let result = app.run_remote(terminal).await;
 
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
+    if mouse_capture {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    }
     ratatui::restore();
 
     // Signal stop to our monitoring tasks

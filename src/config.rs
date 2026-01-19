@@ -66,15 +66,18 @@ impl Default for KeybindingsConfig {
 pub struct DisplayConfig {
     /// Show diffs by default (default: true)
     pub show_diffs: bool,
-    /// Queue mode by default - wait until done before sending (default: true)
+    /// Queue mode by default - wait until done before sending (default: false)
     pub queue_mode: bool,
+    /// Capture mouse events (default: false). Enables scroll wheel but disables terminal selection.
+    pub mouse_capture: bool,
 }
 
 impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
             show_diffs: true,
-            queue_mode: true,
+            queue_mode: false,
+            mouse_capture: false,
         }
     }
 }
@@ -147,6 +150,23 @@ impl Config {
             self.keybindings.model_switch_prev = v;
         }
 
+        // Display
+        if let Ok(v) = std::env::var("JCODE_SHOW_DIFFS") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.show_diffs = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_QUEUE_MODE") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.queue_mode = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_MOUSE_CAPTURE") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.mouse_capture = parsed;
+            }
+        }
+
         // Provider
         if let Ok(v) = std::env::var("JCODE_MODEL") {
             self.provider.default_model = Some(v);
@@ -199,7 +219,10 @@ model_switch_prev = "ctrl+shift+tab"
 show_diffs = true
 
 # Queue mode: wait until assistant is done before sending next message
-queue_mode = true
+queue_mode = false
+
+# Capture mouse events (enables scroll wheel; disables terminal text selection)
+mouse_capture = false
 
 [provider]
 # Default model (optional, uses provider default if not set)
@@ -230,6 +253,7 @@ queue_mode = true
 **Display:**
 - Show diffs: {}
 - Queue mode: {}
+- Mouse capture: {}
 
 **Provider:**
 - Default model: {}
@@ -245,10 +269,19 @@ queue_mode = true
             self.keybindings.model_switch_prev,
             self.display.show_diffs,
             self.display.queue_mode,
+            self.display.mouse_capture,
             self.provider
                 .default_model
                 .as_deref()
                 .unwrap_or("(provider default)"),
         )
+    }
+}
+
+fn parse_env_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
     }
 }
