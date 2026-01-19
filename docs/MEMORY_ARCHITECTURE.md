@@ -1,7 +1,9 @@
 # Memory Architecture Design
 
-> **Status:** Planned
-> **Implementation Threshold:** When fast, cheap models (sub-cent per call) are reliable enough to run as sidecars
+> **Status:** Ready for Implementation
+> **Updated:** 2026-01-19
+
+All cost and latency thresholds have been met. Local embeddings + Haiku sidecar are viable now.
 
 ## Overview
 
@@ -225,31 +227,61 @@ def handle_contradiction(old, new):
 - Debugging ("why did it think X?")
 - Recovery ("actually the old way was right")
 
-## Implementation Thresholds
+## Embedding Model Choice
 
-### Phase 1: Basic Memory Tools (Ready Now)
-- [x] Memory store with file persistence
-- [x] Basic memory tool (remember/recall/search/list/forget)
+**Decision:** Use a single standardized local model everywhere.
+
+**Model:** `all-MiniLM-L6-v2`
+- Size: 80MB
+- RAM: ~200MB while running
+- CPU latency: 20-40ms
+- With NPU/GPU: ~10ms
+
+**Rationale:**
+- Small enough to run on any machine (even Raspberry Pi)
+- Consistent embeddings across all devices (memories are portable)
+- No API dependency (works offline, no cost)
+- Hardware acceleration is a bonus, not a requirement
+- Well-tested, stable model
+
+**Why not per-machine tailored models:**
+- Embeddings wouldn't be comparable across devices
+- Can't share/sync memories between machines
+- Testing nightmare (need all hardware variants)
+- Model versioning issues
+
+**Optional acceleration:**
+- Intel NPU via OpenVINO (Lunar Lake, Meteor Lake chips)
+- CUDA for NVIDIA GPUs
+- Metal for Apple Silicon
+- Falls back to CPU if unavailable
+
+## Implementation Phases
+
+### Phase 1: Basic Memory Tools
+- [x] Memory store with file persistence (implemented, disabled)
+- [x] Basic memory tool (implemented, disabled)
 - [ ] CLI commands (`jcode memory list`, `jcode memory forget`)
+- [ ] Re-enable and integrate with agent
 
-**Threshold:** None - can implement now
+**Status:** Ready now
 
 ### Phase 2: End-of-Session Extraction
 - [ ] Hook into session close
-- [ ] Extraction prompt
+- [ ] Extraction prompt to summarize learnings
 - [ ] Automatic categorization
 
-**Threshold:** None - can implement now, uses existing models
+**Status:** Ready now (uses existing models)
 
 ### Phase 3: Embedding Search
-- [ ] Local embedding model or cheap API
-- [ ] Vector storage
+- [ ] Integrate `all-MiniLM-L6-v2` via ONNX Runtime
+- [ ] Vector storage alongside memory JSON
 - [ ] Background embedding process
 - [ ] Similarity search
 
-**Threshold:**
-- Embedding API cost < $0.0001 per call, OR
-- Local embedding model with < 100ms latency
+**Status:** Ready now
+- Local embeddings: ~30ms, free, consistent
+- API embeddings (if needed): $0.00001/call (10x cheaper than threshold)
 
 ### Phase 4: Memory Sidecar
 - [ ] Sidecar agent infrastructure
@@ -257,10 +289,9 @@ def handle_contradiction(old, new):
 - [ ] Relevance verification
 - [ ] Main agent interruption protocol
 
-**Threshold:**
-- Fast model API cost < $0.001 per call
-- Latency < 500ms for relevance check
-- Reliable enough to run unsupervised
+**Status:** Ready now
+- Claude Haiku 3.5: ~$0.0025/call, <500ms latency
+- Acceptable cost: ~1-2 cents per session
 
 ### Phase 5: Full Integration
 - [ ] Decay/pruning background job
@@ -268,7 +299,7 @@ def handle_contradiction(old, new):
 - [ ] Contradiction detection
 - [ ] User control UI/CLI
 
-**Threshold:** Phases 1-4 stable in production
+**Status:** After phases 1-4 stable
 
 ## Privacy & Security
 
