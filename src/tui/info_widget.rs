@@ -29,6 +29,8 @@ pub struct InfoWidgetData {
     pub context_limit: Option<usize>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub session_count: Option<usize>,
+    pub client_count: Option<usize>,
     // TODO: Add swarm/subagent status summary to the info widget.
 }
 
@@ -391,7 +393,12 @@ fn compact_queue_height(data: &InfoWidgetData) -> u16 {
 
 fn compact_model_height(data: &InfoWidgetData) -> u16 {
     if data.model.is_some() {
-        1
+        // 1 line for model, +1 if we have session info
+        if data.session_count.is_some() {
+            2
+        } else {
+            1
+        }
     } else {
         0
     }
@@ -598,7 +605,25 @@ fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
         ));
     }
 
-    vec![Line::from(spans)]
+    let mut lines = vec![Line::from(spans)];
+
+    // Add session info line if we have a session count
+    if data.session_count.is_some() {
+        let mut server_spans: Vec<Span> = Vec::new();
+
+        if let Some(sessions) = data.session_count {
+            server_spans.push(Span::styled(
+                format!("{} session{}", sessions, if sessions == 1 { "" } else { "s" }),
+                Style::default().fg(Color::Rgb(140, 140, 150)),
+            ));
+        }
+
+        if !server_spans.is_empty() {
+            lines.push(Line::from(server_spans));
+        }
+    }
+
+    lines
 }
 
 fn shorten_model_name(model: &str) -> String {
