@@ -10,6 +10,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph},
 };
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Minimum width needed to show the widget
 const MIN_WIDGET_WIDTH: u16 = 24;
@@ -17,6 +18,7 @@ const MIN_WIDGET_WIDTH: u16 = 24;
 const MAX_WIDGET_WIDTH: u16 = 40;
 /// Minimum height needed to show the widget
 const MIN_WIDGET_HEIGHT: u16 = 5;
+const PAGE_SWITCH_SECONDS: u64 = 6;
 
 /// Data to display in the info widget
 #[derive(Debug, Default, Clone)]
@@ -41,6 +43,10 @@ struct WidgetState {
     enabled: bool,
     /// Calculated position and size
     rect: Rect,
+    /// Current page index
+    page_index: usize,
+    /// Last time the page advanced
+    last_page_switch: Option<Instant>,
 }
 
 impl Default for WidgetState {
@@ -49,6 +55,8 @@ impl Default for WidgetState {
             visible: false,
             enabled: true,
             rect: Rect::default(),
+            page_index: 0,
+            last_page_switch: None,
         }
     }
 }
@@ -63,6 +71,8 @@ static WIDGET_STATE: Mutex<WidgetState> = Mutex::new(WidgetState {
         width: 0,
         height: 0,
     },
+    page_index: 0,
+    last_page_switch: None,
 });
 
 /// Toggle widget visibility (user preference)
@@ -106,12 +116,23 @@ pub fn calculate_layout(
         return None;
     }
 
-    let needed_height = calculate_needed_height(data);
     let best = find_largest_empty_rect(free_widths, MIN_WIDGET_WIDTH, MIN_WIDGET_HEIGHT)?;
     let (top, height, max_width) = best;
 
     let widget_width = max_width.min(MAX_WIDGET_WIDTH);
-    let widget_height = needed_height.min(height);
+    let inner_width = widget_width.saturating_sub(2) as usize;
+    let available_inner_height = height.saturating_sub(2);
+    let layout = compute_page_layout(data, inner_width, available_inner_height);
+    if layout.pages.is_empty() {
+        state.visible = false;
+        return None;
+    }
+
+    let widget_height = layout
+        .max_page_height
+        .saturating_add(2)
+        .max(MIN_WIDGET_HEIGHT)
+        .min(height);
 
     if widget_height < MIN_WIDGET_HEIGHT || widget_width < MIN_WIDGET_WIDTH {
         state.visible = false;
@@ -126,6 +147,7 @@ pub fn calculate_layout(
 
     state.visible = true;
     state.rect = rect;
+    state.page_index = state.page_index.min(layout.pages.len().saturating_sub(1));
 
     Some(rect)
 }
@@ -165,28 +187,6 @@ fn find_largest_empty_rect(
 }
 
 /// Calculate how much height the widget needs based on its content
-fn calculate_needed_height(data: &InfoWidgetData) -> u16 {
-    let mut height: u16 = 2; // Border top/bottom
-
-    // Todos section
-    if !data.todos.is_empty() {
-        height += 1; // Header "Todos"
-        height += data.todos.len().min(8) as u16; // Show up to 8 todos
-        height += 1; // Spacing
-    }
-
-    if let Some(info) = &data.context_info {
-        if info.total_chars > 0 {
-            height += 1; // Header "Context"
-            height += 1; // Total tokens
-            height += context_entries(info).len().min(MAX_CONTEXT_LINES) as u16;
-            height += 1; // Spacing
-        }
-    }
-
-    height.max(MIN_WIDGET_HEIGHT)
-}
-
 /// Render the widget to the frame
 pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
     // Semi-transparent looking border (using dim colors)
@@ -198,78 +198,42 @@ pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    let mut lines: Vec<Line> = Vec::new();
-
-    // Todos section
-    if !data.todos.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            "Todos",
-            Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
-        )]));
-
-        for todo in data.todos.iter().take(8) {
-            let (icon, color) = match todo.status.as_str() {
-                "completed" => ("", Color::Rgb(100, 180, 100)),
-                "in_progress" => ("", Color::Rgb(255, 200, 100)),
-                _ => ("", Color::Rgb(120, 120, 130)),
-            };
-
-            // Truncate content to fit
-            let max_len = inner.width.saturating_sub(3) as usize;
-            let content = if todo.content.len() > max_len && max_len > 3 {
-                format!("{}...", &todo.content[..max_len.saturating_sub(3)])
-            } else {
-                todo.content.clone()
-            };
-
-            lines.push(Line::from(vec![
-                Span::styled(format!("{} ", icon), Style::default().fg(color)),
-                Span::styled(content, Style::default().fg(Color::Rgb(160, 160, 170))),
-            ]));
-        }
-
-        if data.todos.len() > 8 {
-            lines.push(Line::from(vec![Span::styled(
-                format!("  +{} more", data.todos.len() - 8),
-                Style::default().fg(Color::Rgb(100, 100, 110)),
-            )]));
-        }
+    let layout = compute_page_layout(data, inner.width as usize, inner.height);
+    if layout.pages.is_empty() {
+        return;
     }
 
-    if let Some(info) = &data.context_info {
-        if info.total_chars > 0 {
-            if !lines.is_empty() {
-                lines.push(Line::from(""));
-            }
+    let mut state = match WIDGET_STATE.lock() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    if state.page_index >= layout.pages.len() {
+        state.page_index = 0;
+    }
 
-            lines.push(Line::from(vec![Span::styled(
-                "Context",
-                Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
-            )]));
-
-            let total_k = info.estimated_tokens() / 1000;
-            lines.push(Line::from(vec![
-                Span::styled("∑ ", Style::default().fg(Color::Rgb(160, 160, 170))),
-                Span::styled(
-                    format!("{}k tokens", total_k),
-                    Style::default().fg(Color::Rgb(140, 140, 150)),
-                ),
-            ]));
-
-            let max_items = MAX_CONTEXT_LINES;
-            let max_len = inner.width.saturating_sub(2) as usize;
-            for (icon, label, tokens) in context_entries(info).into_iter().take(max_items) {
-                let mut content = format!("{} {} {}k", icon, label, tokens / 1000);
-                if content.len() > max_len && max_len > 3 {
-                    content.truncate(max_len.saturating_sub(3));
-                    content.push_str("...");
-                }
-                lines.push(Line::from(Span::styled(
-                    content,
-                    Style::default().fg(Color::Rgb(140, 140, 150)),
-                )));
-            }
+    if layout.pages.len() > 1 {
+        let now = Instant::now();
+        let switch = match state.last_page_switch {
+            Some(last) => now.duration_since(last) >= Duration::from_secs(PAGE_SWITCH_SECONDS),
+            None => true,
+        };
+        if switch {
+            state.page_index = (state.page_index + 1) % layout.pages.len();
+            state.last_page_switch = Some(now);
         }
+    } else {
+        state.last_page_switch = None;
+    }
+
+    let page = layout.pages[state.page_index];
+    let mut lines = render_page(page.kind, data, inner);
+
+    if layout.show_dots {
+        lines.push(render_pagination_dots(
+            layout.pages.len(),
+            state.page_index,
+            inner.width,
+        ));
     }
 
     let para = Paragraph::new(lines);
@@ -277,6 +241,337 @@ pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
 }
 
 const MAX_CONTEXT_LINES: usize = 5;
+const MAX_TODO_LINES: usize = 8;
+
+#[derive(Clone, Copy, Debug)]
+enum InfoPageKind {
+    TodosExpanded,
+    TodosCompact,
+    ContextExpanded,
+    ContextCompact,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InfoPage {
+    kind: InfoPageKind,
+    height: u16,
+}
+
+struct PageLayout {
+    pages: Vec<InfoPage>,
+    max_page_height: u16,
+    show_dots: bool,
+}
+
+fn compute_page_layout(
+    data: &InfoWidgetData,
+    _inner_width: usize,
+    inner_height: u16,
+) -> PageLayout {
+    let mut candidates: Vec<InfoPage> = Vec::new();
+
+    if !data.todos.is_empty() {
+        let todo_lines = data.todos.len().min(MAX_TODO_LINES);
+        let mut expanded_height = 1 + todo_lines as u16;
+        if data.todos.len() > MAX_TODO_LINES {
+            expanded_height += 1;
+        }
+        candidates.push(InfoPage {
+            kind: InfoPageKind::TodosExpanded,
+            height: expanded_height,
+        });
+        candidates.push(InfoPage {
+            kind: InfoPageKind::TodosCompact,
+            height: 2,
+        });
+    }
+
+    if let Some(info) = &data.context_info {
+        if info.total_chars > 0 {
+            let expanded_height = 2 + context_entries(info).len().min(MAX_CONTEXT_LINES) as u16;
+            candidates.push(InfoPage {
+                kind: InfoPageKind::ContextExpanded,
+                height: expanded_height,
+            });
+            candidates.push(InfoPage {
+                kind: InfoPageKind::ContextCompact,
+                height: 1,
+            });
+        }
+    }
+
+    let mut pages: Vec<InfoPage> = candidates
+        .into_iter()
+        .filter(|p| p.height <= inner_height)
+        .collect();
+
+    if pages.is_empty() {
+        return PageLayout {
+            pages,
+            max_page_height: 0,
+            show_dots: false,
+        };
+    }
+
+    let mut show_dots = false;
+    if pages.len() > 1 {
+        let filtered: Vec<InfoPage> = pages
+            .iter()
+            .copied()
+            .filter(|p| p.height + 1 <= inner_height)
+            .collect();
+        if !filtered.is_empty() {
+            pages = filtered;
+            show_dots = pages.len() > 1;
+        }
+    }
+    let max_page_height = pages
+        .iter()
+        .map(|p| p.height + if show_dots { 1 } else { 0 })
+        .max()
+        .unwrap_or(0);
+
+    PageLayout {
+        pages,
+        max_page_height,
+        show_dots,
+    }
+}
+
+fn render_page(kind: InfoPageKind, data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    match kind {
+        InfoPageKind::TodosExpanded => render_todos_expanded(data, inner),
+        InfoPageKind::TodosCompact => render_todos_compact(data, inner),
+        InfoPageKind::ContextExpanded => render_context_expanded(data, inner),
+        InfoPageKind::ContextCompact => render_context_compact(data, inner),
+    }
+}
+
+fn render_todos_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = Vec::new();
+    if data.todos.is_empty() {
+        return lines;
+    }
+
+    lines.push(Line::from(vec![Span::styled(
+        "Todos",
+        Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
+    )]));
+
+    for todo in data.todos.iter().take(MAX_TODO_LINES) {
+        let (icon, color) = match todo.status.as_str() {
+            "completed" => ("", Color::Rgb(100, 180, 100)),
+            "in_progress" => ("", Color::Rgb(255, 200, 100)),
+            _ => ("", Color::Rgb(120, 120, 130)),
+        };
+
+        let max_len = inner.width.saturating_sub(3) as usize;
+        let content = if todo.content.len() > max_len && max_len > 3 {
+            format!("{}...", &todo.content[..max_len.saturating_sub(3)])
+        } else {
+            todo.content.clone()
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", icon), Style::default().fg(color)),
+            Span::styled(content, Style::default().fg(Color::Rgb(160, 160, 170))),
+        ]));
+    }
+
+    if data.todos.len() > MAX_TODO_LINES {
+        lines.push(Line::from(vec![Span::styled(
+            format!("  +{} more", data.todos.len() - MAX_TODO_LINES),
+            Style::default().fg(Color::Rgb(100, 100, 110)),
+        )]));
+    }
+
+    lines
+}
+
+fn render_todos_compact(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static>> {
+    if data.todos.is_empty() {
+        return Vec::new();
+    }
+    let total = data.todos.len();
+    let mut completed = 0usize;
+    let mut in_progress = 0usize;
+    for todo in &data.todos {
+        match todo.status.as_str() {
+            "completed" => completed += 1,
+            "in_progress" => in_progress += 1,
+            _ => {}
+        }
+    }
+    let pending = total.saturating_sub(completed);
+    vec![
+        Line::from(vec![Span::styled(
+            "Todos",
+            Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
+        )]),
+        Line::from(vec![
+            Span::styled(
+                format!("{} total", total),
+                Style::default().fg(Color::Rgb(160, 160, 170)),
+            ),
+            Span::styled(" · ", Style::default().fg(Color::Rgb(100, 100, 110))),
+            Span::styled(
+                format!("{} active", in_progress),
+                Style::default().fg(Color::Rgb(255, 200, 100)),
+            ),
+            Span::styled(" · ", Style::default().fg(Color::Rgb(100, 100, 110))),
+            Span::styled(
+                format!("{} open", pending),
+                Style::default().fg(Color::Rgb(140, 140, 150)),
+            ),
+        ]),
+    ]
+}
+
+fn render_context_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    let Some(info) = &data.context_info else {
+        return Vec::new();
+    };
+    if info.total_chars == 0 {
+        return Vec::new();
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![Span::styled(
+        "Context",
+        Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
+    )]));
+
+    let total_k = info.estimated_tokens() / 1000;
+    lines.push(Line::from(vec![
+        Span::styled("∑ ", Style::default().fg(Color::Rgb(160, 160, 170))),
+        Span::styled(
+            format!("{}k tokens", total_k),
+            Style::default().fg(Color::Rgb(140, 140, 150)),
+        ),
+    ]));
+
+    let max_items = MAX_CONTEXT_LINES;
+    let max_len = inner.width.saturating_sub(2) as usize;
+    for (icon, label, tokens) in context_entries(info).into_iter().take(max_items) {
+        let mut content = format!("{} {} {}k", icon, label, tokens / 1000);
+        if content.len() > max_len && max_len > 3 {
+            content.truncate(max_len.saturating_sub(3));
+            content.push_str("...");
+        }
+        lines.push(Line::from(Span::styled(
+            content,
+            Style::default().fg(Color::Rgb(140, 140, 150)),
+        )));
+    }
+
+    lines
+}
+
+fn render_context_compact(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    let Some(info) = &data.context_info else {
+        return Vec::new();
+    };
+    if info.total_chars == 0 {
+        return Vec::new();
+    }
+
+    let bar = build_context_bar(info, inner.width as usize);
+    if bar.is_empty() {
+        Vec::new()
+    } else {
+        vec![Line::from(bar)]
+    }
+}
+
+fn build_context_bar(info: &ContextInfo, max_width: usize) -> Vec<Span<'static>> {
+    const SYS_COLOR: Color = Color::Rgb(100, 140, 200);
+    const DOCS_COLOR: Color = Color::Rgb(200, 160, 100);
+    const TOOLS_COLOR: Color = Color::Rgb(100, 200, 200);
+    const MSGS_COLOR: Color = Color::Rgb(138, 180, 248);
+    const TOOL_IO_COLOR: Color = Color::Rgb(255, 183, 77);
+    const OTHER_COLOR: Color = Color::Rgb(150, 150, 150);
+    const EMPTY_COLOR: Color = Color::Rgb(50, 50, 50);
+
+    let sys = info.system_prompt_chars / 4;
+    let docs = (info.project_agents_md_chars
+        + info.project_claude_md_chars
+        + info.global_agents_md_chars
+        + info.global_claude_md_chars)
+        / 4;
+    let tools = info.tool_defs_chars / 4;
+    let msgs = (info.user_messages_chars + info.assistant_messages_chars) / 4;
+    let tool_io = (info.tool_calls_chars + info.tool_results_chars) / 4;
+    let other = (info.env_context_chars + info.skills_chars + info.selfdev_chars) / 4;
+
+    let mut sections: Vec<(usize, Color)> = Vec::new();
+    if sys > 0 {
+        sections.push((sys, SYS_COLOR));
+    }
+    if docs > 0 {
+        sections.push((docs, DOCS_COLOR));
+    }
+    if tools > 0 {
+        sections.push((tools, TOOLS_COLOR));
+    }
+    if msgs > 0 {
+        sections.push((msgs, MSGS_COLOR));
+    }
+    if tool_io > 0 {
+        sections.push((tool_io, TOOL_IO_COLOR));
+    }
+    if other > 0 {
+        sections.push((other, OTHER_COLOR));
+    }
+
+    let total: usize = sections.iter().map(|(t, _)| *t).sum();
+    if total == 0 {
+        return Vec::new();
+    }
+
+    let bar_width = max_width.saturating_sub(2).max(10).min(40);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+
+    let mut remaining = bar_width;
+    for (tokens, color) in sections.iter() {
+        if remaining == 0 {
+            break;
+        }
+        let mut w = ((*tokens as f64 / total as f64) * bar_width as f64)
+            .round()
+            .max(1.0) as usize;
+        if w > remaining {
+            w = remaining;
+        }
+        spans.push(Span::styled("█".repeat(w), Style::default().fg(*color)));
+        remaining = remaining.saturating_sub(w);
+    }
+
+    if remaining > 0 {
+        spans.push(Span::styled("░".repeat(remaining), Style::default().fg(EMPTY_COLOR)));
+    }
+
+    spans
+}
+
+fn render_pagination_dots(count: usize, current: usize, width: u16) -> Line<'static> {
+    if count == 0 {
+        return Line::from("");
+    }
+    let mut dots = String::new();
+    for i in 0..count {
+        dots.push(if i == current { '●' } else { '○' });
+        if i + 1 < count {
+            dots.push(' ');
+        }
+    }
+    let pad = width
+        .saturating_sub(dots.chars().count() as u16)
+        .saturating_div(2);
+    Line::from(vec![
+        Span::raw(" ".repeat(pad as usize)),
+        Span::styled(dots, Style::default().fg(Color::Rgb(140, 140, 150))),
+    ])
+}
 
 fn context_entries(info: &ContextInfo) -> Vec<(&'static str, &'static str, usize)> {
     let docs_chars = info.project_agents_md_chars

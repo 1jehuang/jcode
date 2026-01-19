@@ -285,79 +285,6 @@ fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Ve
     lines
 }
 
-fn render_context_compact_bar(
-    info: &crate::prompt::ContextInfo,
-    max_width: usize,
-) -> Vec<Line<'static>> {
-    const SYS_COLOR: Color = Color::Rgb(100, 140, 200);
-    const DOCS_COLOR: Color = Color::Rgb(200, 160, 100);
-    const TOOLS_COLOR: Color = Color::Rgb(100, 200, 200);
-    const MSGS_COLOR: Color = Color::Rgb(138, 180, 248);
-    const TOOL_IO_COLOR: Color = Color::Rgb(255, 183, 77);
-    const OTHER_COLOR: Color = Color::Rgb(150, 150, 150);
-    const EMPTY_COLOR: Color = Color::Rgb(50, 50, 50);
-
-    let sys = info.system_prompt_chars / 4;
-    let docs = (info.project_agents_md_chars
-        + info.project_claude_md_chars
-        + info.global_agents_md_chars
-        + info.global_claude_md_chars)
-        / 4;
-    let tools = info.tool_defs_chars / 4;
-    let msgs = (info.user_messages_chars + info.assistant_messages_chars) / 4;
-    let tool_io = (info.tool_calls_chars + info.tool_results_chars) / 4;
-    let other = (info.env_context_chars + info.skills_chars + info.selfdev_chars) / 4;
-
-    let mut sections: Vec<(usize, Color)> = Vec::new();
-    if sys > 0 {
-        sections.push((sys, SYS_COLOR));
-    }
-    if docs > 0 {
-        sections.push((docs, DOCS_COLOR));
-    }
-    if tools > 0 {
-        sections.push((tools, TOOLS_COLOR));
-    }
-    if msgs > 0 {
-        sections.push((msgs, MSGS_COLOR));
-    }
-    if tool_io > 0 {
-        sections.push((tool_io, TOOL_IO_COLOR));
-    }
-    if other > 0 {
-        sections.push((other, OTHER_COLOR));
-    }
-
-    let total: usize = sections.iter().map(|(t, _)| *t).sum();
-    if total == 0 {
-        return Vec::new();
-    }
-
-    let bar_width = max_width.saturating_sub(6).max(12).min(48);
-    let mut spans: Vec<Span<'static>> = Vec::new();
-
-    let mut remaining = bar_width;
-    for (tokens, color) in sections.iter() {
-        if remaining == 0 {
-            break;
-        }
-        let mut w = ((*tokens as f64 / total as f64) * bar_width as f64)
-            .round()
-            .max(1.0) as usize;
-        if w > remaining {
-            w = remaining;
-        }
-        spans.push(Span::styled("█".repeat(w), Style::default().fg(*color)));
-        remaining = remaining.saturating_sub(w);
-    }
-
-    if remaining > 0 {
-        spans.push(Span::styled("░".repeat(remaining), Style::default().fg(EMPTY_COLOR)));
-    }
-
-    vec![Line::from(spans)]
-}
-
 fn render_rounded_box(
     title: &str,
     content: Vec<Line<'static>>,
@@ -1062,16 +989,7 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     // Context window info (at the end of header)
     let context_info = app.context_info();
     if context_info.total_chars > 0 {
-        let max_header_lines: usize = 12;
-        let current_lines = lines.len();
-        let expanded = render_context_bar(&context_info, width as usize);
-        let should_compact = width < 90
-            || current_lines + expanded.len() + 2 > max_header_lines;
-        let context_lines = if should_compact {
-            render_context_compact_bar(&context_info, width as usize)
-        } else {
-            expanded
-        };
+        let context_lines = render_context_bar(&context_info, width as usize);
         if !context_lines.is_empty() {
             let boxed = render_rounded_box(
                 "Context",
