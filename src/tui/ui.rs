@@ -4,10 +4,11 @@
 use super::info_widget;
 use super::markdown;
 use super::visual_debug::{self, FrameCaptureBuilder, MessageCapture};
-use super::{ProcessingStatus, TuiState};
+use super::{DisplayMessage, ProcessingStatus, TuiState};
 use crate::message::ToolCall;
 use ratatui::{prelude::*, widgets::Paragraph};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -465,6 +466,27 @@ static BODY_CACHE: OnceLock<Mutex<BodyCacheState>> = OnceLock::new();
 fn body_cache() -> &'static Mutex<BodyCacheState> {
     BODY_CACHE.get_or_init(|| Mutex::new(BodyCacheState::default()))
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct MessageCacheKey {
+    width: u16,
+    show_diffs: bool,
+    message_hash: u64,
+    content_len: usize,
+}
+
+#[derive(Default)]
+struct MessageCacheState {
+    entries: HashMap<MessageCacheKey, Vec<Line<'static>>>,
+}
+
+static MESSAGE_CACHE: OnceLock<Mutex<MessageCacheState>> = OnceLock::new();
+
+fn message_cache() -> &'static Mutex<MessageCacheState> {
+    MESSAGE_CACHE.get_or_init(|| Mutex::new(MessageCacheState::default()))
+}
+
+const MESSAGE_CACHE_LIMIT: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct StreamingCacheKey {
@@ -1156,22 +1178,14 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
             "assistant" => {
                 // AI messages: render markdown flush left
                 // Pass width for table rendering (leave some margin)
-                let content_width = width.saturating_sub(4) as usize;
-                let md_lines =
-                    markdown::render_markdown_with_width(&msg.content, Some(content_width));
-                for md_line in md_lines {
-                    lines.push(md_line);
-                }
-                // Tool badges inline
-                if !msg.tool_calls.is_empty() {
-                    lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(
-                            msg.tool_calls.join(" "),
-                            Style::default().fg(ACCENT_COLOR).dim(),
-                        ),
-                    ]));
-                }
+                let content_width = width.saturating_sub(4);
+                let cached = get_cached_message_lines(
+                    msg,
+                    content_width,
+                    app.show_diffs(),
+                    render_assistant_message,
+                );
+                lines.extend(cached);
             }
             "meta" => {
                 lines.push(Line::from(vec![
@@ -1180,143 +1194,13 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 ]));
             }
             "tool" => {
-                // Show tool call with full details
-                if let Some(ref tc) = msg.tool_data {
-                    let summary = get_tool_summary(tc);
-
-                    // Determine status: error if content starts with error prefix
-                    // Be specific to avoid false positives (e.g., "No matches found" is not an error)
-                    let is_error = msg.content.starts_with("Error:")
-                        || msg.content.starts_with("error:")
-                        || msg.content.starts_with("Failed:");
-
-                    let (icon, icon_color) = if is_error {
-                        ("✗", Color::Rgb(220, 100, 100)) // Red for errors
-                    } else {
-                        ("✓", Color::Rgb(100, 180, 100)) // Green for success
-                    };
-
-                    // For edit tools, count line changes
-                    let is_edit_tool =
-                        matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit");
-                    let (additions, deletions) = if is_edit_tool {
-                        diff_change_counts_for_tool(tc, &msg.content)
-                    } else {
-                        (0, 0)
-                    };
-
-                    let mut tool_line = vec![
-                        Span::styled(format!("  {} ", icon), Style::default().fg(icon_color)),
-                        Span::styled(tc.name.clone(), Style::default().fg(TOOL_COLOR)),
-                        Span::styled(format!(" {}", summary), Style::default().fg(DIM_COLOR)),
-                    ];
-                    if is_edit_tool {
-                        tool_line.push(Span::styled(" (", Style::default().fg(DIM_COLOR)));
-                        tool_line.push(Span::styled(
-                            format!("+{}", additions),
-                            Style::default().fg(DIFF_ADD_COLOR),
-                        ));
-                        tool_line.push(Span::styled(" ", Style::default().fg(DIM_COLOR)));
-                        tool_line.push(Span::styled(
-                            format!("-{}", deletions),
-                            Style::default().fg(DIFF_DEL_COLOR),
-                        ));
-                        tool_line.push(Span::styled(")", Style::default().fg(DIM_COLOR)));
-                    }
-
-                    lines.push(Line::from(tool_line));
-
-                    // Show diff output for editing tools with syntax highlighting
-                    if app.show_diffs() && is_edit_tool {
-                        // Extract file extension for syntax highlighting
-                        let file_ext = tc
-                            .input
-                            .get("file_path")
-                            .and_then(|v| v.as_str())
-                            .and_then(|p| std::path::Path::new(p).extension())
-                            .and_then(|e| e.to_str());
-
-                        // Collect only actual change lines (+ and -)
-                        let change_lines = collect_diff_lines(&msg.content);
-
-                        const MAX_DIFF_LINES: usize = 12;
-                        let total_changes = change_lines.len();
-
-                        // Count additions and deletions for summary
-                        let additions = change_lines
-                            .iter()
-                            .filter(|line| line.kind == DiffLineKind::Add)
-                            .count();
-                        let deletions = change_lines
-                            .iter()
-                            .filter(|line| line.kind == DiffLineKind::Del)
-                            .count();
-
-                        // Determine which lines to show
-                        let (display_lines, truncated): (Vec<&ParsedDiffLine>, bool) =
-                            if total_changes <= MAX_DIFF_LINES {
-                                (change_lines.iter().collect(), false)
-                            } else {
-                                // Show first half and last half, with truncation indicator
-                                let half = MAX_DIFF_LINES / 2;
-                                let mut result: Vec<&ParsedDiffLine> =
-                                    change_lines.iter().take(half).collect();
-                                result.extend(change_lines.iter().skip(total_changes - half));
-                                (result, true)
-                            };
-
-                        let mut shown_truncation = false;
-                        let half_point = if truncated {
-                            MAX_DIFF_LINES / 2
-                        } else {
-                            usize::MAX
-                        };
-
-                        for (i, line) in display_lines.iter().enumerate() {
-                            // Show truncation marker at the midpoint
-                            if truncated && !shown_truncation && i >= half_point {
-                                let skipped = total_changes - MAX_DIFF_LINES;
-                                lines.push(Line::from(Span::styled(
-                                    format!("... {} more changes ...", skipped),
-                                    Style::default().fg(DIM_COLOR),
-                                )));
-                                shown_truncation = true;
-                            }
-
-                            let base_color = if line.kind == DiffLineKind::Add {
-                                DIFF_ADD_COLOR
-                            } else {
-                                DIFF_DEL_COLOR
-                            };
-
-                            // Build the line with syntax-highlighted content
-                            let mut spans: Vec<Span<'static>> =
-                                vec![Span::styled(line.prefix.clone(), Style::default().fg(base_color))];
-
-                            // Apply syntax highlighting to content
-                            if !line.content.is_empty() {
-                                let highlighted =
-                                    markdown::highlight_line(line.content.as_str(), file_ext);
-                                for span in highlighted {
-                                    let tinted = tint_span_with_diff_color(span, base_color);
-                                    spans.push(tinted);
-                                }
-                            }
-
-                            lines.push(Line::from(spans));
-                        }
-
-                        // Show summary if there were changes
-                        if total_changes > 0 && truncated {
-                            lines.push(Line::from(Span::styled(
-                                format!("(+{} -{} total)", additions, deletions),
-                                Style::default().fg(DIM_COLOR),
-                            )));
-                        }
-                    }
-
-                    // Task tool output: just show summary line (content is in AI context anyway)
-                }
+                let cached = get_cached_message_lines(
+                    msg,
+                    width,
+                    app.show_diffs(),
+                    render_tool_message,
+                );
+                lines.extend(cached);
             }
             "system" => {
                 lines.push(Line::from(vec![
@@ -1359,6 +1243,191 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
     }
 
     wrap_lines(lines, &user_line_indices, width)
+}
+
+fn get_cached_message_lines<F>(
+    msg: &DisplayMessage,
+    width: u16,
+    show_diffs: bool,
+    render: F,
+) -> Vec<Line<'static>>
+where
+    F: FnOnce(&DisplayMessage, u16, bool) -> Vec<Line<'static>>,
+{
+    let key = MessageCacheKey {
+        width,
+        show_diffs,
+        message_hash: hash_display_message(msg),
+        content_len: msg.content.len(),
+    };
+
+    let mut cache = message_cache().lock().unwrap();
+    if let Some(lines) = cache.entries.get(&key) {
+        return lines.clone();
+    }
+
+    let lines = render(msg, width, show_diffs);
+    if cache.entries.len() >= MESSAGE_CACHE_LIMIT {
+        cache.entries.clear();
+    }
+    cache.entries.insert(key, lines.clone());
+    lines
+}
+
+fn render_assistant_message(msg: &DisplayMessage, width: u16, _show_diffs: bool) -> Vec<Line<'static>> {
+    let content_width = width as usize;
+    let mut lines = markdown::render_markdown_with_width(&msg.content, Some(content_width));
+    if !msg.tool_calls.is_empty() {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                msg.tool_calls.join(" "),
+                Style::default().fg(ACCENT_COLOR).dim(),
+            ),
+        ]));
+    }
+    lines
+}
+
+fn render_tool_message(msg: &DisplayMessage, width: u16, show_diffs: bool) -> Vec<Line<'static>> {
+    let _ = width;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let Some(ref tc) = msg.tool_data else {
+        return lines;
+    };
+
+    let summary = get_tool_summary(tc);
+
+    // Determine status: error if content starts with error prefix
+    // Be specific to avoid false positives (e.g., "No matches found" is not an error)
+    let is_error = msg.content.starts_with("Error:")
+        || msg.content.starts_with("error:")
+        || msg.content.starts_with("Failed:");
+
+    let (icon, icon_color) = if is_error {
+        ("✗", Color::Rgb(220, 100, 100)) // Red for errors
+    } else {
+        ("✓", Color::Rgb(100, 180, 100)) // Green for success
+    };
+
+    // For edit tools, count line changes
+    let is_edit_tool = matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit");
+    let (additions, deletions) = if is_edit_tool {
+        diff_change_counts_for_tool(tc, &msg.content)
+    } else {
+        (0, 0)
+    };
+
+    let mut tool_line = vec![
+        Span::styled(format!("  {} ", icon), Style::default().fg(icon_color)),
+        Span::styled(tc.name.clone(), Style::default().fg(TOOL_COLOR)),
+        Span::styled(format!(" {}", summary), Style::default().fg(DIM_COLOR)),
+    ];
+    if is_edit_tool {
+        tool_line.push(Span::styled(" (", Style::default().fg(DIM_COLOR)));
+        tool_line.push(Span::styled(
+            format!("+{}", additions),
+            Style::default().fg(DIFF_ADD_COLOR),
+        ));
+        tool_line.push(Span::styled(" ", Style::default().fg(DIM_COLOR)));
+        tool_line.push(Span::styled(
+            format!("-{}", deletions),
+            Style::default().fg(DIFF_DEL_COLOR),
+        ));
+        tool_line.push(Span::styled(")", Style::default().fg(DIM_COLOR)));
+    }
+
+    lines.push(Line::from(tool_line));
+
+    // Show diff output for editing tools with syntax highlighting
+    if show_diffs && is_edit_tool {
+        // Extract file extension for syntax highlighting
+        let file_ext = tc
+            .input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .and_then(|p| std::path::Path::new(p).extension())
+            .and_then(|e| e.to_str());
+
+        // Collect only actual change lines (+ and -)
+        let change_lines = collect_diff_lines(&msg.content);
+
+        const MAX_DIFF_LINES: usize = 12;
+        let total_changes = change_lines.len();
+
+        // Count additions and deletions for summary
+        let additions = change_lines
+            .iter()
+            .filter(|line| line.kind == DiffLineKind::Add)
+            .count();
+        let deletions = change_lines
+            .iter()
+            .filter(|line| line.kind == DiffLineKind::Del)
+            .count();
+
+        // Determine which lines to show
+        let (display_lines, truncated): (Vec<&ParsedDiffLine>, bool) =
+            if total_changes <= MAX_DIFF_LINES {
+                (change_lines.iter().collect(), false)
+            } else {
+                // Show first half and last half, with truncation indicator
+                let half = MAX_DIFF_LINES / 2;
+                let mut result: Vec<&ParsedDiffLine> =
+                    change_lines.iter().take(half).collect();
+                result.extend(change_lines.iter().skip(total_changes - half));
+                (result, true)
+            };
+
+        let mut shown_truncation = false;
+        let half_point = if truncated {
+            MAX_DIFF_LINES / 2
+        } else {
+            usize::MAX
+        };
+
+        for (i, line) in display_lines.iter().enumerate() {
+            // Show truncation marker at the midpoint
+            if truncated && !shown_truncation && i >= half_point {
+                let skipped = total_changes - MAX_DIFF_LINES;
+                lines.push(Line::from(Span::styled(
+                    format!("... {} more changes ...", skipped),
+                    Style::default().fg(DIM_COLOR),
+                )));
+                shown_truncation = true;
+            }
+
+            let base_color = if line.kind == DiffLineKind::Add {
+                DIFF_ADD_COLOR
+            } else {
+                DIFF_DEL_COLOR
+            };
+
+            // Build the line with syntax-highlighted content
+            let mut spans: Vec<Span<'static>> =
+                vec![Span::styled(line.prefix.clone(), Style::default().fg(base_color))];
+
+            // Apply syntax highlighting to content
+            if !line.content.is_empty() {
+                let highlighted = markdown::highlight_line(line.content.as_str(), file_ext);
+                for span in highlighted {
+                    let tinted = tint_span_with_diff_color(span, base_color);
+                    spans.push(tinted);
+                }
+            }
+
+            lines.push(Line::from(spans));
+        }
+
+        // Show summary if there were changes
+        if total_changes > 0 && truncated {
+            lines.push(Line::from(Span::styled(
+                format!("(+{} -{} total)", additions, deletions),
+                Style::default().fg(DIM_COLOR),
+            )));
+        }
+    }
+
+    lines
 }
 
 fn wrap_lines(
@@ -1410,6 +1479,20 @@ fn hash_display_messages(app: &dyn TuiState) -> u64 {
             tool.name.hash(&mut hasher);
             tool.input.to_string().hash(&mut hasher);
         }
+    }
+    hasher.finish()
+}
+
+fn hash_display_message(msg: &DisplayMessage) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    msg.role.hash(&mut hasher);
+    msg.content.hash(&mut hasher);
+    msg.tool_calls.hash(&mut hasher);
+    msg.title.hash(&mut hasher);
+    if let Some(tool) = &msg.tool_data {
+        tool.id.hash(&mut hasher);
+        tool.name.hash(&mut hasher);
+        tool.input.to_string().hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -1472,7 +1555,13 @@ fn draw_messages(
     let visible_free_widths =
         compute_visible_free_widths(wrapped_lines, wrapped_user_indices, scroll, area);
 
-    let paragraph = Paragraph::new(wrapped_lines.clone()).scroll((scroll as u16, 0));
+    let visible_end = (scroll + visible_height).min(wrapped_lines.len());
+    let visible_lines = if scroll < visible_end {
+        wrapped_lines[scroll..visible_end].to_vec()
+    } else {
+        Vec::new()
+    };
+    let paragraph = Paragraph::new(visible_lines);
     frame.render_widget(paragraph, area);
 
     // Draw right bar for visible user lines
