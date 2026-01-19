@@ -42,6 +42,15 @@ pub enum Request {
     #[serde(rename = "state")]
     GetState { id: u64 },
 
+    /// Execute a debug command (debug socket only)
+    #[serde(rename = "debug_command")]
+    DebugCommand {
+        id: u64,
+        command: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
+
     /// Subscribe to events (for TUI clients)
     #[serde(rename = "subscribe")]
     Subscribe { id: u64 },
@@ -198,6 +207,10 @@ pub enum ServerEvent {
         is_processing: bool,
     },
 
+    /// Response for debug command
+    #[serde(rename = "debug_response")]
+    DebugResponse { id: u64, ok: bool, output: String },
+
     /// Session ID assigned
     #[serde(rename = "session")]
     SessionId { session_id: String },
@@ -343,6 +356,7 @@ impl Request {
             Request::Clear { id } => *id,
             Request::Ping { id } => *id,
             Request::GetState { id } => *id,
+            Request::DebugCommand { id, .. } => *id,
             Request::Subscribe { id } => *id,
             Request::GetHistory { id } => *id,
             Request::Reload { id } => *id,
