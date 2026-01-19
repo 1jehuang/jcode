@@ -45,6 +45,12 @@ pub struct PreviewMessage {
     pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+#[derive(Clone, Debug)]
+pub enum PickerResult {
+    Selected(String),
+    RestoreAllCrashed,
+}
+
 /// Load all sessions with their preview data
 pub fn load_sessions() -> Result<Vec<SessionInfo>> {
     let sessions_dir = storage::jcode_dir()?.join("sessions");
@@ -60,7 +66,11 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
         let path = entry.path();
         if path.extension().map(|e| e == "json").unwrap_or(false) {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if let Ok(session) = Session::load(stem) {
+                if let Ok(mut session) = Session::load(stem) {
+                    let updated = session.detect_crash();
+                    if updated {
+                        let _ = session.save();
+                    }
                     let short_name = session.display_name().to_string();
                     let icon = session_icon(&short_name);
 
@@ -126,21 +136,7 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
                         })
                         .collect();
 
-                    // Infer status for sessions that appear stale
-                    // If status is Active but session hasn't been updated in > 2 minutes,
-                    // it's likely from before status tracking or crashed without cleanup
-                    let status = if session.status == SessionStatus::Active {
-                        let now = chrono::Utc::now();
-                        let age = now.signed_duration_since(session.updated_at);
-                        if age.num_seconds() > 120 {
-                            // Session is stale - treat as closed
-                            SessionStatus::Closed
-                        } else {
-                            session.status.clone()
-                        }
-                    } else {
-                        session.status.clone()
-                    };
+                    let status = session.status.clone();
 
                     sessions.push(SessionInfo {
                         id: stem.to_string(),
@@ -227,6 +223,7 @@ pub struct SessionPicker {
     sessions: Vec<SessionInfo>,
     list_state: ListState,
     scroll_offset: u16,
+    auto_scroll_preview: bool,
 }
 
 impl SessionPicker {
@@ -239,6 +236,7 @@ impl SessionPicker {
             sessions,
             list_state,
             scroll_offset: 0,
+            auto_scroll_preview: true,
         }
     }
 
@@ -263,6 +261,7 @@ impl SessionPicker {
         };
         self.list_state.select(Some(i));
         self.scroll_offset = 0; // Reset preview scroll on selection change
+        self.auto_scroll_preview = true;
     }
 
     pub fn previous(&mut self) {
@@ -282,6 +281,7 @@ impl SessionPicker {
         };
         self.list_state.select(Some(i));
         self.scroll_offset = 0;
+        self.auto_scroll_preview = true;
     }
 
     pub fn scroll_preview_down(&mut self) {
@@ -394,7 +394,7 @@ impl SessionPicker {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Sessions (↑↓ navigate, Enter select, Esc quit) ")
+                    .title(" Sessions (↑↓ navigate, Enter select, R restore crashed, Esc quit) ")
                     .border_style(Style::default().fg(Color::Rgb(138, 180, 248))),
             )
             .highlight_style(
@@ -406,7 +406,7 @@ impl SessionPicker {
         frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
-    fn render_preview(&self, frame: &mut Frame, area: Rect) {
+    fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
         // Colors matching the actual TUI
         const USER_COLOR: Color = Color::Rgb(138, 180, 248); // Soft blue
         const USER_TEXT: Color = Color::Rgb(220, 220, 220);  // Bright white for user text
@@ -414,7 +414,7 @@ impl SessionPicker {
         const HEADER_ICON_COLOR: Color = Color::Rgb(110, 210, 255); // Cyan
         const HEADER_SESSION_COLOR: Color = Color::Rgb(140, 220, 160); // Soft green
 
-        let Some(session) = self.selected_session() else {
+        let Some(session) = self.selected_session().cloned() else {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .title(" Preview ")
@@ -579,8 +579,17 @@ impl SessionPicker {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" Preview (Shift+↑↓ scroll) ")
+            .title(" Preview (Shift+↑↓/J/K scroll) ")
             .border_style(Style::default().fg(Color::Rgb(138, 180, 248)));
+
+        let visible_height = area.height.saturating_sub(2) as usize;
+        let max_scroll = lines.len().saturating_sub(visible_height) as u16;
+        if self.auto_scroll_preview {
+            self.scroll_offset = max_scroll;
+            self.auto_scroll_preview = false;
+        } else {
+            self.scroll_offset = self.scroll_offset.min(max_scroll);
+        }
 
         let paragraph = Paragraph::new(lines)
             .block(block)
@@ -601,7 +610,7 @@ impl SessionPicker {
     }
 
     /// Run the interactive picker, returns selected session ID or None if cancelled
-    pub fn run(mut self) -> Result<Option<String>> {
+    pub fn run(mut self) -> Result<Option<PickerResult>> {
         let mut terminal = ratatui::init();
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
 
@@ -619,17 +628,40 @@ impl SessionPicker {
                             break Ok(None);
                         }
                         KeyCode::Enter => {
-                            break Ok(self.selected_session().map(|s| s.id.clone()));
+                            break Ok(self
+                                .selected_session()
+                                .map(|s| PickerResult::Selected(s.id.clone())));
                         }
-                        KeyCode::Down | KeyCode::Char('j') => {
+                        KeyCode::Char('R') => {
+                            break Ok(Some(PickerResult::RestoreAllCrashed));
+                        }
+                        KeyCode::Down => {
                             if key.modifiers.contains(KeyModifiers::SHIFT) {
                                 self.scroll_preview_down();
                             } else {
                                 self.next();
                             }
                         }
-                        KeyCode::Up | KeyCode::Char('k') => {
+                        KeyCode::Up => {
                             if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                self.scroll_preview_up();
+                            } else {
+                                self.previous();
+                            }
+                        }
+                        KeyCode::Char('j') | KeyCode::Char('J') => {
+                            if key.modifiers.contains(KeyModifiers::SHIFT)
+                                || matches!(key.code, KeyCode::Char('J'))
+                            {
+                                self.scroll_preview_down();
+                            } else {
+                                self.next();
+                            }
+                        }
+                        KeyCode::Char('k') | KeyCode::Char('K') => {
+                            if key.modifiers.contains(KeyModifiers::SHIFT)
+                                || matches!(key.code, KeyCode::Char('K'))
+                            {
                                 self.scroll_preview_up();
                             } else {
                                 self.previous();
@@ -663,7 +695,7 @@ impl SessionPicker {
 
 /// Run the interactive session picker
 /// Returns the selected session ID, or None if the user cancelled
-pub fn pick_session() -> Result<Option<String>> {
+pub fn pick_session() -> Result<Option<PickerResult>> {
     // Check if we have a TTY
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         anyhow::bail!("Session picker requires an interactive terminal. Use --resume <session_id> directly.");
@@ -686,31 +718,10 @@ mod tests {
 
     #[test]
     fn test_status_inference() {
-        // Load sessions and check status inference
+        // Load sessions and ensure status display works
         let sessions = load_sessions().unwrap();
-        
         for session in &sessions {
-            let age = chrono::Utc::now()
-                .signed_duration_since(session.last_message_time)
-                .num_seconds();
-            
-            eprintln!(
-                "Session {}: age={}s, status={:?}",
-                session.short_name,
-                age,
-                session.status
-            );
-            
-            // Sessions older than 2 minutes should NOT show as Active
-            // (unless they have a different explicit status)
-            if age > 120 {
-                assert!(
-                    session.status != SessionStatus::Active,
-                    "Session {} is {}s old but shows as Active",
-                    session.short_name,
-                    age
-                );
-            }
+            let _ = session.status.display();
         }
     }
 }

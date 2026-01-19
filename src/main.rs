@@ -58,6 +58,11 @@ fn install_panic_hook() {
                 );
                 eprintln!("  jcode --resume {}", session_id);
                 eprintln!();
+
+                if let Ok(mut session) = session::Session::load(session_id) {
+                    session.mark_crashed(Some(format!("Panic: {}", info)));
+                    let _ = session.save();
+                }
             }
         }
     }));
@@ -939,7 +944,7 @@ fn run_update() -> Result<()> {
 /// List available sessions for resume - interactive picker
 fn list_sessions() -> Result<()> {
     match tui::session_picker::pick_session()? {
-        Some(session_id) => {
+        Some(tui::session_picker::PickerResult::Selected(session_id)) => {
             // User selected a session - exec into jcode with that session
             use std::os::unix::process::CommandExt;
             let exe = std::env::current_exe()?;
@@ -952,6 +957,33 @@ fn list_sessions() -> Result<()> {
                 .exec();
 
             // exec() only returns on error
+            Err(anyhow::anyhow!("Failed to exec: {}", err))
+        }
+        Some(tui::session_picker::PickerResult::RestoreAllCrashed) => {
+            let recovered = session::recover_crashed_sessions()?;
+            if recovered.is_empty() {
+                eprintln!("No crashed sessions found.");
+                return Ok(());
+            }
+
+            eprintln!("Recovered {} crashed session(s).", recovered.len());
+            if recovered.len() > 1 {
+                eprintln!("Other recovered sessions:");
+                for id in recovered.iter().skip(1) {
+                    eprintln!("  jcode --resume {}", id);
+                }
+            }
+
+            // Exec into the most recent recovered session
+            use std::os::unix::process::CommandExt;
+            let exe = std::env::current_exe()?;
+            let cwd = std::env::current_dir()?;
+            let first = &recovered[0];
+            let err = ProcessCommand::new(&exe)
+                .arg("--resume")
+                .arg(first)
+                .current_dir(cwd)
+                .exec();
             Err(anyhow::anyhow!("Failed to exec: {}", err))
         }
         None => {
