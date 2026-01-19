@@ -59,7 +59,9 @@ You are working on the jcode codebase itself. You have the `selfdev` tool availa
 5. If the build crashes, you'll wake up in the stable version with crash context
 6. Once satisfied, use `selfdev { action: "promote" }` to make it stable
 
-Use this to iterate quickly on jcode features and fixes."#;
+Use this to iterate quickly on jcode features and fixes.
+
+Always invoke `selfdev` as a tool call (never via bash)."#;
 
 const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
 

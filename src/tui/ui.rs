@@ -1744,11 +1744,14 @@ fn draw_messages(
         compute_visible_free_widths(wrapped_lines, wrapped_user_indices, scroll, area);
 
     let visible_end = (scroll + visible_height).min(wrapped_lines.len());
-    let visible_lines = if scroll < visible_end {
+    let mut visible_lines = if scroll < visible_end {
         wrapped_lines[scroll..visible_end].to_vec()
     } else {
         Vec::new()
     };
+    if visible_lines.len() < visible_height {
+        visible_lines.extend(std::iter::repeat(Line::from("")).take(visible_height - visible_lines.len()));
+    }
     let paragraph = Paragraph::new(visible_lines);
     frame.render_widget(paragraph, area);
 
