@@ -394,7 +394,7 @@ impl SessionPicker {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Sessions (↑↓ navigate, Enter select, R restore crashed, Esc quit) ")
+                    .title(" Sessions (↑↓ navigate, Enter select, R restore last crash, Esc quit) ")
                     .border_style(Style::default().fg(Color::Rgb(138, 180, 248))),
             )
             .highlight_style(

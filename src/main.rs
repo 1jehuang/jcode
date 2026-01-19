@@ -966,7 +966,10 @@ fn list_sessions() -> Result<()> {
                 return Ok(());
             }
 
-            eprintln!("Recovered {} crashed session(s).", recovered.len());
+            eprintln!(
+                "Recovered {} crashed session(s) from the last crash window.",
+                recovered.len()
+            );
             if recovered.len() > 1 {
                 eprintln!("Other recovered sessions:");
                 for id in recovered.iter().skip(1) {

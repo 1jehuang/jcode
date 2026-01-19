@@ -5,7 +5,7 @@ use crate::id::{extract_session_name, new_id, new_memorable_session_id};
 use crate::message::{ContentBlock, Message, Role};
 use crate::storage;
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -298,7 +298,7 @@ pub fn session_path(session_id: &str) -> Result<PathBuf> {
     Ok(base.join("sessions").join(format!("{}.json", session_id)))
 }
 
-/// Recover all crashed sessions by creating recovery copies (text-only)
+/// Recover crashed sessions from the most recent crash window (text-only).
 /// Returns new recovery session IDs (most recent first).
 pub fn recover_crashed_sessions() -> Result<Vec<String>> {
     let sessions_dir = storage::jcode_dir()?.join("sessions");
@@ -336,6 +336,21 @@ pub fn recover_crashed_sessions() -> Result<Vec<String>> {
         .into_iter()
         .filter(|s| matches!(s.status, SessionStatus::Crashed { .. }))
         .collect();
+    if crashed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let crash_window = Duration::seconds(60);
+    let most_recent = crashed
+        .iter()
+        .map(|s| s.last_active_at.unwrap_or(s.updated_at))
+        .max()
+        .unwrap_or_else(Utc::now);
+    crashed.retain(|s| {
+        let ts = s.last_active_at.unwrap_or(s.updated_at);
+        let delta = most_recent.signed_duration_since(ts);
+        delta >= Duration::zero() && delta <= crash_window
+    });
     crashed.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
     let mut new_ids = Vec::new();
