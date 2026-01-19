@@ -25,12 +25,13 @@ const PAGE_SWITCH_SECONDS: u64 = 6;
 pub struct InfoWidgetData {
     pub todos: Vec<TodoItem>,
     pub context_info: Option<ContextInfo>,
+    pub queue_mode: Option<bool>,
     // TODO: Add swarm/subagent status summary to the info widget.
 }
 
 impl InfoWidgetData {
     pub fn is_empty(&self) -> bool {
-        self.todos.is_empty() && self.context_info.is_none()
+        self.todos.is_empty() && self.context_info.is_none() && self.queue_mode.is_none()
     }
 }
 
@@ -249,6 +250,8 @@ enum InfoPageKind {
     TodosCompact,
     ContextExpanded,
     ContextCompact,
+    QueueExpanded,
+    QueueCompact,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -283,6 +286,17 @@ fn compute_page_layout(
         candidates.push(InfoPage {
             kind: InfoPageKind::TodosCompact,
             height: 2,
+        });
+    }
+
+    if data.queue_mode.is_some() {
+        candidates.push(InfoPage {
+            kind: InfoPageKind::QueueExpanded,
+            height: 2,
+        });
+        candidates.push(InfoPage {
+            kind: InfoPageKind::QueueCompact,
+            height: 1,
         });
     }
 
@@ -344,6 +358,8 @@ fn render_page(kind: InfoPageKind, data: &InfoWidgetData, inner: Rect) -> Vec<Li
         InfoPageKind::TodosCompact => render_todos_compact(data, inner),
         InfoPageKind::ContextExpanded => render_context_expanded(data, inner),
         InfoPageKind::ContextCompact => render_context_compact(data, inner),
+        InfoPageKind::QueueExpanded => render_queue_expanded(data, inner),
+        InfoPageKind::QueueCompact => render_queue_compact(data, inner),
     }
 }
 
@@ -425,6 +441,46 @@ fn render_todos_compact(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static
             ),
         ]),
     ]
+}
+
+fn render_queue_expanded(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static>> {
+    let Some(queue_mode) = data.queue_mode else {
+        return Vec::new();
+    };
+
+    let (mode_text, mode_color) = if queue_mode {
+        ("Wait until done", Color::Rgb(255, 200, 100))
+    } else {
+        ("Send ASAP", Color::Rgb(120, 200, 120))
+    };
+
+    vec![
+        Line::from(vec![Span::styled(
+            "Queue",
+            Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
+        )]),
+        Line::from(vec![
+            Span::styled("Mode: ", Style::default().fg(Color::Rgb(140, 140, 150))),
+            Span::styled(mode_text, Style::default().fg(mode_color)),
+        ]),
+    ]
+}
+
+fn render_queue_compact(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static>> {
+    let Some(queue_mode) = data.queue_mode else {
+        return Vec::new();
+    };
+
+    let (mode_text, mode_color) = if queue_mode {
+        ("Wait", Color::Rgb(255, 200, 100))
+    } else {
+        ("ASAP", Color::Rgb(120, 200, 120))
+    };
+
+    vec![Line::from(vec![
+        Span::styled("Queue: ", Style::default().fg(Color::Rgb(140, 140, 150))),
+        Span::styled(mode_text, Style::default().fg(mode_color)),
+    ])]
 }
 
 fn render_context_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {

@@ -4,6 +4,7 @@
 use super::keybind::{ModelSwitchKeys, ScrollKeys};
 use super::stream_buffer::StreamBuffer;
 use crate::bus::{BackgroundTaskStatus, Bus, BusEvent, ToolEvent, ToolStatus};
+use crate::config::config;
 use crate::id;
 use crate::mcp::McpManager;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall};
@@ -351,6 +352,7 @@ impl App {
         let skills = SkillRegistry::load().unwrap_or_default();
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
         let session = Session::create(None, None);
+        let display = config().display.clone();
 
         // Pre-compute context info so it shows on startup
         let available_skills: Vec<crate::prompt::SkillInfo> = skills
@@ -426,12 +428,12 @@ impl App {
             remote_client_count: None,
             resume_session_id: None,
             requested_exit_code: None,
-            show_diffs: true, // Default to showing diffs
+            show_diffs: display.show_diffs,
             model_switch_keys: super::keybind::load_model_switch_keys(),
             scroll_keys: super::keybind::load_scroll_keys(),
             status_notice: None,
             interleave_message: None,
-            queue_mode: true, // Default to queue mode (wait until done)
+            queue_mode: display.queue_mode,
             tab_completion_state: None,
             app_started: Instant::now(),
             client_binary_mtime: std::env::current_exe()
@@ -4981,6 +4983,7 @@ impl super::TuiState for App {
         super::info_widget::InfoWidgetData {
             todos,
             context_info,
+            queue_mode: Some(self.queue_mode),
         }
     }
 }
@@ -5013,7 +5016,10 @@ mod tests {
         let provider: Arc<dyn Provider> = Arc::new(MockProvider);
         let rt = tokio::runtime::Runtime::new().unwrap();
         let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
-        App::new(provider, registry)
+        let mut app = App::new(provider, registry);
+        app.queue_mode = false;
+        app.show_diffs = true;
+        app
     }
 
     #[test]
@@ -5160,6 +5166,7 @@ mod tests {
     #[test]
     fn test_queue_message_while_processing() {
         let mut app = create_test_app();
+        app.queue_mode = true;
 
         // Simulate processing state
         app.is_processing = true;
@@ -5190,15 +5197,15 @@ mod tests {
     fn test_ctrl_tab_toggles_queue_mode() {
         let mut app = create_test_app();
 
-        assert!(app.queue_mode);
-
-        app.handle_key(KeyCode::Char('t'), KeyModifiers::CONTROL)
-            .unwrap();
         assert!(!app.queue_mode);
 
         app.handle_key(KeyCode::Char('t'), KeyModifiers::CONTROL)
             .unwrap();
         assert!(app.queue_mode);
+
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(!app.queue_mode);
     }
 
     #[test]
@@ -5206,7 +5213,7 @@ mod tests {
         let mut app = create_test_app();
         app.is_processing = true;
 
-        // Default queue mode: Shift+Enter should interleave
+        // Default immediate mode: Shift+Enter should queue
         app.handle_key(KeyCode::Char('h'), KeyModifiers::empty())
             .unwrap();
         app.handle_key(KeyCode::Char('i'), KeyModifiers::empty())
@@ -5214,13 +5221,12 @@ mod tests {
         app.handle_key(KeyCode::Enter, KeyModifiers::SHIFT)
             .unwrap();
 
-        assert_eq!(app.queued_count(), 0);
-        assert_eq!(app.interleave_message.as_deref(), Some("hi"));
+        assert_eq!(app.queued_count(), 1);
+        assert_eq!(app.interleave_message.as_deref(), None);
         assert!(app.input().is_empty());
 
-        // Immediate mode: Shift+Enter should queue instead
-        app.interleave_message = None;
-        app.queue_mode = false;
+        // Queue mode: Shift+Enter should interleave
+        app.queue_mode = true;
         app.handle_key(KeyCode::Char('y'), KeyModifiers::empty())
             .unwrap();
         app.handle_key(KeyCode::Char('o'), KeyModifiers::empty())
@@ -5229,8 +5235,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(app.queued_count(), 1);
-        assert_eq!(app.queued_messages()[0], "yo");
-        assert!(app.interleave_message.is_none());
+        assert_eq!(app.interleave_message.as_deref(), Some("yo"));
     }
 
     #[test]
@@ -5252,6 +5257,7 @@ mod tests {
     #[test]
     fn test_ctrl_up_edits_queued_message() {
         let mut app = create_test_app();
+        app.queue_mode = true;
         app.is_processing = true;
 
         // Type and queue a message
