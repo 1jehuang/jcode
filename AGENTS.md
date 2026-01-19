@@ -42,6 +42,9 @@ The build also includes git hash and `-dev` suffix for uncommitted changes (e.g.
 - `cargo run --bin jcode-harness -- --include-network`: exercise tool harness with optional network calls.
 - `scripts/agent_trace.sh`: end-to-end agent trace (set `JCODE_PROVIDER=openai|claude`).
 
+## Logs
+- Logs are written to `~/.jcode/logs/` (daily files like `jcode-YYYY-MM-DD.log`).
+
 ## Coding Style & Naming Conventions
 - Rust 2021 style; format with `cargo fmt`.
 - Files/modules use `snake_case`; types/traits use `CamelCase`; functions use `snake_case`.

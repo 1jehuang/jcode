@@ -46,6 +46,10 @@ cargo test              # Run all tests
 cargo test --test e2e   # Run only e2e tests
 ```
 
+## Logs
+
+Logs are written to `~/.jcode/logs/` (daily files like `jcode-YYYY-MM-DD.log`).
+
 ## Environment Setup
 
 The Claude provider requires the Claude Agent SDK Python bridge:
