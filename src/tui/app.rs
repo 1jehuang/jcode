@@ -5823,7 +5823,7 @@ impl super::TuiState for App {
         let (session_count, client_count) = if self.is_remote {
             (
                 Some(self.remote_sessions.len()),
-                self.remote_client_count,
+                None,
             )
         } else {
             (None, None)
