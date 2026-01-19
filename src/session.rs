@@ -7,6 +7,7 @@ use crate::storage;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 /// Session exit status - why the session ended
@@ -113,6 +114,12 @@ pub struct Session {
     /// Session exit status - why it ended (if not active)
     #[serde(default)]
     pub status: SessionStatus,
+    /// PID of the process that last owned this session (for crash detection)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pid: Option<u32>,
+    /// Last time the session was marked active
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active_at: Option<DateTime<Utc>>,
 }
 
 impl Session {
@@ -139,6 +146,8 @@ impl Session {
                 .map(|p| p.to_string_lossy().to_string()),
             short_name,
             status: SessionStatus::Active,
+            last_pid: Some(std::process::id()),
+            last_active_at: Some(now),
         }
     }
 
@@ -160,6 +169,8 @@ impl Session {
                 .map(|p| p.to_string_lossy().to_string()),
             short_name: Some(short_name),
             status: SessionStatus::Active,
+            last_pid: Some(std::process::id()),
+            last_active_at: Some(now),
         }
     }
 
@@ -206,6 +217,39 @@ impl Session {
     /// Mark session as active (e.g., when resuming)
     pub fn mark_active(&mut self) {
         self.status = SessionStatus::Active;
+        self.last_pid = Some(std::process::id());
+        self.last_active_at = Some(Utc::now());
+    }
+
+    /// Mark session as active for a specific PID
+    pub fn mark_active_with_pid(&mut self, pid: u32) {
+        self.status = SessionStatus::Active;
+        self.last_pid = Some(pid);
+        self.last_active_at = Some(Utc::now());
+    }
+
+    /// Detect if an active session likely crashed (process no longer running)
+    /// Returns true if status was updated.
+    pub fn detect_crash(&mut self) -> bool {
+        if self.status != SessionStatus::Active {
+            return false;
+        }
+
+        if let Some(pid) = self.last_pid {
+            if !is_pid_running(pid) {
+                self.mark_crashed(Some(format!("Process {} not running", pid)));
+                return true;
+            }
+        } else {
+            // No PID info (older sessions): fall back to age heuristic
+            let age = Utc::now().signed_duration_since(self.updated_at);
+            if age.num_seconds() > 120 {
+                self.mark_crashed(Some("Stale active session".to_string()));
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Check if this session is working on the jcode repository
@@ -252,6 +296,108 @@ impl Session {
 pub fn session_path(session_id: &str) -> Result<PathBuf> {
     let base = storage::jcode_dir()?;
     Ok(base.join("sessions").join(format!("{}.json", session_id)))
+}
+
+/// Recover all crashed sessions by creating recovery copies (text-only)
+/// Returns new recovery session IDs (most recent first).
+pub fn recover_crashed_sessions() -> Result<Vec<String>> {
+    let sessions_dir = storage::jcode_dir()?.join("sessions");
+    if !sessions_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut sessions: Vec<Session> = Vec::new();
+    for entry in std::fs::read_dir(&sessions_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().map(|e| e == "json").unwrap_or(false) {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if let Ok(mut session) = Session::load(stem) {
+                    if session.detect_crash() {
+                        let _ = session.save();
+                    }
+                    sessions.push(session);
+                }
+            }
+        }
+    }
+
+    // Track existing recovery sessions to avoid duplicates
+    let mut recovered_parents: HashSet<String> = HashSet::new();
+    for s in &sessions {
+        if s.id.starts_with("session_recovery_") {
+            if let Some(parent) = s.parent_id.as_ref() {
+                recovered_parents.insert(parent.clone());
+            }
+        }
+    }
+
+    let mut crashed: Vec<Session> = sessions
+        .into_iter()
+        .filter(|s| matches!(s.status, SessionStatus::Crashed { .. }))
+        .collect();
+    crashed.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+    let mut new_ids = Vec::new();
+    for mut old in crashed {
+        if recovered_parents.contains(&old.id) {
+            continue;
+        }
+
+        let new_id = format!("session_recovery_{}", crate::id::new_id("rec"));
+        let mut new_session =
+            Session::create_with_id(new_id.clone(), Some(old.id.clone()), old.title.clone());
+        new_session.working_dir = old.working_dir.clone();
+        new_session.is_canary = old.is_canary;
+        new_session.testing_build = old.testing_build.clone();
+        new_session.provider_session_id = None;
+        new_session.status = SessionStatus::Closed;
+
+        // Add a recovery header
+        new_session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!(
+                    "Recovered from crashed session `{}` ({})",
+                    old.id,
+                    old.display_name()
+                ),
+                cache_control: None,
+            }],
+        );
+
+        for msg in old.messages.drain(..) {
+            let kept_blocks: Vec<ContentBlock> = msg
+                .content
+                .into_iter()
+                .filter(|block| matches!(block, ContentBlock::Text { .. }))
+                .collect();
+            if kept_blocks.is_empty() {
+                continue;
+            }
+            new_session.add_message(msg.role, kept_blocks);
+        }
+
+        new_session.save()?;
+        new_ids.push(new_id);
+    }
+
+    Ok(new_ids)
+}
+
+#[cfg(unix)]
+fn is_pid_running(pid: u32) -> bool {
+    let result = unsafe { libc::kill(pid as i32, 0) };
+    if result == 0 {
+        return true;
+    }
+    let err = std::io::Error::last_os_error();
+    !matches!(err.raw_os_error(), Some(code) if code == libc::ESRCH)
+}
+
+#[cfg(not(unix))]
+fn is_pid_running(_pid: u32) -> bool {
+    true
 }
 
 /// Find a session by ID or memorable name
