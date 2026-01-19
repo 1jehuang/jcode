@@ -21,12 +21,12 @@ const MIN_WIDGET_HEIGHT: u16 = 5;
 #[derive(Debug, Default, Clone)]
 pub struct InfoWidgetData {
     pub todos: Vec<TodoItem>,
-    pub session_tokens: Option<(u64, u64)>,
+    // TODO: Add swarm/subagent status summary to the info widget.
 }
 
 impl InfoWidgetData {
     pub fn is_empty(&self) -> bool {
-        self.todos.is_empty() && self.session_tokens.is_none()
+        self.todos.is_empty()
     }
 }
 
@@ -173,11 +173,6 @@ fn calculate_needed_height(data: &InfoWidgetData) -> u16 {
         height += 1; // Spacing
     }
 
-    // Token usage
-    if data.session_tokens.is_some() {
-        height += 1;
-    }
-
     height.max(MIN_WIDGET_HEIGHT)
 }
 
@@ -228,21 +223,6 @@ pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
                 Style::default().fg(Color::Rgb(100, 100, 110)),
             )]));
         }
-    }
-
-    // Token usage
-    if let Some((input, output)) = data.session_tokens {
-        if !lines.is_empty() {
-            lines.push(Line::from(""));
-        }
-        let total_k = (input + output) / 1000;
-        lines.push(Line::from(vec![
-            Span::styled(" ", Style::default().fg(Color::Rgb(180, 140, 200))),
-            Span::styled(
-                format!("{}k tokens", total_k),
-                Style::default().fg(Color::Rgb(140, 140, 150)),
-            ),
-        ]));
     }
 
     let para = Paragraph::new(lines);

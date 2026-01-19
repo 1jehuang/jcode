@@ -4973,7 +4973,6 @@ impl super::TuiState for App {
 
         super::info_widget::InfoWidgetData {
             todos,
-            session_tokens: self.remote_total_tokens,
         }
     }
 }
