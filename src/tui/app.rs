@@ -370,6 +370,8 @@ pub struct App {
     remote_skills: Vec<String>,
     // Total session token usage (from server in remote mode)
     remote_total_tokens: Option<(u64, u64)>,
+    // Whether the remote session is canary/self-dev (from server)
+    remote_is_canary: Option<bool>,
     // Current message request ID (for remote mode - to match Done events)
     current_message_id: Option<u64>,
     // Whether running in remote mode
@@ -517,6 +519,7 @@ impl App {
             remote_mcp_servers: Vec::new(),
             remote_skills: Vec::new(),
             remote_total_tokens: None,
+            remote_is_canary: None,
             current_message_id: None,
             is_remote: false,
             tool_result_ids: HashSet::new(),
@@ -2270,6 +2273,7 @@ impl App {
                 available_models,
                 all_sessions,
                 client_count,
+                is_canary,
                 ..
             } => {
                 let prev_session_id = self.remote_session_id.clone();
@@ -2306,6 +2310,7 @@ impl App {
                 // Store session list and client count
                 self.remote_sessions = all_sessions;
                 self.remote_client_count = client_count;
+                self.remote_is_canary = is_canary;
 
                 if session_changed || !remote.has_loaded_history() {
                     remote.mark_history_loaded();
@@ -5787,7 +5792,11 @@ impl super::TuiState for App {
     }
 
     fn is_canary(&self) -> bool {
-        self.session.is_canary
+        if self.is_remote {
+            self.remote_is_canary.unwrap_or(false)
+        } else {
+            self.session.is_canary
+        }
     }
 
     fn show_diffs(&self) -> bool {
