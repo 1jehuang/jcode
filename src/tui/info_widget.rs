@@ -26,12 +26,15 @@ pub struct InfoWidgetData {
     pub todos: Vec<TodoItem>,
     pub context_info: Option<ContextInfo>,
     pub queue_mode: Option<bool>,
+    pub context_limit: Option<usize>,
     // TODO: Add swarm/subagent status summary to the info widget.
 }
 
 impl InfoWidgetData {
     pub fn is_empty(&self) -> bool {
-        self.todos.is_empty() && self.context_info.is_none() && self.queue_mode.is_none()
+        self.todos.is_empty()
+            && self.context_info.is_none()
+            && self.queue_mode.is_none()
     }
 }
 
@@ -401,7 +404,7 @@ fn compact_overview_height(data: &InfoWidgetData) -> u16 {
 fn expanded_context_height(data: &InfoWidgetData) -> u16 {
     if let Some(info) = &data.context_info {
         if info.total_chars > 0 {
-            return 2 + context_entries(info).len().min(MAX_CONTEXT_LINES) as u16;
+            return 3 + context_entries(info).len().min(MAX_CONTEXT_LINES) as u16;
         }
     }
     0
@@ -597,19 +600,36 @@ fn render_context_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'stat
         Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
     )]));
 
-    let total_k = info.estimated_tokens() / 1000;
+    let used_tokens = info.estimated_tokens();
+    let limit_tokens = data.context_limit.unwrap_or(200_000).max(1);
+    let used_str = format_token_k(used_tokens);
+    let limit_str = format_token_k(limit_tokens);
+    let pct = ((used_tokens as f64 / limit_tokens as f64) * 100.0)
+        .round()
+        .min(100.0) as usize;
     lines.push(Line::from(vec![
-        Span::styled("∑ ", Style::default().fg(Color::Rgb(160, 160, 170))),
+        Span::styled("Usage ", Style::default().fg(Color::Rgb(160, 160, 170))),
         Span::styled(
-            format!("{}k tokens", total_k),
+            format!("{}/{} ({}%)", used_str, limit_str, pct),
             Style::default().fg(Color::Rgb(140, 140, 150)),
         ),
     ]));
+    lines.push(render_usage_bar(used_tokens, limit_tokens, inner.width));
 
     let max_items = MAX_CONTEXT_LINES;
     let max_len = inner.width.saturating_sub(2) as usize;
+    let total_tokens = used_tokens.max(1);
     for (icon, label, tokens) in context_entries(info).into_iter().take(max_items) {
-        let mut content = format!("{} {} {}k", icon, label, tokens / 1000);
+        let pct = ((tokens as f64 / total_tokens as f64) * 100.0)
+            .round()
+            .min(100.0) as usize;
+        let mut content = format!(
+            "{} {} {} {}%",
+            icon,
+            label,
+            format_token_k(tokens),
+            pct
+        );
         if content.len() > max_len && max_len > 3 {
             content.truncate(max_len.saturating_sub(3));
             content.push_str("...");
@@ -631,82 +651,59 @@ fn render_context_compact(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'stati
         return Vec::new();
     }
 
-    let bar = build_context_bar(info, inner.width as usize);
-    if bar.is_empty() {
-        Vec::new()
-    } else {
-        vec![Line::from(bar)]
-    }
+    let used_tokens = info.estimated_tokens();
+    let limit_tokens = data.context_limit.unwrap_or(200_000).max(1);
+    vec![render_usage_line(used_tokens, limit_tokens, inner.width as usize)]
 }
 
-fn build_context_bar(info: &ContextInfo, max_width: usize) -> Vec<Span<'static>> {
-    const SYS_COLOR: Color = Color::Rgb(100, 140, 200);
-    const DOCS_COLOR: Color = Color::Rgb(200, 160, 100);
-    const TOOLS_COLOR: Color = Color::Rgb(100, 200, 200);
-    const MSGS_COLOR: Color = Color::Rgb(138, 180, 248);
-    const TOOL_IO_COLOR: Color = Color::Rgb(255, 183, 77);
-    const OTHER_COLOR: Color = Color::Rgb(150, 150, 150);
-    const EMPTY_COLOR: Color = Color::Rgb(50, 50, 50);
+fn render_usage_line(used_tokens: usize, limit_tokens: usize, max_width: usize) -> Line<'static> {
+    let used_str = format_token_k(used_tokens);
+    let limit_str = format_token_k(limit_tokens);
+    let pct = ((used_tokens as f64 / limit_tokens as f64) * 100.0)
+        .round()
+        .min(100.0) as usize;
+    let mut text = format!("Ctx {}/{}", used_str, limit_str);
+    if max_width >= text.len() + 5 {
+        text.push(' ');
+        text.push_str(&format!("{}%", pct));
+    }
+    Line::from(Span::styled(
+        text,
+        Style::default().fg(Color::Rgb(160, 160, 170)),
+    ))
+}
 
-    let sys = info.system_prompt_chars / 4;
-    let docs = (info.project_agents_md_chars
-        + info.project_claude_md_chars
-        + info.global_agents_md_chars
-        + info.global_claude_md_chars)
-        / 4;
-    let tools = info.tool_defs_chars / 4;
-    let msgs = (info.user_messages_chars + info.assistant_messages_chars) / 4;
-    let tool_io = (info.tool_calls_chars + info.tool_results_chars) / 4;
-    let other = (info.env_context_chars + info.skills_chars + info.selfdev_chars) / 4;
+fn render_usage_bar(used_tokens: usize, limit_tokens: usize, width: u16) -> Line<'static> {
+    let bar_width = width.saturating_sub(2).min(24).max(8) as usize;
+    let mut used_cells = ((used_tokens as f64 / limit_tokens as f64) * bar_width as f64)
+        .round()
+        .max(0.0) as usize;
+    if used_cells > bar_width {
+        used_cells = bar_width;
+    }
+    let empty_cells = bar_width.saturating_sub(used_cells);
+    let mut spans = Vec::new();
+    spans.push(Span::styled("[", Style::default().fg(Color::Rgb(90, 90, 100))));
+    spans.push(Span::styled(
+        "█".repeat(used_cells),
+        Style::default().fg(Color::Rgb(120, 200, 180)),
+    ));
+    if empty_cells > 0 {
+        spans.push(Span::styled(
+            "░".repeat(empty_cells),
+            Style::default().fg(Color::Rgb(50, 50, 60)),
+        ));
+    }
+    spans.push(Span::styled("]", Style::default().fg(Color::Rgb(90, 90, 100))));
+    Line::from(spans)
+}
 
-    let mut sections: Vec<(usize, Color)> = Vec::new();
-    if sys > 0 {
-        sections.push((sys, SYS_COLOR));
+fn format_token_k(tokens: usize) -> String {
+    if tokens >= 1000 {
+        format!("{}k", tokens / 1000)
+    } else {
+        format!("{}", tokens)
     }
-    if docs > 0 {
-        sections.push((docs, DOCS_COLOR));
-    }
-    if tools > 0 {
-        sections.push((tools, TOOLS_COLOR));
-    }
-    if msgs > 0 {
-        sections.push((msgs, MSGS_COLOR));
-    }
-    if tool_io > 0 {
-        sections.push((tool_io, TOOL_IO_COLOR));
-    }
-    if other > 0 {
-        sections.push((other, OTHER_COLOR));
-    }
-
-    let total: usize = sections.iter().map(|(t, _)| *t).sum();
-    if total == 0 {
-        return Vec::new();
-    }
-
-    let bar_width = max_width.saturating_sub(2).max(10).min(40);
-    let mut spans: Vec<Span<'static>> = Vec::new();
-
-    let mut remaining = bar_width;
-    for (tokens, color) in sections.iter() {
-        if remaining == 0 {
-            break;
-        }
-        let mut w = ((*tokens as f64 / total as f64) * bar_width as f64)
-            .round()
-            .max(1.0) as usize;
-        if w > remaining {
-            w = remaining;
-        }
-        spans.push(Span::styled("█".repeat(w), Style::default().fg(*color)));
-        remaining = remaining.saturating_sub(w);
-    }
-
-    if remaining > 0 {
-        spans.push(Span::styled("░".repeat(remaining), Style::default().fg(EMPTY_COLOR)));
-    }
-
-    spans
 }
 
 fn render_pagination_dots(count: usize, current: usize, width: u16) -> Line<'static> {
