@@ -466,6 +466,26 @@ fn body_cache() -> &'static Mutex<BodyCacheState> {
     BODY_CACHE.get_or_init(|| Mutex::new(BodyCacheState::default()))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StreamingCacheKey {
+    width: u16,
+    prefix_blank: bool,
+}
+
+#[derive(Default)]
+struct StreamingCacheState {
+    key: Option<StreamingCacheKey>,
+    text: String,
+    wrapped_lines: Vec<Line<'static>>,
+    is_plain: bool,
+}
+
+static STREAMING_CACHE: OnceLock<Mutex<StreamingCacheState>> = OnceLock::new();
+
+fn streaming_cache() -> &'static Mutex<StreamingCacheState> {
+    STREAMING_CACHE.get_or_init(|| Mutex::new(StreamingCacheState::default()))
+}
+
 #[derive(Default)]
 struct RenderProfile {
     frames: u64,
@@ -676,15 +696,22 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
     let header_lines = build_header_lines(app, width);
     let header_prepared = wrap_lines(header_lines, &[], width);
 
-    let body_prepared = if !app.is_processing() && app.streaming_text().is_empty() {
-        prepare_body_cached(app, width)
+    let body_prepared = prepare_body_cached(app, width);
+    let has_streaming = app.is_processing() && !app.streaming_text().is_empty();
+    let stream_prefix_blank = has_streaming && !body_prepared.wrapped_lines.is_empty();
+    let streaming_prepared = if has_streaming {
+        prepare_streaming_cached(app, width, stream_prefix_blank)
     } else {
-        prepare_body(app, width, true)
+        PreparedMessages {
+            wrapped_lines: Vec::new(),
+            wrapped_user_indices: Vec::new(),
+        }
     };
 
     let mut wrapped_lines = header_prepared.wrapped_lines;
     let header_len = wrapped_lines.len();
     wrapped_lines.extend(body_prepared.wrapped_lines);
+    wrapped_lines.extend(streaming_prepared.wrapped_lines);
 
     let mut wrapped_user_indices = body_prepared.wrapped_user_indices;
     for idx in &mut wrapped_user_indices {
@@ -922,6 +949,171 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> PreparedMessages {
     cache.key = Some(key);
     cache.prepared = Some(prepared.clone());
     prepared
+}
+
+fn prepare_streaming_cached(
+    app: &dyn TuiState,
+    width: u16,
+    prefix_blank: bool,
+) -> PreparedMessages {
+    let streaming = app.streaming_text();
+    if streaming.is_empty() {
+        return PreparedMessages {
+            wrapped_lines: Vec::new(),
+            wrapped_user_indices: Vec::new(),
+        };
+    }
+
+    let key = StreamingCacheKey {
+        width,
+        prefix_blank,
+    };
+    let is_plain = is_plain_streaming_text(streaming);
+    let mut cache = streaming_cache().lock().unwrap();
+
+    if cache.key.as_ref() == Some(&key) && cache.text == streaming {
+        return PreparedMessages {
+            wrapped_lines: cache.wrapped_lines.clone(),
+            wrapped_user_indices: Vec::new(),
+        };
+    }
+
+    if cache.key.as_ref() == Some(&key)
+        && cache.is_plain
+        && is_plain
+        && streaming.starts_with(&cache.text)
+    {
+        let append = &streaming[cache.text.len()..];
+        if !append.is_empty() {
+            let style = streaming_plain_style(&cache.wrapped_lines);
+            append_plain_text_lines(
+                &mut cache.wrapped_lines,
+                width as usize,
+                append,
+                prefix_blank,
+                style,
+            );
+            cache.text = streaming.to_string();
+        }
+
+        return PreparedMessages {
+            wrapped_lines: cache.wrapped_lines.clone(),
+            wrapped_user_indices: Vec::new(),
+        };
+    }
+
+    let prepared = prepare_streaming_full(streaming, width, prefix_blank);
+    cache.key = Some(key);
+    cache.text = streaming.to_string();
+    cache.wrapped_lines = prepared.wrapped_lines.clone();
+    cache.is_plain = is_plain;
+    prepared
+}
+
+fn prepare_streaming_full(streaming: &str, width: u16, prefix_blank: bool) -> PreparedMessages {
+    let mut lines: Vec<Line> = Vec::new();
+    if prefix_blank {
+        lines.push(Line::from(""));
+    }
+    let content_width = width.saturating_sub(4) as usize;
+    let md_lines = markdown::render_markdown_with_width(streaming, Some(content_width));
+    lines.extend(md_lines);
+    wrap_lines(lines, &[], width)
+}
+
+fn is_plain_streaming_text(text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    if text.contains('`') || text.contains('*') || text.contains('_') || text.contains('|') {
+        return false;
+    }
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#')
+            || trimmed.starts_with('>')
+            || trimmed.starts_with("```")
+            || trimmed.starts_with("- ")
+            || trimmed.starts_with("* ")
+            || trimmed.starts_with("+ ")
+            || trimmed.starts_with("|")
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn streaming_plain_style(lines: &[Line<'static>]) -> Style {
+    lines
+        .last()
+        .and_then(|line| line.spans.last())
+        .map(|span| span.style)
+        .unwrap_or_else(|| Style::default().fg(AI_TEXT))
+}
+
+fn append_plain_text_lines(
+    lines: &mut Vec<Line<'static>>,
+    width: usize,
+    text: &str,
+    prefix_blank: bool,
+    style: Style,
+) {
+    if lines.is_empty() {
+        if prefix_blank {
+            lines.push(Line::from(""));
+        }
+        lines.push(plain_line_with_style("", style));
+    } else if prefix_blank && lines.len() == 1 && line_text(&lines[0]).is_empty() {
+        lines.push(plain_line_with_style("", style));
+    }
+
+    let mut parts = text.split('\n');
+    if let Some(first) = parts.next() {
+        append_to_current_line(lines, width, first, style);
+    }
+    for part in parts {
+        lines.push(plain_line_with_style("", style));
+        append_to_current_line(lines, width, part, style);
+    }
+}
+
+fn append_to_current_line(
+    lines: &mut Vec<Line<'static>>,
+    width: usize,
+    text: &str,
+    style: Style,
+) {
+    if text.is_empty() {
+        return;
+    }
+    if lines.is_empty() {
+        lines.push(plain_line_with_style("", style));
+    }
+    let last_idx = lines.len().saturating_sub(1);
+    let last_text = line_text(&lines[last_idx]);
+    let combined = format!("{}{}", last_text, text);
+    let wrapped = markdown::wrap_line(plain_line_with_style(combined, style), width);
+    if !wrapped.is_empty() {
+        lines[last_idx] = wrapped[0].clone();
+        if wrapped.len() > 1 {
+            lines.extend(wrapped.into_iter().skip(1));
+        }
+    }
+}
+
+fn line_text(line: &Line<'static>) -> String {
+    if line.spans.is_empty() {
+        return String::new();
+    }
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+}
+
+fn plain_line_with_style(text: impl Into<String>, style: Style) -> Line<'static> {
+    Line::from(Span::styled(text.into(), style))
 }
 
 fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> PreparedMessages {
