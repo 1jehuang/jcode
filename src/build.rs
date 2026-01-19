@@ -354,6 +354,52 @@ pub fn current_build_info(repo_dir: &std::path::Path) -> Result<BuildInfo> {
     })
 }
 
+/// Install release binary into ~/.local/bin with versioned filename and symlink
+pub fn install_local_release(repo_dir: &std::path::Path) -> Result<PathBuf> {
+    let source = repo_dir.join("target/release/jcode");
+    if !source.exists() {
+        anyhow::bail!("Binary not found at {:?}", source);
+    }
+
+    let hash = current_git_hash(repo_dir)?;
+    let dirty = is_working_tree_dirty(repo_dir)?;
+    let version = if dirty {
+        format!("{}-dirty", hash)
+    } else {
+        hash
+    };
+
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .map_err(|_| anyhow::anyhow!("HOME not set"))?;
+    let dest_dir = home.join(".local").join("bin");
+    storage::ensure_dir(&dest_dir)?;
+
+    let versioned = dest_dir.join(format!("jcode-{}", version));
+
+    // Remove existing file first to avoid ETXTBSY
+    if versioned.exists() {
+        std::fs::remove_file(&versioned)?;
+    }
+    std::fs::copy(&source, &versioned)?;
+
+    // Make executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&versioned)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&versioned, perms)?;
+    }
+
+    let link_path = dest_dir.join("jcode");
+    let _ = std::fs::remove_file(&link_path);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&versioned, &link_path)?;
+
+    Ok(versioned)
+}
+
 /// Save migration context before switching to canary
 pub fn save_migration_context(ctx: &MigrationContext) -> Result<()> {
     let path = migration_context_path(&ctx.session_id)?;
