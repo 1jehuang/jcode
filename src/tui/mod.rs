@@ -4,6 +4,7 @@ mod core;
 pub mod info_widget;
 mod keybind;
 pub(crate) mod markdown;
+pub mod screenshot;
 pub mod session_picker;
 mod stream_buffer;
 mod ui;
@@ -72,6 +73,8 @@ pub trait TuiState {
     fn queue_mode(&self) -> bool;
     /// Context info (what's loaded in context window - static + dynamic)
     fn context_info(&self) -> crate::prompt::ContextInfo;
+    /// Context window limit in tokens (if known)
+    fn context_limit(&self) -> Option<usize>;
     /// Get info widget data (todos, client count, etc.)
     fn info_widget_data(&self) -> info_widget::InfoWidgetData;
 }

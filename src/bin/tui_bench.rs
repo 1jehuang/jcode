@@ -260,6 +260,10 @@ impl TuiState for BenchState {
         self.context_info.clone()
     }
 
+    fn context_limit(&self) -> Option<usize> {
+        Some(200_000)
+    }
+
     fn info_widget_data(&self) -> InfoWidgetData {
         self.info_widget.clone()
     }

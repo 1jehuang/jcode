@@ -891,6 +891,10 @@ impl TuiState for ClientApp {
         self.context_info.clone()
     }
 
+    fn context_limit(&self) -> Option<usize> {
+        None
+    }
+
     fn info_widget_data(&self) -> super::info_widget::InfoWidgetData {
         // Deprecated client - return empty widget data
         super::info_widget::InfoWidgetData::default()
