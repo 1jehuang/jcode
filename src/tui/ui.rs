@@ -24,9 +24,9 @@ const ASAP_COLOR: Color = Color::Rgb(110, 210, 255); // Cyan for immediate send
 const USER_TEXT: Color = Color::Rgb(245, 245, 255); // Bright cool white (user messages)
 const USER_BG: Color = Color::Rgb(35, 40, 50); // Subtle dark blue background for user
 const AI_TEXT: Color = Color::Rgb(220, 220, 215); // Softer warm white (AI messages)
-const HEADER_ICON_COLOR: Color = Color::Rgb(110, 210, 255); // Cyan for session icon
-const HEADER_NAME_COLOR: Color = Color::Rgb(255, 200, 120); // Warm amber for JCode label
-const HEADER_SESSION_COLOR: Color = Color::Rgb(140, 220, 160); // Soft green for session name
+const HEADER_ICON_COLOR: Color = Color::Rgb(120, 210, 230); // Teal for session icon
+const HEADER_NAME_COLOR: Color = Color::Rgb(190, 210, 235); // Soft blue-gray for JCode label
+const HEADER_SESSION_COLOR: Color = Color::Rgb(150, 220, 190); // Seafoam for session name
 
 // Spinner frames for animated status
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -66,8 +66,29 @@ fn header_animation_color(elapsed: f32) -> Color {
 
 /// Create animated span for the header text during startup
 fn animated_header_span(text: &str, elapsed: f32) -> Span<'static> {
-    let color = header_animation_color(elapsed);
+    let color = header_fade_color(header_animation_color(elapsed), elapsed, 0.12);
     Span::styled(text.to_string(), Style::default().fg(color))
+}
+
+fn header_fade_color(target: Color, elapsed: f32, offset: f32) -> Color {
+    let t = ((elapsed - offset) / HEADER_ANIM_DURATION).clamp(0.0, 1.0);
+    let eased = 1.0 - (1.0 - t).powi(3);
+    blend_color(DIM_COLOR, target, eased)
+}
+
+fn blend_color(from: Color, to: Color, t: f32) -> Color {
+    let (fr, fg, fb) = match from {
+        Color::Rgb(r, g, b) => (r as f32, g as f32, b as f32),
+        _ => (80.0, 80.0, 80.0),
+    };
+    let (tr, tg, tb) = match to {
+        Color::Rgb(r, g, b) => (r as f32, g as f32, b as f32),
+        _ => (200.0, 200.0, 200.0),
+    };
+    let r = fr + (tr - fr) * t;
+    let g = fg + (tg - fg) * t;
+    let b = fb + (tb - fb) * t;
+    Color::Rgb(r.clamp(0.0, 255.0) as u8, g.clamp(0.0, 255.0) as u8, b.clamp(0.0, 255.0) as u8)
 }
 
 /// Extract semantic version from full version string (e.g., "v0.1.0-dev (abc123)" -> "v0.1.0")
@@ -87,13 +108,22 @@ fn semver() -> &'static str {
 /// Create multi-color spans for the header line
 fn header_spans(icon: &str, session: &str, model: &str, elapsed: f32) -> Vec<Span<'static>> {
     vec![
-        Span::styled(format!("{} ", icon), Style::default().fg(HEADER_ICON_COLOR)),
-        Span::styled("JCode ".to_string(), Style::default().fg(HEADER_NAME_COLOR)),
+        Span::styled(
+            format!("{} ", icon),
+            Style::default().fg(header_fade_color(HEADER_ICON_COLOR, elapsed, 0.00)),
+        ),
+        Span::styled(
+            "JCode ".to_string(),
+            Style::default().fg(header_fade_color(HEADER_NAME_COLOR, elapsed, 0.06)),
+        ),
         Span::styled(
             format!("{} ", capitalize(session)),
-            Style::default().fg(HEADER_SESSION_COLOR),
+            Style::default().fg(header_fade_color(HEADER_SESSION_COLOR, elapsed, 0.12)),
         ),
-        Span::styled("· ".to_string(), Style::default().fg(DIM_COLOR)),
+        Span::styled(
+            "· ".to_string(),
+            Style::default().fg(header_fade_color(DIM_COLOR, elapsed, 0.18)),
+        ),
         animated_header_span(model, elapsed),
     ]
 }
@@ -228,59 +258,86 @@ fn render_context_bar(info: &crate::prompt::ContextInfo, max_width: usize) -> Ve
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let total: usize = final_segs.iter().map(|(_, _, t, _)| *t).sum();
-    let bar_w = 20.min(max_width.saturating_sub(30));
 
-    // Find max label width for alignment
-    let max_label_len = final_segs.iter().map(|(_, l, _, _)| l.chars().count()).max().unwrap_or(12);
-    let label_w = max_label_len.max(12).min(20);
-
-    for (icon, label, tokens, color) in &final_segs {
-        let pct = (*tokens as f64 / LIMIT as f64 * 100.0).round() as usize;
-        let token_str = if *tokens >= 1000 {
-            format!("{:>3}k", tokens / 1000)
-        } else {
-            format!("{:>4}", tokens)
-        };
-        let bar_len = ((*tokens as f64 / LIMIT as f64) * bar_w as f64)
-            .ceil().max(if *tokens > 0 { 1.0 } else { 0.0 }).min(bar_w as f64) as usize;
-
-        let spans = vec![
-            Span::styled(format!("{} ", icon), Style::default().fg(*color)),
-            Span::styled(format!("{:<width$}", label, width = label_w), Style::default().fg(*color)),
-            Span::styled(format!(" {:>4}", token_str), Style::default().fg(DIM_COLOR)),
-            Span::styled(format!(" {:>2}%", pct), Style::default().fg(DIM_COLOR)),
-            Span::styled("  ", Style::default()),
-            Span::styled("█".repeat(bar_len), Style::default().fg(*color)),
-        ];
-        lines.push(Line::from(spans));
-    }
-
-    // Summary bar
-    let sum_w = 30.min(max_width.saturating_sub(15));
+    // Summary bar (top)
+    let sum_w = 36.min(max_width.saturating_sub(12)).max(14);
     let used_w = ((total as f64 / LIMIT as f64) * sum_w as f64)
-        .ceil().max(if total > 0 { 1.0 } else { 0.0 }).min(sum_w as f64) as usize;
+        .ceil()
+        .max(if total > 0 { 1.0 } else { 0.0 })
+        .min(sum_w as f64) as usize;
     let empty_w = sum_w.saturating_sub(used_w);
 
     let mut bar: Vec<Span<'static>> = vec![Span::styled("[", Style::default().fg(DIM_COLOR))];
     let mut rem = used_w;
     for (_, _, t, c) in &final_segs {
-        if rem == 0 || total == 0 { break; }
-        let w = ((*t as f64 / total as f64) * used_w as f64).round().min(rem as f64) as usize;
+        if rem == 0 || total == 0 {
+            break;
+        }
+        let w = ((*t as f64 / total as f64) * used_w as f64)
+            .round()
+            .min(rem as f64) as usize;
         if w > 0 {
             bar.push(Span::styled("█".repeat(w), Style::default().fg(*c)));
             rem -= w;
         }
     }
     if rem > 0 && !final_segs.is_empty() {
-        bar.push(Span::styled("█".repeat(rem), Style::default().fg(final_segs.last().unwrap().3)));
+        bar.push(Span::styled(
+            "█".repeat(rem),
+            Style::default().fg(final_segs.last().unwrap().3),
+        ));
     }
     if empty_w > 0 {
         bar.push(Span::styled("░".repeat(empty_w), Style::default().fg(EMPTY_COLOR)));
     }
     bar.push(Span::styled("] ", Style::default().fg(DIM_COLOR)));
-    let total_str = if total >= 1000 { format!("{}k", total / 1000) } else { format!("{}", total) };
-    bar.push(Span::styled(format!("{}/200k", total_str), Style::default().fg(DIM_COLOR)));
+    let total_str = if total >= 1000 {
+        format!("{}k", total / 1000)
+    } else {
+        format!("{}", total)
+    };
+    bar.push(Span::styled(
+        format!("{}/200k", total_str),
+        Style::default().fg(DIM_COLOR),
+    ));
     lines.push(Line::from(bar));
+
+    // Detail list with dot leaders
+    let max_label_len = final_segs
+        .iter()
+        .map(|(_, l, _, _)| l.chars().count())
+        .max()
+        .unwrap_or(8);
+    let label_w = max_label_len.max(10).min(18);
+    let line_w = max_width.saturating_sub(4);
+
+    for (icon, label, tokens, color) in &final_segs {
+        let pct = (*tokens as f64 / LIMIT as f64 * 100.0).round() as usize;
+        let token_str = if *tokens >= 1000 {
+            format!("{}k", tokens / 1000)
+        } else {
+            format!("{}", tokens)
+        };
+        let tail = format!("{}  {}%", token_str, pct);
+        let label_text = format!("{} {}", icon, label);
+        let label_len = label_text.chars().count();
+        let pad = label_w.saturating_sub(label_len);
+        let reserved = label_w + pad + tail.chars().count() + 2;
+        let dots = line_w.saturating_sub(reserved).max(2);
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        spans.push(Span::styled(label_text, Style::default().fg(*color)));
+        if pad > 0 {
+            spans.push(Span::raw(" ".repeat(pad)));
+        }
+        spans.push(Span::styled(
+            "·".repeat(dots),
+            Style::default().fg(DIM_COLOR),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(tail, Style::default().fg(DIM_COLOR)));
+        lines.push(Line::from(spans));
+    }
 
     lines
 }
