@@ -88,12 +88,15 @@ impl Default for DisplayConfig {
 pub struct ProviderConfig {
     /// Default model to use
     pub default_model: Option<String>,
+    /// Reasoning effort for OpenAI Responses API (none|low|medium|high|xhigh)
+    pub openai_reasoning_effort: Option<String>,
 }
 
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
             default_model: None,
+            openai_reasoning_effort: Some("xhigh".to_string()),
         }
     }
 }
@@ -171,6 +174,12 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_MODEL") {
             self.provider.default_model = Some(v);
         }
+        if let Ok(v) = std::env::var("JCODE_OPENAI_REASONING_EFFORT") {
+            let trimmed = v.trim().to_string();
+            if !trimmed.is_empty() {
+                self.provider.openai_reasoning_effort = Some(trimmed);
+            }
+        }
     }
 
     /// Save config to file
@@ -227,6 +236,8 @@ mouse_capture = false
 [provider]
 # Default model (optional, uses provider default if not set)
 # default_model = "claude-sonnet-4-20250514"
+# OpenAI reasoning effort (none|low|medium|high|xhigh)
+openai_reasoning_effort = "xhigh"
 "#;
 
         std::fs::write(&path, default_content)?;
@@ -257,6 +268,7 @@ mouse_capture = false
 
 **Provider:**
 - Default model: {}
+- OpenAI reasoning effort: {}
 
 *Edit the config file or set environment variables to customize.*
 *Environment variables (e.g., `JCODE_SCROLL_UP_KEY`) override file settings.*"#,
@@ -272,6 +284,10 @@ mouse_capture = false
             self.display.mouse_capture,
             self.provider
                 .default_model
+                .as_deref()
+                .unwrap_or("(provider default)"),
+            self.provider
+                .openai_reasoning_effort
                 .as_deref()
                 .unwrap_or("(provider default)"),
         )
