@@ -402,7 +402,7 @@ pub struct App {
     status_notice: Option<(String, Instant)>,
     // Message to interleave during processing (set via Shift+Enter)
     interleave_message: Option<String>,
-    // Queue mode: if true, Enter during processing queues; if false, Enter interleaves immediately
+    // Queue mode: if true, Enter during processing queues; if false, Enter queues to send next
     // Toggle with Ctrl+Tab or Ctrl+T
     queue_mode: bool,
     // Tab completion state: (base_input, suggestion_index)
@@ -2453,7 +2453,7 @@ impl App {
                     let mode_str = if self.queue_mode {
                         "Queue mode: messages wait until response completes"
                     } else {
-                        "Immediate mode: messages interrupt current response"
+                        "Immediate mode: messages send next (no interrupt)"
                     };
                     self.set_status_notice(mode_str);
                     return Ok(());
@@ -2493,9 +2493,8 @@ impl App {
                         self.queued_messages.push(expanded);
                     }
                     SendAction::Interleave => {
-                        self.interleave_message = Some(expanded);
-                        self.set_status_notice("⚡ Interleaving message...");
-                        remote.cancel().await?;
+                        self.queued_messages.insert(0, expanded);
+                        self.set_status_notice("⏭ Queued to send next");
                     }
                 }
             }
@@ -2701,9 +2700,8 @@ impl App {
                             self.queued_messages.push(expanded);
                         }
                         SendAction::Interleave => {
-                            self.interleave_message = Some(expanded);
-                            self.set_status_notice("⚡ Interleaving message...");
-                            remote.cancel().await?;
+                            self.queued_messages.insert(0, expanded);
+                            self.set_status_notice("⏭ Queued to send next");
                         }
                     }
                 }
@@ -2949,7 +2947,7 @@ impl App {
                     let mode_str = if self.queue_mode {
                         "Queue mode: messages wait until response completes"
                     } else {
-                        "Immediate mode: messages interrupt current response"
+                        "Immediate mode: messages send next (no interrupt)"
                     };
                     self.set_status_notice(mode_str);
                     return Ok(());
@@ -2979,9 +2977,9 @@ impl App {
                         let raw_input = std::mem::take(&mut self.input);
                         let expanded = self.expand_paste_placeholders(&raw_input);
                         self.pasted_contents.clear();
-                        self.interleave_message = Some(expanded);
+                        self.queued_messages.insert(0, expanded);
                         self.cursor_pos = 0;
-                        self.set_status_notice("⚡ Interleaving message...");
+                        self.set_status_notice("⏭ Queued to send next");
                     }
                 }
             }
@@ -2998,9 +2996,9 @@ impl App {
                             let raw_input = std::mem::take(&mut self.input);
                             let expanded = self.expand_paste_placeholders(&raw_input);
                             self.pasted_contents.clear();
-                            self.interleave_message = Some(expanded);
+                            self.queued_messages.insert(0, expanded);
                             self.cursor_pos = 0;
-                            self.set_status_notice("⚡ Interleaving message...");
+                            self.set_status_notice("⏭ Queued to send next");
                         }
                     }
                 }
@@ -6088,8 +6086,8 @@ mod tests {
         app.handle_key(KeyCode::Enter, KeyModifiers::SHIFT)
             .unwrap();
 
-        assert_eq!(app.queued_count(), 1);
-        assert_eq!(app.interleave_message.as_deref(), Some("yo"));
+        assert_eq!(app.queued_count(), 2);
+        assert_eq!(app.queued_messages()[0], "yo");
     }
 
     #[test]
