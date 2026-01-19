@@ -84,6 +84,7 @@ impl Tool for BashTool {
         let mut child = Command::new("bash")
             .arg("-c")
             .arg(&params.command)
+            .kill_on_drop(true)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
@@ -157,6 +158,7 @@ impl BashTool {
                 let mut child = Command::new("bash")
                     .arg("-c")
                     .arg(&command)
+                    .kill_on_drop(true)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .spawn()

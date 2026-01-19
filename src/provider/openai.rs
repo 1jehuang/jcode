@@ -573,6 +573,10 @@ impl Provider for OpenAIProvider {
     fn reasoning_effort(&self) -> Option<String> {
         self.reasoning_effort.clone()
     }
+
+    fn supports_compaction(&self) -> bool {
+        true
+    }
 }
 
 fn should_refresh_token(status: StatusCode, body: &str) -> bool {

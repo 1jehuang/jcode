@@ -2,8 +2,9 @@
 #![allow(unused_assignments)]
 
 use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
+use crate::compaction::CompactionEvent;
 use crate::logging;
-use crate::message::{ContentBlock, Role, StreamEvent, ToolCall, ToolDefinition};
+use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall, ToolDefinition};
 use crate::protocol::{HistoryMessage, ServerEvent};
 use crate::provider::Provider;
 use crate::session::Session;
@@ -78,7 +79,7 @@ pub struct Agent {
 impl Agent {
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
         let skills = SkillRegistry::load().unwrap_or_default();
-        Self {
+        let mut agent = Self {
             provider,
             registry,
             skills,
@@ -87,7 +88,9 @@ impl Agent {
             allowed_tools: None,
             provider_session_id: None,
             pending_alerts: Vec::new(),
-        }
+        };
+        agent.seed_compaction_from_session();
+        agent
     }
 
     pub fn new_with_session(
@@ -97,7 +100,7 @@ impl Agent {
         allowed_tools: Option<HashSet<String>>,
     ) -> Self {
         let skills = SkillRegistry::load().unwrap_or_default();
-        Self {
+        let mut agent = Self {
             provider,
             registry,
             skills,
@@ -106,7 +109,44 @@ impl Agent {
             allowed_tools,
             provider_session_id: None,
             pending_alerts: Vec::new(),
+        };
+        agent.seed_compaction_from_session();
+        agent
+    }
+
+    fn seed_compaction_from_session(&mut self) {
+        let compaction = self.registry.compaction();
+        let mut manager = compaction.try_write().expect("compaction lock");
+        manager.reset();
+        for msg in &self.session.messages {
+            manager.add_message(msg.to_message());
         }
+    }
+
+    fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {
+        let id = self.session.add_message(role.clone(), content.clone());
+        let message = Message { role, content };
+        let compaction = self.registry.compaction();
+        if let Ok(mut manager) = compaction.try_write() {
+            manager.add_message(message);
+        }
+        id
+    }
+
+    fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
+        if self.provider.supports_compaction() {
+            let compaction = self.registry.compaction();
+            match compaction.try_write() {
+                Ok(mut manager) => {
+                    manager.maybe_start_compaction(self.provider.clone());
+                    let messages = manager.messages_for_api();
+                    let event = manager.take_compaction_event();
+                    return (messages, event);
+                }
+                Err(_) => {}
+            };
+        }
+        (self.session.messages_for_provider(), None)
     }
 
     /// Add a swarm alert to be injected into the next turn
@@ -130,7 +170,7 @@ impl Agent {
 
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
-        self.session.add_message(
+        self.add_message(
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
@@ -146,7 +186,7 @@ impl Agent {
     }
 
     pub async fn run_once_capture(&mut self, user_message: &str) -> Result<String> {
-        self.session.add_message(
+        self.add_message(
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
@@ -174,7 +214,7 @@ impl Agent {
                 alerts.len(),
                 alerts.join("\n\n---\n\n")
             );
-            self.session.add_message(
+            self.add_message(
                 Role::User,
                 vec![ContentBlock::Text {
                     text: alert_text,
@@ -183,7 +223,7 @@ impl Agent {
             );
         }
 
-        self.session.add_message(
+        self.add_message(
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
@@ -208,7 +248,7 @@ impl Agent {
                 alerts.len(),
                 alerts.join("\n\n---\n\n")
             );
-            self.session.add_message(
+            self.add_message(
                 Role::User,
                 vec![ContentBlock::Text {
                     text: alert_text,
@@ -217,7 +257,7 @@ impl Agent {
             );
         }
 
-        self.session.add_message(
+        self.add_message(
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
@@ -233,6 +273,7 @@ impl Agent {
         self.session = Session::create(None, None);
         self.active_skill = None;
         self.provider_session_id = None;
+        self.seed_compaction_from_session();
     }
 
     /// Build the system prompt, including skill and self-dev context
@@ -291,6 +332,7 @@ impl Agent {
         self.active_skill = None;
         // Don't restore provider_session_id - it's not valid across process restarts
         self.provider_session_id = None;
+        self.seed_compaction_from_session();
         Ok(())
     }
 
@@ -408,7 +450,16 @@ impl Agent {
 
             let system_prompt = self.build_system_prompt();
 
-            let messages = self.session.messages_for_provider();
+            let (messages, compaction_event) = self.messages_for_provider();
+            if let Some(event) = compaction_event {
+                if print_output {
+                    let tokens_str = event
+                        .pre_tokens
+                        .map(|t| format!(" ({} tokens)", t))
+                        .unwrap_or_default();
+                    println!("📦 Context compacted ({}){}", event.trigger, tokens_str);
+                }
+            }
 
             logging::info(&format!(
                 "API call starting: {} messages, {} tools",
@@ -651,7 +702,7 @@ impl Agent {
             }
 
             let assistant_message_id = if !content_blocks.is_empty() {
-                let message_id = self.session.add_message(Role::Assistant, content_blocks);
+                let message_id = self.add_message(Role::Assistant, content_blocks);
                 self.session.save()?;
                 Some(message_id)
             } else {
@@ -743,7 +794,7 @@ impl Agent {
                             title: None,
                         }));
 
-                        self.session.add_message(
+                        self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id,
@@ -823,7 +874,7 @@ impl Agent {
                             println!("{}", preview.lines().next().unwrap_or("(done)"));
                         }
 
-                        self.session.add_message(
+                        self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id,
@@ -853,7 +904,7 @@ impl Agent {
                         if print_output {
                             println!("{}", error_msg);
                         }
-                        self.session.add_message(
+                        self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id,
@@ -883,7 +934,16 @@ impl Agent {
 
             let system_prompt = self.build_system_prompt();
 
-            let messages = self.session.messages_for_provider();
+            let (messages, compaction_event) = self.messages_for_provider();
+            if let Some(event) = compaction_event {
+                logging::info(&format!(
+                    "Context compacted ({}{})",
+                    event.trigger,
+                    event.pre_tokens
+                        .map(|t| format!(" {} tokens", t))
+                        .unwrap_or_default()
+                ));
+            }
 
             let mut stream = self
                 .provider
@@ -1041,7 +1101,7 @@ impl Agent {
             }
 
             let assistant_message_id = if !content_blocks.is_empty() {
-                let message_id = self.session.add_message(Role::Assistant, content_blocks);
+                let message_id = self.add_message(Role::Assistant, content_blocks);
                 self.session.save()?;
                 Some(message_id)
             } else {
@@ -1084,7 +1144,7 @@ impl Agent {
                 if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
                     // For native tools, ignore SDK errors and execute locally
                     if !(is_native_tool && sdk_is_error) {
-                        self.session.add_message(
+                        self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id,
@@ -1120,7 +1180,7 @@ impl Agent {
                             error: None,
                         });
 
-                        self.session.add_message(
+                        self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id,
@@ -1139,7 +1199,7 @@ impl Agent {
                             error: Some(error_msg.clone()),
                         });
 
-                        self.session.add_message(
+                        self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id,
@@ -1168,7 +1228,16 @@ impl Agent {
 
             let system_prompt = self.build_system_prompt();
 
-            let messages = self.session.messages_for_provider();
+            let (messages, compaction_event) = self.messages_for_provider();
+            if let Some(event) = compaction_event {
+                logging::info(&format!(
+                    "Context compacted ({}{})",
+                    event.trigger,
+                    event.pre_tokens
+                        .map(|t| format!(" {} tokens", t))
+                        .unwrap_or_default()
+                ));
+            }
 
             let mut stream = self
                 .provider
@@ -1321,7 +1390,7 @@ impl Agent {
             }
 
             let assistant_message_id = if !content_blocks.is_empty() {
-                let message_id = self.session.add_message(Role::Assistant, content_blocks);
+                let message_id = self.add_message(Role::Assistant, content_blocks);
                 self.session.save()?;
                 Some(message_id)
             } else {
@@ -1360,7 +1429,7 @@ impl Agent {
                 if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
                     // For native tools, ignore SDK errors and execute locally
                     if !(is_native_tool && sdk_is_error) {
-                        self.session.add_message(
+                        self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id,
@@ -1395,7 +1464,7 @@ impl Agent {
                             error: None,
                         });
 
-                        self.session.add_message(
+                        self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id,
@@ -1414,7 +1483,7 @@ impl Agent {
                             error: Some(error_msg.clone()),
                         });
 
-                        self.session.add_message(
+                        self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id,
