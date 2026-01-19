@@ -7,7 +7,10 @@ use super::visual_debug::{self, FrameCaptureBuilder, MessageCapture};
 use super::{ProcessingStatus, TuiState};
 use crate::message::ToolCall;
 use ratatui::{prelude::*, widgets::Paragraph};
-use std::sync::OnceLock;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 // Minimal color palette
 const USER_COLOR: Color = Color::Rgb(138, 180, 248); // Soft blue (caret)
@@ -438,9 +441,81 @@ fn format_status_for_debug(app: &dyn TuiState) -> String {
     }
 }
 
+#[derive(Clone)]
 struct PreparedMessages {
     wrapped_lines: Vec<Line<'static>>,
     wrapped_user_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct BodyCacheKey {
+    width: u16,
+    show_diffs: bool,
+    messages_hash: u64,
+}
+
+#[derive(Default)]
+struct BodyCacheState {
+    key: Option<BodyCacheKey>,
+    prepared: Option<PreparedMessages>,
+}
+
+static BODY_CACHE: OnceLock<Mutex<BodyCacheState>> = OnceLock::new();
+
+fn body_cache() -> &'static Mutex<BodyCacheState> {
+    BODY_CACHE.get_or_init(|| Mutex::new(BodyCacheState::default()))
+}
+
+#[derive(Default)]
+struct RenderProfile {
+    frames: u64,
+    total: Duration,
+    prepare: Duration,
+    draw: Duration,
+    last_log: Option<Instant>,
+}
+
+static PROFILE_STATE: OnceLock<Mutex<RenderProfile>> = OnceLock::new();
+
+fn profile_state() -> &'static Mutex<RenderProfile> {
+    PROFILE_STATE.get_or_init(|| Mutex::new(RenderProfile::default()))
+}
+
+fn profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("JCODE_TUI_PROFILE").is_ok())
+}
+
+fn record_profile(prepare: Duration, draw: Duration, total: Duration) {
+    let mut state = profile_state().lock().unwrap();
+    state.frames += 1;
+    state.prepare += prepare;
+    state.draw += draw;
+    state.total += total;
+
+    let now = Instant::now();
+    let should_log = match state.last_log {
+        Some(last) => now.duration_since(last) >= Duration::from_secs(1),
+        None => true,
+    };
+    if should_log && state.frames > 0 {
+        let frames = state.frames as f64;
+        let avg_prepare = state.prepare.as_secs_f64() * 1000.0 / frames;
+        let avg_draw = state.draw.as_secs_f64() * 1000.0 / frames;
+        let avg_total = state.total.as_secs_f64() * 1000.0 / frames;
+        crate::logging::info(&format!(
+            "TUI perf: {:.1} fps | prepare {:.2}ms | draw {:.2}ms | total {:.2}ms",
+            frames,
+            avg_prepare,
+            avg_draw,
+            avg_total
+        ));
+        state.frames = 0;
+        state.prepare = Duration::from_secs(0);
+        state.draw = Duration::from_secs(0);
+        state.total = Duration::from_secs(0);
+        state.last_log = Some(now);
+    }
 }
 
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
@@ -478,7 +553,10 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         .filter(|m| m.role == "user")
         .count();
 
+    let total_start = Instant::now();
+    let prep_start = Instant::now();
     let prepared = prepare_messages(app, area.width);
+    let prep_elapsed = prep_start.elapsed();
     let content_height = prepared.wrapped_lines.len().max(1) as u16;
     let fixed_height = 1 + queued_height + input_height; // status + queued + input
     let available_height = area.height;
@@ -559,7 +637,9 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         capture.rendered_text.status_line = format_status_for_debug(app);
     }
 
+    let draw_start = Instant::now();
     let visible_free_widths = draw_messages(frame, app, chunks[0], &prepared);
+    let draw_elapsed = draw_start.elapsed();
     draw_status(frame, app, chunks[1]);
     if queued_height > 0 {
         draw_queued(frame, app, chunks[2], user_count + 1);
@@ -586,11 +666,39 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     if let Some(capture) = debug_capture {
         visual_debug::record_frame(capture.build());
     }
+
+    if profile_enabled() {
+        record_profile(prep_elapsed, draw_elapsed, total_start.elapsed());
+    }
 }
 
 fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
+    let header_lines = build_header_lines(app, width);
+    let header_prepared = wrap_lines(header_lines, &[], width);
+
+    let body_prepared = if !app.is_processing() && app.streaming_text().is_empty() {
+        prepare_body_cached(app, width)
+    } else {
+        prepare_body(app, width, true)
+    };
+
+    let mut wrapped_lines = header_prepared.wrapped_lines;
+    let header_len = wrapped_lines.len();
+    wrapped_lines.extend(body_prepared.wrapped_lines);
+
+    let mut wrapped_user_indices = body_prepared.wrapped_user_indices;
+    for idx in &mut wrapped_user_indices {
+        *idx += header_len;
+    }
+
+    PreparedMessages {
+        wrapped_lines,
+        wrapped_user_indices,
+    }
+}
+
+fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
-    let mut user_line_indices: Vec<usize> = Vec::new(); // Track which lines are user prompts
 
     // Header - always visible
     let _provider = app.provider_name();
@@ -682,9 +790,7 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
                 .min(available_width.saturating_sub(4));
 
             // Minimum usable width
-            if max_content_width < 10 {
-                // Too narrow - skip the box
-            } else {
+            if max_content_width >= 10 {
                 let box_width = max_content_width + 4; // +4 for "│ " and " │"
 
                 // Top border with title centered: ──── Updates ────
@@ -794,6 +900,33 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
 
     // Blank line after header
     lines.push(Line::from(""));
+
+    lines
+}
+
+fn prepare_body_cached(app: &dyn TuiState, width: u16) -> PreparedMessages {
+    let key = BodyCacheKey {
+        width,
+        show_diffs: app.show_diffs(),
+        messages_hash: hash_display_messages(app),
+    };
+
+    let mut cache = body_cache().lock().unwrap();
+    if cache.key.as_ref() == Some(&key) {
+        if let Some(prepared) = cache.prepared.clone() {
+            return prepared;
+        }
+    }
+
+    let prepared = prepare_body(app, width, false);
+    cache.key = Some(key);
+    cache.prepared = Some(prepared.clone());
+    prepared
+}
+
+fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> PreparedMessages {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut user_line_indices: Vec<usize> = Vec::new();
 
     let mut prompt_num = 0usize;
     // Count total user prompts and pending messages for rainbow coloring
@@ -1019,7 +1152,7 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
     }
 
     // Streaming text - render with markdown for consistent formatting
-    if app.is_processing() {
+    if include_streaming && app.is_processing() {
         if !app.streaming_text().is_empty() {
             if !lines.is_empty() {
                 lines.push(Line::from(""));
@@ -1033,6 +1166,14 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
         // Tool calls are now shown inline in display_messages
     }
 
+    wrap_lines(lines, &user_line_indices, width)
+}
+
+fn wrap_lines(
+    lines: Vec<Line<'static>>,
+    user_line_indices: &[usize],
+    width: u16,
+) -> PreparedMessages {
     // Wrap lines and track which wrapped indices correspond to user lines
     let full_width = width as usize;
     let user_width = width.saturating_sub(2) as usize; // Leave margin for right bar
@@ -1062,6 +1203,23 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
         wrapped_lines,
         wrapped_user_indices,
     }
+}
+
+fn hash_display_messages(app: &dyn TuiState) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    app.display_messages().len().hash(&mut hasher);
+    for msg in app.display_messages() {
+        msg.role.hash(&mut hasher);
+        msg.content.hash(&mut hasher);
+        msg.tool_calls.hash(&mut hasher);
+        msg.title.hash(&mut hasher);
+        if let Some(tool) = &msg.tool_data {
+            tool.id.hash(&mut hasher);
+            tool.name.hash(&mut hasher);
+            tool.input.to_string().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 fn compute_visible_free_widths(
