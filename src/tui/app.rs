@@ -1915,6 +1915,29 @@ impl App {
 
             // Show reconnection message if applicable
             if reconnect_attempts > 0 {
+                if self.reload_info.is_empty() {
+                    if let Ok(jcode_dir) = crate::storage::jcode_dir() {
+                        let info_path = jcode_dir.join("reload-info");
+                        if info_path.exists() {
+                            if let Ok(info) = std::fs::read_to_string(&info_path) {
+                                let _ = std::fs::remove_file(&info_path);
+                                let trimmed = info.trim();
+                                if let Some(hash) = trimmed.strip_prefix("reload:") {
+                                    self.reload_info
+                                        .push(format!("Reloaded with build {}", hash.trim()));
+                                } else if let Some(hash) = trimmed.strip_prefix("rebuild:") {
+                                    self.reload_info.push(format!(
+                                        "Rebuilt and reloaded ({})",
+                                        hash.trim()
+                                    ));
+                                } else if !trimmed.is_empty() {
+                                    self.reload_info.push(trimmed.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Check if client also needs to reload (newer binary available)
                 if self.has_newer_binary() {
                     self.display_messages.push(DisplayMessage::system(
