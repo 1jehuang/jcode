@@ -878,6 +878,7 @@ fn context_entries(info: &ContextInfo) -> Vec<(&'static str, &'static str, usize
         + info.global_agents_md_chars
         + info.global_claude_md_chars;
     let skills_chars = info.skills_chars + info.selfdev_chars;
+    let memory_chars = info.memory_chars;
     let msgs_chars = info.user_messages_chars + info.assistant_messages_chars;
     let tool_io_chars = info.tool_calls_chars + info.tool_results_chars;
 
@@ -893,6 +894,9 @@ fn context_entries(info: &ContextInfo) -> Vec<(&'static str, &'static str, usize
     }
     if skills_chars > 0 {
         entries.push(("🛠", "skills", skills_chars / 4));
+    }
+    if memory_chars > 0 {
+        entries.push(("🧠", "mem", memory_chars / 4));
     }
     if info.tool_defs_chars > 0 {
         entries.push(("🔨", "tools", info.tool_defs_chars / 4));

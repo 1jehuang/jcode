@@ -4164,9 +4164,9 @@ impl App {
             }
 
             let tools = self.registry.definitions(None).await;
-
+            let memory_prompt = self.build_memory_prompt(&self.messages).await;
             // Build system prompt with active skill
-            let system_prompt = self.build_system_prompt();
+            let system_prompt = self.build_system_prompt(memory_prompt.as_deref());
 
             self.status = ProcessingStatus::Sending;
             let mut stream = self
@@ -4556,7 +4556,8 @@ impl App {
             }
 
             let tools = self.registry.definitions(None).await;
-            let system_prompt = self.build_system_prompt();
+            let memory_prompt = self.build_memory_prompt(&self.messages).await;
+            let system_prompt = self.build_system_prompt(memory_prompt.as_deref());
 
             self.status = ProcessingStatus::Sending;
             terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
@@ -5209,7 +5210,7 @@ impl App {
         Ok(())
     }
 
-    fn build_system_prompt(&mut self) -> String {
+    fn build_system_prompt(&mut self, memory_prompt: Option<&str>) -> String {
         let skill_prompt = self
             .active_skill
             .as_ref()
@@ -5223,13 +5224,29 @@ impl App {
                 description: s.description.clone(),
             })
             .collect();
-        let (prompt, context_info) = crate::prompt::build_system_prompt_with_context(
+        let (prompt, context_info) = crate::prompt::build_system_prompt_with_context_and_memory(
             skill_prompt.as_deref(),
             &available_skills,
             self.session.is_canary,
+            memory_prompt,
         );
         self.context_info = context_info;
         prompt
+    }
+
+    async fn build_memory_prompt(&self, messages: &[Message]) -> Option<String> {
+        if self.is_remote {
+            return None;
+        }
+
+        let manager = crate::memory::MemoryManager::new();
+        match manager.relevant_prompt_for_messages(messages).await {
+            Ok(prompt) => prompt,
+            Err(e) => {
+                crate::logging::info(&format!("Memory relevance skipped: {}", e));
+                None
+            }
+        }
     }
 
     // Getters for UI
@@ -6048,6 +6065,7 @@ impl super::TuiState for App {
             + info.global_claude_md_chars
             + info.skills_chars
             + info.selfdev_chars
+            + info.memory_chars
             + info.tool_defs_chars
             + info.user_messages_chars
             + info.assistant_messages_chars
