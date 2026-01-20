@@ -9,8 +9,24 @@ use ratatui::{
     prelude::*,
     widgets::{Block, BorderType, Borders, Paragraph},
 };
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// Memory statistics for the info widget
+#[derive(Debug, Default, Clone)]
+pub struct MemoryInfo {
+    /// Total memory count (project + global)
+    pub total_count: usize,
+    /// Project-specific memory count
+    pub project_count: usize,
+    /// Global memory count
+    pub global_count: usize,
+    /// Count by category
+    pub by_category: HashMap<String, usize>,
+    /// Whether sidecar is available
+    pub sidecar_available: bool,
+}
 
 /// Minimum width needed to show the widget
 const MIN_WIDGET_WIDTH: u16 = 24;
@@ -31,6 +47,8 @@ pub struct InfoWidgetData {
     pub reasoning_effort: Option<String>,
     pub session_count: Option<usize>,
     pub client_count: Option<usize>,
+    /// Memory system statistics
+    pub memory_info: Option<MemoryInfo>,
     // TODO: Add swarm/subagent status summary to the info widget.
 }
 
@@ -40,6 +58,7 @@ impl InfoWidgetData {
             && self.context_info.is_none()
             && self.queue_mode.is_none()
             && self.model.is_none()
+            && self.memory_info.is_none()
     }
 }
 
@@ -391,6 +410,15 @@ fn compact_queue_height(data: &InfoWidgetData) -> u16 {
     }
 }
 
+fn compact_memory_height(data: &InfoWidgetData) -> u16 {
+    if let Some(info) = &data.memory_info {
+        if info.total_count > 0 {
+            return 1;
+        }
+    }
+    0
+}
+
 fn compact_model_height(data: &InfoWidgetData) -> u16 {
     if data.model.is_some() {
         // 1 line for model, +1 if we have session info
@@ -409,6 +437,7 @@ fn compact_overview_height(data: &InfoWidgetData) -> u16 {
         + compact_context_height(data)
         + compact_todos_height(data)
         + compact_queue_height(data)
+        + compact_memory_height(data)
 }
 
 fn expanded_context_height(data: &InfoWidgetData) -> u16 {
@@ -465,6 +494,13 @@ fn render_sections(
 
     if data.queue_mode.is_some() {
         lines.extend(render_queue_compact(data, inner));
+    }
+
+    // Memory info at the bottom
+    if let Some(info) = &data.memory_info {
+        if info.total_count > 0 {
+            lines.extend(render_memory_compact(info));
+        }
     }
 
     lines
@@ -565,6 +601,27 @@ fn render_queue_compact(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static
         Span::styled("Queue: ", Style::default().fg(Color::Rgb(140, 140, 150))),
         Span::styled(mode_text, Style::default().fg(mode_color)),
     ])]
+}
+
+fn render_memory_compact(info: &MemoryInfo) -> Vec<Line<'static>> {
+    let mut spans = vec![
+        Span::styled("🧠 ", Style::default().fg(Color::Rgb(200, 150, 255))),
+        Span::styled(
+            format!("{}", info.total_count),
+            Style::default().fg(Color::Rgb(180, 180, 190)),
+        ),
+        Span::styled(" mem", Style::default().fg(Color::Rgb(140, 140, 150))),
+    ];
+
+    // Show project/global breakdown if both exist
+    if info.project_count > 0 && info.global_count > 0 {
+        spans.push(Span::styled(
+            format!(" ({}p/{}g)", info.project_count, info.global_count),
+            Style::default().fg(Color::Rgb(100, 100, 110)),
+        ));
+    }
+
+    vec![Line::from(spans)]
 }
 
 fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
