@@ -256,8 +256,11 @@ impl RemoteConnection {
         };
 
         // Subscribe to events
+        let (working_dir, selfdev) = super::subscribe_metadata();
         conn.send_request(Request::Subscribe {
             id: conn.next_request_id,
+            working_dir,
+            selfdev,
         })
         .await?;
         conn.next_request_id += 1;

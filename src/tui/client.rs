@@ -286,8 +286,11 @@ impl ClientApp {
                 reconnect_attempts = 0;
 
                 // Subscribe to events
+                let (working_dir, selfdev) = super::subscribe_metadata();
                 let request = Request::Subscribe {
                     id: self.next_request_id,
+                    working_dir,
+                    selfdev,
                 };
                 self.next_request_id += 1;
                 let json = serde_json::to_string(&request)? + "\n";

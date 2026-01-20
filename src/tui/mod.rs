@@ -84,6 +84,29 @@ pub trait TuiState {
     fn info_widget_data(&self) -> info_widget::InfoWidgetData;
 }
 
+pub(crate) fn subscribe_metadata() -> (Option<String>, Option<bool>) {
+    let working_dir = std::env::current_dir().ok();
+    let working_dir_str = working_dir
+        .as_ref()
+        .map(|p| p.display().to_string());
+
+    let mut selfdev = std::env::var("JCODE_SELFDEV_MODE").is_ok();
+    if !selfdev {
+        if let Some(ref dir) = working_dir {
+            let mut current = Some(dir.as_path());
+            while let Some(path) = current {
+                if crate::build::is_jcode_repo(path) {
+                    selfdev = true;
+                    break;
+                }
+                current = path.parent();
+            }
+        }
+    }
+
+    (working_dir_str, if selfdev { Some(true) } else { None })
+}
+
 /// Public wrapper to render a single frame (used by benchmarks/tools).
 pub fn render_frame(frame: &mut Frame<'_>, state: &dyn TuiState) {
     ui::draw(frame, state);
