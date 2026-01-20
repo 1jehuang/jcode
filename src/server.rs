@@ -119,23 +119,55 @@ fn debug_control_allowed() -> bool {
         .unwrap_or(false)
 }
 
-fn server_has_newer_binary() -> bool {
-    let startup_mtime = std::env::current_exe()
-        .ok()
-        .and_then(|p| std::fs::metadata(&p).ok())
-        .and_then(|m| m.modified().ok());
-    let Some(startup_mtime) = startup_mtime else {
-        return false;
-    };
+fn server_update_candidate() -> Option<(PathBuf, &'static str)> {
+    if is_selfdev_env() {
+        if let Ok(canary) = crate::build::canary_binary_path() {
+            if canary.exists() {
+                return Some((canary, "canary"));
+            }
+        }
+        if let Ok(stable) = crate::build::stable_binary_path() {
+            if stable.exists() {
+                return Some((stable, "stable"));
+            }
+        }
+    }
 
-    let Some(repo_dir) = crate::build::get_repo_dir() else {
-        return false;
-    };
-
+    let repo_dir = crate::build::get_repo_dir()?;
     let exe = repo_dir.join("target/release/jcode");
-    if let Ok(metadata) = std::fs::metadata(&exe) {
-        if let Ok(current_mtime) = metadata.modified() {
-            return current_mtime > startup_mtime;
+    if exe.exists() {
+        return Some((exe, "release"));
+    }
+    None
+}
+
+fn canonicalize_or(path: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&path).unwrap_or(path)
+}
+
+fn server_has_newer_binary() -> bool {
+    let current_exe = std::env::current_exe().ok();
+    let startup_mtime = current_exe
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok());
+    let Some((candidate, _label)) = server_update_candidate() else {
+        return false;
+    };
+
+    if let Some(current_exe) = current_exe {
+        let current = canonicalize_or(current_exe);
+        let candidate_path = canonicalize_or(candidate.clone());
+        if candidate_path != current {
+            return true;
+        }
+    }
+
+    if let Some(startup_mtime) = startup_mtime {
+        if let Ok(metadata) = std::fs::metadata(&candidate) {
+            if let Ok(current_mtime) = metadata.modified() {
+                return current_mtime > startup_mtime;
+            }
         }
     }
 
@@ -894,7 +926,7 @@ async fn handle_client(
                 let (result, is_canary) = {
                     let mut agent_guard = agent.lock().await;
                     let result = agent_guard.restore_session(&session_id);
-                    if is_selfdev_env() {
+                    if client_selfdev || is_selfdev_env() {
                         agent_guard.set_canary("self-dev");
                     }
                     let is_canary = agent_guard.is_canary();
@@ -1896,11 +1928,13 @@ async fn do_server_reload_with_progress(
     );
 
     // Step 2: Check for binary
-    let exe = repo_dir.join("target/release/jcode");
+    let (exe, exe_label) = server_update_candidate().ok_or_else(|| {
+        anyhow::anyhow!("No reloadable binary found (canary/stable or target/release)")
+    })?;
     if !exe.exists() {
         send_progress(
             "verify",
-            "❌ No binary found at target/release/jcode",
+            "❌ No reloadable binary found",
             Some(false),
             None,
         );
@@ -1939,7 +1973,10 @@ async fn do_server_reload_with_progress(
 
     send_progress(
         "verify",
-        &format!("✓ Binary: {:.1} MB, built {}", size_mb, age_str),
+        &format!(
+            "✓ Binary ({}): {:.1} MB, built {}",
+            exe_label, size_mb, age_str
+        ),
         Some(true),
         None,
     );
