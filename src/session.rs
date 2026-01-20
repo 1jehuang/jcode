@@ -2,12 +2,12 @@
 #![allow(dead_code)]
 
 use crate::id::{extract_session_name, new_id, new_memorable_session_id};
-use crate::message::{ContentBlock, Message, Role};
+use crate::message::{ContentBlock, Message, Role, ToolCall};
 use crate::storage;
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// Session exit status - why the session ended
@@ -99,6 +99,9 @@ pub struct Session {
     /// Provider-specific session ID (e.g., Claude SDK session for resume)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_id: Option<String>,
+    /// Model identifier for this session (e.g., "gpt-5.2-codex")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Whether this session is a canary session (testing new builds)
     #[serde(default)]
     pub is_canary: bool,
@@ -139,6 +142,7 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             provider_session_id: None,
+            model: None,
             is_canary: false,
             testing_build: None,
             working_dir: std::env::current_dir()
@@ -162,6 +166,7 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             provider_session_id: None,
+            model: None,
             is_canary: false,
             testing_build: None,
             working_dir: std::env::current_dir()
@@ -293,6 +298,88 @@ impl Session {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RenderedMessage {
+    pub role: String,
+    pub content: String,
+    pub tool_calls: Vec<String>,
+    pub tool_data: Option<ToolCall>,
+}
+
+/// Convert stored session messages into renderable messages (including tool output).
+pub fn render_messages(session: &Session) -> Vec<RenderedMessage> {
+    let mut rendered: Vec<RenderedMessage> = Vec::new();
+    let mut tool_map: HashMap<String, ToolCall> = HashMap::new();
+
+    for msg in &session.messages {
+        let role = match msg.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        let mut text = String::new();
+        let mut tool_calls: Vec<String> = Vec::new();
+
+        for block in &msg.content {
+            match block {
+                ContentBlock::Text { text: t, .. } => {
+                    text.push_str(t);
+                }
+                ContentBlock::ToolUse { id, name, input } => {
+                    tool_map.insert(
+                        id.clone(),
+                        ToolCall {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: input.clone(),
+                        },
+                    );
+                    tool_calls.push(name.clone());
+                }
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } => {
+                    if !text.is_empty() {
+                        rendered.push(RenderedMessage {
+                            role: role.to_string(),
+                            content: std::mem::take(&mut text),
+                            tool_calls: tool_calls.clone(),
+                            tool_data: None,
+                        });
+                    }
+
+                    let tool_data = tool_map.get(tool_use_id).cloned().or_else(|| {
+                        Some(ToolCall {
+                            id: tool_use_id.clone(),
+                            name: "tool".to_string(),
+                            input: serde_json::Value::Null,
+                        })
+                    });
+
+                    rendered.push(RenderedMessage {
+                        role: "tool".to_string(),
+                        content: content.clone(),
+                        tool_calls: Vec::new(),
+                        tool_data,
+                    });
+                }
+            }
+        }
+
+        if !text.is_empty() {
+            rendered.push(RenderedMessage {
+                role: role.to_string(),
+                content: text,
+                tool_calls,
+                tool_data: None,
+            });
+        }
+    }
+
+    rendered
+}
+
 fn session_path_in_dir(base: &std::path::Path, session_id: &str) -> PathBuf {
     base.join("sessions").join(format!("{}.json", session_id))
 }
@@ -405,6 +492,7 @@ pub fn recover_crashed_sessions() -> Result<Vec<String>> {
         let mut new_session =
             Session::create_with_id(new_id.clone(), Some(old.id.clone()), old.title.clone());
         new_session.working_dir = old.working_dir.clone();
+        new_session.model = old.model.clone();
         new_session.is_canary = old.is_canary;
         new_session.testing_build = old.testing_build.clone();
         new_session.provider_session_id = None;

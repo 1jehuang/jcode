@@ -91,6 +91,7 @@ impl Agent {
             provider_session_id: None,
             pending_alerts: Vec::new(),
         };
+        agent.session.model = Some(agent.provider.model());
         agent.seed_compaction_from_session();
         agent
     }
@@ -112,6 +113,16 @@ impl Agent {
             provider_session_id: None,
             pending_alerts: Vec::new(),
         };
+        if let Some(model) = agent.session.model.clone() {
+            if let Err(e) = agent.provider.set_model(&model) {
+                logging::error(&format!(
+                    "Failed to restore session model '{}': {}",
+                    model, e
+                ));
+            }
+        } else {
+            agent.session.model = Some(agent.provider.model());
+        }
         agent.seed_compaction_from_session();
         agent
     }
@@ -196,6 +207,17 @@ impl Agent {
 
     pub fn provider_model(&self) -> String {
         self.provider.model().to_string()
+    }
+
+    pub fn available_models(&self) -> Vec<&'static str> {
+        self.provider.available_models()
+    }
+
+    pub fn set_model(&mut self, model: &str) -> Result<()> {
+        self.provider.set_model(model)?;
+        self.session.model = Some(self.provider.model());
+        let _ = self.session.save();
+        Ok(())
     }
 
     /// Get the short/friendly name for this session (e.g., "fox")
@@ -308,6 +330,7 @@ impl Agent {
         self.session = Session::create(None, None);
         self.active_skill = None;
         self.provider_session_id = None;
+        self.session.model = Some(self.provider.model());
         self.seed_compaction_from_session();
     }
 
@@ -374,10 +397,7 @@ impl Agent {
     pub fn set_canary(&mut self, build_hash: &str) {
         self.session.set_canary(build_hash);
         if let Err(err) = self.session.save() {
-            logging::error(&format!(
-                "Failed to persist canary session state: {}",
-                err
-            ));
+            logging::error(&format!("Failed to persist canary session state: {}", err));
         }
     }
 
@@ -431,6 +451,16 @@ impl Agent {
         self.active_skill = None;
         // Don't restore provider_session_id - it's not valid across process restarts
         self.provider_session_id = None;
+        if let Some(model) = self.session.model.clone() {
+            if let Err(e) = self.provider.set_model(&model) {
+                logging::error(&format!(
+                    "Failed to restore session model '{}': {}",
+                    model, e
+                ));
+            }
+        } else {
+            self.session.model = Some(self.provider.model());
+        }
         self.session.mark_active();
         self.seed_compaction_from_session();
         Ok(())
@@ -438,31 +468,17 @@ impl Agent {
 
     /// Get conversation history for sync
     pub fn get_history(&self) -> Vec<HistoryMessage> {
-        self.session
-            .messages
-            .iter()
-            .map(|msg| {
-                let role = match msg.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                };
-                let content = msg
-                    .content
-                    .iter()
-                    .filter_map(|c| {
-                        if let ContentBlock::Text { text, .. } = c {
-                            Some(text.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                HistoryMessage {
-                    role: role.to_string(),
-                    content,
-                    tool_calls: None,
-                }
+        crate::session::render_messages(&self.session)
+            .into_iter()
+            .map(|msg| HistoryMessage {
+                role: msg.role,
+                content: msg.content,
+                tool_calls: if msg.tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(msg.tool_calls)
+                },
+                tool_data: msg.tool_data,
             })
             .collect()
     }
@@ -1035,7 +1051,8 @@ impl Agent {
                 logging::info(&format!(
                     "Context compacted ({}{})",
                     event.trigger,
-                    event.pre_tokens
+                    event
+                        .pre_tokens
                         .map(|t| format!(" {} tokens", t))
                         .unwrap_or_default()
                 ));
@@ -1329,7 +1346,8 @@ impl Agent {
                 logging::info(&format!(
                     "Context compacted ({}{})",
                     event.trigger,
-                    event.pre_tokens
+                    event
+                        .pre_tokens
                         .map(|t| format!(" {} tokens", t))
                         .unwrap_or_default()
                 ));
