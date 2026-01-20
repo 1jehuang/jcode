@@ -109,6 +109,16 @@ fn is_jcode_repo_or_parent(path: &std::path::Path) -> bool {
     false
 }
 
+async fn reset_provider_sessions(
+    sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+) {
+    let sessions_guard = sessions.read().await;
+    for agent in sessions_guard.values() {
+        let mut agent_guard = agent.lock().await;
+        agent_guard.reset_provider_session();
+    }
+}
+
 fn debug_control_allowed() -> bool {
     if is_selfdev_env() {
         return true;
@@ -978,6 +988,7 @@ async fn handle_client(
 
                 match provider.set_model(next_model) {
                     Ok(()) => {
+                        reset_provider_sessions(&sessions).await;
                         let _ = client_event_tx.send(ServerEvent::ModelChanged {
                             id,
                             model: next_model.to_string(),
@@ -1010,6 +1021,7 @@ async fn handle_client(
                 let current = provider.model();
                 match provider.set_model(&model) {
                     Ok(()) => {
+                        reset_provider_sessions(&sessions).await;
                         let updated = provider.model();
                         let _ = client_event_tx.send(ServerEvent::ModelChanged {
                             id,
