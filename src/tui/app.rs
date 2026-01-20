@@ -2009,14 +2009,35 @@ impl App {
 
                 // Queue message to notify the agent about the reload
                 if !self.reload_info.is_empty() {
-                    let cwd = std::env::current_dir()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| "unknown".to_string());
-                    let reload_summary = self.reload_info.join(", ");
-                    self.queued_messages.push(format!(
-                        "[Reload complete. {}. CWD: {}. Session restored - continue where you left off.]",
-                        reload_summary, cwd
-                    ));
+                    // Try to load reload context for richer continuation message
+                    let reload_ctx = ReloadContext::load().ok().flatten();
+
+                    let continuation_msg = if let Some(ctx) = reload_ctx {
+                        let action = if ctx.is_rollback { "Rollback" } else { "Reload" };
+                        let task_info = ctx.task_context
+                            .map(|t| format!("\nYou were working on: {}", t))
+                            .unwrap_or_default();
+
+                        format!(
+                            "[{} complete. Previous version: {}, New version: {}.{}\nContinue with your task.]",
+                            action,
+                            ctx.version_before,
+                            ctx.version_after,
+                            task_info
+                        )
+                    } else {
+                        // Fallback to basic message
+                        let cwd = std::env::current_dir()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|_| "unknown".to_string());
+                        let reload_summary = self.reload_info.join(", ");
+                        format!(
+                            "[Reload complete. {}. CWD: {}. Session restored - continue where you left off.]",
+                            reload_summary, cwd
+                        )
+                    };
+
+                    self.queued_messages.push(continuation_msg);
                     self.reload_info.clear();
                 }
             }
