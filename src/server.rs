@@ -873,10 +873,7 @@ async fn handle_client(
                     messages,
                     provider_name: Some(provider_name),
                     provider_model: Some(provider_model),
-                    available_models: available_models
-                        .iter()
-                        .map(|m| (*m).to_string())
-                        .collect(),
+                    available_models: available_models.iter().map(|m| (*m).to_string()).collect(),
                     mcp_servers: Vec::new(),
                     skills: Vec::new(),
                     total_tokens: None,
@@ -941,8 +938,7 @@ async fn handle_client(
                 match result {
                     Ok(()) => {
                         // Send updated history to client
-                        let (messages, is_canary, provider_name, provider_model, available_models) =
-                            {
+                        let (messages, is_canary, provider_name, provider_model, available_models) = {
                             let agent_guard = agent.lock().await;
                             (
                                 agent_guard.get_history(),
@@ -1462,10 +1458,7 @@ async fn resolve_debug_session(
     ))
 }
 
-async fn execute_debug_command(
-    agent: Arc<Mutex<Agent>>,
-    command: &str,
-) -> Result<String> {
+async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Result<String> {
     let trimmed = command.trim();
 
     if trimmed.starts_with("message:") {
@@ -1495,25 +1488,19 @@ async fn execute_debug_command(
             "title": output.title,
             "metadata": output.metadata,
         });
-        return Ok(
-            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
-        );
+        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
     }
 
     if trimmed == "history" {
         let agent = agent.lock().await;
         let history = agent.get_history();
-        return Ok(
-            serde_json::to_string_pretty(&history).unwrap_or_else(|_| "[]".to_string())
-        );
+        return Ok(serde_json::to_string_pretty(&history).unwrap_or_else(|_| "[]".to_string()));
     }
 
     if trimmed == "tools" {
         let agent = agent.lock().await;
         let tools = agent.tool_names().await;
-        return Ok(
-            serde_json::to_string_pretty(&tools).unwrap_or_else(|_| "[]".to_string())
-        );
+        return Ok(serde_json::to_string_pretty(&tools).unwrap_or_else(|_| "[]".to_string()));
     }
 
     if trimmed == "last_response" {
@@ -1532,9 +1519,7 @@ async fn execute_debug_command(
             "provider": agent.provider_name(),
             "model": agent.provider_model(),
         });
-        return Ok(
-            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
-        );
+        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
     }
 
     if trimmed == "help" {
@@ -1614,12 +1599,11 @@ async fn handle_debug_client(
                     continue;
                 }
 
-                let result = match resolve_debug_session(&sessions, &session_id, requested_session)
-                    .await
-                {
-                    Ok((_session, agent)) => execute_debug_command(agent, &command).await,
-                    Err(e) => Err(e),
-                };
+                let result =
+                    match resolve_debug_session(&sessions, &session_id, requested_session).await {
+                        Ok((_session, agent)) => execute_debug_command(agent, &command).await,
+                        Err(e) => Err(e),
+                    };
 
                 let (ok, output) = match result {
                     Ok(output) => (true, output),
@@ -1799,6 +1783,19 @@ impl Client {
         })
     }
 
+    pub async fn resume_session(&mut self, session_id: &str) -> Result<u64> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::ResumeSession {
+            id,
+            session_id: session_id.to_string(),
+        };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+        Ok(id)
+    }
+
     pub async fn reload(&mut self) -> Result<()> {
         let id = self.next_id;
         self.next_id += 1;
@@ -1932,12 +1929,7 @@ async fn do_server_reload_with_progress(
         anyhow::anyhow!("No reloadable binary found (canary/stable or target/release)")
     })?;
     if !exe.exists() {
-        send_progress(
-            "verify",
-            "❌ No reloadable binary found",
-            Some(false),
-            None,
-        );
+        send_progress("verify", "❌ No reloadable binary found", Some(false), None);
         send_progress(
             "verify",
             "💡 Run 'cargo build --release' first, then use 'selfdev reload'",

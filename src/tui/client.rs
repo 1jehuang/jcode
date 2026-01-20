@@ -164,10 +164,10 @@ impl ClientApp {
                 self.display_messages.push(DisplayMessage {
                     role: msg.role,
                     content: msg.content,
-                    tool_calls: Vec::new(),
+                    tool_calls: msg.tool_calls.unwrap_or_default(),
                     duration_secs: None,
                     title: None,
-                    tool_data: None,
+                    tool_data: msg.tool_data,
                 });
             }
         }
