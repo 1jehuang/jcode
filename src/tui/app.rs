@@ -451,6 +451,10 @@ impl Provider for NullProvider {
             "NullProvider cannot be used for completion"
         ))
     }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(NullProvider)
+    }
 }
 
 impl App {
@@ -6093,6 +6097,10 @@ mod tests {
 
         fn name(&self) -> &str {
             "mock"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(MockProvider)
         }
     }
 

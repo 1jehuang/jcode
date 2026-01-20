@@ -7,7 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::Stream;
 use std::pin::Pin;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 /// Stream of events from a provider
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
@@ -60,6 +60,10 @@ pub trait Provider: Send + Sync {
     fn supports_compaction(&self) -> bool {
         false
     }
+
+    /// Create a new provider instance with the same credentials/config and model,
+    /// but independent mutable state (e.g., model selection).
+    fn fork(&self) -> Arc<dyn Provider>;
 }
 
 /// Available models (shown in /model list)
@@ -301,5 +305,13 @@ impl Provider for MultiProvider {
                 .map(|o| o.supports_compaction())
                 .unwrap_or(false),
         }
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        let current_model = self.model();
+        let prefer_openai = self.active_provider() == ActiveProvider::OpenAI;
+        let provider = MultiProvider::with_preference(prefer_openai);
+        let _ = provider.set_model(&current_model);
+        Arc::new(provider)
     }
 }

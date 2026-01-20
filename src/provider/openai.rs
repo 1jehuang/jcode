@@ -577,6 +577,18 @@ impl Provider for OpenAIProvider {
     fn supports_compaction(&self) -> bool {
         true
     }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        let model = self.model();
+        Arc::new(OpenAIProvider {
+            client: self.client.clone(),
+            credentials: Arc::clone(&self.credentials),
+            model: Arc::new(RwLock::new(model)),
+            prompt_cache_key: self.prompt_cache_key.clone(),
+            prompt_cache_retention: self.prompt_cache_retention.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+        })
+    }
 }
 
 fn should_refresh_token(status: StatusCode, body: &str) -> bool {

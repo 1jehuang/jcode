@@ -109,16 +109,6 @@ fn is_jcode_repo_or_parent(path: &std::path::Path) -> bool {
     false
 }
 
-async fn reset_provider_sessions(
-    sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
-) {
-    let sessions_guard = sessions.read().await;
-    for agent in sessions_guard.values() {
-        let mut agent_guard = agent.lock().await;
-        agent_guard.reset_provider_session();
-    }
-}
-
 fn debug_control_allowed() -> bool {
     if is_selfdev_env() {
         return true;
@@ -158,7 +148,6 @@ pub const EXIT_IDLE_TIMEOUT: i32 = 44;
 /// Server state
 pub struct Server {
     provider: Arc<dyn Provider>,
-    registry: Registry,
     socket_path: PathBuf,
     debug_socket_path: PathBuf,
     /// Broadcast channel for streaming events to all subscribers
@@ -182,11 +171,10 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
+    pub fn new(provider: Arc<dyn Provider>) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
         Self {
             provider,
-            registry,
             socket_path: socket_path(),
             debug_socket_path: debug_socket_path(),
             event_tx,
@@ -203,11 +191,10 @@ impl Server {
 
     pub fn new_with_paths(
         provider: Arc<dyn Provider>,
-        registry: Registry,
         socket_path: PathBuf,
         debug_socket_path: PathBuf,
     ) -> Self {
-        let mut server = Self::new(provider, registry);
+        let mut server = Self::new(provider);
         server.socket_path = socket_path;
         server.debug_socket_path = debug_socket_path;
         server
@@ -447,7 +434,6 @@ impl Server {
         let main_sessions = Arc::clone(&self.sessions);
         let main_event_tx = self.event_tx.clone();
         let main_provider = Arc::clone(&self.provider);
-        let main_registry = self.registry.clone();
         let main_is_processing = Arc::clone(&self.is_processing);
         let main_session_id = Arc::clone(&self.session_id);
         let main_client_count = Arc::clone(&self.client_count);
@@ -463,7 +449,6 @@ impl Server {
                         let sessions = Arc::clone(&main_sessions);
                         let event_tx = main_event_tx.clone();
                         let provider = Arc::clone(&main_provider);
-                        let registry = main_registry.clone();
                         let is_processing = Arc::clone(&main_is_processing);
                         let session_id = Arc::clone(&main_session_id);
                         let client_count = Arc::clone(&main_client_count);
@@ -481,7 +466,6 @@ impl Server {
                                 sessions,
                                 event_tx,
                                 provider,
-                                registry,
                                 is_processing,
                                 session_id,
                                 Arc::clone(&client_count),
@@ -546,8 +530,7 @@ async fn handle_client(
     stream: UnixStream,
     sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
     _global_event_tx: broadcast::Sender<ServerEvent>,
-    provider: Arc<dyn Provider>,
-    registry: Registry,
+    provider_template: Arc<dyn Provider>,
     _global_is_processing: Arc<RwLock<bool>>,
     global_session_id: Arc<RwLock<String>>,
     client_count: Arc<RwLock<usize>>,
@@ -568,6 +551,9 @@ async fn handle_client(
     let mut processing_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut processing_message_id: Option<u64> = None;
     let mut client_selfdev = is_selfdev_env();
+
+    let provider = provider_template.fork();
+    let registry = Registry::new(provider.clone()).await;
 
     // Create a new session for this client
     let mut new_agent = Agent::new(Arc::clone(&provider), registry.clone());
@@ -830,9 +816,15 @@ async fn handle_client(
             }
 
             Request::GetHistory { id } => {
-                let (messages, is_canary) = {
+                let (messages, is_canary, provider_name, provider_model, available_models) = {
                     let agent_guard = agent.lock().await;
-                    (agent_guard.get_history(), agent_guard.is_canary())
+                    (
+                        agent_guard.get_history(),
+                        agent_guard.is_canary(),
+                        agent_guard.provider_name(),
+                        agent_guard.provider_model(),
+                        agent_guard.available_models(),
+                    )
                 };
 
                 // Get all session IDs and client count
@@ -847,10 +839,9 @@ async fn handle_client(
                     id,
                     session_id: client_session_id.clone(),
                     messages,
-                    provider_name: Some(provider.name().to_string()),
-                    provider_model: Some(provider.model().to_string()),
-                    available_models: provider
-                        .available_models()
+                    provider_name: Some(provider_name),
+                    provider_model: Some(provider_model),
+                    available_models: available_models
                         .iter()
                         .map(|m| (*m).to_string())
                         .collect(),
@@ -918,9 +909,16 @@ async fn handle_client(
                 match result {
                     Ok(()) => {
                         // Send updated history to client
-                        let (messages, is_canary) = {
+                        let (messages, is_canary, provider_name, provider_model, available_models) =
+                            {
                             let agent_guard = agent.lock().await;
-                            (agent_guard.get_history(), agent_guard.is_canary())
+                            (
+                                agent_guard.get_history(),
+                                agent_guard.is_canary(),
+                                agent_guard.provider_name(),
+                                agent_guard.provider_model(),
+                                agent_guard.available_models(),
+                            )
                         };
 
                         let (all_sessions, current_client_count) = {
@@ -934,10 +932,9 @@ async fn handle_client(
                             id,
                             session_id: session_id.clone(),
                             messages,
-                            provider_name: Some(provider.name().to_string()),
-                            provider_model: Some(provider.model().to_string()),
-                            available_models: provider
-                                .available_models()
+                            provider_name: Some(provider_name),
+                            provider_model: Some(provider_model),
+                            available_models: available_models
                                 .iter()
                                 .map(|m| (*m).to_string())
                                 .collect(),
@@ -964,11 +961,18 @@ async fn handle_client(
             }
 
             Request::CycleModel { id, direction } => {
-                let models = provider.available_models();
+                let models = {
+                    let agent_guard = agent.lock().await;
+                    agent_guard.available_models()
+                };
                 if models.is_empty() {
+                    let model = {
+                        let agent_guard = agent.lock().await;
+                        agent_guard.provider_model()
+                    };
                     let _ = client_event_tx.send(ServerEvent::ModelChanged {
                         id,
-                        model: provider.model(),
+                        model,
                         error: Some(
                             "Model switching is not available for this provider.".to_string(),
                         ),
@@ -976,7 +980,10 @@ async fn handle_client(
                     continue;
                 }
 
-                let current = provider.model();
+                let current = {
+                    let agent_guard = agent.lock().await;
+                    agent_guard.provider_model()
+                };
                 let current_index = models.iter().position(|m| *m == current).unwrap_or(0);
                 let len = models.len();
                 let next_index = if direction >= 0 {
@@ -986,12 +993,20 @@ async fn handle_client(
                 };
                 let next_model = models[next_index];
 
-                match provider.set_model(next_model) {
-                    Ok(()) => {
-                        reset_provider_sessions(&sessions).await;
+                let result = {
+                    let mut agent_guard = agent.lock().await;
+                    let result = agent_guard.set_model(next_model);
+                    if result.is_ok() {
+                        agent_guard.reset_provider_session();
+                    }
+                    result.map(|_| agent_guard.provider_model())
+                };
+
+                match result {
+                    Ok(updated) => {
                         let _ = client_event_tx.send(ServerEvent::ModelChanged {
                             id,
-                            model: next_model.to_string(),
+                            model: updated,
                             error: None,
                         });
                     }
@@ -1006,11 +1021,18 @@ async fn handle_client(
             }
 
             Request::SetModel { id, model } => {
-                let models = provider.available_models();
+                let models = {
+                    let agent_guard = agent.lock().await;
+                    agent_guard.available_models()
+                };
                 if models.is_empty() {
+                    let current = {
+                        let agent_guard = agent.lock().await;
+                        agent_guard.provider_model()
+                    };
                     let _ = client_event_tx.send(ServerEvent::ModelChanged {
                         id,
-                        model: provider.model(),
+                        model: current,
                         error: Some(
                             "Model switching is not available for this provider.".to_string(),
                         ),
@@ -1018,11 +1040,20 @@ async fn handle_client(
                     continue;
                 }
 
-                let current = provider.model();
-                match provider.set_model(&model) {
-                    Ok(()) => {
-                        reset_provider_sessions(&sessions).await;
-                        let updated = provider.model();
+                let current = {
+                    let agent_guard = agent.lock().await;
+                    agent_guard.provider_model()
+                };
+                let result = {
+                    let mut agent_guard = agent.lock().await;
+                    let result = agent_guard.set_model(&model);
+                    if result.is_ok() {
+                        agent_guard.reset_provider_session();
+                    }
+                    result.map(|_| agent_guard.provider_model())
+                };
+                match result {
+                    Ok(updated) => {
                         let _ = client_event_tx.send(ServerEvent::ModelChanged {
                             id,
                             model: updated,

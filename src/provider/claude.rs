@@ -835,6 +835,15 @@ impl Provider for ClaudeProvider {
         // Claude Agent SDK executes tools internally - jcode should not re-execute them
         true
     }
+
+    fn fork(&self) -> std::sync::Arc<dyn Provider> {
+        let model = self.model();
+        let config = self.config.clone();
+        std::sync::Arc::new(ClaudeProvider {
+            config,
+            model: std::sync::Arc::new(std::sync::RwLock::new(model)),
+        })
+    }
 }
 
 fn ensure_bridge_script(path: &Path) -> Result<()> {
