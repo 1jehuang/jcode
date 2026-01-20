@@ -316,7 +316,11 @@ async def _stream_messages(messages: List[Dict[str, Any]]) -> AsyncIterator[Dict
 
 
 async def _run() -> None:
-    request = json.load(sys.stdin)
+    # Read request from single line (don't use json.load() as stdin stays open for tool results)
+    request_line = sys.stdin.readline()
+    if not request_line:
+        raise RuntimeError("No request received on stdin")
+    request = json.loads(request_line)
 
     messages = request.get("messages", [])
     system_prompt = request.get("system", "") or ""
