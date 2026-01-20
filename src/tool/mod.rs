@@ -8,20 +8,21 @@ mod bg;
 mod codesearch;
 mod communicate;
 mod conversation_search;
+mod debug_socket;
 mod edit;
-mod memory;
-mod remember;
-mod session_search;
 mod glob;
 mod grep;
 mod invalid;
 mod ls;
 mod lsp;
 pub mod mcp;
+mod memory;
 mod multiedit;
 mod patch;
 mod read;
+mod remember;
 pub mod selfdev;
+mod session_search;
 mod skill;
 mod task;
 mod todo;
@@ -298,8 +299,14 @@ impl Registry {
 
     /// Register self-dev tools (only for canary/self-dev sessions)
     pub async fn register_selfdev_tools(&self) {
-        let tool = selfdev::SelfDevTool::new();
-        self.register("selfdev".to_string(), Arc::new(tool) as Arc<dyn Tool>)
+        // Self-dev management tool
+        let selfdev_tool = selfdev::SelfDevTool::new();
+        self.register("selfdev".to_string(), Arc::new(selfdev_tool) as Arc<dyn Tool>)
+            .await;
+
+        // Debug socket tool for direct debug socket access
+        let debug_socket_tool = debug_socket::DebugSocketTool::new();
+        self.register("debug_socket".to_string(), Arc::new(debug_socket_tool) as Arc<dyn Tool>)
             .await;
     }
 

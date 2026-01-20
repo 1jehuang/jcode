@@ -201,27 +201,50 @@ pub fn build_system_prompt_with_context_and_memory(
 
 /// Build self-dev tools prompt section
 fn build_selfdev_prompt() -> String {
-    r#"# Self-Development Mode
+    let debug_socket_path = crate::server::debug_socket_path();
+
+    format!(r#"# Self-Development Mode
 
 You are running in self-dev mode, working on the jcode codebase itself. You have access to additional tools:
 
 ## selfdev Tool
 
-Use this tool to manage reloads:
+Use this tool to manage builds and get debug socket info:
 
 ```json
-{"name": "selfdev", "input": {"action": "reload"}}   // Restart with current binary
-{"name": "selfdev", "input": {"action": "status"}}   // Show build versions and crash history
-{"name": "selfdev", "input": {"action": "promote", "message": "description"}}  // Mark current as stable
-{"name": "selfdev", "input": {"action": "rollback"}} // Switch back to stable build
+{{"name": "selfdev", "input": {{"action": "reload"}}}}      // Restart with current binary
+{{"name": "selfdev", "input": {{"action": "status"}}}}      // Show build versions, debug socket path
+{{"name": "selfdev", "input": {{"action": "promote"}}}}     // Mark current as stable
+{{"name": "selfdev", "input": {{"action": "rollback"}}}}    // Switch back to stable build
+{{"name": "selfdev", "input": {{"action": "socket-info"}}}} // Debug socket connection info
+{{"name": "selfdev", "input": {{"action": "socket-help"}}}} // Debug socket command reference
 ```
+
+## debug_socket Tool
+
+Use this tool to send commands to the debug socket for visual debugging, spawning test instances, or inspecting agent state:
+
+```json
+{{"name": "debug_socket", "input": {{"command": "client:frame"}}}}      // Get visual debug frame
+{{"name": "debug_socket", "input": {{"command": "client:enable"}}}}     // Enable visual debug
+{{"name": "debug_socket", "input": {{"command": "tester:spawn"}}}}      // Spawn test instance
+{{"name": "debug_socket", "input": {{"command": "tester:list"}}}}       // List active testers
+{{"name": "debug_socket", "input": {{"command": "state"}}}}             // Get agent state
+{{"name": "debug_socket", "input": {{"command": "help"}}}}              // Full command list
+```
+
+Debug socket path: {}
+
+## Workflow
 
 When you make code changes to jcode:
 1. Build with `cargo build --release`
 2. Use `selfdev` with action `reload` to restart with the new binary
 3. The session continues automatically after restart
 
-You can call the selfdev tool directly - it will be executed by jcode."#.to_string()
+For testing UI changes, use the debug_socket tool to spawn testers and capture visual debug frames."#,
+        debug_socket_path.display()
+    )
 }
 
 /// Build environment context (date, cwd, git status)
@@ -325,12 +348,16 @@ fn load_claude_md_files_with_info() -> (Option<String>, ContextInfo) {
 
     // Project-level files (current directory)
     // AGENTS.md first (generic), then CLAUDE.md (Claude-specific)
-    if let Some((content, size)) = load_file(Path::new("AGENTS.md"), "Project Instructions (AGENTS.md)") {
+    if let Some((content, size)) =
+        load_file(Path::new("AGENTS.md"), "Project Instructions (AGENTS.md)")
+    {
         info.has_project_agents_md = true;
         info.project_agents_md_chars = size;
         contents.push(content);
     }
-    if let Some((content, size)) = load_file(Path::new("CLAUDE.md"), "Project Instructions (CLAUDE.md)") {
+    if let Some((content, size)) =
+        load_file(Path::new("CLAUDE.md"), "Project Instructions (CLAUDE.md)")
+    {
         info.has_project_claude_md = true;
         info.project_claude_md_chars = size;
         contents.push(content);
@@ -338,12 +365,18 @@ fn load_claude_md_files_with_info() -> (Option<String>, ContextInfo) {
 
     // Home directory files
     if let Some(home) = dirs::home_dir() {
-        if let Some((content, size)) = load_file(&home.join("AGENTS.md"), "Global Instructions (~/.AGENTS.md)") {
+        if let Some((content, size)) = load_file(
+            &home.join("AGENTS.md"),
+            "Global Instructions (~/.AGENTS.md)",
+        ) {
             info.has_global_agents_md = true;
             info.global_agents_md_chars = size;
             contents.push(content);
         }
-        if let Some((content, size)) = load_file(&home.join("CLAUDE.md"), "Global Instructions (~/.CLAUDE.md)") {
+        if let Some((content, size)) = load_file(
+            &home.join("CLAUDE.md"),
+            "Global Instructions (~/.CLAUDE.md)",
+        ) {
             info.has_global_claude_md = true;
             info.global_claude_md_chars = size;
             contents.push(content);
