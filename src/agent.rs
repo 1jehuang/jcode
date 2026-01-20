@@ -318,8 +318,8 @@ impl Agent {
         let _ = self.session.save();
     }
 
-    /// Build the system prompt, including skill and self-dev context
-    fn build_system_prompt(&self) -> String {
+    /// Build the system prompt, including skill, memory, and self-dev context
+    fn build_system_prompt(&self, memory_prompt: Option<&str>) -> String {
         let mut prompt = SYSTEM_PROMPT.to_string();
 
         // Add self-dev context if in canary mode
@@ -340,6 +340,11 @@ impl Agent {
                 .push_str("\n\nWhen asked about available skills or capabilities, mention these.");
         }
 
+        if let Some(memory) = memory_prompt {
+            prompt.push_str("\n\n");
+            prompt.push_str(memory);
+        }
+
         // Add active skill prompt
         if let Some(ref skill_name) = self.active_skill {
             if let Some(skill) = self.skills.get(skill_name) {
@@ -349,6 +354,17 @@ impl Agent {
         }
 
         prompt
+    }
+
+    async fn build_memory_prompt(&self, messages: &[Message]) -> Option<String> {
+        let manager = crate::memory::MemoryManager::new();
+        match manager.relevant_prompt_for_messages(messages).await {
+            Ok(prompt) => prompt,
+            Err(e) => {
+                logging::info(&format!("Memory relevance skipped: {}", e));
+                None
+            }
+        }
     }
 
     pub fn is_canary(&self) -> bool {
@@ -530,10 +546,6 @@ impl Agent {
         let trace = trace_enabled();
 
         loop {
-            let tools = self.tool_definitions().await;
-
-            let system_prompt = self.build_system_prompt();
-
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
                 if print_output {
@@ -544,6 +556,10 @@ impl Agent {
                     println!("📦 Context compacted ({}){}", event.trigger, tokens_str);
                 }
             }
+
+            let tools = self.tool_definitions().await;
+            let memory_prompt = self.build_memory_prompt(&messages).await;
+            let system_prompt = self.build_system_prompt(memory_prompt.as_deref());
 
             logging::info(&format!(
                 "API call starting: {} messages, {} tools",
@@ -1014,10 +1030,6 @@ impl Agent {
         let trace = trace_enabled();
 
         loop {
-            let tools = self.tool_definitions().await;
-
-            let system_prompt = self.build_system_prompt();
-
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
                 logging::info(&format!(
@@ -1028,6 +1040,10 @@ impl Agent {
                         .unwrap_or_default()
                 ));
             }
+
+            let tools = self.tool_definitions().await;
+            let memory_prompt = self.build_memory_prompt(&messages).await;
+            let system_prompt = self.build_system_prompt(memory_prompt.as_deref());
 
             let mut stream = self
                 .provider
@@ -1308,10 +1324,6 @@ impl Agent {
         let trace = trace_enabled();
 
         loop {
-            let tools = self.tool_definitions().await;
-
-            let system_prompt = self.build_system_prompt();
-
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
                 logging::info(&format!(
@@ -1322,6 +1334,10 @@ impl Agent {
                         .unwrap_or_default()
                 ));
             }
+
+            let tools = self.tool_definitions().await;
+            let memory_prompt = self.build_memory_prompt(&messages).await;
+            let system_prompt = self.build_system_prompt(memory_prompt.as_deref());
 
             let mut stream = self
                 .provider

@@ -40,6 +40,8 @@ pub struct ContextInfo {
     pub skills_chars: usize,
     /// Self-dev section size (chars)
     pub selfdev_chars: usize,
+    /// Memory section size (chars)
+    pub memory_chars: usize,
 
     // === Dynamic (Conversation) ===
     /// Tool definitions sent to API (chars)
@@ -97,6 +99,9 @@ impl ContextInfo {
         if self.selfdev_chars > 0 {
             parts.push(("dev", self.selfdev_chars, "🛠"));
         }
+        if self.memory_chars > 0 {
+            parts.push(("mem", self.memory_chars, "🧠"));
+        }
         parts
     }
 }
@@ -121,6 +126,16 @@ pub fn build_system_prompt_with_context(
     skill_prompt: Option<&str>,
     available_skills: &[SkillInfo],
     is_selfdev: bool,
+) -> (String, ContextInfo) {
+    build_system_prompt_with_context_and_memory(skill_prompt, available_skills, is_selfdev, None)
+}
+
+/// Build the full system prompt with optional memory section and return context info
+pub fn build_system_prompt_with_context_and_memory(
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+    memory_prompt: Option<&str>,
 ) -> (String, ContextInfo) {
     let mut parts = vec![DEFAULT_SYSTEM_PROMPT.to_string()];
     let mut info = ContextInfo::default();
@@ -154,6 +169,11 @@ pub fn build_system_prompt_with_context(
     info.global_agents_md_chars = md_info.global_agents_md_chars;
     info.has_global_claude_md = md_info.has_global_claude_md;
     info.global_claude_md_chars = md_info.global_claude_md_chars;
+
+    if let Some(memory) = memory_prompt {
+        info.memory_chars = memory.len();
+        parts.push(memory.to_string());
+    }
 
     // Add available skills list
     if !available_skills.is_empty() {

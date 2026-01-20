@@ -116,7 +116,15 @@ Be conservative - only say "yes" if the memory would actually be useful for the 
         let response = self.complete(system, &prompt).await?;
 
         // Parse response
-        let is_relevant = response.to_lowercase().contains("relevant: yes");
+        let mut is_relevant = false;
+        for line in response.lines() {
+            let line = line.trim();
+            if line.len() >= 9 && line[..9].eq_ignore_ascii_case("relevant:") {
+                let value = line[9..].trim();
+                is_relevant = value.eq_ignore_ascii_case("yes") || value.starts_with("yes");
+                break;
+            }
+        }
         let reason = response
             .lines()
             .find(|line| line.to_lowercase().starts_with("reason:"))

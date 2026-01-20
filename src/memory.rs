@@ -195,7 +195,7 @@ impl MemoryStore {
     }
 
     pub fn get_relevant(&self, limit: usize) -> Vec<&MemoryEntry> {
-        let mut entries: Vec<&MemoryEntry> = self.entries.iter().collect();
+        let mut entries: Vec<&MemoryEntry> = self.entries.iter().filter(|e| e.active).collect();
         entries.sort_by(|a, b| {
             let score_a = memory_score(a);
             let score_b = memory_score(b);
@@ -240,6 +240,144 @@ impl MemoryStore {
         }
 
         if output.is_empty() { None } else { Some(output) }
+    }
+}
+
+const MEMORY_CONTEXT_MAX_CHARS: usize = 8_000;
+const MEMORY_CONTEXT_MAX_MESSAGES: usize = 12;
+const MEMORY_CONTEXT_MAX_BLOCK_CHARS: usize = 1_200;
+const MEMORY_RELEVANCE_MAX_CANDIDATES: usize = 30;
+const MEMORY_RELEVANCE_MAX_RESULTS: usize = 10;
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    value.chars().take(max_chars).collect()
+}
+
+fn format_content_block(block: &crate::message::ContentBlock) -> Option<String> {
+    match block {
+        crate::message::ContentBlock::Text { text, .. } => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(truncate_chars(trimmed, MEMORY_CONTEXT_MAX_BLOCK_CHARS))
+            }
+        }
+        crate::message::ContentBlock::ToolUse { name, input, .. } => {
+            let input_str = serde_json::to_string(input).unwrap_or_else(|_| "<invalid json>".into());
+            let input_str = truncate_chars(&input_str, MEMORY_CONTEXT_MAX_BLOCK_CHARS / 2);
+            Some(format!("[Tool: {} input: {}]", name, input_str))
+        }
+        crate::message::ContentBlock::ToolResult { content, is_error, .. } => {
+            let label = if is_error.unwrap_or(false) {
+                "Tool error"
+            } else {
+                "Tool result"
+            };
+            let content = truncate_chars(content, MEMORY_CONTEXT_MAX_BLOCK_CHARS / 2);
+            Some(format!("[{}: {}]", label, content))
+        }
+    }
+}
+
+fn format_message_context(message: &crate::message::Message) -> String {
+    let role = match message.role {
+        crate::message::Role::User => "User",
+        crate::message::Role::Assistant => "Assistant",
+    };
+
+    let mut chunk = String::new();
+    chunk.push_str(role);
+    chunk.push_str(":\n");
+
+    let mut has_content = false;
+    for block in &message.content {
+        if let Some(text) = format_content_block(block) {
+            if !text.is_empty() {
+                has_content = true;
+                chunk.push_str(&text);
+                chunk.push('\n');
+            }
+        }
+    }
+
+    if has_content {
+        chunk
+    } else {
+        String::new()
+    }
+}
+
+fn format_context_for_relevance(messages: &[crate::message::Message]) -> String {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut total_chars = 0usize;
+
+    for message in messages.iter().rev().take(MEMORY_CONTEXT_MAX_MESSAGES) {
+        let chunk = format_message_context(message);
+        if chunk.is_empty() {
+            continue;
+        }
+        let chunk_len = chunk.chars().count();
+        if total_chars + chunk_len > MEMORY_CONTEXT_MAX_CHARS {
+            if total_chars == 0 {
+                chunks.push(truncate_chars(&chunk, MEMORY_CONTEXT_MAX_CHARS));
+            }
+            break;
+        }
+        total_chars += chunk_len;
+        chunks.push(chunk);
+    }
+
+    chunks.reverse();
+    chunks.join("\n").trim().to_string()
+}
+
+fn format_entries_for_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
+    let mut sections: HashMap<MemoryCategory, Vec<&MemoryEntry>> = HashMap::new();
+    let mut added = 0usize;
+    for entry in entries.iter().filter(|e| e.active) {
+        if added >= limit {
+            break;
+        }
+        sections.entry(entry.category.clone()).or_default().push(entry);
+        added += 1;
+    }
+
+    if sections.is_empty() {
+        return None;
+    }
+
+    let mut output = String::new();
+    let order = [
+        MemoryCategory::Correction,
+        MemoryCategory::Fact,
+        MemoryCategory::Preference,
+        MemoryCategory::Entity,
+    ];
+
+    for cat in &order {
+        if let Some(items) = sections.remove(cat) {
+            output.push_str(&format!("\n### {}s\n", cat));
+            for item in items {
+                output.push_str(&format!("- {}\n", item.content));
+            }
+        }
+    }
+
+    for (cat, items) in sections {
+        output.push_str(&format!("\n### {}\n", cat));
+        for item in items {
+            output.push_str(&format!("- {}\n", item.content));
+        }
+    }
+
+    if output.is_empty() {
+        None
+    } else {
+        Some(output)
     }
 }
 
@@ -353,6 +491,41 @@ impl MemoryManager {
         Ok(id)
     }
 
+    fn touch_entries(&self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let id_set: std::collections::HashSet<&str> =
+            ids.iter().map(|id| id.as_str()).collect();
+
+        let mut project = self.load_project()?;
+        let mut project_changed = false;
+        for entry in &mut project.entries {
+            if id_set.contains(entry.id.as_str()) {
+                entry.touch();
+                project_changed = true;
+            }
+        }
+        if project_changed {
+            self.save_project(&project)?;
+        }
+
+        let mut global = self.load_global()?;
+        let mut global_changed = false;
+        for entry in &mut global.entries {
+            if id_set.contains(entry.id.as_str()) {
+                entry.touch();
+                global_changed = true;
+            }
+        }
+        if global_changed {
+            self.save_global(&global)?;
+        }
+
+        Ok(())
+    }
+
     pub fn get_prompt_memories(&self, limit: usize) -> Option<String> {
         let mut combined = MemoryStore::new();
         if let Ok(project) = self.load_project() {
@@ -362,6 +535,36 @@ impl MemoryManager {
             combined.entries.extend(global.entries);
         }
         combined.format_for_prompt(limit)
+    }
+
+    pub async fn relevant_prompt_for_messages(
+        &self,
+        messages: &[crate::message::Message],
+    ) -> Result<Option<String>> {
+        let context = format_context_for_relevance(messages);
+        if context.is_empty() {
+            return Ok(None);
+        }
+        self.relevant_prompt_for_context(
+            &context,
+            MEMORY_RELEVANCE_MAX_CANDIDATES,
+            MEMORY_RELEVANCE_MAX_RESULTS,
+        )
+        .await
+    }
+
+    pub async fn relevant_prompt_for_context(
+        &self,
+        context: &str,
+        max_candidates: usize,
+        limit: usize,
+    ) -> Result<Option<String>> {
+        let relevant = self.get_relevant_for_context(context, max_candidates).await?;
+        if relevant.is_empty() {
+            return Ok(None);
+        }
+        Ok(format_entries_for_prompt(&relevant, limit)
+            .map(|entries| format!("# Memory\n\n{}", entries)))
     }
 
     pub fn search(&self, query: &str) -> Result<Vec<MemoryEntry>> {
@@ -441,8 +644,19 @@ impl MemoryManager {
         max_candidates: usize,
     ) -> Result<Vec<MemoryEntry>> {
         // Get top candidate memories by score
-        let all = self.list_all()?;
-        let candidates: Vec<_> = all.into_iter().take(max_candidates).collect();
+        let mut candidates: Vec<_> = self
+            .list_all()?
+            .into_iter()
+            .filter(|entry| entry.active)
+            .collect();
+        candidates.sort_by(|a, b| {
+            let score_a = memory_score(a);
+            let score_b = memory_score(b);
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        candidates.truncate(max_candidates);
 
         if candidates.is_empty() {
             return Ok(Vec::new());
@@ -450,11 +664,13 @@ impl MemoryManager {
 
         let sidecar = HaikuSidecar::new();
         let mut relevant = Vec::new();
+        let mut relevant_ids = Vec::new();
 
         for memory in candidates {
             match sidecar.check_relevance(&memory.content, context).await {
                 Ok((is_relevant, _reason)) => {
                     if is_relevant {
+                        relevant_ids.push(memory.id.clone());
                         relevant.push(memory);
                     }
                 }
@@ -464,6 +680,8 @@ impl MemoryManager {
                 }
             }
         }
+
+        let _ = self.touch_entries(&relevant_ids);
 
         Ok(relevant)
     }
