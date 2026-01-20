@@ -3,13 +3,34 @@
 //! Provides persistent memory that survives across sessions, organized by:
 //! - Project (per working directory)
 //! - Global (user-level preferences)
+//!
+//! Integrates with the Haiku sidecar for relevance verification and extraction.
 
+use crate::sidecar::HaikuSidecar;
 use crate::storage;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Trust levels for memories
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum TrustLevel {
+    /// User explicitly stated this
+    High,
+    /// Observed from user behavior
+    Medium,
+    /// Inferred by the agent
+    Low,
+}
+
+impl Default for TrustLevel {
+    fn default() -> Self {
+        TrustLevel::Medium
+    }
+}
 
 /// A single memory entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +43,22 @@ pub struct MemoryEntry {
     pub updated_at: DateTime<Utc>,
     pub access_count: u32,
     pub source: Option<String>,
+    /// Trust level for this memory
+    #[serde(default)]
+    pub trust: TrustLevel,
+    /// Consolidation strength (how many times this was reinforced)
+    #[serde(default)]
+    pub strength: u32,
+    /// Whether this memory is active or superseded
+    #[serde(default = "default_active")]
+    pub active: bool,
+    /// ID of memory that superseded this one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+}
+
+fn default_active() -> bool {
+    true
 }
 
 impl MemoryEntry {
@@ -36,6 +73,10 @@ impl MemoryEntry {
             updated_at: now,
             access_count: 0,
             source: None,
+            trust: TrustLevel::default(),
+            strength: 1,
+            active: true,
+            superseded_by: None,
         }
     }
 
@@ -49,9 +90,26 @@ impl MemoryEntry {
         self
     }
 
+    pub fn with_trust(mut self, trust: TrustLevel) -> Self {
+        self.trust = trust;
+        self
+    }
+
     pub fn touch(&mut self) {
         self.updated_at = Utc::now();
         self.access_count += 1;
+    }
+
+    /// Reinforce this memory (called when same info is encountered again)
+    pub fn reinforce(&mut self) {
+        self.strength += 1;
+        self.updated_at = Utc::now();
+    }
+
+    /// Mark this memory as superseded by another
+    pub fn supersede(&mut self, new_id: &str) {
+        self.active = false;
+        self.superseded_by = Some(new_id.to_string());
     }
 }
 
@@ -186,10 +244,21 @@ impl MemoryStore {
 }
 
 fn memory_score(entry: &MemoryEntry) -> f64 {
+    // Skip inactive memories
+    if !entry.active {
+        return 0.0;
+    }
+
     let mut score = 0.0;
+
+    // Recency factor (decays over time)
     let age_hours = (Utc::now() - entry.updated_at).num_hours() as f64;
     score += 100.0 / (1.0 + age_hours / 24.0);
+
+    // Access frequency bonus
     score += (entry.access_count as f64).sqrt() * 10.0;
+
+    // Category importance
     score += match entry.category {
         MemoryCategory::Correction => 50.0,
         MemoryCategory::Preference => 30.0,
@@ -197,6 +266,17 @@ fn memory_score(entry: &MemoryEntry) -> f64 {
         MemoryCategory::Entity => 10.0,
         MemoryCategory::Custom(_) => 5.0,
     };
+
+    // Trust level multiplier
+    score *= match entry.trust {
+        TrustLevel::High => 1.5,
+        TrustLevel::Medium => 1.0,
+        TrustLevel::Low => 0.7,
+    };
+
+    // Consolidation strength bonus
+    score += (entry.strength as f64).ln() * 5.0;
+
     score
 }
 
@@ -319,6 +399,90 @@ impl MemoryManager {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    // === Sidecar Integration ===
+
+    /// Extract memories from a session transcript using the Haiku sidecar
+    pub async fn extract_from_transcript(
+        &self,
+        transcript: &str,
+        session_id: &str,
+    ) -> Result<Vec<String>> {
+        let sidecar = HaikuSidecar::new();
+        let extracted = sidecar.extract_memories(transcript).await?;
+
+        let mut ids = Vec::new();
+        for memory in extracted {
+            let category: MemoryCategory = memory.category.parse().unwrap_or(MemoryCategory::Fact);
+            let trust = match memory.trust.as_str() {
+                "high" => TrustLevel::High,
+                "medium" => TrustLevel::Medium,
+                _ => TrustLevel::Low,
+            };
+
+            let entry = MemoryEntry::new(category, memory.content)
+                .with_source(session_id)
+                .with_trust(trust);
+
+            // Store in project scope by default
+            let id = self.remember_project(entry)?;
+            ids.push(id);
+        }
+
+        Ok(ids)
+    }
+
+    /// Check if stored memories are relevant to the current context
+    /// Returns memories that the sidecar deems relevant
+    pub async fn get_relevant_for_context(
+        &self,
+        context: &str,
+        max_candidates: usize,
+    ) -> Result<Vec<MemoryEntry>> {
+        // Get top candidate memories by score
+        let all = self.list_all()?;
+        let candidates: Vec<_> = all.into_iter().take(max_candidates).collect();
+
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let sidecar = HaikuSidecar::new();
+        let mut relevant = Vec::new();
+
+        for memory in candidates {
+            match sidecar.check_relevance(&memory.content, context).await {
+                Ok((is_relevant, _reason)) => {
+                    if is_relevant {
+                        relevant.push(memory);
+                    }
+                }
+                Err(e) => {
+                    // Log error but continue with other memories
+                    eprintln!("Sidecar relevance check failed: {}", e);
+                }
+            }
+        }
+
+        Ok(relevant)
+    }
+
+    /// Simple relevance check without sidecar (keyword-based)
+    /// Use this for quick checks when sidecar is not needed
+    pub fn get_relevant_keywords(&self, keywords: &[&str], limit: usize) -> Result<Vec<MemoryEntry>> {
+        let all = self.list_all()?;
+
+        let matches: Vec<_> = all
+            .into_iter()
+            .filter(|e| {
+                let content_lower = e.content.to_lowercase();
+                keywords.iter().any(|kw| content_lower.contains(&kw.to_lowercase()))
+            })
+            .take(limit)
+            .collect();
+
+        Ok(matches)
     }
 }
 

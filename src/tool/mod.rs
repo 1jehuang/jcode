@@ -9,6 +9,7 @@ mod codesearch;
 mod communicate;
 mod conversation_search;
 mod edit;
+mod memory;
 mod remember;
 mod session_search;
 mod glob;
@@ -243,6 +244,12 @@ impl Registry {
         tools_map.insert(
             "remember".to_string(),
             Arc::new(remember::RememberTool::new()) as Arc<dyn Tool>,
+        );
+
+        // Full memory tool with categories and lifecycle management
+        tools_map.insert(
+            "memory".to_string(),
+            Arc::new(memory::MemoryTool::new()) as Arc<dyn Tool>,
         );
 
         // Populate the registry
