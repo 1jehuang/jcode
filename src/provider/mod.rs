@@ -71,6 +71,24 @@ pub const ALL_CLAUDE_MODELS: &[&str] = &["claude-opus-4-5-20251101"];
 
 pub const ALL_OPENAI_MODELS: &[&str] = &["gpt-5.2-codex"];
 
+/// Default context window size when model-specific data isn't known.
+pub const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
+
+/// Return the context window size in tokens for a given model, if known.
+pub fn context_limit_for_model(model: &str) -> Option<usize> {
+    let model = model.to_lowercase();
+
+    if model.starts_with("gpt-5.2-codex") {
+        return Some(400_000);
+    }
+
+    if model.starts_with("claude-opus-4-5") || model.starts_with("claude-opus-4.5") {
+        return Some(200_000);
+    }
+
+    None
+}
+
 /// Detect which provider a model belongs to
 pub fn provider_for_model(model: &str) -> Option<&'static str> {
     if ALL_CLAUDE_MODELS.contains(&model) {
