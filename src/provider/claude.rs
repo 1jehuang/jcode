@@ -23,10 +23,70 @@ const BRIDGE_SCRIPT: &str = include_str!("../../scripts/claude_agent_sdk_bridge.
 /// Available Claude models
 const AVAILABLE_MODELS: &[&str] = &["claude-opus-4-5-20251101"];
 
+/// Native tools that jcode handles locally (not SDK built-ins)
+const NATIVE_TOOL_NAMES: &[&str] = &["selfdev", "communicate", "memory", "remember", "session_search", "bg"];
+
+/// Native tool definition for SDK
+#[derive(Serialize)]
+struct NativeToolDef {
+    name: String,
+    description: String,
+    input_schema: Value,
+}
+
+/// Channel for sending native tool results back to the bridge
+pub type NativeToolResultSender = mpsc::Sender<NativeToolResult>;
+
+/// Native tool result to send back to the Python bridge
+#[derive(Debug, Clone, Serialize)]
+pub struct NativeToolResult {
+    #[serde(rename = "type")]
+    pub msg_type: &'static str,
+    pub request_id: String,
+    pub result: NativeToolResultPayload,
+    pub is_error: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NativeToolResultPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl NativeToolResult {
+    pub fn success(request_id: String, output: String) -> Self {
+        Self {
+            msg_type: "native_tool_result",
+            request_id,
+            result: NativeToolResultPayload {
+                output: Some(output),
+                error: None,
+            },
+            is_error: false,
+        }
+    }
+
+    pub fn error(request_id: String, error: String) -> Self {
+        Self {
+            msg_type: "native_tool_result",
+            request_id,
+            result: NativeToolResultPayload {
+                output: None,
+                error: Some(error),
+            },
+            is_error: true,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ClaudeProvider {
     config: ClaudeSdkConfig,
     model: std::sync::Arc<std::sync::RwLock<String>>,
+    /// Sender for native tool results - populated during complete()
+    native_result_sender: std::sync::Arc<std::sync::Mutex<Option<NativeToolResultSender>>>,
 }
 
 impl ClaudeProvider {
@@ -36,21 +96,47 @@ impl ClaudeProvider {
         Self {
             config,
             model: std::sync::Arc::new(std::sync::RwLock::new(model)),
+            native_result_sender: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
+    /// Get a sender for native tool results (if a completion is in progress)
+    pub fn native_result_sender(&self) -> Option<NativeToolResultSender> {
+        self.native_result_sender
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
     fn tool_names_for_sdk(&self, tools: &[ToolDefinition]) -> Vec<String> {
-        // Pass all tools to SDK including jcode-native ones like selfdev
-        // If SDK fails to execute native tools, jcode's agent will handle them locally
+        // Pass SDK-known tools as names (SDK has built-in implementations)
+        // Native tools like selfdev are passed separately with full definitions
         let mut seen = HashSet::new();
         let mut names = Vec::new();
         for tool in tools {
+            // Skip native tools - they're handled via native_tools_for_sdk
+            if NATIVE_TOOL_NAMES.contains(&tool.name.as_str()) {
+                continue;
+            }
             let mapped = to_claude_tool_name(&tool.name);
             if seen.insert(mapped.clone()) {
                 names.push(mapped);
             }
         }
         names
+    }
+
+    fn native_tools_for_sdk(&self, tools: &[ToolDefinition]) -> Vec<NativeToolDef> {
+        // Pass native tool definitions so the bridge can create MCP tools for them
+        tools
+            .iter()
+            .filter(|t| NATIVE_TOOL_NAMES.contains(&t.name.as_str()))
+            .map(|t| NativeToolDef {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                input_schema: t.input_schema.clone(),
+            })
+            .collect()
     }
 
     fn apply_prompt_cache_control(&self, messages: &[Message]) -> Vec<Message> {
@@ -97,7 +183,7 @@ impl ClaudeProvider {
         &self,
         script_path: &Path,
         request: &ClaudeSdkRequest<'_>,
-    ) -> Result<tokio::process::Child> {
+    ) -> Result<(tokio::process::Child, tokio::process::ChildStdin)> {
         let payload = serde_json::to_vec(request)?;
 
         let mut cmd = Command::new(&self.config.python_bin);
@@ -120,9 +206,8 @@ impl ClaudeProvider {
         stdin.write_all(&payload).await?;
         stdin.write_all(b"\n").await?;
         stdin.flush().await?;
-        drop(stdin);
-
-        Ok(child)
+        // Keep stdin open for native tool results
+        Ok((child, stdin))
     }
 }
 
@@ -232,6 +317,9 @@ struct ClaudeSdkRequest<'a> {
     system: &'a str,
     messages: &'a [Message],
     tools: Vec<String>,
+    /// Native tool definitions for jcode-specific tools (selfdev, etc.)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    native_tools: Vec<NativeToolDef>,
     options: ClaudeSdkOptions,
 }
 
@@ -276,6 +364,12 @@ enum SdkOutput {
         message: String,
         #[serde(default)]
         retry_after_secs: Option<u64>,
+    },
+    /// Native tool call request from the bridge - jcode needs to execute and send result
+    NativeToolCall {
+        request_id: String,
+        tool_name: String,
+        input: Value,
     },
     #[serde(other)]
     Other,
@@ -673,6 +767,15 @@ impl OutputParser {
                 message,
                 retry_after_secs,
             }],
+            SdkOutput::NativeToolCall {
+                request_id,
+                tool_name,
+                input,
+            } => vec![StreamEvent::NativeToolCall {
+                request_id,
+                tool_name,
+                input,
+            }],
             SdkOutput::Other => Vec::new(),
         }
     }
@@ -688,6 +791,7 @@ impl Provider for ClaudeProvider {
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let tool_names = self.tool_names_for_sdk(tools);
+        let native_tools = self.native_tools_for_sdk(tools);
         let cwd = std::env::current_dir()
             .ok()
             .map(|path| path.display().to_string());
@@ -711,6 +815,7 @@ impl Provider for ClaudeProvider {
             system,
             messages,
             tools: tool_names,
+            native_tools,
             options: ClaudeSdkOptions {
                 model: current_model,
                 permission_mode: self.config.permission_mode.clone(),
@@ -723,8 +828,8 @@ impl Provider for ClaudeProvider {
         };
 
         let script_path = self.resolve_bridge_script()?;
-        let mut child = match self.spawn_bridge(&script_path, &request).await {
-            Ok(child) => child,
+        let (mut child, stdin) = match self.spawn_bridge(&script_path, &request).await {
+            Ok(result) => result,
             Err(err) => {
                 if self.config.python_bin == "python3"
                     && err
@@ -752,6 +857,36 @@ impl Provider for ClaudeProvider {
             .ok_or_else(|| anyhow::anyhow!("Failed to capture SDK stderr"))?;
 
         let (tx, rx) = mpsc::channel(200);
+
+        // Create channel for native tool results
+        let (native_result_tx, mut native_result_rx) =
+            mpsc::channel::<NativeToolResult>(50);
+
+        // Store sender for external use
+        if let Ok(mut guard) = self.native_result_sender.lock() {
+            *guard = Some(native_result_tx);
+        }
+
+        // Spawn task to write native tool results to bridge stdin
+        tokio::spawn(async move {
+            let mut stdin = stdin;
+            while let Some(result) = native_result_rx.recv().await {
+                match serde_json::to_string(&result) {
+                    Ok(json) => {
+                        if stdin.write_all(json.as_bytes()).await.is_err() {
+                            break;
+                        }
+                        if stdin.write_all(b"\n").await.is_err() {
+                            break;
+                        }
+                        if stdin.flush().await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
+        });
 
         tokio::spawn(async move {
             let mut stderr_reader = BufReader::new(stderr).lines();
@@ -842,6 +977,7 @@ impl Provider for ClaudeProvider {
         std::sync::Arc::new(ClaudeProvider {
             config,
             model: std::sync::Arc::new(std::sync::RwLock::new(model)),
+            native_result_sender: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
 }

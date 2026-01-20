@@ -11,7 +11,7 @@ import json
 import signal
 import sys
 import time
-from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Optional
 
 
 def _write_output(payload: dict) -> bool:
@@ -25,7 +25,7 @@ def _write_output(payload: dict) -> bool:
 
 
 import anyio
-from claude_agent_sdk import ClaudeAgentOptions, query
+from claude_agent_sdk import ClaudeAgentOptions, query, create_sdk_mcp_server, tool
 from claude_agent_sdk.types import (
     AssistantMessage,
     ResultMessage,
@@ -33,6 +33,123 @@ from claude_agent_sdk.types import (
     SystemMessage,
     UserMessage,
 )
+
+
+import threading
+import uuid
+
+# Global lock and pending requests for native tool calls
+_native_tool_lock = threading.Lock()
+_native_tool_pending: Dict[str, Any] = {}
+_stdin_reader_started = False
+_stdin_lock = threading.Lock()
+
+
+def _start_stdin_reader():
+    """Start a background thread to read native tool results from stdin."""
+    global _stdin_reader_started
+    with _stdin_lock:
+        if _stdin_reader_started:
+            return
+        _stdin_reader_started = True
+
+    def reader_thread():
+        import sys
+        while True:
+            try:
+                line = sys.stdin.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                    if msg.get("type") == "native_tool_result":
+                        request_id = msg.get("request_id")
+                        if request_id:
+                            with _native_tool_lock:
+                                if request_id in _native_tool_pending:
+                                    _native_tool_pending[request_id]["result"] = msg
+                                    _native_tool_pending[request_id]["event"].set()
+                except json.JSONDecodeError:
+                    pass
+            except Exception:
+                break
+
+    t = threading.Thread(target=reader_thread, daemon=True)
+    t.start()
+
+
+def _create_native_tool_handler(tool_name: str) -> Callable:
+    """Create a tool handler that requests jcode to execute the tool and waits for result."""
+    async def handler(args: Dict[str, Any]) -> Dict[str, Any]:
+        # Start stdin reader if not already started
+        _start_stdin_reader()
+
+        # Generate unique request ID
+        request_id = str(uuid.uuid4())
+
+        # Set up pending request with event for synchronization
+        event = threading.Event()
+        with _native_tool_lock:
+            _native_tool_pending[request_id] = {"event": event, "result": None}
+
+        # Output request for jcode to execute
+        payload = {
+            "type": "native_tool_call",
+            "request_id": request_id,
+            "tool_name": tool_name,
+            "input": args,
+        }
+        _write_output(payload)
+
+        # Wait for result (with timeout)
+        if event.wait(timeout=300):  # 5 minute timeout
+            with _native_tool_lock:
+                result_msg = _native_tool_pending.pop(request_id, {}).get("result", {})
+
+            # Extract result
+            result = result_msg.get("result", {})
+            is_error = result_msg.get("is_error", False)
+
+            if is_error:
+                error_text = result.get("error", "Unknown error")
+                return {"content": [{"type": "text", "text": f"Error: {error_text}"}], "is_error": True}
+            else:
+                output_text = result.get("output", "")
+                return {"content": [{"type": "text", "text": output_text}]}
+        else:
+            # Timeout - clean up
+            with _native_tool_lock:
+                _native_tool_pending.pop(request_id, None)
+            return {"content": [{"type": "text", "text": f"Timeout waiting for {tool_name} execution"}], "is_error": True}
+
+    return handler
+
+
+def _create_mcp_server_for_native_tools(native_tools: List[Dict[str, Any]]):
+    """Create an in-process MCP server exposing native jcode tools."""
+    if not native_tools:
+        return None
+
+    tools = []
+    for tool_def in native_tools:
+        name = tool_def.get("name", "")
+        description = tool_def.get("description", "")
+        input_schema = tool_def.get("input_schema", {})
+
+        # Create tool handler
+        handler = _create_native_tool_handler(name)
+        # Use the @tool decorator to create SdkMcpTool
+        sdk_tool = tool(name=name, description=description, input_schema=input_schema)(handler)
+        tools.append(sdk_tool)
+
+    if not tools:
+        return None
+
+    # Create server with all tools
+    return create_sdk_mcp_server("jcode-native-tools", tools=tools)
 
 
 def _to_cli_content_blocks(blocks: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -204,6 +321,7 @@ async def _run() -> None:
     messages = request.get("messages", [])
     system_prompt = request.get("system", "") or ""
     tools = request.get("tools", [])
+    native_tools = request.get("native_tools", [])
     options = request.get("options", {}) or {}
 
     permission_mode = options.get("permission_mode")
@@ -223,9 +341,18 @@ async def _run() -> None:
     # The SDK accepts either a string or SystemPromptPreset dict, we use string
     system_value: Optional[str] = system_prompt.strip() if system_prompt.strip() else "You are an AI coding assistant."
 
+    # Create MCP server for native jcode tools (selfdev, etc.)
+    mcp_server_config = _create_mcp_server_for_native_tools(native_tools)
+    # mcp_servers must be a dict mapping server name to config
+    mcp_servers_dict = {"jcode-native-tools": mcp_server_config} if mcp_server_config else {}
+
+    # Add native tool names to allowed_tools
+    native_tool_names = [t.get("name") for t in native_tools if t.get("name")]
+    all_allowed_tools = (tools if tools else []) + native_tool_names
+
     claude_options = ClaudeAgentOptions(
         tools=tools if tools else None,
-        allowed_tools=tools if tools else [],
+        allowed_tools=all_allowed_tools,
         system_prompt=system_value,
         permission_mode=permission_mode,
         model=model,
@@ -235,6 +362,7 @@ async def _run() -> None:
         extra_args=extra_args,
         resume=resume_session_id,  # Resume previous session if provided
         max_thinking_tokens=max_thinking_tokens,  # Extended thinking for Opus models
+        mcp_servers=mcp_servers_dict if mcp_servers_dict else None,
     )
 
     # When resuming, only send the last user message as a simple string
