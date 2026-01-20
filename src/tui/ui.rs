@@ -980,7 +980,7 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     if app.client_update_available() {
         mode_parts.push(Span::styled(" ", Style::default()));
         mode_parts.push(Span::styled(
-            " client update ",
+            " new client available ",
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Rgb(110, 200, 120)), // Soft green
