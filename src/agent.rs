@@ -357,6 +357,12 @@ impl Agent {
 
     pub fn set_canary(&mut self, build_hash: &str) {
         self.session.set_canary(build_hash);
+        if let Err(err) = self.session.save() {
+            logging::error(&format!(
+                "Failed to persist canary session state: {}",
+                err
+            ));
+        }
     }
 
     async fn tool_definitions(&self) -> Vec<ToolDefinition> {
