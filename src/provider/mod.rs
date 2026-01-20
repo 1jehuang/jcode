@@ -78,7 +78,16 @@ pub const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
 pub fn context_limit_for_model(model: &str) -> Option<usize> {
     let model = model.to_lowercase();
 
-    if model.starts_with("gpt-5.2-codex") {
+    if model.starts_with("gpt-5.2-chat") || model.starts_with("gpt-5-chat") {
+        return Some(128_000);
+    }
+
+    if model.starts_with("gpt-5.2-pro")
+        || model.starts_with("gpt-5.2-codex")
+        || model.starts_with("gpt-5-codex")
+        || model.starts_with("gpt-5.2")
+        || model.starts_with("gpt-5")
+    {
         return Some(400_000);
     }
 
