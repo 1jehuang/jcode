@@ -811,6 +811,11 @@ impl Provider for ClaudeProvider {
             messages
         };
 
+        // Note: We intentionally don't pass resume_session_id to the bridge.
+        // SDK session resume doesn't work across process invocations (each bridge
+        // spawn is a new process), so the bridge would send only the last user
+        // message thinking the SDK has context - but it doesn't. Instead, we always
+        // send full message history and let the bridge format it as context.
         let request = ClaudeSdkRequest {
             system,
             messages,
@@ -822,7 +827,7 @@ impl Provider for ClaudeProvider {
                 cli_path: self.config.cli_path.clone(),
                 cwd,
                 include_partial_messages: self.config.include_partial_messages,
-                resume: resume_session_id.map(|s| s.to_string()),
+                resume: None, // Don't use SDK resume - it doesn't persist across processes
                 max_thinking_tokens: self.config.max_thinking_tokens,
             },
         };
