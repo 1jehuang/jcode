@@ -45,6 +45,11 @@ The build also includes git hash and `-dev` suffix for uncommitted changes (e.g.
 ## Logs
 - Logs are written to `~/.jcode/logs/` (daily files like `jcode-YYYY-MM-DD.log`).
 
+## Debug Socket (External Testing)
+- Server exposes a debug socket for automation/introspection (default: main socket name with `-debug.sock` suffix).
+- Enable debug control with `JCODE_DEBUG_CONTROL=1` (or run in self-dev mode); then send `debug_command` requests.
+- Protocol is newline-delimited JSON; see `Request::DebugCommand` in `src/protocol.rs`.
+
 ## Install Notes
 - `scripts/install_release.sh` installs a versioned binary and atomically flips the `~/.local/bin/jcode` symlink.
 - Ensure `~/.local/bin` is **before** `~/.cargo/bin` in `PATH` so the symlinked release is used.
