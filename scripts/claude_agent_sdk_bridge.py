@@ -13,6 +13,18 @@ import sys
 import time
 from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Optional
 
+# For handling anyio exception groups in Python < 3.11
+try:
+    BaseExceptionGroup
+except NameError:
+    # Python < 3.11 - use exceptiongroup backport if available
+    try:
+        from exceptiongroup import BaseExceptionGroup
+    except ImportError:
+        # No backport available - create a dummy that will never match
+        class BaseExceptionGroup(Exception):  # type: ignore
+            pass
+
 
 def _write_output(payload: dict) -> bool:
     """Write JSON to stdout, returning False if pipe is broken."""
@@ -35,6 +47,7 @@ from claude_agent_sdk.types import (
 )
 
 
+import asyncio
 import threading
 import uuid
 
@@ -43,6 +56,7 @@ _native_tool_lock = threading.Lock()
 _native_tool_pending: Dict[str, Any] = {}
 _stdin_reader_started = False
 _stdin_lock = threading.Lock()
+_event_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 def _start_stdin_reader():
@@ -70,8 +84,13 @@ def _start_stdin_reader():
                         if request_id:
                             with _native_tool_lock:
                                 if request_id in _native_tool_pending:
-                                    _native_tool_pending[request_id]["result"] = msg
-                                    _native_tool_pending[request_id]["event"].set()
+                                    pending = _native_tool_pending[request_id]
+                                    pending["result"] = msg
+                                    # Use thread-safe event set for async event
+                                    event = pending["event"]
+                                    loop = pending.get("loop")
+                                    if loop is not None:
+                                        loop.call_soon_threadsafe(event.set)
                 except json.JSONDecodeError:
                     pass
             except Exception:
@@ -90,10 +109,11 @@ def _create_native_tool_handler(tool_name: str) -> Callable:
         # Generate unique request ID
         request_id = str(uuid.uuid4())
 
-        # Set up pending request with event for synchronization
-        event = threading.Event()
+        # Set up pending request with async event for non-blocking wait
+        event = asyncio.Event()
+        loop = asyncio.get_running_loop()
         with _native_tool_lock:
-            _native_tool_pending[request_id] = {"event": event, "result": None}
+            _native_tool_pending[request_id] = {"event": event, "result": None, "loop": loop}
 
         # Output request for jcode to execute
         payload = {
@@ -104,8 +124,9 @@ def _create_native_tool_handler(tool_name: str) -> Callable:
         }
         _write_output(payload)
 
-        # Wait for result (with timeout)
-        if event.wait(timeout=300):  # 5 minute timeout
+        # Wait for result asynchronously (with timeout) - does NOT block event loop
+        try:
+            await asyncio.wait_for(event.wait(), timeout=300)  # 5 minute timeout
             with _native_tool_lock:
                 result_msg = _native_tool_pending.pop(request_id, {}).get("result", {})
 
@@ -119,7 +140,7 @@ def _create_native_tool_handler(tool_name: str) -> Callable:
             else:
                 output_text = result.get("output", "")
                 return {"content": [{"type": "text", "text": output_text}]}
-        else:
+        except asyncio.TimeoutError:
             # Timeout - clean up
             with _native_tool_lock:
                 _native_tool_pending.pop(request_id, None)
@@ -497,6 +518,18 @@ def main() -> None:
     except BrokenPipeError:
         # Parent closed the pipe - exit silently
         sys.exit(0)
+    except BaseExceptionGroup as exc:
+        # Handle anyio task group exceptions (Python 3.11+ or exceptiongroup backport)
+        # Extract the actual exception from the group
+        errors = list(exc.exceptions) if hasattr(exc, 'exceptions') else [exc]
+        actual_exc = errors[0] if errors else exc
+        error_payload = {
+            "type": "error",
+            "message": f"{str(exc)} (inner: {str(actual_exc)})",
+            "kind": actual_exc.__class__.__name__,
+        }
+        _write_output(error_payload)
+        raise
     except Exception as exc:  # pragma: no cover - surfaced to Rust caller
         error_payload = {"type": "error", "message": str(exc), "kind": exc.__class__.__name__}
 
