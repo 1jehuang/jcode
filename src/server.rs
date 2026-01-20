@@ -108,6 +108,29 @@ fn debug_control_allowed() -> bool {
         .unwrap_or(false)
 }
 
+fn server_has_newer_binary() -> bool {
+    let startup_mtime = std::env::current_exe()
+        .ok()
+        .and_then(|p| std::fs::metadata(&p).ok())
+        .and_then(|m| m.modified().ok());
+    let Some(startup_mtime) = startup_mtime else {
+        return false;
+    };
+
+    let Some(repo_dir) = crate::build::get_repo_dir() else {
+        return false;
+    };
+
+    let exe = repo_dir.join("target/release/jcode");
+    if let Ok(metadata) = std::fs::metadata(&exe) {
+        if let Ok(current_mtime) = metadata.modified() {
+            return current_mtime > startup_mtime;
+        }
+    }
+
+    false
+}
+
 /// Exit code when server shuts down due to idle timeout
 pub const EXIT_IDLE_TIMEOUT: i32 = 44;
 
@@ -775,6 +798,8 @@ async fn handle_client(
                     all_sessions,
                     client_count: Some(current_client_count),
                     is_canary: Some(is_canary),
+                    server_version: Some(env!("JCODE_VERSION").to_string()),
+                    server_has_update: Some(server_has_newer_binary()),
                 };
                 let json = encode_event(&event);
                 let mut w = writer.lock().await;
@@ -859,6 +884,8 @@ async fn handle_client(
                             all_sessions,
                             client_count: Some(current_client_count),
                             is_canary: Some(is_canary),
+                            server_version: Some(env!("JCODE_VERSION").to_string()),
+                            server_has_update: Some(server_has_newer_binary()),
                         };
                         let json = encode_event(&event);
                         let mut w = writer.lock().await;
