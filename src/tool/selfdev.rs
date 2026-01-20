@@ -180,7 +180,12 @@ impl SelfDevTool {
             timestamp: chrono::Utc::now().to_rfc3339(),
             is_rollback: false,
         };
-        reload_ctx.save()?;
+        crate::logging::info(&format!("Saving reload context to {:?}", ReloadContext::path()));
+        if let Err(e) = reload_ctx.save() {
+            crate::logging::error(&format!("Failed to save reload context: {}", e));
+            return Err(e);
+        }
+        crate::logging::info("Reload context saved successfully");
 
         // Write reload info for post-restart display
         let info_path = crate::storage::jcode_dir()?.join("reload-info");
