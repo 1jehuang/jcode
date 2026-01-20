@@ -1967,9 +1967,7 @@ impl App {
             };
 
             if let Some(session_id) = session_to_resume {
-                let exists_on_disk = crate::session::session_path(&session_id)
-                    .map(|p| p.exists())
-                    .unwrap_or(false);
+                let exists_on_disk = crate::session::session_exists(&session_id);
                 if !exists_on_disk {
                     if resume_from_arg {
                         self.display_messages.push(DisplayMessage::error(format!(

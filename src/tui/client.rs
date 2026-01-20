@@ -274,9 +274,7 @@ impl ClientApp {
                 // If reconnecting after server reload, restore the session first
                 if reconnect_attempts > 0 {
                     if let Some(ref session_id) = self.session_id {
-                        let exists_on_disk = crate::session::session_path(session_id)
-                            .map(|p| p.exists())
-                            .unwrap_or(false);
+                        let exists_on_disk = crate::session::session_exists(session_id);
                         if exists_on_disk {
                             let request = Request::ResumeSession {
                                 id: self.next_request_id,

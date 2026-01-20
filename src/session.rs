@@ -293,9 +293,51 @@ impl Session {
     }
 }
 
+fn session_path_in_dir(base: &std::path::Path, session_id: &str) -> PathBuf {
+    base.join("sessions").join(format!("{}.json", session_id))
+}
+
 pub fn session_path(session_id: &str) -> Result<PathBuf> {
     let base = storage::jcode_dir()?;
-    Ok(base.join("sessions").join(format!("{}.json", session_id)))
+    Ok(session_path_in_dir(&base, session_id))
+}
+
+pub fn session_exists(session_id: &str) -> bool {
+    session_path(session_id)
+        .map(|path| path.exists())
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_session_exists_roundtrip() {
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "jcode-session-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(tmp_dir.join("sessions")).unwrap();
+
+        assert!(!session_path_in_dir(&tmp_dir, "missing-session").exists());
+
+        let session_path = session_path_in_dir(&tmp_dir, "exists-session");
+        std::fs::write(&session_path, "{}").unwrap();
+        assert!(session_path.exists());
+
+        let random_id = format!(
+            "missing-session-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        assert!(!session_exists(&random_id));
+    }
 }
 
 /// Recover crashed sessions from the most recent crash window (text-only).
