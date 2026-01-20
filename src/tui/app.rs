@@ -6023,6 +6023,41 @@ impl super::TuiState for App {
             (None, None)
         };
 
+        // Gather memory info
+        let memory_info = {
+            use crate::memory::MemoryManager;
+
+            let manager = MemoryManager::new();
+            let project = manager.load_project().ok();
+            let global = manager.load_global().ok();
+
+            match (project, global) {
+                (Some(p), Some(g)) => {
+                    let project_count = p.entries.len();
+                    let global_count = g.entries.len();
+                    let total_count = project_count + global_count;
+
+                    if total_count > 0 {
+                        let mut by_category = std::collections::HashMap::new();
+                        for entry in p.entries.iter().chain(g.entries.iter()) {
+                            *by_category.entry(entry.category.to_string()).or_insert(0) += 1;
+                        }
+
+                        Some(super::info_widget::MemoryInfo {
+                            total_count,
+                            project_count,
+                            global_count,
+                            by_category,
+                            sidecar_available: true,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        };
+
         super::info_widget::InfoWidgetData {
             todos,
             context_info,
@@ -6032,6 +6067,7 @@ impl super::TuiState for App {
             reasoning_effort,
             session_count,
             client_count,
+            memory_info,
         }
     }
 }
