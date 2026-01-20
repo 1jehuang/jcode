@@ -142,31 +142,35 @@ async fn test_socket_model_cycle_supported_models() -> Result<()> {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_millis()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&runtime_dir)?;
-    let prev_runtime = std::env::var("XDG_RUNTIME_DIR").ok();
-    std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
+    let socket_path = runtime_dir.join("jcode.sock");
+    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
 
     let provider = MockProvider::with_models(vec!["gpt-5.2-codex", "claude-opus-4-5-20251101"]);
     let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
     let registry = Registry::new(provider.clone()).await;
-    let server_instance = server::Server::new(provider, registry);
+    let server_instance = server::Server::new_with_paths(
+        provider,
+        registry,
+        socket_path.clone(),
+        debug_socket_path.clone(),
+    );
 
     let server_handle = tokio::spawn(async move { server_instance.run().await });
 
     // Wait for socket to appear
-    let socket_path = server::socket_path();
     let start = Instant::now();
     while !socket_path.exists() {
-        if start.elapsed() > Duration::from_secs(2) {
+        if start.elapsed() > Duration::from_secs(10) {
             server_handle.abort();
             anyhow::bail!("Server socket did not appear");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
-    let mut client = server::Client::connect().await?;
+    let mut client = server::Client::connect_with_path(socket_path.clone()).await?;
     let request_id = client.cycle_model(1).await?;
 
     let mut saw_model_changed = false;
@@ -186,15 +190,72 @@ async fn test_socket_model_cycle_supported_models() -> Result<()> {
     }
 
     server_handle.abort();
-    let _ = std::fs::remove_file(server::socket_path());
-
-    if let Some(prev) = prev_runtime {
-        std::env::set_var("XDG_RUNTIME_DIR", prev);
-    } else {
-        std::env::remove_var("XDG_RUNTIME_DIR");
-    }
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_file(&debug_socket_path);
 
     assert!(saw_model_changed, "Did not receive model_changed event");
+    Ok(())
+}
+
+/// Test that subscribe selfdev hint marks the session as canary
+#[tokio::test]
+async fn test_subscribe_selfdev_hint_marks_canary() -> Result<()> {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "jcode-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir)?;
+    let socket_path = runtime_dir.join("jcode.sock");
+    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+
+    let provider = MockProvider::new();
+    let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
+    let registry = Registry::new(provider.clone()).await;
+    let server_instance = server::Server::new_with_paths(
+        provider,
+        registry,
+        socket_path.clone(),
+        debug_socket_path.clone(),
+    );
+
+    let server_handle = tokio::spawn(async move { server_instance.run().await });
+
+    // Wait for socket to appear
+    let start = Instant::now();
+    while !socket_path.exists() {
+        if start.elapsed() > Duration::from_secs(2) {
+            server_handle.abort();
+            anyhow::bail!("Server socket did not appear");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let mut client = server::Client::connect_with_path(socket_path.clone()).await?;
+    let subscribe_id = client.subscribe_with_info(None, Some(true)).await?;
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let event = tokio::time::timeout(Duration::from_secs(1), client.read_event()).await??;
+        if matches!(event, ServerEvent::Done { id } if id == subscribe_id) {
+            break;
+        }
+    }
+
+    let history_event = client.get_history_event().await?;
+    match history_event {
+        ServerEvent::History { is_canary, .. } => {
+            assert_eq!(is_canary, Some(true));
+        }
+        _ => anyhow::bail!("Expected history event after subscribe"),
+    }
+
+    server_handle.abort();
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_file(&debug_socket_path);
+
     Ok(())
 }
 

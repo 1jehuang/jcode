@@ -53,7 +53,13 @@ pub enum Request {
 
     /// Subscribe to events (for TUI clients)
     #[serde(rename = "subscribe")]
-    Subscribe { id: u64 },
+    Subscribe {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selfdev: Option<bool>,
+    },
 
     /// Get full conversation history (for TUI sync on connect)
     #[serde(rename = "get_history")]
@@ -363,7 +369,7 @@ impl Request {
             Request::Ping { id } => *id,
             Request::GetState { id } => *id,
             Request::DebugCommand { id, .. } => *id,
-            Request::Subscribe { id } => *id,
+            Request::Subscribe { id, .. } => *id,
             Request::GetHistory { id } => *id,
             Request::Reload { id } => *id,
             Request::ResumeSession { id, .. } => *id,

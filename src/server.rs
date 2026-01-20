@@ -98,6 +98,17 @@ fn is_selfdev_env() -> bool {
         .unwrap_or(false)
 }
 
+fn is_jcode_repo_or_parent(path: &std::path::Path) -> bool {
+    let mut current = Some(path);
+    while let Some(dir) = current {
+        if crate::build::is_jcode_repo(dir) {
+            return true;
+        }
+        current = dir.parent();
+    }
+    false
+}
+
 fn debug_control_allowed() -> bool {
     if is_selfdev_env() {
         return true;
@@ -178,6 +189,18 @@ impl Server {
             swarms_by_cwd: Arc::new(RwLock::new(HashMap::new())),
             shared_context: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    pub fn new_with_paths(
+        provider: Arc<dyn Provider>,
+        registry: Registry,
+        socket_path: PathBuf,
+        debug_socket_path: PathBuf,
+    ) -> Self {
+        let mut server = Self::new(provider, registry);
+        server.socket_path = socket_path;
+        server.debug_socket_path = debug_socket_path;
+        server
     }
 
     /// Monitor the global Bus for FileTouch events and detect conflicts
@@ -534,6 +557,7 @@ async fn handle_client(
         mpsc::unbounded_channel::<(u64, Result<()>)>();
     let mut processing_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut processing_message_id: Option<u64> = None;
+    let mut client_selfdev = is_selfdev_env();
 
     // Create a new session for this client
     let mut new_agent = Agent::new(Arc::clone(&provider), registry.clone());
@@ -548,7 +572,7 @@ async fn handle_client(
     }
 
     // Enable self-dev mode when running in a self-dev environment
-    if is_selfdev_env() {
+    if client_selfdev {
         new_agent.set_canary("self-dev");
         registry.register_selfdev_tools().await;
     }
@@ -713,7 +737,7 @@ async fn handle_client(
                 let new_id = new_agent.session_id().to_string();
 
                 // Enable self-dev mode when running in a self-dev environment
-                if is_selfdev_env() {
+                if client_selfdev {
                     new_agent.set_canary("self-dev");
                     // selfdev tools should already be registered from initial connection
                 }
@@ -757,7 +781,35 @@ async fn handle_client(
                 w.write_all(json.as_bytes()).await?;
             }
 
-            Request::Subscribe { id } => {
+            Request::Subscribe {
+                id,
+                working_dir,
+                selfdev,
+            } => {
+                let mut should_selfdev = client_selfdev;
+                if matches!(selfdev, Some(true)) {
+                    should_selfdev = true;
+                }
+
+                if !should_selfdev {
+                    if let Some(ref dir) = working_dir {
+                        let path = PathBuf::from(dir);
+                        if is_jcode_repo_or_parent(&path) {
+                            should_selfdev = true;
+                        }
+                    }
+                }
+
+                if should_selfdev {
+                    client_selfdev = true;
+                    let mut agent_guard = agent.lock().await;
+                    if !agent_guard.is_canary() {
+                        agent_guard.set_canary("self-dev");
+                    }
+                    drop(agent_guard);
+                    registry.register_selfdev_tools().await;
+                }
+
                 // Send this client's session ID
                 let json = encode_event(&ServerEvent::SessionId {
                     session_id: client_session_id.clone(),
@@ -849,6 +901,7 @@ async fn handle_client(
                 };
 
                 if result.is_ok() && is_canary {
+                    client_selfdev = true;
                     registry.register_selfdev_tools().await;
                 }
 
@@ -1526,7 +1579,10 @@ pub struct Client {
 
 impl Client {
     pub async fn connect() -> Result<Self> {
-        let path = socket_path();
+        Self::connect_with_path(socket_path()).await
+    }
+
+    pub async fn connect_with_path(path: PathBuf) -> Result<Self> {
         let stream = UnixStream::connect(&path).await?;
         let (reader, writer) = stream.into_split();
         Ok(Self {
@@ -1537,7 +1593,10 @@ impl Client {
     }
 
     pub async fn connect_debug() -> Result<Self> {
-        let path = debug_socket_path();
+        Self::connect_debug_with_path(debug_socket_path()).await
+    }
+
+    pub async fn connect_debug_with_path(path: PathBuf) -> Result<Self> {
         let stream = UnixStream::connect(&path).await?;
         let (reader, writer) = stream.into_split();
         Ok(Self {
@@ -1563,10 +1622,22 @@ impl Client {
 
     /// Subscribe to events
     pub async fn subscribe(&mut self) -> Result<u64> {
+        self.subscribe_with_info(None, None).await
+    }
+
+    pub async fn subscribe_with_info(
+        &mut self,
+        working_dir: Option<String>,
+        selfdev: Option<bool>,
+    ) -> Result<u64> {
         let id = self.next_id;
         self.next_id += 1;
 
-        let request = Request::Subscribe { id };
+        let request = Request::Subscribe {
+            id,
+            working_dir,
+            selfdev,
+        };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;
         Ok(id)
@@ -1623,21 +1694,34 @@ impl Client {
     }
 
     pub async fn get_history(&mut self) -> Result<Vec<HistoryMessage>> {
+        let event = self.get_history_event().await?;
+        match event {
+            ServerEvent::History { messages, .. } => Ok(messages),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    pub async fn get_history_event(&mut self) -> Result<ServerEvent> {
         let id = self.next_id;
         self.next_id += 1;
 
         let request = Request::GetHistory { id };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;
-
-        let mut line = String::new();
-        self.reader.read_line(&mut line).await?;
-        let event: ServerEvent = serde_json::from_str(&line)?;
-
-        match event {
-            ServerEvent::History { messages, .. } => Ok(messages),
-            _ => Ok(Vec::new()),
+        for _ in 0..10 {
+            let mut line = String::new();
+            self.reader.read_line(&mut line).await?;
+            let event: ServerEvent = serde_json::from_str(&line)?;
+            match event {
+                ServerEvent::Ack { .. } => continue,
+                _ => return Ok(event),
+            }
         }
+
+        Ok(ServerEvent::Error {
+            id,
+            message: "History response not received".to_string(),
+        })
     }
 
     pub async fn reload(&mut self) -> Result<()> {
