@@ -311,6 +311,13 @@ impl Agent {
         self.seed_compaction_from_session();
     }
 
+    /// Clear provider session so the next turn sends full context.
+    pub fn reset_provider_session(&mut self) {
+        self.provider_session_id = None;
+        self.session.provider_session_id = None;
+        let _ = self.session.save();
+    }
+
     /// Build the system prompt, including skill and self-dev context
     fn build_system_prompt(&self) -> String {
         let mut prompt = SYSTEM_PROMPT.to_string();
