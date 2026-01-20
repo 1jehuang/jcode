@@ -259,12 +259,14 @@ def handle_contradiction(old, new):
 ## Implementation Phases
 
 ### Phase 1: Basic Memory Tools
-- [x] Memory store with file persistence (implemented, disabled)
-- [x] Basic memory tool (implemented, disabled)
+- [x] Memory store with file persistence (`src/memory.rs`)
+- [x] Basic memory tool (`src/tool/memory.rs` - enabled)
 - [ ] CLI commands (`jcode memory list`, `jcode memory forget`)
-- [ ] Re-enable and integrate with agent
+- [x] Re-enable and integrate with agent
 
-**Status:** Ready now
+**Status:** Implemented
+- MemoryTool registered and active
+- Added trust levels, consolidation strength, superseded tracking
 
 ### Phase 2: End-of-Session Extraction
 - [ ] Hook into session close
@@ -284,14 +286,15 @@ def handle_contradiction(old, new):
 - API embeddings (if needed): $0.00001/call (10x cheaper than threshold)
 
 ### Phase 4: Memory Sidecar
-- [ ] Sidecar agent infrastructure
+- [x] Sidecar agent infrastructure (`src/sidecar.rs` - HaikuSidecar)
 - [ ] Session search integration
-- [ ] Relevance verification
+- [x] Relevance verification (`check_relevance()`)
 - [ ] Main agent interruption protocol
 
-**Status:** Ready now
-- Claude Haiku 3.5: ~$0.0025/call, <500ms latency
-- Acceptable cost: ~1-2 cents per session
+**Status:** Implemented
+- Claude Haiku 4.5: ~$0.003-0.005/call (context-dependent), <500ms latency
+- `HaikuSidecar` provides: `complete()`, `check_relevance()`, `extract_memories()`
+- Integrated with MemoryManager via `get_relevant_for_context()`, `extract_from_transcript()`
 
 ### Phase 5: Full Integration
 - [ ] Decay/pruning background job
