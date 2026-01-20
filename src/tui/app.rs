@@ -461,7 +461,8 @@ impl App {
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
         let skills = SkillRegistry::load().unwrap_or_default();
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
-        let session = Session::create(None, None);
+        let mut session = Session::create(None, None);
+        session.model = Some(provider.model());
         let display = config().display.clone();
         let context_limit = crate::provider::context_limit_for_model(&provider.model())
             .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT) as u64;
@@ -644,47 +645,27 @@ impl App {
             let mut assistant_turns = 0;
             let mut total_chars = 0;
 
-            // Convert session messages to display messages
-            for stored_msg in &session.messages {
-                let role_str = match stored_msg.role {
-                    Role::User => {
-                        user_turns += 1;
-                        "user"
-                    }
-                    Role::Assistant => {
-                        assistant_turns += 1;
-                        "assistant"
-                    }
-                };
-
-                // Extract text content from ContentBlocks
-                let content: String = stored_msg
-                    .content
-                    .iter()
-                    .filter_map(|c| {
-                        if let ContentBlock::Text { text, .. } = c {
-                            Some(text.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
-
-                total_chars += content.len();
-
-                if !content.is_empty() {
-                    self.display_messages.push(DisplayMessage {
-                        role: role_str.to_string(),
-                        content,
-                        tool_calls: vec![],
-                        duration_secs: None,
-                        title: None,
-                        tool_data: None,
-                    });
-                    self.messages.push(stored_msg.to_message());
+            // Convert session messages to display messages (including tools)
+            for item in crate::session::render_messages(&session) {
+                if item.role == "user" {
+                    user_turns += 1;
+                } else if item.role == "assistant" {
+                    assistant_turns += 1;
                 }
+                total_chars += item.content.len();
+
+                self.display_messages.push(DisplayMessage {
+                    role: item.role,
+                    content: item.content,
+                    tool_calls: item.tool_calls,
+                    duration_secs: None,
+                    title: None,
+                    tool_data: item.tool_data,
+                });
             }
+
+            // Restore full message history for provider context
+            self.messages = session.messages_for_provider();
 
             // Don't restore provider_session_id - Claude sessions don't persist across
             // process restarts. The messages are restored, so Claude will get full context.
@@ -692,6 +673,27 @@ impl App {
             self.session = session;
             // Clear the saved provider_session_id since it's no longer valid
             self.session.provider_session_id = None;
+            let mut restored_model = false;
+            if let Some(model) = self.session.model.clone() {
+                if let Err(e) = self.provider.set_model(&model) {
+                    self.display_messages.push(DisplayMessage {
+                        role: "system".to_string(),
+                        content: format!("⚠ Failed to restore model '{}': {}", model, e),
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                } else {
+                    restored_model = true;
+                }
+            }
+
+            let active_model = self.provider.model();
+            if restored_model || self.session.model.is_none() {
+                self.session.model = Some(active_model.clone());
+            }
+            self.update_context_limit_for_model(&active_model);
             // Mark session as active now that it's being used again
             self.session.mark_active();
             crate::logging::info(&format!("Restored session: {}", session_id));
@@ -1926,10 +1928,8 @@ impl App {
                                     self.reload_info
                                         .push(format!("Reloaded with build {}", hash.trim()));
                                 } else if let Some(hash) = trimmed.strip_prefix("rebuild:") {
-                                    self.reload_info.push(format!(
-                                        "Rebuilt and reloaded ({})",
-                                        hash.trim()
-                                    ));
+                                    self.reload_info
+                                        .push(format!("Rebuilt and reloaded ({})", hash.trim()));
                                 } else if !trimmed.is_empty() {
                                     self.reload_info.push(trimmed.to_string());
                                 }
@@ -2399,10 +2399,10 @@ impl App {
                         self.display_messages.push(DisplayMessage {
                             role: msg.role,
                             content: msg.content,
-                            tool_calls: vec![],
+                            tool_calls: msg.tool_calls.unwrap_or_default(),
                             duration_secs: None,
                             title: None,
-                            tool_data: None,
+                            tool_data: msg.tool_data,
                         });
                     }
                 }
@@ -2977,7 +2977,9 @@ impl App {
                     self.queued_messages.clear();
                     self.pasted_contents.clear();
                     self.active_skill = None;
-                    self.session = Session::create(None, None);
+                    let mut session = Session::create(None, None);
+                    session.model = Some(self.provider.model());
+                    self.session = session;
                     self.provider_session_id = None;
                     return Ok(());
                 }
@@ -3335,7 +3337,9 @@ impl App {
             self.queued_messages.clear();
             self.pasted_contents.clear();
             self.active_skill = None;
-            self.session = Session::create(None, None);
+            let mut session = Session::create(None, None);
+            session.model = Some(self.provider.model());
+            self.session = session;
             self.provider_session_id = None;
             return;
         }
@@ -3670,6 +3674,8 @@ impl App {
                     self.session.provider_session_id = None;
                     let active_model = self.provider.model();
                     self.update_context_limit_for_model(&active_model);
+                    self.session.model = Some(active_model.clone());
+                    let _ = self.session.save();
                     self.display_messages.push(DisplayMessage {
                         role: "system".to_string(),
                         content: format!("✓ Switched to model: {}", active_model),
@@ -3994,6 +4000,8 @@ impl App {
                 self.provider_session_id = None;
                 self.session.provider_session_id = None;
                 self.update_context_limit_for_model(next_model);
+                self.session.model = Some(self.provider.model());
+                let _ = self.session.save();
                 self.display_messages.push(DisplayMessage::system(format!(
                     "✓ Switched to model: {}",
                     next_model
@@ -4098,6 +4106,7 @@ impl App {
             Session::create_with_id(new_session_id, Some(old_session.id.clone()), None);
         new_session.title = old_session.title.clone();
         new_session.provider_session_id = old_session.provider_session_id.clone();
+        new_session.model = old_session.model.clone();
 
         self.messages.clear();
         self.display_messages.clear();
@@ -6674,5 +6683,75 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_file(crate::session::session_path(&session_id).unwrap());
+    }
+
+    #[test]
+    fn test_has_newer_binary_detection() {
+        use std::time::{Duration, SystemTime};
+
+        let mut app = create_test_app();
+        let Some(repo_dir) = crate::build::get_repo_dir() else {
+            return;
+        };
+        let exe = repo_dir.join("target/release/jcode");
+
+        let mut created = false;
+        if !exe.exists() {
+            if let Some(parent) = exe.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&exe, "test").unwrap();
+            created = true;
+        }
+
+        app.client_binary_mtime = Some(SystemTime::UNIX_EPOCH);
+        assert!(app.has_newer_binary());
+
+        app.client_binary_mtime = Some(SystemTime::now() + Duration::from_secs(3600));
+        assert!(!app.has_newer_binary());
+
+        if created {
+            let _ = std::fs::remove_file(&exe);
+        }
+    }
+
+    #[test]
+    fn test_reload_requests_exit_when_newer_binary() {
+        use std::time::{Duration, SystemTime};
+
+        let mut app = create_test_app();
+        let Some(repo_dir) = crate::build::get_repo_dir() else {
+            return;
+        };
+        let exe = repo_dir.join("target/release/jcode");
+
+        let mut created = false;
+        if !exe.exists() {
+            if let Some(parent) = exe.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&exe, "test").unwrap();
+            created = true;
+        }
+
+        app.client_binary_mtime = Some(SystemTime::UNIX_EPOCH);
+        app.input = "/reload".to_string();
+        app.submit_input();
+
+        assert!(app.reload_requested.is_some());
+        assert!(app.should_quit);
+
+        // Ensure the "no newer binary" path is exercised too.
+        app.reload_requested = None;
+        app.should_quit = false;
+        app.client_binary_mtime = Some(SystemTime::now() + Duration::from_secs(3600));
+        app.input = "/reload".to_string();
+        app.submit_input();
+        assert!(app.reload_requested.is_none());
+        assert!(!app.should_quit);
+
+        if created {
+            let _ = std::fs::remove_file(&exe);
+        }
     }
 }

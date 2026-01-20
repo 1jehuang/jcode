@@ -10,14 +10,26 @@ use jcode::agent::Agent;
 use jcode::message::StreamEvent;
 use jcode::protocol::ServerEvent;
 use jcode::server;
+use jcode::session::Session;
 use jcode::tool::Registry;
 use mock_provider::MockProvider;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+static JCODE_HOME_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+
+fn lock_jcode_home() -> std::sync::MutexGuard<'static, ()> {
+    JCODE_HOME_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("jcode home lock")
+}
 
 /// Test that a simple text response works
 #[tokio::test]
 async fn test_simple_response() -> Result<()> {
+    let _lock = lock_jcode_home();
     let provider = MockProvider::new();
 
     // Queue a simple response
@@ -43,6 +55,7 @@ async fn test_simple_response() -> Result<()> {
 /// Test that multi-turn conversation works with session resume
 #[tokio::test]
 async fn test_multi_turn_conversation() -> Result<()> {
+    let _lock = lock_jcode_home();
     let provider = MockProvider::new();
 
     // First turn response
@@ -81,6 +94,7 @@ async fn test_multi_turn_conversation() -> Result<()> {
 /// Test that token usage is tracked
 #[tokio::test]
 async fn test_token_usage() -> Result<()> {
+    let _lock = lock_jcode_home();
     let provider = MockProvider::new();
 
     provider.queue_response(vec![
@@ -110,6 +124,7 @@ async fn test_token_usage() -> Result<()> {
 /// Test error handling
 #[tokio::test]
 async fn test_stream_error() -> Result<()> {
+    let _lock = lock_jcode_home();
     let provider = MockProvider::new();
 
     provider.queue_response(vec![
@@ -137,6 +152,7 @@ async fn test_stream_error() -> Result<()> {
 /// Test model cycling over the socket interface (server + client)
 #[tokio::test]
 async fn test_socket_model_cycle_supported_models() -> Result<()> {
+    let _lock = lock_jcode_home();
     let runtime_dir = std::env::temp_dir().join(format!(
         "jcode-test-{}",
         std::time::SystemTime::now()
@@ -150,11 +166,8 @@ async fn test_socket_model_cycle_supported_models() -> Result<()> {
 
     let provider = MockProvider::with_models(vec!["gpt-5.2-codex", "claude-opus-4-5-20251101"]);
     let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
-    let server_instance = server::Server::new_with_paths(
-        provider,
-        socket_path.clone(),
-        debug_socket_path.clone(),
-    );
+    let server_instance =
+        server::Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
 
     let server_handle = tokio::spawn(async move { server_instance.run().await });
 
@@ -195,9 +208,130 @@ async fn test_socket_model_cycle_supported_models() -> Result<()> {
     Ok(())
 }
 
+/// Test that resume restores model selection and tool output in history
+#[tokio::test]
+async fn test_resume_restores_model_and_tool_history() -> Result<()> {
+    let _lock = lock_jcode_home();
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "jcode-resume-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir)?;
+
+    let jcode_home = runtime_dir.join("home");
+    std::fs::create_dir_all(&jcode_home)?;
+
+    let prev_home = std::env::var("JCODE_HOME").ok();
+    std::env::set_var("JCODE_HOME", &jcode_home);
+
+    let mut session = Session::create(None, Some("Resume Test".to_string()));
+    session.model = Some("gpt-5.2-codex".to_string());
+    session.add_message(
+        jcode::message::Role::User,
+        vec![jcode::message::ContentBlock::Text {
+            text: "Run a tool".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.add_message(
+        jcode::message::Role::Assistant,
+        vec![
+            jcode::message::ContentBlock::Text {
+                text: "Running...".to_string(),
+                cache_control: None,
+            },
+            jcode::message::ContentBlock::ToolUse {
+                id: "tool-1".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({"cmd": "echo hi"}),
+            },
+        ],
+    );
+    session.add_message(
+        jcode::message::Role::User,
+        vec![jcode::message::ContentBlock::ToolResult {
+            tool_use_id: "tool-1".to_string(),
+            content: "hi\n".to_string(),
+            is_error: None,
+        }],
+    );
+    session.save()?;
+
+    let socket_path = runtime_dir.join("jcode.sock");
+    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+
+    // Default model = claude, resume should switch to gpt-5.2-codex
+    let provider = MockProvider::with_models(vec!["claude-opus-4-5-20251101", "gpt-5.2-codex"]);
+    let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
+    let server_instance =
+        server::Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
+    let server_handle = tokio::spawn(async move { server_instance.run().await });
+
+    let start = Instant::now();
+    while !socket_path.exists() {
+        if start.elapsed() > Duration::from_secs(10) {
+            server_handle.abort();
+            anyhow::bail!("Server socket did not appear");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let mut client = server::Client::connect_with_path(socket_path.clone()).await?;
+    let resume_id = client.resume_session(&session.id).await?;
+
+    let mut history_event = None;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let event = tokio::time::timeout(Duration::from_secs(1), client.read_event()).await??;
+        match event {
+            ServerEvent::History {
+                id,
+                messages,
+                provider_model,
+                ..
+            } if id == resume_id => {
+                history_event = Some((messages, provider_model));
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    server_handle.abort();
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_file(&debug_socket_path);
+    if let Some(prev) = prev_home {
+        std::env::set_var("JCODE_HOME", prev);
+    } else {
+        std::env::remove_var("JCODE_HOME");
+    }
+
+    let (messages, provider_model) =
+        history_event.ok_or_else(|| anyhow::anyhow!("Did not receive history event"))?;
+
+    assert_eq!(provider_model, Some("gpt-5.2-codex".to_string()));
+
+    let tool_msg = messages
+        .iter()
+        .find(|m| m.role == "tool")
+        .ok_or_else(|| anyhow::anyhow!("Tool message missing in history"))?;
+    assert!(tool_msg.content.contains("hi"));
+    let tool_data = tool_msg
+        .tool_data
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Tool metadata missing in history"))?;
+    assert_eq!(tool_data.name, "bash");
+
+    Ok(())
+}
+
 /// Test that subscribe selfdev hint marks the session as canary
 #[tokio::test]
 async fn test_subscribe_selfdev_hint_marks_canary() -> Result<()> {
+    let _lock = lock_jcode_home();
     let runtime_dir = std::env::temp_dir().join(format!(
         "jcode-test-{}",
         std::time::SystemTime::now()
@@ -211,11 +345,8 @@ async fn test_subscribe_selfdev_hint_marks_canary() -> Result<()> {
 
     let provider = MockProvider::new();
     let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
-    let server_instance = server::Server::new_with_paths(
-        provider,
-        socket_path.clone(),
-        debug_socket_path.clone(),
-    );
+    let server_instance =
+        server::Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
 
     let server_handle = tokio::spawn(async move { server_instance.run().await });
 
@@ -258,6 +389,7 @@ async fn test_subscribe_selfdev_hint_marks_canary() -> Result<()> {
 /// Test that switching models resets the provider resume session
 #[tokio::test]
 async fn test_model_switch_resets_provider_session() -> Result<()> {
+    let _lock = lock_jcode_home();
     let runtime_dir = std::env::temp_dir().join(format!(
         "jcode-test-{}",
         std::time::SystemTime::now()
@@ -355,6 +487,7 @@ async fn test_model_switch_resets_provider_session() -> Result<()> {
 /// Test that switching models only affects the active session
 #[tokio::test]
 async fn test_model_switch_is_per_session() -> Result<()> {
+    let _lock = lock_jcode_home();
     let runtime_dir = std::env::temp_dir().join(format!(
         "jcode-test-{}",
         std::time::SystemTime::now()
@@ -472,6 +605,7 @@ async fn test_model_switch_is_per_session() -> Result<()> {
 /// The agent should identify as "jcode" or just a generic "coding assistant powered by Claude"
 #[tokio::test]
 async fn test_system_prompt_no_claude_code_identity() -> Result<()> {
+    let _lock = lock_jcode_home();
     let provider = Arc::new(MockProvider::new());
 
     // Queue a simple response
@@ -535,6 +669,7 @@ async fn test_system_prompt_no_claude_code_identity() -> Result<()> {
 #[ignore] // Requires Claude credentials
 async fn binary_integration_standalone_claude() -> Result<()> {
     use std::process::Command;
+    let _lock = lock_jcode_home();
 
     let output = Command::new("cargo")
         .args([
@@ -566,6 +701,7 @@ async fn binary_integration_standalone_claude() -> Result<()> {
 #[ignore] // Requires OpenAI/Codex credentials
 async fn binary_integration_openai_provider() -> Result<()> {
     use std::process::Command;
+    let _lock = lock_jcode_home();
 
     let output = Command::new("cargo")
         .args([
@@ -603,6 +739,7 @@ async fn binary_integration_openai_provider() -> Result<()> {
 #[tokio::test]
 async fn binary_version_command() -> Result<()> {
     use std::process::Command;
+    let _lock = lock_jcode_home();
 
     let output = Command::new("cargo")
         .args(["run", "--release", "--bin", "jcode", "--", "--version"])

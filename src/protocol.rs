@@ -9,6 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::message::ToolCall;
+
 /// A message in conversation history (for sync)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryMessage {
@@ -16,6 +18,8 @@ pub struct HistoryMessage {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_data: Option<ToolCall>,
 }
 
 /// Client request to server
