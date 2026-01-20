@@ -79,7 +79,7 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
     // Check if token is expired
     let now_ms = chrono::Utc::now().timestamp_millis();
     if oauth.expires_at < now_ms {
-        eprintln!("Claude OAuth token expired; will attempt refresh.");
+        crate::logging::info("Claude OAuth token expired; will attempt refresh.");
     }
 
     Ok(ClaudeCredentials {
@@ -104,9 +104,9 @@ pub fn load_opencode_credentials() -> Result<ClaudeCredentials> {
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     if anthropic.expires <= now_ms {
-        eprintln!("OpenCode Anthropic token expired; will attempt refresh.");
+        crate::logging::info("OpenCode Anthropic token expired; will attempt refresh.");
     }
-    eprintln!("Using OpenCode Anthropic credentials");
+    crate::logging::info("Using OpenCode Anthropic credentials");
 
     Ok(ClaudeCredentials {
         access_token: anthropic.access,
