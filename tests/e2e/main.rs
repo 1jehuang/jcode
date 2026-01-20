@@ -259,6 +259,109 @@ async fn test_subscribe_selfdev_hint_marks_canary() -> Result<()> {
     Ok(())
 }
 
+/// Test that switching models resets the provider resume session
+#[tokio::test]
+async fn test_model_switch_resets_provider_session() -> Result<()> {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "jcode-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir)?;
+    let socket_path = runtime_dir.join("jcode.sock");
+    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+
+    let provider = Arc::new(MockProvider::with_models(vec!["model-a", "model-b"]));
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("hello".to_string()),
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".to_string()),
+        },
+        StreamEvent::SessionId("session-1".to_string()),
+    ]);
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("again".to_string()),
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".to_string()),
+        },
+    ]);
+
+    let provider_dyn: Arc<dyn jcode::provider::Provider> = provider.clone();
+    let registry = Registry::new(provider_dyn.clone()).await;
+    let server_instance = server::Server::new_with_paths(
+        provider_dyn,
+        registry,
+        socket_path.clone(),
+        debug_socket_path.clone(),
+    );
+
+    let server_handle = tokio::spawn(async move { server_instance.run().await });
+
+    let start = Instant::now();
+    while !socket_path.exists() {
+        if start.elapsed() > Duration::from_secs(2) {
+            server_handle.abort();
+            anyhow::bail!("Server socket did not appear");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let mut client = server::Client::connect_with_path(socket_path.clone()).await?;
+
+    let msg_id = client.send_message("hello").await?;
+    let mut saw_done1 = false;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let event = tokio::time::timeout(Duration::from_secs(1), client.read_event()).await??;
+        if matches!(event, ServerEvent::Done { id } if id == msg_id) {
+            saw_done1 = true;
+            break;
+        }
+    }
+    assert!(saw_done1, "Did not receive Done for first message");
+
+    let model_id = client.cycle_model(1).await?;
+    let mut saw_model = false;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let event = tokio::time::timeout(Duration::from_secs(1), client.read_event()).await??;
+        if matches!(event, ServerEvent::ModelChanged { id, error: None, .. } if id == model_id) {
+            saw_model = true;
+            break;
+        }
+    }
+    assert!(saw_model, "Did not receive ModelChanged after cycle");
+
+    let msg2_id = client.send_message("second").await?;
+    let mut saw_done2 = false;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let event = tokio::time::timeout(Duration::from_secs(1), client.read_event()).await??;
+        if matches!(event, ServerEvent::Done { id } if id == msg2_id) {
+            saw_done2 = true;
+            break;
+        }
+    }
+    assert!(saw_done2, "Did not receive Done for second message");
+
+    let resume_ids = provider
+        .captured_resume_session_ids
+        .lock()
+        .unwrap()
+        .clone();
+    assert_eq!(resume_ids.len(), 2);
+    assert_eq!(resume_ids[0], None);
+    assert_eq!(resume_ids[1], None);
+
+    server_handle.abort();
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_file(&debug_socket_path);
+
+    Ok(())
+}
+
 /// Test that the system prompt does NOT identify the agent as "Claude Code"
 /// The agent should identify as "jcode" or just a generic "coding assistant powered by Claude"
 #[tokio::test]

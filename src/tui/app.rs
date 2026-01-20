@@ -3597,6 +3597,8 @@ impl App {
             let model_name = model_name.trim();
             match self.provider.set_model(model_name) {
                 Ok(()) => {
+                    self.provider_session_id = None;
+                    self.session.provider_session_id = None;
                     self.display_messages.push(DisplayMessage {
                         role: "system".to_string(),
                         content: format!("✓ Switched to model: {}", model_name),
@@ -3916,6 +3918,8 @@ impl App {
 
         match self.provider.set_model(next_model) {
             Ok(()) => {
+                self.provider_session_id = None;
+                self.session.provider_session_id = None;
                 self.display_messages.push(DisplayMessage::system(format!(
                     "✓ Switched to model: {}",
                     next_model
