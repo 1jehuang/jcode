@@ -2,10 +2,11 @@
 
 use crate::build;
 use crate::server;
+use crate::storage;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 #[derive(Debug, Deserialize)]
@@ -13,6 +14,50 @@ struct SelfDevInput {
     action: String,
     #[serde(default)]
     message: Option<String>,
+    /// Optional context for reload - what the agent is working on
+    #[serde(default)]
+    context: Option<String>,
+}
+
+/// Context saved before reload, restored after restart
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReloadContext {
+    /// What the agent was working on (user-provided or auto-detected)
+    pub task_context: Option<String>,
+    /// Version before reload
+    pub version_before: String,
+    /// New version (target)
+    pub version_after: String,
+    /// Session ID
+    pub session_id: String,
+    /// Timestamp
+    pub timestamp: String,
+    /// Whether this was a rollback
+    pub is_rollback: bool,
+}
+
+impl ReloadContext {
+    pub fn path() -> Result<std::path::PathBuf> {
+        Ok(storage::jcode_dir()?.join("reload-context.json"))
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let path = Self::path()?;
+        storage::write_json(&path, self)?;
+        Ok(())
+    }
+
+    pub fn load() -> Result<Option<Self>> {
+        let path = Self::path()?;
+        if path.exists() {
+            let ctx: Self = storage::read_json(&path)?;
+            // Delete after loading (one-time use)
+            let _ = std::fs::remove_file(&path);
+            Ok(Some(ctx))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 pub struct SelfDevTool;
@@ -60,23 +105,28 @@ impl Tool for SelfDevTool {
                 "message": {
                     "type": "string",
                     "description": "Optional message for promote action"
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional context for reload/rollback - describe what you're working on. \
+                                   This will be included in the continuation message after restart."
                 }
             },
             "required": ["action"]
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: SelfDevInput = serde_json::from_value(input)?;
         let action = params.action.clone();
 
         let title = format!("selfdev {}", action);
 
         let result = match action.as_str() {
-            "reload" => self.do_reload().await,
+            "reload" => self.do_reload(params.context, &ctx.session_id).await,
             "promote" => self.do_promote(params.message).await,
             "status" => self.do_status().await,
-            "rollback" => self.do_rollback().await,
+            "rollback" => self.do_rollback(params.context, &ctx.session_id).await,
             "socket-info" => self.do_socket_info().await,
             "socket-help" => self.do_socket_help().await,
             _ => Ok(ToolOutput::new(format!(
@@ -90,7 +140,7 @@ impl Tool for SelfDevTool {
 }
 
 impl SelfDevTool {
-    async fn do_reload(&self) -> Result<ToolOutput> {
+    async fn do_reload(&self, context: Option<String>, session_id: &str) -> Result<ToolOutput> {
         let repo_dir = build::get_repo_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository directory"))?;
 
@@ -105,6 +155,7 @@ impl SelfDevTool {
         }
 
         let hash = build::current_git_hash(&repo_dir)?;
+        let version_before = env!("JCODE_VERSION").to_string();
 
         // Install this version and set as canary (stable stays as safety net)
         build::install_version(&repo_dir, &hash)?;
@@ -119,6 +170,17 @@ impl SelfDevTool {
         manifest.canary = Some(hash.clone());
         manifest.canary_status = Some(build::CanaryStatus::Testing);
         manifest.save()?;
+
+        // Save reload context for continuation after restart
+        let reload_ctx = ReloadContext {
+            task_context: context,
+            version_before,
+            version_after: hash.clone(),
+            session_id: session_id.to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            is_rollback: false,
+        };
+        reload_ctx.save()?;
 
         // Write reload info for post-restart display
         let info_path = crate::storage::jcode_dir()?.join("reload-info");
@@ -271,13 +333,26 @@ impl SelfDevTool {
         Ok(ToolOutput::new(status))
     }
 
-    async fn do_rollback(&self) -> Result<ToolOutput> {
+    async fn do_rollback(&self, context: Option<String>, session_id: &str) -> Result<ToolOutput> {
         let manifest = build::BuildManifest::load()?;
 
         let stable_hash = manifest
             .stable
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No stable build to rollback to"))?;
+
+        let version_before = env!("JCODE_VERSION").to_string();
+
+        // Save reload context for continuation after restart
+        let reload_ctx = ReloadContext {
+            task_context: context,
+            version_before,
+            version_after: stable_hash.clone(),
+            session_id: session_id.to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            is_rollback: true,
+        };
+        reload_ctx.save()?;
 
         // Write signal file with stable hash to trigger rollback
         let signal_path = crate::storage::jcode_dir()?.join("rollback-signal");
@@ -362,5 +437,60 @@ Unnamespaced commands default to `server:`.
 | `tester:<id>:stop` | Stop tester |
 
 Use the `debug_socket` tool to execute these commands directly."#.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_reload_context_serialization() {
+        // Create test context with task info
+        let ctx = ReloadContext {
+            task_context: Some("Testing the reload feature".to_string()),
+            version_before: "v0.1.100".to_string(),
+            version_after: "abc1234".to_string(),
+            session_id: "test-session-123".to_string(),
+            timestamp: "2025-01-20T00:00:00Z".to_string(),
+            is_rollback: false,
+        };
+
+        // Serialize and deserialize
+        let json = serde_json::to_string(&ctx).unwrap();
+        let loaded: ReloadContext = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.task_context, Some("Testing the reload feature".to_string()));
+        assert_eq!(loaded.version_before, "v0.1.100");
+        assert_eq!(loaded.version_after, "abc1234");
+        assert_eq!(loaded.session_id, "test-session-123");
+        assert!(!loaded.is_rollback);
+    }
+
+    #[test]
+    fn test_reload_context_rollback() {
+        let ctx = ReloadContext {
+            task_context: None,
+            version_before: "canary-xyz".to_string(),
+            version_after: "stable-abc".to_string(),
+            session_id: "session-456".to_string(),
+            timestamp: "2025-01-20T00:00:00Z".to_string(),
+            is_rollback: true,
+        };
+
+        let json = serde_json::to_string(&ctx).unwrap();
+        let loaded: ReloadContext = serde_json::from_str(&json).unwrap();
+
+        assert!(loaded.is_rollback);
+        assert!(loaded.task_context.is_none());
+    }
+
+    #[test]
+    fn test_reload_context_path() {
+        // Just verify the path function works
+        let path = ReloadContext::path();
+        assert!(path.is_ok());
+        let path = path.unwrap();
+        assert!(path.to_string_lossy().contains("reload-context.json"));
     }
 }
