@@ -463,6 +463,8 @@ impl App {
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
         let session = Session::create(None, None);
         let display = config().display.clone();
+        let context_limit = crate::provider::context_limit_for_model(&provider.model())
+            .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT) as u64;
 
         // Pre-compute context info so it shows on startup
         let available_skills: Vec<crate::prompt::SkillInfo> = skills
@@ -501,7 +503,7 @@ impl App {
             streaming_cache_creation_tokens: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
-            context_limit: 200_000, // Claude's context window
+            context_limit,
             context_warning_shown: false,
             context_info,
             last_stream_activity: None,
@@ -2316,6 +2318,7 @@ impl App {
                     self.remote_provider_name = Some(name);
                 }
                 if let Some(model) = provider_model {
+                    self.update_context_limit_for_model(&model);
                     self.remote_provider_model = Some(model);
                 }
                 self.remote_available_models = available_models;
@@ -2348,6 +2351,7 @@ impl App {
                     )));
                     self.set_status_notice("Model switch failed");
                 } else {
+                    self.update_context_limit_for_model(&model);
                     self.remote_provider_model = Some(model.clone());
                     self.display_messages.push(DisplayMessage::system(format!(
                         "✓ Switched to model: {}",
@@ -3603,9 +3607,11 @@ impl App {
                 Ok(()) => {
                     self.provider_session_id = None;
                     self.session.provider_session_id = None;
+                    let active_model = self.provider.model();
+                    self.update_context_limit_for_model(&active_model);
                     self.display_messages.push(DisplayMessage {
                         role: "system".to_string(),
-                        content: format!("✓ Switched to model: {}", model_name),
+                        content: format!("✓ Switched to model: {}", active_model),
                         tool_calls: vec![],
                         duration_secs: None,
                         title: None,
@@ -3924,6 +3930,7 @@ impl App {
             Ok(()) => {
                 self.provider_session_id = None;
                 self.session.provider_session_id = None;
+                self.update_context_limit_for_model(next_model);
                 self.display_messages.push(DisplayMessage::system(format!(
                     "✓ Switched to model: {}",
                     next_model
@@ -3938,6 +3945,13 @@ impl App {
                 self.set_status_notice("Model switch failed");
             }
         }
+    }
+
+    fn update_context_limit_for_model(&mut self, model: &str) {
+        let limit = crate::provider::context_limit_for_model(model)
+            .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT);
+        self.context_limit = limit as u64;
+        self.context_warning_shown = false;
     }
 
     fn set_status_notice(&mut self, text: impl Into<String>) {

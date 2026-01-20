@@ -261,7 +261,7 @@ impl TuiState for BenchState {
     }
 
     fn context_limit(&self) -> Option<usize> {
-        Some(200_000)
+        Some(jcode::provider::DEFAULT_CONTEXT_LIMIT)
     }
 
     fn client_update_available(&self) -> bool {
