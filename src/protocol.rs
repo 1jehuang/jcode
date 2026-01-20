@@ -55,6 +55,14 @@ pub enum Request {
         session_id: Option<String>,
     },
 
+    /// Execute a client debug command (forwarded to TUI)
+    #[serde(rename = "client_debug_command")]
+    ClientDebugCommand { id: u64, command: String },
+
+    /// Response from TUI for client debug command
+    #[serde(rename = "client_debug_response")]
+    ClientDebugResponse { id: u64, output: String },
+
     /// Subscribe to events (for TUI clients)
     #[serde(rename = "subscribe")]
     Subscribe {
@@ -221,6 +229,10 @@ pub enum ServerEvent {
     #[serde(rename = "debug_response")]
     DebugResponse { id: u64, ok: bool, output: String },
 
+    /// Client debug command forwarded from debug socket to TUI
+    #[serde(rename = "client_debug_request")]
+    ClientDebugRequest { id: u64, command: String },
+
     /// Session ID assigned
     #[serde(rename = "session")]
     SessionId { session_id: String },
@@ -373,6 +385,8 @@ impl Request {
             Request::Ping { id } => *id,
             Request::GetState { id } => *id,
             Request::DebugCommand { id, .. } => *id,
+            Request::ClientDebugCommand { id, .. } => *id,
+            Request::ClientDebugResponse { id, .. } => *id,
             Request::Subscribe { id, .. } => *id,
             Request::GetHistory { id } => *id,
             Request::Reload { id } => *id,
