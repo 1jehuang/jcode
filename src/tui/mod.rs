@@ -1,6 +1,7 @@
 mod app;
 pub mod backend;
 mod core;
+pub mod image;
 pub mod info_widget;
 mod keybind;
 pub(crate) mod markdown;
@@ -75,6 +76,10 @@ pub trait TuiState {
     fn context_info(&self) -> crate::prompt::ContextInfo;
     /// Context window limit in tokens (if known)
     fn context_limit(&self) -> Option<usize>;
+    /// Whether a newer client binary is available
+    fn client_update_available(&self) -> bool;
+    /// Whether a newer server binary is available (remote mode)
+    fn server_update_available(&self) -> Option<bool>;
     /// Get info widget data (todos, client count, etc.)
     fn info_widget_data(&self) -> info_widget::InfoWidgetData;
 }

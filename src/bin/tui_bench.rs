@@ -264,6 +264,14 @@ impl TuiState for BenchState {
         Some(200_000)
     }
 
+    fn client_update_available(&self) -> bool {
+        false
+    }
+
+    fn server_update_available(&self) -> Option<bool> {
+        None
+    }
+
     fn info_widget_data(&self) -> InfoWidgetData {
         self.info_widget.clone()
     }

@@ -248,6 +248,12 @@ pub enum ServerEvent {
         /// Whether this session is in canary/self-dev mode
         #[serde(skip_serializing_if = "Option::is_none")]
         is_canary: Option<bool>,
+        /// Server binary version string (e.g. "v0.1.123 (abc1234)")
+        #[serde(skip_serializing_if = "Option::is_none")]
+        server_version: Option<String>,
+        /// Whether a newer server binary is available on disk
+        #[serde(skip_serializing_if = "Option::is_none")]
+        server_has_update: Option<bool>,
     },
 
     /// Server is reloading (clients should reconnect)

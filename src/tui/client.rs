@@ -895,6 +895,14 @@ impl TuiState for ClientApp {
         None
     }
 
+    fn client_update_available(&self) -> bool {
+        false
+    }
+
+    fn server_update_available(&self) -> Option<bool> {
+        None
+    }
+
     fn info_widget_data(&self) -> super::info_widget::InfoWidgetData {
         // Deprecated client - return empty widget data
         super::info_widget::InfoWidgetData::default()
