@@ -9,6 +9,9 @@ use futures::Stream;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
+// Re-export native tool result types for use by agent
+pub use claude::{NativeToolResult, NativeToolResultSender};
+
 /// Stream of events from a provider
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 
@@ -64,6 +67,12 @@ pub trait Provider: Send + Sync {
     /// Create a new provider instance with the same credentials/config and model,
     /// but independent mutable state (e.g., model selection).
     fn fork(&self) -> Arc<dyn Provider>;
+
+    /// Get a sender for native tool results (if the provider supports it).
+    /// This is used by the Claude provider to send results back to the SDK bridge.
+    fn native_result_sender(&self) -> Option<NativeToolResultSender> {
+        None
+    }
 }
 
 /// Available models (shown in /model list)
@@ -340,5 +349,12 @@ impl Provider for MultiProvider {
         let provider = MultiProvider::with_preference(prefer_openai);
         let _ = provider.set_model(&current_model);
         Arc::new(provider)
+    }
+
+    fn native_result_sender(&self) -> Option<NativeToolResultSender> {
+        match self.active_provider() {
+            ActiveProvider::Claude => self.claude.as_ref().and_then(|c| c.native_result_sender()),
+            ActiveProvider::OpenAI => None,
+        }
     }
 }

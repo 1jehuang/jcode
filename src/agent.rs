@@ -6,7 +6,7 @@ use crate::compaction::CompactionEvent;
 use crate::logging;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall, ToolDefinition};
 use crate::protocol::{HistoryMessage, ServerEvent};
-use crate::provider::Provider;
+use crate::provider::{NativeToolResult, Provider};
 use crate::session::Session;
 use crate::skill::SkillRegistry;
 use crate::tool::{Registry, ToolContext};
@@ -767,6 +767,33 @@ impl Agent {
                             println!("📦 Context compacted ({}){}", trigger, tokens_str);
                         }
                     }
+                    StreamEvent::NativeToolCall {
+                        request_id,
+                        tool_name,
+                        input,
+                    } => {
+                        // Execute native tool and send result back to SDK bridge
+                        if trace {
+                            eprintln!(
+                                "[trace] native_tool_call request_id={} tool={}",
+                                request_id, tool_name
+                            );
+                        }
+                        let ctx = ToolContext {
+                            session_id: self.session.id.clone(),
+                            message_id: self.session.id.clone(),
+                            tool_call_id: request_id.clone(),
+                        };
+                        let tool_result = self.registry.execute(&tool_name, input, ctx).await;
+                        let native_result = match tool_result {
+                            Ok(output) => NativeToolResult::success(request_id, output.output),
+                            Err(e) => NativeToolResult::error(request_id, e.to_string()),
+                        };
+                        // Send result back to SDK bridge
+                        if let Some(sender) = self.provider.native_result_sender() {
+                            let _ = sender.send(native_result).await;
+                        }
+                    }
                     StreamEvent::Error { message, .. } => {
                         if trace {
                             eprintln!("[trace] stream_error {}", message);
@@ -1181,6 +1208,26 @@ impl Agent {
                         let _ = event_tx.send(ServerEvent::SessionId { session_id: sid });
                     }
                     StreamEvent::Compaction { .. } => {}
+                    StreamEvent::NativeToolCall {
+                        request_id,
+                        tool_name,
+                        input,
+                    } => {
+                        // Execute native tool and send result back to SDK bridge
+                        let ctx = ToolContext {
+                            session_id: self.session.id.clone(),
+                            message_id: self.session.id.clone(),
+                            tool_call_id: request_id.clone(),
+                        };
+                        let tool_result = self.registry.execute(&tool_name, input, ctx).await;
+                        let native_result = match tool_result {
+                            Ok(output) => NativeToolResult::success(request_id, output.output),
+                            Err(e) => NativeToolResult::error(request_id, e.to_string()),
+                        };
+                        if let Some(sender) = self.provider.native_result_sender() {
+                            let _ = sender.send(native_result).await;
+                        }
+                    }
                     StreamEvent::Error { message, .. } => {
                         return Err(anyhow::anyhow!("Stream error: {}", message));
                     }
@@ -1473,6 +1520,26 @@ impl Agent {
                         let _ = event_tx.send(ServerEvent::SessionId { session_id: sid });
                     }
                     StreamEvent::Compaction { .. } => {}
+                    StreamEvent::NativeToolCall {
+                        request_id,
+                        tool_name,
+                        input,
+                    } => {
+                        // Execute native tool and send result back to SDK bridge
+                        let ctx = ToolContext {
+                            session_id: self.session.id.clone(),
+                            message_id: self.session.id.clone(),
+                            tool_call_id: request_id.clone(),
+                        };
+                        let tool_result = self.registry.execute(&tool_name, input, ctx).await;
+                        let native_result = match tool_result {
+                            Ok(output) => NativeToolResult::success(request_id, output.output),
+                            Err(e) => NativeToolResult::error(request_id, e.to_string()),
+                        };
+                        if let Some(sender) = self.provider.native_result_sender() {
+                            let _ = sender.send(native_result).await;
+                        }
+                    }
                     StreamEvent::Error { message, .. } => {
                         return Err(anyhow::anyhow!("Stream error: {}", message));
                     }
