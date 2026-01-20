@@ -113,10 +113,24 @@ fn debug_control_allowed() -> bool {
     if is_selfdev_env() {
         return true;
     }
-    std::env::var("JCODE_DEBUG_CONTROL")
+    // Check config file setting
+    if crate::config::config().display.debug_socket {
+        return true;
+    }
+    if std::env::var("JCODE_DEBUG_CONTROL")
         .ok()
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
+    {
+        return true;
+    }
+    // Check for file-based toggle (allows enabling without restart)
+    if let Ok(jcode_dir) = crate::storage::jcode_dir() {
+        if jcode_dir.join("debug_control").exists() {
+            return true;
+        }
+    }
+    false
 }
 
 fn server_update_candidate() -> Option<(PathBuf, &'static str)> {
@@ -200,11 +214,16 @@ pub struct Server {
     swarms_by_cwd: Arc<RwLock<HashMap<PathBuf, HashSet<String>>>>,
     /// Shared context by swarm (cwd -> key -> SharedContext)
     shared_context: Arc<RwLock<HashMap<PathBuf, HashMap<String, SharedContext>>>>,
+    /// Channel to forward client debug commands to TUI (request_id, command)
+    client_debug_tx: Arc<RwLock<Option<mpsc::UnboundedSender<(u64, String)>>>>,
+    /// Channel to receive client debug responses from TUI (request_id, response)
+    client_debug_response_tx: broadcast::Sender<(u64, String)>,
 }
 
 impl Server {
     pub fn new(provider: Arc<dyn Provider>) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
+        let (client_debug_response_tx, _) = broadcast::channel(64);
         Self {
             provider,
             socket_path: socket_path(),
@@ -218,6 +237,8 @@ impl Server {
             swarm_members: Arc::new(RwLock::new(HashMap::new())),
             swarms_by_cwd: Arc::new(RwLock::new(HashMap::new())),
             shared_context: Arc::new(RwLock::new(HashMap::new())),
+            client_debug_tx: Arc::new(RwLock::new(None)),
+            client_debug_response_tx,
         }
     }
 
@@ -473,6 +494,8 @@ impl Server {
         let main_swarms_by_cwd = Arc::clone(&self.swarms_by_cwd);
         let main_shared_context = Arc::clone(&self.shared_context);
         let main_file_touches = Arc::clone(&self.file_touches);
+        let main_client_debug_tx = Arc::clone(&self.client_debug_tx);
+        let main_client_debug_response_tx = self.client_debug_response_tx.clone();
 
         let main_handle = tokio::spawn(async move {
             loop {
@@ -488,6 +511,8 @@ impl Server {
                         let swarms_by_cwd = Arc::clone(&main_swarms_by_cwd);
                         let shared_context = Arc::clone(&main_shared_context);
                         let file_touches = Arc::clone(&main_file_touches);
+                        let client_debug_tx = Arc::clone(&main_client_debug_tx);
+                        let client_debug_response_tx = main_client_debug_response_tx.clone();
 
                         // Increment client count
                         *client_count.write().await += 1;
@@ -505,6 +530,8 @@ impl Server {
                                 swarms_by_cwd,
                                 shared_context,
                                 file_touches,
+                                client_debug_tx,
+                                client_debug_response_tx,
                             )
                             .await;
 
@@ -527,6 +554,9 @@ impl Server {
         let debug_sessions = Arc::clone(&self.sessions);
         let debug_is_processing = Arc::clone(&self.is_processing);
         let debug_session_id = Arc::clone(&self.session_id);
+        let debug_provider = Arc::clone(&self.provider);
+        let debug_client_debug_tx = Arc::clone(&self.client_debug_tx);
+        let debug_client_debug_response_tx = self.client_debug_response_tx.clone();
 
         let debug_handle = tokio::spawn(async move {
             loop {
@@ -535,10 +565,21 @@ impl Server {
                         let sessions = Arc::clone(&debug_sessions);
                         let is_processing = Arc::clone(&debug_is_processing);
                         let session_id = Arc::clone(&debug_session_id);
+                        let provider = Arc::clone(&debug_provider);
+                        let client_debug_tx = Arc::clone(&debug_client_debug_tx);
+                        let client_debug_response_tx = debug_client_debug_response_tx.clone();
 
                         tokio::spawn(async move {
                             if let Err(e) =
-                                handle_debug_client(stream, sessions, is_processing, session_id)
+                                handle_debug_client(
+                                    stream,
+                                    sessions,
+                                    is_processing,
+                                    session_id,
+                                    provider,
+                                    client_debug_tx,
+                                    client_debug_response_tx,
+                                )
                                     .await
                             {
                                 eprintln!("Debug client error: {}", e);
@@ -570,6 +611,8 @@ async fn handle_client(
     swarms_by_cwd: Arc<RwLock<HashMap<PathBuf, HashSet<String>>>>,
     shared_context: Arc<RwLock<HashMap<PathBuf, HashMap<String, SharedContext>>>>,
     file_touches: Arc<RwLock<HashMap<PathBuf, Vec<FileAccess>>>>,
+    client_debug_tx: Arc<RwLock<Option<mpsc::UnboundedSender<(u64, String)>>>>,
+    client_debug_response_tx: broadcast::Sender<(u64, String)>,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -658,9 +701,25 @@ async fn handle_client(
         session_id: client_session_id.clone(),
     });
 
+    // Set up client debug command channel
+    // This client becomes the "active" debug client that receives client: commands
+    let (debug_cmd_tx, mut debug_cmd_rx) = mpsc::unbounded_channel::<(u64, String)>();
+    {
+        let mut tx_guard = client_debug_tx.write().await;
+        *tx_guard = Some(debug_cmd_tx);
+    }
+
     loop {
         line.clear();
         tokio::select! {
+            // Handle client debug commands from debug socket
+            debug_cmd = debug_cmd_rx.recv() => {
+                if let Some((request_id, command)) = debug_cmd {
+                    let response = execute_client_debug_command(&command);
+                    let _ = client_debug_response_tx.send((request_id, response));
+                }
+                continue;
+            }
             done = processing_done_rx.recv() => {
                 if let Some((done_id, result)) = done {
                     if Some(done_id) != processing_message_id {
@@ -1370,6 +1429,14 @@ async fn handle_client(
                     members: member_list,
                 });
             }
+
+            // These are handled via channels, not direct requests from TUI
+            Request::ClientDebugCommand { id, .. } | Request::ClientDebugResponse { id, .. } => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: "ClientDebugCommand/Response are for internal use only".to_string(),
+                });
+            }
         }
     }
 
@@ -1395,6 +1462,12 @@ async fn handle_client(
                 }
             }
         }
+    }
+
+    // Clean up: remove client debug channel
+    {
+        let mut tx_guard = client_debug_tx.write().await;
+        *tx_guard = None;
     }
 
     if let Some(handle) = processing_task.take() {
@@ -1456,6 +1529,63 @@ async fn resolve_debug_session(
     Err(anyhow::anyhow!(
         "No active session found. Connect a client or provide session_id."
     ))
+}
+
+/// Create a headless session (no TUI client needed)
+async fn create_headless_session(
+    sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    global_session_id: &Arc<RwLock<String>>,
+    provider_template: &Arc<dyn Provider>,
+    command: &str,
+) -> Result<String> {
+    // Parse optional working directory from command: create_session:/path/to/dir
+    let working_dir = if let Some(path_str) = command.strip_prefix("create_session:") {
+        let path_str = path_str.trim();
+        if !path_str.is_empty() {
+            Some(std::path::PathBuf::from(path_str))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Fork the provider for this session
+    let provider = provider_template.fork();
+    let registry = Registry::new(provider.clone()).await;
+
+    // Create a new agent
+    let mut new_agent = Agent::new(Arc::clone(&provider), registry);
+    let client_session_id = new_agent.session_id().to_string();
+
+    // Enable self-dev mode if in self-dev environment or working in jcode repo
+    if is_selfdev_env() {
+        new_agent.set_canary("self-dev");
+    } else if let Some(ref dir) = working_dir {
+        if crate::build::is_jcode_repo(dir) || is_jcode_repo_or_parent(dir) {
+            new_agent.set_canary("self-dev");
+        }
+    }
+
+    // Set as current session if none exists
+    {
+        let mut current = global_session_id.write().await;
+        if current.is_empty() {
+            *current = client_session_id.clone();
+        }
+    }
+
+    // Add to sessions map
+    let agent = Arc::new(Mutex::new(new_agent));
+    {
+        let mut sessions_guard = sessions.write().await;
+        sessions_guard.insert(client_session_id.clone(), agent);
+    }
+
+    Ok(serde_json::json!({
+        "session_id": client_session_id,
+        "working_dir": working_dir,
+    }).to_string())
 }
 
 async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Result<String> {
@@ -1524,11 +1654,89 @@ async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Resul
 
     if trimmed == "help" {
         return Ok(
-            "debug commands: state, history, tools, last_response, message:<text>, tool:<name> <json>, help".to_string()
+            "debug commands: state, history, tools, last_response, message:<text>, tool:<name> <json>, sessions, create_session, create_session:<path>, help".to_string()
         );
     }
 
     Err(anyhow::anyhow!("Unknown debug command '{}'", trimmed))
+}
+
+/// Execute a client debug command (visual debug, TUI state, etc.)
+/// These commands access the TUI's visual debug module which uses global state.
+fn execute_client_debug_command(command: &str) -> String {
+    use crate::tui::visual_debug;
+
+    let trimmed = command.trim();
+
+    // Visual debug commands
+    if trimmed == "frame" || trimmed == "screen-json" {
+        visual_debug::enable(); // Ensure enabled
+        return visual_debug::latest_frame_json()
+            .unwrap_or_else(|| "No frames captured yet. Try again after some UI activity.".to_string());
+    }
+
+    if trimmed == "frame-normalized" || trimmed == "screen-json-normalized" {
+        visual_debug::enable();
+        return visual_debug::latest_frame_json_normalized()
+            .unwrap_or_else(|| "No frames captured yet.".to_string());
+    }
+
+    if trimmed == "screen" {
+        visual_debug::enable();
+        match visual_debug::dump_to_file() {
+            Ok(path) => return format!("Frames written to: {}", path.display()),
+            Err(e) => return format!("Error dumping frames: {}", e),
+        }
+    }
+
+    if trimmed == "enable" || trimmed == "debug-enable" {
+        visual_debug::enable();
+        return "Visual debugging enabled.".to_string();
+    }
+
+    if trimmed == "disable" || trimmed == "debug-disable" {
+        visual_debug::disable();
+        return "Visual debugging disabled.".to_string();
+    }
+
+    if trimmed == "status" {
+        let enabled = visual_debug::is_enabled();
+        return serde_json::json!({
+            "visual_debug_enabled": enabled,
+        }).to_string();
+    }
+
+    if trimmed == "help" {
+        return r#"Client debug commands:
+  frame / screen-json      - Get latest visual debug frame (JSON)
+  frame-normalized         - Get normalized frame (for diffs)
+  screen                   - Dump visual debug frames to file
+  enable                   - Enable visual debug capture
+  disable                  - Disable visual debug capture
+  status                   - Get client debug status
+  help                     - Show this help
+
+Note: Visual debug captures TUI rendering state for debugging UI issues.
+Frames are captured automatically when visual debug is enabled."#.to_string();
+    }
+
+    format!("Unknown client command: {}. Use client:help for available commands.", trimmed)
+}
+
+/// Parse namespaced debug command (e.g., "server:state", "client:frame", "tester:list")
+fn parse_namespaced_command(command: &str) -> (&str, &str) {
+    let trimmed = command.trim();
+    if let Some(idx) = trimmed.find(':') {
+        let namespace = &trimmed[..idx];
+        let rest = &trimmed[idx + 1..];
+        // Only recognize known namespaces
+        match namespace {
+            "server" | "client" | "tester" => (namespace, rest),
+            _ => ("server", trimmed), // Default to server namespace
+        }
+    } else {
+        ("server", trimmed) // No namespace = server
+    }
 }
 
 /// Handle debug socket connections (introspection + optional debug control)
@@ -1537,6 +1745,9 @@ async fn handle_debug_client(
     sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
     is_processing: Arc<RwLock<bool>>,
     session_id: Arc<RwLock<String>>,
+    provider: Arc<dyn Provider>,
+    client_debug_tx: Arc<RwLock<Option<mpsc::UnboundedSender<(u64, String)>>>>,
+    client_debug_response_tx: broadcast::Sender<(u64, String)>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -1599,11 +1810,62 @@ async fn handle_debug_client(
                     continue;
                 }
 
-                let result =
-                    match resolve_debug_session(&sessions, &session_id, requested_session).await {
-                        Ok((_session, agent)) => execute_debug_command(agent, &command).await,
-                        Err(e) => Err(e),
-                    };
+                // Parse namespaced command
+                let (namespace, cmd) = parse_namespaced_command(&command);
+
+                let result = match namespace {
+                    "client" => {
+                        // Forward to TUI client
+                        let tx_guard = client_debug_tx.read().await;
+                        if let Some(ref tx) = *tx_guard {
+                            // Subscribe to response channel before sending
+                            let mut response_rx = client_debug_response_tx.subscribe();
+
+                            // Send command to TUI
+                            if tx.send((id, cmd.to_string())).is_ok() {
+                                // Wait for response with timeout
+                                let timeout = tokio::time::Duration::from_secs(30);
+                                match tokio::time::timeout(timeout, async {
+                                    loop {
+                                        if let Ok((resp_id, output)) = response_rx.recv().await {
+                                            if resp_id == id {
+                                                return Ok(output);
+                                            }
+                                        }
+                                    }
+                                }).await {
+                                    Ok(result) => result,
+                                    Err(_) => Err(anyhow::anyhow!("Timeout waiting for client response")),
+                                }
+                            } else {
+                                Err(anyhow::anyhow!("Failed to send command to TUI client"))
+                            }
+                        } else {
+                            Err(anyhow::anyhow!("No TUI client connected"))
+                        }
+                    }
+                    "tester" => {
+                        // Handle tester commands
+                        execute_tester_command(cmd).await
+                    }
+                    _ => {
+                        // Server commands (default)
+                        if cmd == "create_session" || cmd.starts_with("create_session:") {
+                            create_headless_session(&sessions, &session_id, &provider, cmd).await
+                        } else if cmd == "sessions" {
+                            let sessions_guard = sessions.read().await;
+                            let session_list: Vec<_> = sessions_guard.keys().collect();
+                            Ok(serde_json::to_string_pretty(&session_list).unwrap_or_else(|_| "[]".to_string()))
+                        } else if cmd == "help" {
+                            Ok(debug_help_text())
+                        } else {
+                            match resolve_debug_session(&sessions, &session_id, requested_session).await {
+                                Ok((_session, agent)) => execute_debug_command(agent, cmd).await,
+                                Err(e) => Err(e),
+                            }
+                        }
+                    }
+                };
 
                 let (ok, output) = match result {
                     Ok(output) => (true, output),
@@ -1627,6 +1889,235 @@ async fn handle_debug_client(
     }
 
     Ok(())
+}
+
+/// Generate help text for debug commands
+fn debug_help_text() -> String {
+    r#"Debug socket commands (namespaced):
+
+SERVER COMMANDS (server: prefix or no prefix):
+  state                    - Get agent state
+  history                  - Get conversation history
+  tools                    - List available tools
+  last_response            - Get last assistant response
+  message:<text>           - Send message to agent
+  tool:<name> <json>       - Execute tool directly
+  sessions                 - List all sessions
+  create_session           - Create headless session
+  create_session:<path>    - Create session with working dir
+
+CLIENT COMMANDS (client: prefix):
+  client:state             - Get TUI state
+  client:frame             - Get latest visual debug frame (JSON)
+  client:frame-normalized  - Get normalized frame (for diffs)
+  client:screen            - Dump visual debug to file
+  client:input             - Get current input buffer
+  client:set_input:<text>  - Set input buffer
+  client:keys:<keyspec>    - Inject key events
+  client:message:<text>    - Inject and submit message
+  client:scroll:<dir>      - Scroll (up/down/top/bottom)
+  client:wait              - Check if processing
+  client:history           - Get display messages
+  client:help              - Client command help
+
+TESTER COMMANDS (tester: prefix):
+  tester:spawn             - Spawn new tester instance
+  tester:list              - List active testers
+  tester:<id>:frame        - Get frame from tester
+  tester:<id>:message:<t>  - Send message to tester
+  tester:<id>:state        - Get tester state
+  tester:<id>:stop         - Stop tester
+
+Examples:
+  {"type":"debug_command","id":1,"command":"state"}
+  {"type":"debug_command","id":2,"command":"client:frame"}
+  {"type":"debug_command","id":3,"command":"tester:list"}"#.to_string()
+}
+
+/// Execute tester commands
+async fn execute_tester_command(command: &str) -> Result<String> {
+    let trimmed = command.trim();
+
+    if trimmed == "list" {
+        // List active testers from manifest
+        let testers = load_testers()?;
+        if testers.is_empty() {
+            return Ok("No active testers.".to_string());
+        }
+        return Ok(serde_json::to_string_pretty(&testers)?);
+    }
+
+    if trimmed == "spawn" || trimmed.starts_with("spawn ") {
+        // Parse spawn options
+        let opts: serde_json::Value = if trimmed == "spawn" {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(trimmed.strip_prefix("spawn ").unwrap_or("{}"))?
+        };
+        return spawn_tester(opts).await;
+    }
+
+    // Check for tester:<id>:<command> format
+    if let Some(rest) = trimmed.strip_prefix("") {
+        // Parse <id>:<command> or <id>:<command>:<arg>
+        let parts: Vec<&str> = rest.splitn(3, ':').collect();
+        if parts.len() >= 2 {
+            let tester_id = parts[0];
+            let cmd = parts[1];
+            let arg = parts.get(2).map(|s| *s);
+            return execute_tester_subcommand(tester_id, cmd, arg).await;
+        }
+    }
+
+    Err(anyhow::anyhow!("Unknown tester command: {}. Use tester:help for usage.", trimmed))
+}
+
+/// Load testers from manifest file
+fn load_testers() -> Result<Vec<serde_json::Value>> {
+    let path = crate::storage::jcode_dir()?.join("testers.json");
+    if path.exists() {
+        let content = std::fs::read_to_string(&path)?;
+        Ok(serde_json::from_str(&content)?)
+    } else {
+        Ok(vec![])
+    }
+}
+
+/// Save testers to manifest file
+fn save_testers(testers: &[serde_json::Value]) -> Result<()> {
+    let path = crate::storage::jcode_dir()?.join("testers.json");
+    std::fs::write(&path, serde_json::to_string_pretty(testers)?)?;
+    Ok(())
+}
+
+/// Spawn a new tester instance
+async fn spawn_tester(opts: serde_json::Value) -> Result<String> {
+    use std::process::Stdio;
+
+    let id = format!("tester_{}", crate::id::new_id("tui"));
+    let cwd = opts.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
+    let binary = opts.get("binary").and_then(|v| v.as_str());
+
+    // Find binary to use
+    let binary_path = if let Some(b) = binary {
+        PathBuf::from(b)
+    } else if let Ok(canary) = crate::build::canary_binary_path() {
+        if canary.exists() { canary } else { std::env::current_exe()? }
+    } else {
+        std::env::current_exe()?
+    };
+
+    if !binary_path.exists() {
+        return Err(anyhow::anyhow!("Binary not found: {}", binary_path.display()));
+    }
+
+    // Set up debug file paths for this tester
+    let debug_cmd = std::env::temp_dir().join(format!("jcode_debug_cmd_{}", id));
+    let debug_resp = std::env::temp_dir().join(format!("jcode_debug_response_{}", id));
+    let stdout_path = std::env::temp_dir().join(format!("jcode_tester_stdout_{}", id));
+    let stderr_path = std::env::temp_dir().join(format!("jcode_tester_stderr_{}", id));
+
+    let stdout_file = std::fs::File::create(&stdout_path)?;
+    let stderr_file = std::fs::File::create(&stderr_path)?;
+
+    let mut cmd = tokio::process::Command::new(&binary_path);
+    cmd.current_dir(cwd);
+    cmd.env("JCODE_SELFDEV_MODE", "1");
+    cmd.env("JCODE_DEBUG_CMD_PATH", debug_cmd.to_string_lossy().to_string());
+    cmd.env("JCODE_DEBUG_RESPONSE_PATH", debug_resp.to_string_lossy().to_string());
+    cmd.arg("--debug-socket");
+    cmd.stdout(Stdio::from(stdout_file));
+    cmd.stderr(Stdio::from(stderr_file));
+
+    let child = cmd.spawn()?;
+    let pid = child.id().unwrap_or(0);
+
+    // Save tester info
+    let info = serde_json::json!({
+        "id": id,
+        "pid": pid,
+        "binary": binary_path.to_string_lossy(),
+        "cwd": cwd,
+        "debug_cmd_path": debug_cmd.to_string_lossy(),
+        "debug_response_path": debug_resp.to_string_lossy(),
+        "stdout_path": stdout_path.to_string_lossy(),
+        "stderr_path": stderr_path.to_string_lossy(),
+        "started_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    let mut testers = load_testers()?;
+    testers.push(info);
+    save_testers(&testers)?;
+
+    Ok(serde_json::json!({
+        "id": id,
+        "pid": pid,
+        "message": format!("Spawned tester {} (pid {})", id, pid)
+    }).to_string())
+}
+
+/// Execute a command on a specific tester
+async fn execute_tester_subcommand(tester_id: &str, cmd: &str, arg: Option<&str>) -> Result<String> {
+    let testers = load_testers()?;
+    let tester = testers.iter()
+        .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(tester_id))
+        .ok_or_else(|| anyhow::anyhow!("Tester not found: {}", tester_id))?;
+
+    let debug_cmd_path = tester.get("debug_cmd_path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Invalid tester config"))?;
+    let debug_resp_path = tester.get("debug_response_path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Invalid tester config"))?;
+
+    // Map commands to the TUI file protocol
+    let file_cmd = match cmd {
+        "frame" => "screen-json".to_string(),
+        "frame-normalized" => "screen-json-normalized".to_string(),
+        "state" => "state".to_string(),
+        "history" => "history".to_string(),
+        "wait" => "wait".to_string(),
+        "input" => "input".to_string(),
+        "message" => format!("message:{}", arg.unwrap_or("")),
+        "keys" => format!("keys:{}", arg.unwrap_or("")),
+        "set_input" => format!("set_input:{}", arg.unwrap_or("")),
+        "scroll" => format!("scroll:{}", arg.unwrap_or("down")),
+        "stop" => {
+            // Kill the tester
+            if let Some(pid) = tester.get("pid").and_then(|v| v.as_u64()) {
+                let _ = std::process::Command::new("kill")
+                    .arg("-TERM")
+                    .arg(pid.to_string())
+                    .output();
+            }
+            // Remove from testers list
+            let mut testers = load_testers()?;
+            testers.retain(|t| t.get("id").and_then(|v| v.as_str()) != Some(tester_id));
+            save_testers(&testers)?;
+            return Ok("Stopped tester.".to_string());
+        }
+        _ => return Err(anyhow::anyhow!("Unknown tester command: {}", cmd)),
+    };
+
+    // Write command to tester's debug file
+    std::fs::write(debug_cmd_path, &file_cmd)?;
+
+    // Wait for response with timeout
+    let timeout = std::time::Duration::from_secs(10);
+    let start = std::time::Instant::now();
+    loop {
+        if start.elapsed() > timeout {
+            return Err(anyhow::anyhow!("Timeout waiting for tester response"));
+        }
+        if let Ok(response) = std::fs::read_to_string(debug_resp_path) {
+            if !response.is_empty() {
+                // Clear response file
+                let _ = std::fs::remove_file(debug_resp_path);
+                return Ok(response);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }
 
 /// Client for connecting to a running server

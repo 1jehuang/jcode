@@ -70,3 +70,127 @@ export JCODE_CLAUDE_SDK_PYTHON=~/.venv/bin/python3
 - `src/tui/ui.rs` - UI rendering
 - `src/tool/` - Tool implementations
 - `src/id.rs` - Session naming and IDs
+
+## Headless Testing via Debug Socket
+
+jcode has a debug socket for headless/automated testing. This allows external scripts to:
+- Execute tools directly (bypass LLM)
+- Send messages to the agent and get responses
+- Query agent state and history
+- Spawn and control test instances
+
+### Enable Debug Control
+
+```bash
+# Option 1: File toggle (persists, no restart needed after reload)
+touch ~/.jcode/debug_control
+
+# Option 2: Environment variable
+JCODE_DEBUG_CONTROL=1 jcode serve
+```
+
+### Socket Paths
+
+- Main socket: `/run/user/$(id -u)/jcode.sock`
+- Debug socket: `/run/user/$(id -u)/jcode-debug.sock`
+
+### Debug Commands (Namespaced)
+
+Commands can be namespaced with `server:`, `client:`, or `tester:` prefixes. Unnamespaced commands default to server.
+
+**Server Commands** (agent/tools - default namespace):
+| Command | Description |
+|---------|-------------|
+| `state` | Agent state (session, model, canary) |
+| `history` | Conversation history as JSON |
+| `tools` | List available tools |
+| `last_response` | Last assistant response |
+| `message:<text>` | Send message, get LLM response |
+| `tool:<name> <json>` | Execute tool directly |
+| `sessions` | List all sessions |
+| `create_session` | Create headless session |
+| `help` | List commands |
+
+**Client Commands** (TUI/visual debug - `client:` prefix):
+| Command | Description |
+|---------|-------------|
+| `client:frame` | Get latest visual debug frame (JSON) |
+| `client:frame-normalized` | Get normalized frame (for diffs) |
+| `client:screen` | Dump visual debug frames to file |
+| `client:enable` | Enable visual debug capture |
+| `client:disable` | Disable visual debug capture |
+| `client:status` | Get client debug status |
+| `client:help` | Client command help |
+
+**Tester Commands** (spawned instances - `tester:` prefix):
+| Command | Description |
+|---------|-------------|
+| `tester:spawn` | Spawn new tester instance |
+| `tester:spawn {"cwd":"/path"}` | Spawn with options |
+| `tester:list` | List active testers |
+| `tester:<id>:frame` | Get frame from tester |
+| `tester:<id>:state` | Get tester state |
+| `tester:<id>:message:<text>` | Send message to tester |
+| `tester:<id>:stop` | Stop tester |
+
+### Python Test Example
+
+```python
+import socket
+import json
+
+def debug_cmd(cmd, session_id, timeout=30):
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.connect('/run/user/1000/jcode-debug.sock')
+    sock.settimeout(timeout)
+    req = {'type': 'debug_command', 'id': 1, 'command': cmd, 'session_id': session_id}
+    sock.send((json.dumps(req) + '\n').encode())
+    data = sock.recv(65536).decode()
+    sock.close()
+    return json.loads(data)
+
+# Get session first by subscribing to main socket
+main_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+main_sock.connect('/run/user/1000/jcode.sock')
+main_sock.settimeout(10.0)
+req = json.dumps({'type': 'subscribe', 'id': 1,
+                 'working_dir': '/home/jeremy/jcode', 'selfdev': True}) + '\n'
+main_sock.send(req.encode())
+# Parse response to get session_id...
+
+# Server commands (default namespace)
+result = debug_cmd('state', session_id)
+result = debug_cmd('tool:bash {"command":"echo hello"}', session_id)
+result = debug_cmd('message:What is 2+2?', session_id)
+
+# Client commands (visual debug)
+result = debug_cmd('client:enable', session_id)
+result = debug_cmd('client:frame', session_id)
+
+# Tester commands (spawn and control test instances)
+result = debug_cmd('tester:spawn {"cwd":"/tmp"}', session_id)
+result = debug_cmd('tester:list', session_id)
+result = debug_cmd('tester:tester_abc123:frame', session_id)
+```
+
+### Selfdev Tool Actions
+
+When in self-dev mode, the `selfdev` tool is available:
+
+```python
+# Check build status
+debug_cmd('tool:selfdev {"action":"status"}', session_id)
+
+# Spawn a test instance
+debug_cmd('tool:selfdev {"action":"spawn-tester","cwd":"/tmp","args":["--help"]}', session_id)
+
+# List testers
+debug_cmd('tool:selfdev {"action":"tester","command":"list"}', session_id)
+
+# Control tester
+debug_cmd('tool:selfdev {"action":"tester","command":"stop","id":"tester_xxx"}', session_id)
+```
+
+### Known Issues
+
+- **Claude provider**: The Claude model may claim it doesn't have access to the `selfdev` tool even when it's registered. Direct tool execution via debug socket works. GPT models correctly see and use selfdev.
