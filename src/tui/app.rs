@@ -11,6 +11,7 @@ use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall};
 use crate::provider::Provider;
 use crate::session::Session;
 use crate::skill::SkillRegistry;
+use crate::tool::selfdev::ReloadContext;
 use crate::tool::{Registry, ToolContext};
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -769,24 +770,65 @@ impl App {
             // Queue an automatic message to notify the AI that reload completed
             // Only do this if there's actually a conversation to continue
             if total_turns > 0 {
-                let build_info = build_hash;
-                let cwd = std::env::current_dir()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| "unknown".to_string());
-                let terminal_size = crossterm::terminal::size()
-                    .map(|(w, h)| format!("{}x{}", w, h))
-                    .unwrap_or_else(|_| "unknown".to_string());
+                // Try to load reload context for richer continuation message
+                let reload_ctx = ReloadContext::load().ok().flatten();
 
-                self.queued_messages.push(format!(
-                    "[Reload complete. Build: {}, CWD: {}, Terminal: {}, Session: {} turns. Continue where you left off.]",
-                    build_info,
-                    cwd,
-                    terminal_size,
-                    total_turns
-                ));
+                let continuation_msg = if let Some(ctx) = reload_ctx {
+                    let action = if ctx.is_rollback { "Rollback" } else { "Reload" };
+                    let task_info = ctx.task_context
+                        .map(|t| format!("\nYou were working on: {}", t))
+                        .unwrap_or_default();
+
+                    format!(
+                        "[{} complete. Previous version: {}, New version: {}.{}\nSession restored with {} turns. Continue with your task.]",
+                        action,
+                        ctx.version_before,
+                        ctx.version_after,
+                        task_info,
+                        total_turns
+                    )
+                } else {
+                    // Fallback to basic message if no context
+                    let cwd = std::env::current_dir()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "unknown".to_string());
+
+                    format!(
+                        "[Reload complete. Build: {}, CWD: {}, Session: {} turns. Continue where you left off.]",
+                        build_hash,
+                        cwd,
+                        total_turns
+                    )
+                };
+
+                self.queued_messages.push(continuation_msg);
             }
         } else {
             crate::logging::error(&format!("Failed to restore session: {}", session_id));
+
+            // Check if this was a reload that failed - inject failure message if so
+            if let Ok(Some(ctx)) = ReloadContext::load() {
+                let action = if ctx.is_rollback { "Rollback" } else { "Reload" };
+                let task_info = ctx.task_context
+                    .map(|t| format!(" You were working on: {}", t))
+                    .unwrap_or_default();
+
+                self.display_messages.push(DisplayMessage {
+                    role: "system".to_string(),
+                    content: format!(
+                        "⚠ {} failed. Session could not be restored. Previous version: {}, Target version: {}.{}\n\
+                         Starting fresh session. You may need to re-examine your changes.",
+                        action,
+                        ctx.version_before,
+                        ctx.version_after,
+                        task_info
+                    ),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+            }
         }
     }
 
