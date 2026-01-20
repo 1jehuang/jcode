@@ -947,49 +947,62 @@ impl App {
                     _ => false,
                 },
                 "len" => match &actual {
-                    serde_json::Value::String(s) => {
-                        expected.as_u64().map(|e| s.len() as u64 == e).unwrap_or(false)
-                    }
-                    serde_json::Value::Array(a) => {
-                        expected.as_u64().map(|e| a.len() as u64 == e).unwrap_or(false)
-                    }
-                    serde_json::Value::Object(o) => {
-                        expected.as_u64().map(|e| o.len() as u64 == e).unwrap_or(false)
-                    }
+                    serde_json::Value::String(s) => expected
+                        .as_u64()
+                        .map(|e| s.len() as u64 == e)
+                        .unwrap_or(false),
+                    serde_json::Value::Array(a) => expected
+                        .as_u64()
+                        .map(|e| a.len() as u64 == e)
+                        .unwrap_or(false),
+                    serde_json::Value::Object(o) => expected
+                        .as_u64()
+                        .map(|e| o.len() as u64 == e)
+                        .unwrap_or(false),
                     _ => false,
                 },
                 "len_gt" => match &actual {
-                    serde_json::Value::String(s) => {
-                        expected.as_u64().map(|e| s.len() as u64 > e).unwrap_or(false)
-                    }
-                    serde_json::Value::Array(a) => {
-                        expected.as_u64().map(|e| a.len() as u64 > e).unwrap_or(false)
-                    }
+                    serde_json::Value::String(s) => expected
+                        .as_u64()
+                        .map(|e| s.len() as u64 > e)
+                        .unwrap_or(false),
+                    serde_json::Value::Array(a) => expected
+                        .as_u64()
+                        .map(|e| a.len() as u64 > e)
+                        .unwrap_or(false),
                     _ => false,
                 },
                 "len_lt" => match &actual {
-                    serde_json::Value::String(s) => {
-                        expected.as_u64().map(|e| (s.len() as u64) < e).unwrap_or(false)
-                    }
-                    serde_json::Value::Array(a) => {
-                        expected.as_u64().map(|e| (a.len() as u64) < e).unwrap_or(false)
-                    }
+                    serde_json::Value::String(s) => expected
+                        .as_u64()
+                        .map(|e| (s.len() as u64) < e)
+                        .unwrap_or(false),
+                    serde_json::Value::Array(a) => expected
+                        .as_u64()
+                        .map(|e| (a.len() as u64) < e)
+                        .unwrap_or(false),
                     _ => false,
                 },
                 "matches" => match (&actual, &expected) {
                     (serde_json::Value::String(a), serde_json::Value::String(pattern)) => {
-                        regex::Regex::new(pattern).map(|re| re.is_match(a)).unwrap_or(false)
+                        regex::Regex::new(pattern)
+                            .map(|re| re.is_match(a))
+                            .unwrap_or(false)
                     }
                     _ => false,
                 },
                 "not_matches" => match (&actual, &expected) {
                     (serde_json::Value::String(a), serde_json::Value::String(pattern)) => {
-                        regex::Regex::new(pattern).map(|re| !re.is_match(a)).unwrap_or(true)
+                        regex::Regex::new(pattern)
+                            .map(|re| !re.is_match(a))
+                            .unwrap_or(true)
                     }
                     _ => true,
                 },
                 "starts_with" => match (&actual, &expected) {
-                    (serde_json::Value::String(a), serde_json::Value::String(b)) => a.starts_with(b),
+                    (serde_json::Value::String(a), serde_json::Value::String(b)) => {
+                        a.starts_with(b)
+                    }
                     _ => false,
                 },
                 "ends_with" => match (&actual, &expected) {
@@ -1017,7 +1030,10 @@ impl App {
             let message = if ok {
                 "ok".to_string()
             } else {
-                format!("expected {} {} {:?}, got {:?}", assertion.field, op, expected, actual)
+                format!(
+                    "expected {} {} {:?}, got {:?}",
+                    assertion.field, op, expected, actual
+                )
             };
             results.push(DebugAssertResult {
                 ok,
@@ -1217,8 +1233,7 @@ impl App {
         }
         if trimmed == "snapshot" {
             let snapshot = self.build_debug_snapshot();
-            return serde_json::to_string_pretty(&snapshot)
-                .unwrap_or_else(|_| "{}".to_string());
+            return serde_json::to_string_pretty(&snapshot).unwrap_or_else(|_| "{}".to_string());
         }
         if trimmed.starts_with("wait:") {
             let raw = trimmed.strip_prefix("wait:").unwrap_or("0");
@@ -1325,7 +1340,7 @@ impl App {
                 // Capture current visual state
                 use super::visual_debug;
                 visual_debug::enable(); // Ensure enabled
-                // Force a frame dump to file and return path
+                                        // Force a frame dump to file and return path
                 match visual_debug::dump_to_file() {
                     Ok(path) => format!("screen: {}", path.display()),
                     Err(e) => format!("screen error: {}", e),
@@ -1379,8 +1394,7 @@ impl App {
                 for key_spec in keys_str.split(',') {
                     match self.parse_and_inject_key(key_spec.trim()) {
                         Ok(desc) => {
-                            self.debug_trace
-                                .record("key", format!("{}", desc));
+                            self.debug_trace.record("key", format!("{}", desc));
                             results.push(format!("OK: {}", desc));
                         }
                         Err(e) => results.push(format!("ERR: {}", e)),
@@ -1451,7 +1465,11 @@ impl App {
                         while let Some(event) = player.next_event() {
                             results.push(format!("{:?}", event));
                         }
-                        format!("replay: {} events processed, {} remaining", results.len(), player.remaining())
+                        format!(
+                            "replay: {} events processed, {} remaining",
+                            results.len(),
+                            player.remaining()
+                        )
                     }
                     Err(e) => format!("replay error: {}", e),
                 }
@@ -1462,7 +1480,8 @@ impl App {
                 format!("OK: test bundle '{}' started", name)
             } else if cmd == "bundle-save" {
                 use super::test_harness::TestBundle;
-                let name = std::env::var("JCODE_TEST_BUNDLE").unwrap_or_else(|_| "unnamed".to_string());
+                let name =
+                    std::env::var("JCODE_TEST_BUNDLE").unwrap_or_else(|_| "unnamed".to_string());
                 let bundle = TestBundle::new(&name);
                 let path = TestBundle::default_path(&name);
                 match bundle.save(&path) {
@@ -1522,8 +1541,14 @@ impl App {
                                 }
                                 super::test_harness::TestStep::Scroll { direction } => {
                                     match direction.as_str() {
-                                        "up" => self.scroll_offset = self.scroll_offset.saturating_add(5),
-                                        "down" => self.scroll_offset = self.scroll_offset.saturating_sub(5),
+                                        "up" => {
+                                            self.scroll_offset =
+                                                self.scroll_offset.saturating_add(5)
+                                        }
+                                        "down" => {
+                                            self.scroll_offset =
+                                                self.scroll_offset.saturating_sub(5)
+                                        }
                                         "top" => self.scroll_offset = usize::MAX,
                                         "bottom" => self.scroll_offset = 0,
                                         _ => {}
@@ -1531,13 +1556,18 @@ impl App {
                                     format!("scroll: {}", direction)
                                 }
                                 super::test_harness::TestStep::Assert { assertions } => {
-                                    let parsed: Vec<DebugAssertion> = assertions.iter()
+                                    let parsed: Vec<DebugAssertion> = assertions
+                                        .iter()
                                         .filter_map(|a| serde_json::from_value(a.clone()).ok())
                                         .collect();
                                     let results = self.eval_assertions(&parsed);
                                     let passed = results.iter().all(|r| r.ok);
-                                    format!("assert: {} ({}/{})", if passed { "PASS" } else { "FAIL" },
-                                        results.iter().filter(|r| r.ok).count(), results.len())
+                                    format!(
+                                        "assert: {} ({}/{})",
+                                        if passed { "PASS" } else { "FAIL" },
+                                        results.iter().filter(|r| r.ok).count(),
+                                        results.len()
+                                    )
                                 }
                                 super::test_harness::TestStep::Snapshot { name } => {
                                     format!("snapshot: {}", name)
@@ -1549,7 +1579,8 @@ impl App {
                             "script": script.name,
                             "steps": results,
                             "completed": true
-                        }).to_string()
+                        })
+                        .to_string()
                     }
                     Err(e) => format!("script error: {}", e),
                 }
@@ -1591,7 +1622,8 @@ impl App {
                  - bundle-save - save test bundle\n\
                  - script:<json> - run test script\n\
                  - version - get version\n\
-                 - help - show this help".to_string()
+                 - help - show this help"
+                    .to_string()
             } else {
                 format!("ERROR: unknown command '{}'. Use 'help' for list.", cmd)
             };
@@ -1925,6 +1957,7 @@ impl App {
             }
 
             // Resume session: on first connect use CLI arg, on reconnect use previous session
+            let resume_from_arg = reconnect_attempts == 0 && self.resume_session_id.is_some();
             let session_to_resume = if reconnect_attempts == 0 {
                 // First connect: use --resume argument if provided
                 self.resume_session_id.take()
@@ -1934,7 +1967,17 @@ impl App {
             };
 
             if let Some(session_id) = session_to_resume {
-                if let Err(e) = remote.resume_session(&session_id).await {
+                let exists_on_disk = crate::session::session_path(&session_id)
+                    .map(|p| p.exists())
+                    .unwrap_or(false);
+                if !exists_on_disk {
+                    if resume_from_arg {
+                        self.display_messages.push(DisplayMessage::error(format!(
+                            "Failed to resume session: {} (not found)",
+                            session_id
+                        )));
+                    }
+                } else if let Err(e) = remote.resume_session(&session_id).await {
                     self.display_messages.push(DisplayMessage::error(format!(
                         "Failed to resume session: {}",
                         e
@@ -2410,8 +2453,7 @@ impl App {
             let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
             if amount < 0 {
                 // Scroll up (increase offset)
-                self.scroll_offset =
-                    (self.scroll_offset + (-amount) as usize).min(max_estimate);
+                self.scroll_offset = (self.scroll_offset + (-amount) as usize).min(max_estimate);
             } else {
                 // Scroll down (decrease offset)
                 self.scroll_offset = self.scroll_offset.saturating_sub(amount as usize);
@@ -2610,9 +2652,8 @@ impl App {
 
                     // Handle /client-reload - force reload CLIENT binary
                     if trimmed == "/client-reload" {
-                        self.display_messages.push(DisplayMessage::system(
-                            "Reloading client...".to_string(),
-                        ));
+                        self.display_messages
+                            .push(DisplayMessage::system("Reloading client...".to_string()));
                         let session_id = self
                             .remote_session_id
                             .clone()
@@ -2624,9 +2665,8 @@ impl App {
 
                     // Handle /server-reload - force reload SERVER (keeps client running)
                     if trimmed == "/server-reload" {
-                        self.display_messages.push(DisplayMessage::system(
-                            "Reloading server...".to_string(),
-                        ));
+                        self.display_messages
+                            .push(DisplayMessage::system("Reloading server...".to_string()));
                         remote.reload().await?;
                         return Ok(());
                     }
@@ -2879,8 +2919,7 @@ impl App {
             let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
             if amount < 0 {
                 // Scroll up (increase offset)
-                self.scroll_offset =
-                    (self.scroll_offset + (-amount) as usize).min(max_estimate);
+                self.scroll_offset = (self.scroll_offset + (-amount) as usize).min(max_estimate);
             } else {
                 // Scroll down (decrease offset)
                 self.scroll_offset = self.scroll_offset.saturating_sub(amount as usize);
@@ -3358,9 +3397,7 @@ impl App {
                 });
 
                 // Spawn editor in background (user will see it after jcode exits or in another terminal)
-                let _ = std::process::Command::new(&editor)
-                    .arg(&path)
-                    .spawn();
+                let _ = std::process::Command::new(&editor).arg(&path).spawn();
             }
             return;
         }
@@ -3475,9 +3512,12 @@ impl App {
             use super::screenshot;
             let state_name = trimmed.strip_prefix("/screenshot ").unwrap_or("").trim();
             if !state_name.is_empty() {
-                screenshot::signal_ready(state_name, serde_json::json!({
-                    "manual_trigger": true,
-                }));
+                screenshot::signal_ready(
+                    state_name,
+                    serde_json::json!({
+                        "manual_trigger": true,
+                    }),
+                );
                 self.display_messages.push(DisplayMessage {
                     role: "system".to_string(),
                     content: format!("Screenshot signal sent: {}", state_name),
@@ -3764,7 +3804,8 @@ impl App {
             // Save provider session ID for resume after reload
             self.session.provider_session_id = self.provider_session_id.clone();
             // Mark as reloaded and save session
-            self.session.set_status(crate::session::SessionStatus::Reloaded);
+            self.session
+                .set_status(crate::session::SessionStatus::Reloaded);
             let _ = self.session.save();
             self.reload_requested = Some(self.session.id.clone());
             self.should_quit = true;
@@ -3783,7 +3824,8 @@ impl App {
             // Save provider session ID for resume after rebuild
             self.session.provider_session_id = self.provider_session_id.clone();
             // Mark as reloaded and save session
-            self.session.set_status(crate::session::SessionStatus::Reloaded);
+            self.session
+                .set_status(crate::session::SessionStatus::Reloaded);
             let _ = self.session.save();
             self.rebuild_requested = Some(self.session.id.clone());
             self.should_quit = true;
@@ -4019,7 +4061,10 @@ impl App {
             .join(", ");
         let count = missing.len();
         let suffix = if count > 3 { "..." } else { "" };
-        Some(format!("Missing tool outputs for {} call(s): {}{}", count, sample, suffix))
+        Some(format!(
+            "Missing tool outputs for {} call(s): {}{}",
+            count, sample, suffix
+        ))
     }
 
     /// Rebuild current session into a new one without tool calls
@@ -5389,9 +5434,10 @@ impl App {
                 self.streaming_input_tokens, self.streaming_output_tokens
             ));
         }
-        if let Some(cache) =
-            format_cache_footer(self.streaming_cache_read_tokens, self.streaming_cache_creation_tokens)
-        {
+        if let Some(cache) = format_cache_footer(
+            self.streaming_cache_read_tokens,
+            self.streaming_cache_creation_tokens,
+        ) {
             parts.push(cache);
         }
 
@@ -5938,12 +5984,10 @@ impl super::TuiState for App {
 
                 for block in &msg.content {
                     match block {
-                        ContentBlock::Text { text, .. } => {
-                            match msg.role {
-                                Role::User => user_chars += text.len(),
-                                Role::Assistant => asst_chars += text.len(),
-                            }
-                        }
+                        ContentBlock::Text { text, .. } => match msg.role {
+                            Role::User => user_chars += text.len(),
+                            Role::Assistant => asst_chars += text.len(),
+                        },
                         ContentBlock::ToolUse { name, input, .. } => {
                             tool_call_count += 1;
                             tool_call_chars += name.len() + input.to_string().len();
@@ -6029,14 +6073,14 @@ impl super::TuiState for App {
         let (model, reasoning_effort) = if self.is_remote {
             (self.remote_provider_model.clone(), None)
         } else {
-            (Some(self.provider.model()), self.provider.reasoning_effort())
+            (
+                Some(self.provider.model()),
+                self.provider.reasoning_effort(),
+            )
         };
 
         let (session_count, client_count) = if self.is_remote {
-            (
-                Some(self.remote_sessions.len()),
-                None,
-            )
+            (Some(self.remote_sessions.len()), None)
         } else {
             (None, None)
         };
@@ -6067,6 +6111,7 @@ impl super::TuiState for App {
                             global_count,
                             by_category,
                             sidecar_available: true,
+                            activity: None,
                         })
                     } else {
                         None
@@ -6324,8 +6369,7 @@ mod tests {
             .unwrap();
         app.handle_key(KeyCode::Char('i'), KeyModifiers::empty())
             .unwrap();
-        app.handle_key(KeyCode::Enter, KeyModifiers::SHIFT)
-            .unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::SHIFT).unwrap();
 
         assert_eq!(app.queued_count(), 1);
         assert_eq!(app.interleave_message.as_deref(), None);
@@ -6337,8 +6381,7 @@ mod tests {
             .unwrap();
         app.handle_key(KeyCode::Char('o'), KeyModifiers::empty())
             .unwrap();
-        app.handle_key(KeyCode::Enter, KeyModifiers::SHIFT)
-            .unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::SHIFT).unwrap();
 
         assert_eq!(app.queued_count(), 2);
         assert_eq!(app.queued_messages()[0], "yo");
