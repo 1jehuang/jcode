@@ -7,26 +7,29 @@ use async_stream::stream;
 use jcode::message::{Message, StreamEvent, ToolDefinition};
 use jcode::provider::{EventStream, Provider};
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub struct MockProvider {
-    responses: Mutex<VecDeque<Vec<StreamEvent>>>,
+    responses: Arc<Mutex<VecDeque<Vec<StreamEvent>>>>,
     models: Vec<&'static str>,
-    current_model: Mutex<String>,
+    current_model: Arc<Mutex<String>>,
     /// Captured system prompts from complete() calls (for testing)
-    pub captured_system_prompts: Mutex<Vec<String>>,
+    pub captured_system_prompts: Arc<Mutex<Vec<String>>>,
     /// Captured resume session IDs from complete() calls (for testing)
-    pub captured_resume_session_ids: Mutex<Vec<Option<String>>>,
+    pub captured_resume_session_ids: Arc<Mutex<Vec<Option<String>>>>,
+    /// Captured model names from complete() calls (for testing)
+    pub captured_models: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockProvider {
     pub fn new() -> Self {
         Self {
-            responses: Mutex::new(VecDeque::new()),
+            responses: Arc::new(Mutex::new(VecDeque::new())),
             models: Vec::new(),
-            current_model: Mutex::new("mock".to_string()),
-            captured_system_prompts: Mutex::new(Vec::new()),
-            captured_resume_session_ids: Mutex::new(Vec::new()),
+            current_model: Arc::new(Mutex::new("mock".to_string())),
+            captured_system_prompts: Arc::new(Mutex::new(Vec::new())),
+            captured_resume_session_ids: Arc::new(Mutex::new(Vec::new())),
+            captured_models: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -36,11 +39,12 @@ impl MockProvider {
             .map(|m| (*m).to_string())
             .unwrap_or_else(|| "mock".to_string());
         Self {
-            responses: Mutex::new(VecDeque::new()),
+            responses: Arc::new(Mutex::new(VecDeque::new())),
             models,
-            current_model: Mutex::new(current),
-            captured_system_prompts: Mutex::new(Vec::new()),
-            captured_resume_session_ids: Mutex::new(Vec::new()),
+            current_model: Arc::new(Mutex::new(current)),
+            captured_system_prompts: Arc::new(Mutex::new(Vec::new())),
+            captured_resume_session_ids: Arc::new(Mutex::new(Vec::new())),
+            captured_models: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -68,6 +72,7 @@ impl Provider for MockProvider {
             .lock()
             .unwrap()
             .push(resume_session_id.map(|s| s.to_string()));
+        self.captured_models.lock().unwrap().push(self.model());
 
         let events = self
             .responses
@@ -103,5 +108,17 @@ impl Provider for MockProvider {
 
     fn available_models(&self) -> Vec<&'static str> {
         self.models.clone()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        let current = self.current_model.lock().unwrap().clone();
+        Arc::new(MockProvider {
+            responses: self.responses.clone(),
+            models: self.models.clone(),
+            current_model: Arc::new(Mutex::new(current)),
+            captured_system_prompts: self.captured_system_prompts.clone(),
+            captured_resume_session_ids: self.captured_resume_session_ids.clone(),
+            captured_models: self.captured_models.clone(),
+        })
     }
 }

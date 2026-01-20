@@ -38,6 +38,10 @@ impl Provider for NoopProvider {
     fn name(&self) -> &str {
         "noop"
     }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(NoopProvider)
+    }
 }
 
 struct ToolCase {

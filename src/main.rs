@@ -266,8 +266,9 @@ async fn run_main(mut args: Args) -> Result<()> {
 
     match args.command {
         Some(Command::Serve) => {
-            let (provider, registry) = init_provider_and_registry(&args.provider, args.model.as_deref()).await?;
-            let server = server::Server::new(provider, registry);
+            let (provider, _registry) =
+                init_provider_and_registry(&args.provider, args.model.as_deref()).await?;
+            let server = server::Server::new(provider);
             server.run().await?;
         }
         Some(Command::Connect) => {
@@ -1666,6 +1667,10 @@ mod selfdev_integration_tests {
         ) -> anyhow::Result<crate::provider::EventStream> {
             unimplemented!()
         }
+
+        fn fork(&self) -> Arc<dyn provider::Provider> {
+            Arc::new(TestProvider)
+        }
     }
 
     #[tokio::test]
@@ -1750,6 +1755,10 @@ mod selfdev_e2e_tests {
                 _session_id: Option<&str>,
             ) -> anyhow::Result<crate::provider::EventStream> {
                 unimplemented!()
+            }
+
+            fn fork(&self) -> Arc<dyn provider::Provider> {
+                Arc::new(TestProvider)
             }
         }
 
