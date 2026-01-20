@@ -4,6 +4,7 @@
 //! visible message area and renders a compact info panel there.
 
 use crate::prompt::ContextInfo;
+use crate::provider::DEFAULT_CONTEXT_LIMIT;
 use crate::todo::TodoItem;
 use ratatui::{
     prelude::*,
@@ -742,7 +743,7 @@ fn render_context_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'stat
     )]));
 
     let used_tokens = info.estimated_tokens();
-    let limit_tokens = data.context_limit.unwrap_or(200_000).max(1);
+    let limit_tokens = data.context_limit.unwrap_or(DEFAULT_CONTEXT_LIMIT).max(1);
     let used_str = format_token_k(used_tokens);
     let limit_str = format_token_k(limit_tokens);
     let pct = ((used_tokens as f64 / limit_tokens as f64) * 100.0)
@@ -793,8 +794,12 @@ fn render_context_compact(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'stati
     }
 
     let used_tokens = info.estimated_tokens();
-    let limit_tokens = data.context_limit.unwrap_or(200_000).max(1);
-    vec![render_usage_line(used_tokens, limit_tokens, inner.width as usize)]
+    let limit_tokens = data.context_limit.unwrap_or(DEFAULT_CONTEXT_LIMIT).max(1);
+    vec![render_usage_line(
+        used_tokens,
+        limit_tokens,
+        inner.width as usize,
+    )]
 }
 
 fn render_usage_line(used_tokens: usize, limit_tokens: usize, max_width: usize) -> Line<'static> {
