@@ -152,4 +152,10 @@ pub enum StreamEvent {
         trigger: String,
         pre_tokens: Option<u64>,
     },
+    /// Native tool call from Claude SDK that needs execution by jcode
+    NativeToolCall {
+        request_id: String,
+        tool_name: String,
+        input: serde_json::Value,
+    },
 }

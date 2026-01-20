@@ -4367,6 +4367,26 @@ impl App {
                         self.tool_result_ids.insert(tool_use_id.clone());
                         sdk_tool_results.insert(tool_use_id, (content, is_error));
                     }
+                    StreamEvent::NativeToolCall {
+                        request_id,
+                        tool_name,
+                        input,
+                    } => {
+                        // Execute native tool and send result back to SDK bridge
+                        let ctx = crate::tool::ToolContext {
+                            session_id: self.session_id().to_string(),
+                            message_id: self.session_id().to_string(),
+                            tool_call_id: request_id.clone(),
+                        };
+                        let tool_result = self.registry.execute(&tool_name, input, ctx).await;
+                        let native_result = match tool_result {
+                            Ok(output) => crate::provider::NativeToolResult::success(request_id, output.output),
+                            Err(e) => crate::provider::NativeToolResult::error(request_id, e.to_string()),
+                        };
+                        if let Some(sender) = self.provider.native_result_sender() {
+                            let _ = sender.send(native_result).await;
+                        }
+                    }
                 }
             }
 
@@ -4942,6 +4962,26 @@ impl App {
                                         self.status = ProcessingStatus::Streaming;
 
                                         sdk_tool_results.insert(tool_use_id, (content, is_error));
+                                    }
+                                    StreamEvent::NativeToolCall {
+                                        request_id,
+                                        tool_name,
+                                        input,
+                                    } => {
+                                        // Execute native tool and send result back to SDK bridge
+                                        let ctx = crate::tool::ToolContext {
+                                            session_id: self.session_id().to_string(),
+                                            message_id: self.session_id().to_string(),
+                                            tool_call_id: request_id.clone(),
+                                        };
+                                        let tool_result = self.registry.execute(&tool_name, input, ctx).await;
+                                        let native_result = match tool_result {
+                                            Ok(output) => crate::provider::NativeToolResult::success(request_id, output.output),
+                                            Err(e) => crate::provider::NativeToolResult::error(request_id, e.to_string()),
+                                        };
+                                        if let Some(sender) = self.provider.native_result_sender() {
+                                            let _ = sender.send(native_result).await;
+                                        }
                                     }
                                 }
                             }
