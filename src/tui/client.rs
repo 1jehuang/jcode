@@ -274,13 +274,18 @@ impl ClientApp {
                 // If reconnecting after server reload, restore the session first
                 if reconnect_attempts > 0 {
                     if let Some(ref session_id) = self.session_id {
-                        let request = Request::ResumeSession {
-                            id: self.next_request_id,
-                            session_id: session_id.clone(),
-                        };
-                        self.next_request_id += 1;
-                        let json = serde_json::to_string(&request)? + "\n";
-                        w.write_all(json.as_bytes()).await?;
+                        let exists_on_disk = crate::session::session_path(session_id)
+                            .map(|p| p.exists())
+                            .unwrap_or(false);
+                        if exists_on_disk {
+                            let request = Request::ResumeSession {
+                                id: self.next_request_id,
+                                session_id: session_id.clone(),
+                            };
+                            self.next_request_id += 1;
+                            let json = serde_json::to_string(&request)? + "\n";
+                            w.write_all(json.as_bytes()).await?;
+                        }
                     }
                 }
                 reconnect_attempts = 0;
