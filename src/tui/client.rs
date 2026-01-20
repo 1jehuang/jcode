@@ -533,8 +533,16 @@ impl ClientApp {
             ServerEvent::History {
                 messages,
                 session_id,
+                provider_name,
+                provider_model,
                 ..
             } => {
+                if let Some(name) = provider_name {
+                    self.provider_name = name;
+                }
+                if let Some(model) = provider_model {
+                    self.provider_model = model;
+                }
                 let session_changed = self.session_id.as_deref() != Some(&session_id);
                 self.session_id = Some(session_id);
 
@@ -898,7 +906,7 @@ impl TuiState for ClientApp {
     }
 
     fn context_limit(&self) -> Option<usize> {
-        None
+        crate::provider::context_limit_for_model(&self.provider_model)
     }
 
     fn client_update_available(&self) -> bool {
