@@ -372,6 +372,10 @@ pub struct App {
     remote_total_tokens: Option<(u64, u64)>,
     // Whether the remote session is canary/self-dev (from server)
     remote_is_canary: Option<bool>,
+    // Remote server version (from server)
+    remote_server_version: Option<String>,
+    // Whether the remote server has a newer binary available
+    remote_server_has_update: Option<bool>,
     // Current message request ID (for remote mode - to match Done events)
     current_message_id: Option<u64>,
     // Whether running in remote mode
@@ -520,6 +524,8 @@ impl App {
             remote_skills: Vec::new(),
             remote_total_tokens: None,
             remote_is_canary: None,
+            remote_server_version: None,
+            remote_server_has_update: None,
             current_message_id: None,
             is_remote: false,
             tool_result_ids: HashSet::new(),
@@ -2274,6 +2280,8 @@ impl App {
                 all_sessions,
                 client_count,
                 is_canary,
+                server_version,
+                server_has_update,
                 ..
             } => {
                 let prev_session_id = self.remote_session_id.clone();
@@ -2311,6 +2319,8 @@ impl App {
                 self.remote_sessions = all_sessions;
                 self.remote_client_count = client_count;
                 self.remote_is_canary = is_canary;
+                self.remote_server_version = server_version;
+                self.remote_server_has_update = server_has_update;
 
                 if session_changed || !remote.has_loaded_history() {
                     remote.mark_history_loaded();
@@ -2558,8 +2568,8 @@ impl App {
                     // Handle /reload - smart reload: client and/or server if newer binary exists
                     if trimmed == "/reload" {
                         let client_needs_reload = self.has_newer_binary();
-                        // TODO: Check if server needs reload (would need protocol support)
-                        let server_needs_reload = client_needs_reload; // Assume same binary
+                        let server_needs_reload =
+                            self.remote_server_has_update.unwrap_or(client_needs_reload);
 
                         if !client_needs_reload && !server_needs_reload {
                             self.display_messages.push(DisplayMessage::system(
@@ -5962,6 +5972,18 @@ impl super::TuiState for App {
 
     fn context_limit(&self) -> Option<usize> {
         Some(self.context_limit as usize)
+    }
+
+    fn client_update_available(&self) -> bool {
+        self.has_newer_binary()
+    }
+
+    fn server_update_available(&self) -> Option<bool> {
+        if self.is_remote {
+            self.remote_server_has_update
+        } else {
+            None
+        }
     }
 
     fn info_widget_data(&self) -> super::info_widget::InfoWidgetData {

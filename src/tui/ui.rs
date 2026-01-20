@@ -967,6 +967,26 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
         ));
     }
 
+    // Add update badges
+    if let Some(true) = app.server_update_available() {
+        mode_parts.push(Span::styled(" ", Style::default()));
+        mode_parts.push(Span::styled(
+            " server update ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Rgb(255, 180, 80)), // Amber
+        ));
+    }
+    if app.client_update_available() {
+        mode_parts.push(Span::styled(" ", Style::default()));
+        mode_parts.push(Span::styled(
+            " client update ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Rgb(110, 200, 120)), // Soft green
+        ));
+    }
+
     lines.push(Line::from(mode_parts));
 
     // Line 2: Model ID, version, and build age (dimmed) + how to switch models
