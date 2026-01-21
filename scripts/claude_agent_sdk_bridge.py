@@ -103,17 +103,27 @@ def _start_stdin_reader():
 def _create_native_tool_handler(tool_name: str) -> Callable:
     """Create a tool handler that requests jcode to execute the tool and waits for result."""
     async def handler(args: Dict[str, Any]) -> Dict[str, Any]:
+        import time as _time
+        start_time = _time.time()
+
         # Start stdin reader if not already started
         _start_stdin_reader()
 
         # Generate unique request ID
         request_id = str(uuid.uuid4())
 
+        # Log to stderr for debugging
+        print(f"[bridge] native_tool_call: {tool_name} request_id={request_id[:8]}", file=sys.stderr, flush=True)
+
         # Set up pending request with async event for non-blocking wait
         event = asyncio.Event()
         loop = asyncio.get_running_loop()
         with _native_tool_lock:
+            pending_count = len(_native_tool_pending)
             _native_tool_pending[request_id] = {"event": event, "result": None, "loop": loop}
+
+        if pending_count > 0:
+            print(f"[bridge] WARNING: {pending_count} other native tool calls already pending", file=sys.stderr, flush=True)
 
         # Output request for jcode to execute
         payload = {
@@ -126,18 +136,22 @@ def _create_native_tool_handler(tool_name: str) -> Callable:
             # Pipe broken - jcode is gone
             with _native_tool_lock:
                 _native_tool_pending.pop(request_id, None)
+            print(f"[bridge] native_tool_call FAILED: pipe closed for {tool_name}", file=sys.stderr, flush=True)
             return {"content": [{"type": "text", "text": f"Failed to send {tool_name} request (pipe closed)"}], "is_error": True}
 
         # Wait for result asynchronously (with timeout) - does NOT block event loop
         # Use 60 second timeout - native tools should be fast, long waits indicate issues
         try:
             await asyncio.wait_for(event.wait(), timeout=60)
+            elapsed = _time.time() - start_time
             with _native_tool_lock:
                 result_msg = _native_tool_pending.pop(request_id, {}).get("result", {})
 
             # Extract result
             result = result_msg.get("result", {})
             is_error = result_msg.get("is_error", False)
+
+            print(f"[bridge] native_tool_call OK: {tool_name} completed in {elapsed:.2f}s", file=sys.stderr, flush=True)
 
             if is_error:
                 error_text = result.get("error", "Unknown error")
@@ -147,8 +161,10 @@ def _create_native_tool_handler(tool_name: str) -> Callable:
                 return {"content": [{"type": "text", "text": output_text}]}
         except asyncio.TimeoutError:
             # Timeout - clean up
+            elapsed = _time.time() - start_time
             with _native_tool_lock:
                 _native_tool_pending.pop(request_id, None)
+            print(f"[bridge] native_tool_call TIMEOUT: {tool_name} after {elapsed:.2f}s", file=sys.stderr, flush=True)
             return {"content": [{"type": "text", "text": f"Timeout waiting for {tool_name} execution (60s)"}], "is_error": True}
 
     return handler
