@@ -23,3 +23,4 @@ pub mod storage;
 pub mod todo;
 pub mod tool;
 pub mod tui;
+pub mod update;

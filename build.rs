@@ -55,12 +55,18 @@ fn main() {
         format!("v0.1.{} ({})", build_number, git_hash)
     };
 
+    // Check if this is a release build (set by CI)
+    let is_release_build = std::env::var("JCODE_RELEASE_BUILD").is_ok();
+
     // Set environment variables for compilation
     println!("cargo:rustc-env=JCODE_GIT_HASH={}", git_hash);
     println!("cargo:rustc-env=JCODE_GIT_DATE={}", git_date);
     println!("cargo:rustc-env=JCODE_VERSION={}", version);
     println!("cargo:rustc-env=JCODE_BUILD_NUMBER={}", build_number);
     println!("cargo:rustc-env=JCODE_CHANGELOG={}", changelog);
+    if is_release_build {
+        println!("cargo:rustc-env=JCODE_RELEASE_BUILD=1");
+    }
 
     // Re-run if git HEAD changes
     println!("cargo:rerun-if-changed=.git/HEAD");

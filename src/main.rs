@@ -23,6 +23,7 @@ mod storage;
 mod todo;
 mod tool;
 mod tui;
+mod update;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -221,6 +222,37 @@ async fn main() -> Result<()> {
         server::set_socket_path(socket);
     }
 
+    // Check for crash loop (only for release builds with auto-update enabled)
+    let build_info = update::BuildInfo::current();
+    if build_info.is_release_build {
+        if let Ok(true) = update::check_crash_loop() {
+            eprintln!("⚠️  Detected crash loop after update, attempting rollback...");
+            match update::rollback() {
+                Ok(Some(path)) => {
+                    eprintln!("Rolled back to: {}", path.display());
+                    // Exec into the previous version
+                    use std::os::unix::process::CommandExt;
+                    let args: Vec<String> = std::env::args().skip(1).collect();
+                    let err = ProcessCommand::new(&path)
+                        .args(&args)
+                        .arg("--no-update")
+                        .exec();
+                    eprintln!("Failed to exec previous version: {}", err);
+                }
+                Ok(None) => {
+                    eprintln!("No previous version available for rollback");
+                }
+                Err(e) => {
+                    eprintln!("Rollback failed: {}", e);
+                }
+            }
+        }
+        // Mark startup for crash detection
+        if let Err(e) = update::mark_startup() {
+            logging::info(&format!("Warning: Failed to mark startup: {}", e));
+        }
+    }
+
     // Check for updates unless --no-update is specified or running Update command
     if !args.no_update && !matches!(args.command, Some(Command::Update)) && args.resume.is_none() {
         if let Some(update_available) = check_for_updates() {
@@ -264,6 +296,13 @@ async fn main() -> Result<()> {
         }
 
         return Err(e);
+    }
+
+    // Successful startup - clear crash marker (for release builds)
+    if update::BuildInfo::current().is_release_build {
+        if let Err(e) = update::mark_startup_success() {
+            logging::info(&format!("Warning: Failed to clear crash marker: {}", e));
+        }
     }
 
     Ok(())
@@ -1159,7 +1198,27 @@ pub fn main_get_repo_dir() -> Option<std::path::PathBuf> {
 
 /// Check if updates are available (returns None if unable to check)
 /// Only returns true if remote is AHEAD of local (not if local is ahead)
+///
+/// Two modes:
+/// 1. Developer mode: binary is in git repo, check for new commits
+/// 2. Release mode: binary is a release build, check GitHub Releases
 fn check_for_updates() -> Option<bool> {
+    // For release builds, use async check (but we're in sync context)
+    // So we do a quick synchronous check here and defer actual download
+    let build_info = update::BuildInfo::current();
+
+    if build_info.is_release_build {
+        // Release build: check metadata to see if we should check GitHub
+        let metadata = update::UpdateMetadata::load().ok()?;
+        if !metadata.should_check() {
+            return Some(false);
+        }
+        // For release builds, we'll do the actual async check in run_auto_update
+        // Here we just signal that a check should be attempted
+        return Some(true);
+    }
+
+    // Developer mode: use git-based check
     let repo_dir = get_repo_dir()?;
 
     // Fetch quietly
@@ -1193,9 +1252,21 @@ fn check_for_updates() -> Option<bool> {
 }
 
 /// Auto-update: pull, build, and exec into new binary
+///
+/// Two modes:
+/// 1. Developer mode: git pull, cargo build, exec into new binary
+/// 2. Release mode: download from GitHub Releases, exec into new binary
 fn run_auto_update() -> Result<()> {
     use std::os::unix::process::CommandExt;
 
+    let build_info = update::BuildInfo::current();
+
+    if build_info.is_release_build {
+        // Release mode: download from GitHub Releases
+        return run_release_auto_update();
+    }
+
+    // Developer mode: git pull + cargo build
     let repo_dir =
         get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
@@ -1244,8 +1315,64 @@ fn run_auto_update() -> Result<()> {
     Err(anyhow::anyhow!("Failed to exec new binary: {}", err))
 }
 
+/// Auto-update for release builds: download from GitHub Releases
+fn run_release_auto_update() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    // Create a small tokio runtime for the async operations
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
+    let new_binary = rt.block_on(async {
+        // Check for update
+        let release = match update::check_for_update().await {
+            Ok(Some(release)) => release,
+            Ok(None) => {
+                // Update last check time even if no update
+                let mut metadata = update::UpdateMetadata::load().unwrap_or_default();
+                metadata.last_check = std::time::SystemTime::now();
+                let _ = metadata.save();
+                anyhow::bail!("No update available");
+            }
+            Err(e) => anyhow::bail!("Failed to check for update: {}", e),
+        };
+
+        eprintln!(
+            "Downloading {} from GitHub...",
+            release.tag_name
+        );
+
+        // Download and install
+        update::download_and_install(&release).await
+    })?;
+
+    eprintln!("Updated to {}. Restarting...", new_binary.display());
+
+    // Exec into new binary with same args
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    let err = ProcessCommand::new(&new_binary)
+        .args(&args)
+        .arg("--no-update") // Prevent infinite update loop
+        .exec();
+
+    Err(anyhow::anyhow!("Failed to exec new binary: {}", err))
+}
+
 /// Run the update process (manual)
+///
+/// Two modes:
+/// 1. Developer mode: git pull + cargo build
+/// 2. Release mode: download from GitHub Releases
 fn run_update() -> Result<()> {
+    let build_info = update::BuildInfo::current();
+
+    if build_info.is_release_build {
+        return run_release_update();
+    }
+
+    // Developer mode
     let repo_dir =
         get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
@@ -1287,6 +1414,40 @@ fn run_update() -> Result<()> {
     eprintln!("Successfully updated to {}", hash.trim());
 
     Ok(())
+}
+
+/// Run update for release builds: download from GitHub Releases
+fn run_release_update() -> Result<()> {
+    let build_info = update::BuildInfo::current();
+    eprintln!("Current version: {} ({})", build_info.version, build_info.git_hash);
+    eprintln!("Checking for updates from GitHub...");
+
+    // Create a small tokio runtime for the async operations
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
+    rt.block_on(async {
+        // Fetch latest release
+        let release = update::fetch_latest_release().await?;
+
+        eprintln!("Latest release: {}", release.tag_name);
+
+        // Check if we need to update
+        match update::check_for_update().await? {
+            Some(release) => {
+                eprintln!("Downloading {}...", release.tag_name);
+                let path = update::download_and_install(&release).await?;
+                eprintln!("Successfully updated to: {}", path.display());
+                eprintln!("\nRestart jcode to use the new version.");
+                Ok(())
+            }
+            None => {
+                eprintln!("Already up to date!");
+                Ok(())
+            }
+        }
+    })
 }
 
 /// List available sessions for resume - interactive picker
