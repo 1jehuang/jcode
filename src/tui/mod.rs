@@ -28,6 +28,8 @@ use std::time::Duration;
 /// This allows sharing the UI rendering code between standalone and client modes
 pub trait TuiState {
     fn display_messages(&self) -> &[DisplayMessage];
+    /// Version counter for display_messages (monotonic, increments on mutation)
+    fn display_messages_version(&self) -> u64;
     fn streaming_text(&self) -> &str;
     fn input(&self) -> &str;
     fn cursor_pos(&self) -> usize;
