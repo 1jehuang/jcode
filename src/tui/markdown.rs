@@ -593,7 +593,9 @@ mod tests {
         let lines = render_markdown(md);
         let rendered: Vec<String> = lines.iter().map(line_to_string).collect();
 
-        assert!(rendered.iter().any(|l| l.contains('│') && l.contains('A') && l.contains('B')));
+        assert!(rendered
+            .iter()
+            .any(|l| l.contains('│') && l.contains('A') && l.contains('B')));
         assert!(rendered.iter().any(|l| l.contains('─') && l.contains('┼')));
     }
 
@@ -604,7 +606,11 @@ mod tests {
         let rendered: Vec<String> = lines.iter().map(line_to_string).collect();
 
         assert!(rendered.iter().any(|l| l.contains('…')));
-        let max_len = rendered.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        let max_len = rendered
+            .iter()
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(0);
         assert!(max_len <= 20);
     }
 }

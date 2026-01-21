@@ -301,13 +301,19 @@ impl Registry {
     pub async fn register_selfdev_tools(&self) {
         // Self-dev management tool
         let selfdev_tool = selfdev::SelfDevTool::new();
-        self.register("selfdev".to_string(), Arc::new(selfdev_tool) as Arc<dyn Tool>)
-            .await;
+        self.register(
+            "selfdev".to_string(),
+            Arc::new(selfdev_tool) as Arc<dyn Tool>,
+        )
+        .await;
 
         // Debug socket tool for direct debug socket access
         let debug_socket_tool = debug_socket::DebugSocketTool::new();
-        self.register("debug_socket".to_string(), Arc::new(debug_socket_tool) as Arc<dyn Tool>)
-            .await;
+        self.register(
+            "debug_socket".to_string(),
+            Arc::new(debug_socket_tool) as Arc<dyn Tool>,
+        )
+        .await;
     }
 
     /// Unregister a tool

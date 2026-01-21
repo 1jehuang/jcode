@@ -1927,6 +1927,9 @@ impl App {
             }
         }
 
+        // Extract memories from session before exiting (don't block on failure)
+        self.extract_session_memories().await;
+
         Ok(RunResult {
             reload_session: self.reload_requested.take(),
             rebuild_session: self.rebuild_requested.take(),
@@ -5394,6 +5397,105 @@ impl App {
         }
     }
 
+    /// Extract and store memories from the session transcript at end of session
+    async fn extract_session_memories(&self) {
+        // Skip if remote mode or not enough messages
+        if self.is_remote || self.messages.len() < 4 {
+            return;
+        }
+
+        // Build transcript from messages
+        let mut transcript = String::new();
+        for msg in &self.messages {
+            let role = match msg.role {
+                Role::User => "User",
+                Role::Assistant => "Assistant",
+            };
+            transcript.push_str(&format!("**{}:**\n", role));
+            for block in &msg.content {
+                match block {
+                    ContentBlock::Text { text, .. } => {
+                        transcript.push_str(text);
+                        transcript.push('\n');
+                    }
+                    ContentBlock::ToolUse { name, .. } => {
+                        transcript.push_str(&format!("[Used tool: {}]\n", name));
+                    }
+                    ContentBlock::ToolResult { content, .. } => {
+                        // Truncate long results
+                        let preview = if content.len() > 200 {
+                            format!("{}...", &content[..200])
+                        } else {
+                            content.clone()
+                        };
+                        transcript.push_str(&format!("[Result: {}]\n", preview));
+                    }
+                }
+            }
+            transcript.push('\n');
+        }
+
+        // Extract memories using sidecar
+        let sidecar = crate::sidecar::HaikuSidecar::new();
+        match sidecar.extract_memories(&transcript).await {
+            Ok(extracted) if !extracted.is_empty() => {
+                let manager = crate::memory::MemoryManager::new();
+                let mut stored_count = 0;
+
+                for memory in extracted {
+                    // Map category string to enum
+                    let category = match memory.category.as_str() {
+                        "fact" => crate::memory::MemoryCategory::Fact,
+                        "preference" => crate::memory::MemoryCategory::Preference,
+                        "correction" => crate::memory::MemoryCategory::Correction,
+                        _ => crate::memory::MemoryCategory::Fact, // Default to fact
+                    };
+
+                    // Map trust string to enum
+                    let trust = match memory.trust.as_str() {
+                        "high" => crate::memory::TrustLevel::High,
+                        "low" => crate::memory::TrustLevel::Low,
+                        _ => crate::memory::TrustLevel::Medium,
+                    };
+
+                    // Create memory entry
+                    let entry = crate::memory::MemoryEntry {
+                        id: format!("auto_{}", chrono::Utc::now().timestamp_millis()),
+                        category,
+                        content: memory.content,
+                        tags: Vec::new(),
+                        created_at: chrono::Utc::now(),
+                        updated_at: chrono::Utc::now(),
+                        access_count: 0,
+                        trust,
+                        active: true,
+                        superseded_by: None,
+                        strength: 1,
+                        source: Some(self.session.id.clone()),
+                    };
+
+                    // Store memory
+                    if manager.remember_project(entry).is_ok() {
+                        stored_count += 1;
+                    }
+                }
+
+                if stored_count > 0 {
+                    crate::logging::info(&format!(
+                        "Extracted {} memories from session",
+                        stored_count
+                    ));
+                }
+            }
+            Ok(_) => {
+                // No memories extracted, that's fine
+            }
+            Err(e) => {
+                crate::logging::info(&format!("Memory extraction skipped: {}", e));
+            }
+        }
+    }
+
     // Getters for UI
     pub fn display_messages(&self) -> &[DisplayMessage] {
         &self.display_messages
@@ -6295,7 +6397,7 @@ impl super::TuiState for App {
                             global_count,
                             by_category,
                             sidecar_available: true,
-                            activity: None,
+                            activity: crate::memory::get_activity(),
                         })
                     } else {
                         None
@@ -6587,7 +6689,7 @@ mod tests {
         assert_eq!(app.interleave_message.as_deref(), None);
         assert!(app.input().is_empty());
 
-        // Queue mode: Shift+Enter should interleave
+        // Queue mode: Shift+Enter should interleave (sets interleave_message, not queued)
         app.queue_mode = true;
         app.handle_key(KeyCode::Char('y'), KeyModifiers::empty())
             .unwrap();
@@ -6595,8 +6697,9 @@ mod tests {
             .unwrap();
         app.handle_key(KeyCode::Enter, KeyModifiers::SHIFT).unwrap();
 
-        assert_eq!(app.queued_count(), 2);
-        assert_eq!(app.queued_messages()[0], "yo");
+        // Interleave now sets interleave_message instead of adding to queue
+        assert_eq!(app.queued_count(), 1); // Still just "hi" in queue
+        assert_eq!(app.interleave_message.as_deref(), Some("yo")); // "yo" is for interleave
     }
 
     #[test]

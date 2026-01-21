@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, AsyncBufReadExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -213,7 +213,10 @@ impl BashTool {
                 } else {
                     Ok(TaskResult {
                         exit_code,
-                        error: Some(format!("Command exited with code {}", exit_code.unwrap_or(-1))),
+                        error: Some(format!(
+                            "Command exited with code {}",
+                            exit_code.unwrap_or(-1)
+                        )),
                     })
                 }
             })

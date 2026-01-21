@@ -152,7 +152,11 @@ impl Tool for SessionSearchTool {
         }
 
         // Sort by score descending
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Take top results
         let results: Vec<_> = results.into_iter().take(limit).collect();
@@ -165,10 +169,7 @@ impl Tool for SessionSearchTool {
         );
 
         for (i, result) in results.iter().enumerate() {
-            let session_name = result
-                .short_name
-                .as_deref()
-                .unwrap_or(&result.session_id);
+            let session_name = result.short_name.as_deref().unwrap_or(&result.session_id);
             let dir = result
                 .working_dir
                 .as_deref()
@@ -197,8 +198,14 @@ fn extract_snippet(text: &str, query: &str, max_len: usize) -> String {
         let end = (pos + query.len() + max_len / 2).min(text.len());
 
         // Find word boundaries
-        let start = text[..start].rfind(char::is_whitespace).map(|p| p + 1).unwrap_or(start);
-        let end = text[end..].find(char::is_whitespace).map(|p| end + p).unwrap_or(end);
+        let start = text[..start]
+            .rfind(char::is_whitespace)
+            .map(|p| p + 1)
+            .unwrap_or(start);
+        let end = text[end..]
+            .find(char::is_whitespace)
+            .map(|p| end + p)
+            .unwrap_or(end);
 
         let mut snippet = text[start..end].to_string();
         if start > 0 {

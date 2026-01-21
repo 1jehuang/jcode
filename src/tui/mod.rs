@@ -8,9 +8,9 @@ pub(crate) mod markdown;
 pub mod screenshot;
 pub mod session_picker;
 mod stream_buffer;
+pub mod test_harness;
 mod ui;
 pub mod visual_debug;
-pub mod test_harness;
 
 // ClientApp is deprecated - use App::new_for_remote().run_remote() instead
 #[deprecated(note = "Use App::new_for_remote().run_remote() instead")]
@@ -86,9 +86,7 @@ pub trait TuiState {
 
 pub(crate) fn subscribe_metadata() -> (Option<String>, Option<bool>) {
     let working_dir = std::env::current_dir().ok();
-    let working_dir_str = working_dir
-        .as_ref()
-        .map(|p| p.display().to_string());
+    let working_dir_str = working_dir.as_ref().map(|p| p.display().to_string());
 
     let mut selfdev = std::env::var("JCODE_SELFDEV_MODE").is_ok();
     if !selfdev {

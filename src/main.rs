@@ -168,6 +168,29 @@ enum Command {
         /// Binary path to run
         binary: String,
     },
+
+    /// Debug socket CLI - interact with running jcode server
+    Debug {
+        /// Debug command to run (list, start, sessions, create_session, message, tool, state, history, etc.)
+        #[arg(default_value = "help")]
+        command: String,
+
+        /// Optional argument for the command
+        #[arg(default_value = "")]
+        arg: String,
+
+        /// Target a specific session by ID
+        #[arg(short = 'S', long)]
+        session: Option<String>,
+
+        /// Connect to specific server socket path
+        #[arg(short = 's', long)]
+        socket: Option<String>,
+
+        /// Wait for response to complete (for message command)
+        #[arg(short, long)]
+        wait: bool,
+    },
 }
 
 #[tokio::main]
@@ -275,7 +298,8 @@ async fn run_main(mut args: Args) -> Result<()> {
             run_client().await?;
         }
         Some(Command::Run { message }) => {
-            let (provider, registry) = init_provider_and_registry(&args.provider, args.model.as_deref()).await?;
+            let (provider, registry) =
+                init_provider_and_registry(&args.provider, args.model.as_deref()).await?;
             let mut agent = agent::Agent::new(provider, registry);
             agent.run_once(&message).await?;
         }
@@ -284,7 +308,8 @@ async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::Repl) => {
             // Simple REPL mode (no TUI)
-            let (provider, registry) = init_provider_and_registry(&args.provider, args.model.as_deref()).await?;
+            let (provider, registry) =
+                init_provider_and_registry(&args.provider, args.model.as_deref()).await?;
             let mut agent = agent::Agent::new(provider, registry);
             agent.repl().await?;
         }
@@ -299,6 +324,15 @@ async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::CanaryWrapper { session_id, binary }) => {
             run_canary_wrapper(&session_id, &binary).await?;
+        }
+        Some(Command::Debug {
+            command,
+            arg,
+            session,
+            socket,
+            wait,
+        }) => {
+            run_debug_command(&command, &arg, session, socket, wait).await?;
         }
         None => {
             // Auto-detect jcode repo and enable self-dev mode
@@ -322,7 +356,8 @@ async fn run_main(mut args: Args) -> Result<()> {
             if args.standalone {
                 eprintln!("\x1b[33m⚠️  Warning: --standalone is deprecated and will be removed in a future version.\x1b[0m");
                 eprintln!("\x1b[33m   The default server/client mode now handles all use cases including self-dev.\x1b[0m\n");
-                let (provider, registry) = init_provider_and_registry(&args.provider, args.model.as_deref()).await?;
+                let (provider, registry) =
+                    init_provider_and_registry(&args.provider, args.model.as_deref()).await?;
                 run_tui(provider, registry, args.resume, args.debug_socket).await?;
             } else {
                 // Default: TUI client mode - start server if needed
@@ -468,10 +503,10 @@ async fn run_tui(
     let _debug_handle = if debug_socket {
         let rx = app.enable_debug_socket();
         let handle = app.start_debug_socket_listener(rx);
-        eprintln!(
+        logging::info(&format!(
             "Debug socket enabled at: {:?}",
             tui::App::debug_socket_path()
-        );
+        ));
         Some(handle)
     } else {
         None
@@ -675,6 +710,315 @@ fn hot_rebuild(session_id: &str) -> Result<()> {
 
     // exec() only returns on error
     Err(anyhow::anyhow!("Failed to exec: {}", err))
+}
+
+/// Run a debug socket command
+async fn run_debug_command(
+    command: &str,
+    arg: &str,
+    session_id: Option<String>,
+    socket_path: Option<String>,
+    _wait: bool,
+) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    // Handle special commands that don't need a server connection
+    match command {
+        "list" => return debug_list_servers().await,
+        "start" => return debug_start_server(arg, socket_path).await,
+        _ => {}
+    }
+
+    // Determine which debug socket to connect to
+    let debug_socket = if let Some(ref path) = socket_path {
+        // User specified a main socket path, derive debug socket from it
+        let main_path = std::path::PathBuf::from(path);
+        let filename = main_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("jcode.sock");
+        let debug_filename = filename.replace(".sock", "-debug.sock");
+        main_path.with_file_name(debug_filename)
+    } else {
+        server::debug_socket_path()
+    };
+
+    if !debug_socket.exists() {
+        eprintln!("Debug socket not found at {:?}", debug_socket);
+        eprintln!("\nMake sure:");
+        eprintln!("  1. A jcode server is running (jcode or jcode serve)");
+        eprintln!("  2. debug_socket is enabled in ~/.jcode/config.toml");
+        eprintln!("     [display]");
+        eprintln!("     debug_socket = true");
+        eprintln!("\nOr use 'jcode debug start' to start a server.");
+        eprintln!("Use 'jcode debug list' to see running servers.");
+        anyhow::bail!("Debug socket not available");
+    }
+
+    let stream = UnixStream::connect(&debug_socket).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    // Build the debug command
+    let debug_cmd = if arg.is_empty() {
+        command.to_string()
+    } else {
+        format!("{}:{}", command, arg)
+    };
+
+    // Build the request
+    let request = serde_json::json!({
+        "type": "debug_command",
+        "id": 1,
+        "command": debug_cmd,
+        "session_id": session_id,
+    });
+
+    // Send request
+    let mut json = serde_json::to_string(&request)?;
+    json.push('\n');
+    writer.write_all(json.as_bytes()).await?;
+
+    // Read response
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+
+    // Parse and display response
+    let response: serde_json::Value = serde_json::from_str(&line)?;
+
+    match response.get("type").and_then(|v| v.as_str()) {
+        Some("debug_response") => {
+            let ok = response
+                .get("ok")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let output = response
+                .get("output")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            if ok {
+                println!("{}", output);
+            } else {
+                eprintln!("Error: {}", output);
+                std::process::exit(1);
+            }
+        }
+        Some("error") => {
+            let message = response
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown error");
+            eprintln!("Error: {}", message);
+            std::process::exit(1);
+        }
+        _ => {
+            // Print raw response
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+    }
+
+    Ok(())
+}
+
+/// Scan for running jcode servers
+async fn debug_list_servers() -> Result<()> {
+    let mut servers = Vec::new();
+
+    // Scan XDG_RUNTIME_DIR
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+
+    // Scan /tmp as well
+    let scan_dirs = vec![runtime_dir, std::path::PathBuf::from("/tmp")];
+
+    for dir in scan_dirs {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    // Look for jcode socket files (but not debug sockets)
+                    if name.starts_with("jcode")
+                        && name.ends_with(".sock")
+                        && !name.contains("-debug")
+                    {
+                        servers.push(path);
+                    }
+                }
+            }
+        }
+    }
+
+    if servers.is_empty() {
+        println!("No running jcode servers found.");
+        println!("\nStart one with: jcode debug start");
+        return Ok(());
+    }
+
+    println!("Running jcode servers:\n");
+
+    for socket_path in servers {
+        let debug_socket = {
+            let filename = socket_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("jcode.sock");
+            let debug_filename = filename.replace(".sock", "-debug.sock");
+            socket_path.with_file_name(debug_filename)
+        };
+
+        // Check if server is alive
+        let alive = tokio::net::UnixStream::connect(&socket_path).await.is_ok();
+        let debug_enabled =
+            debug_socket.exists() && tokio::net::UnixStream::connect(&debug_socket).await.is_ok();
+
+        // Try to get session count if debug is enabled
+        let session_info = if debug_enabled {
+            get_server_info(&debug_socket).await.unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let status = if alive {
+            if debug_enabled {
+                format!("✓ running, debug: enabled{}", session_info)
+            } else {
+                "✓ running, debug: disabled".to_string()
+            }
+        } else {
+            "✗ not responding (stale socket?)".to_string()
+        };
+
+        println!("  {} ({})", socket_path.display(), status);
+    }
+
+    println!("\nUse -s/--socket to target a specific server:");
+    println!("  jcode debug -s /path/to/socket.sock sessions");
+
+    Ok(())
+}
+
+/// Get server info via debug socket
+async fn get_server_info(debug_socket: &std::path::Path) -> Result<String> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let stream = UnixStream::connect(debug_socket).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    // Send sessions command
+    let request = serde_json::json!({
+        "type": "debug_command",
+        "id": 1,
+        "command": "sessions",
+    });
+    let mut json = serde_json::to_string(&request)?;
+    json.push('\n');
+    writer.write_all(json.as_bytes()).await?;
+
+    // Read response
+    let mut line = String::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        reader.read_line(&mut line),
+    )
+    .await??;
+
+    let response: serde_json::Value = serde_json::from_str(&line)?;
+    if let Some(output) = response.get("output").and_then(|v| v.as_str()) {
+        if let Ok(sessions) = serde_json::from_str::<Vec<String>>(output) {
+            return Ok(format!(", sessions: {}", sessions.len()));
+        }
+    }
+
+    Ok(String::new())
+}
+
+/// Start a new jcode server
+async fn debug_start_server(arg: &str, socket_path: Option<String>) -> Result<()> {
+    let socket = socket_path.unwrap_or_else(|| {
+        if !arg.is_empty() {
+            arg.to_string()
+        } else {
+            server::socket_path().to_string_lossy().to_string()
+        }
+    });
+
+    let socket_pathbuf = std::path::PathBuf::from(&socket);
+
+    // Check if server already running
+    if socket_pathbuf.exists() {
+        if tokio::net::UnixStream::connect(&socket_pathbuf)
+            .await
+            .is_ok()
+        {
+            eprintln!("Server already running at {}", socket);
+            eprintln!("Use 'jcode debug list' to see all servers.");
+            return Ok(());
+        }
+        // Stale socket, remove it
+        let _ = std::fs::remove_file(&socket_pathbuf);
+    }
+
+    // Also clean up debug socket
+    let debug_socket = {
+        let filename = socket_pathbuf
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("jcode.sock");
+        let debug_filename = filename.replace(".sock", "-debug.sock");
+        socket_pathbuf.with_file_name(debug_filename)
+    };
+    let _ = std::fs::remove_file(&debug_socket);
+
+    eprintln!("Starting jcode server...");
+
+    // Start server in background
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("serve");
+
+    if socket != server::socket_path().to_string_lossy() {
+        cmd.arg("--socket").arg(&socket);
+    }
+
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+
+    // Wait for server to be ready
+    let start = std::time::Instant::now();
+    loop {
+        if start.elapsed() > std::time::Duration::from_secs(10) {
+            anyhow::bail!("Server failed to start within 10 seconds");
+        }
+        if socket_pathbuf.exists() {
+            if tokio::net::UnixStream::connect(&socket_pathbuf)
+                .await
+                .is_ok()
+            {
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    eprintln!("✓ Server started at {}", socket);
+
+    // Check if debug socket is available
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    if debug_socket.exists() {
+        eprintln!("✓ Debug socket at {}", debug_socket.display());
+    } else {
+        eprintln!("⚠ Debug socket not enabled. Add to ~/.jcode/config.toml:");
+        eprintln!("  [display]");
+        eprintln!("  debug_socket = true");
+    }
+
+    Ok(())
 }
 
 async fn run_login(choice: &ProviderChoice) -> Result<()> {
@@ -1233,7 +1577,10 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
             }
         }
     } else {
-        eprintln!("Connecting to existing self-dev server on {}...", socket_path);
+        eprintln!(
+            "Connecting to existing self-dev server on {}...",
+            socket_path
+        );
     }
 
     // Set up ownership takeover callback for when server dies
@@ -1259,9 +1606,11 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
             }
 
             // If we're not owner and server is dead, try to take over
-            if !is_owner_clone.load(Ordering::SeqCst) && !is_server_alive(&socket_for_takeover).await {
+            if !is_owner_clone.load(Ordering::SeqCst)
+                && !is_server_alive(&socket_for_takeover).await
+            {
                 if let Some(lock) = try_acquire_server_lock() {
-                    eprintln!("\n🔄 Server died - taking over as new owner...");
+                    logging::info("Server died - taking over as new owner...");
                     *lock_file_clone.lock().await = Some(lock);
                     is_owner_clone.store(true, Ordering::SeqCst);
 
@@ -1289,7 +1638,7 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
                     });
                     *server_manager_clone.lock().await = Some(handle);
 
-                    eprintln!("✓ Now managing self-dev server");
+                    logging::info("Now managing self-dev server");
                 }
             }
         }
@@ -1347,8 +1696,15 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
         if code == EXIT_RELOAD_REQUESTED || code == EXIT_ROLLBACK_REQUESTED {
             use std::os::unix::process::CommandExt;
 
-            let action = if code == EXIT_RELOAD_REQUESTED { "reload" } else { "rollback" };
-            eprintln!("\n🔄 Client {} requested, restarting with new binary...", action);
+            let action = if code == EXIT_RELOAD_REQUESTED {
+                "reload"
+            } else {
+                "rollback"
+            };
+            eprintln!(
+                "\n🔄 Client {} requested, restarting with new binary...",
+                action
+            );
 
             // Small delay for filesystem sync
             std::thread::sleep(std::time::Duration::from_millis(200));
@@ -1362,7 +1718,11 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
 
             let binary = binary_path
                 .filter(|p| p.exists())
-                .or_else(|| initial_binary_path.exists().then(|| initial_binary_path.clone()))
+                .or_else(|| {
+                    initial_binary_path
+                        .exists()
+                        .then(|| initial_binary_path.clone())
+                })
                 .ok_or_else(|| anyhow::anyhow!("No binary found for reload"))?;
 
             let cwd = std::env::current_dir()?;
@@ -1401,6 +1761,7 @@ async fn run_server_manager(
     server_crashed: Arc<std::sync::atomic::AtomicBool>,
     repo_dir: Option<&std::path::PathBuf>,
 ) {
+    use std::process::Stdio;
     use std::sync::atomic::Ordering;
     use tokio::process::Command as TokioCommand;
 
@@ -1423,23 +1784,25 @@ async fn run_server_manager(
             } else if initial_binary.exists() {
                 (initial_binary.to_path_buf(), "dev")
             } else {
-                eprintln!("No binary found for server!");
+                logging::error("No binary found for server!");
                 break;
             };
 
-        eprintln!("Starting {} server...", version_type);
+        logging::info(&format!("Starting {} server...", version_type));
 
         // Spawn server (don't kill on drop - let server self-terminate via idle timeout)
         let server_result = TokioCommand::new(&binary_path)
             .arg("serve")
             .current_dir(&cwd)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .kill_on_drop(false)
             .spawn();
 
         let mut server = match server_result {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to spawn server: {}", e);
+                logging::error(&format!("Failed to spawn server: {}", e));
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 continue;
             }
@@ -1453,26 +1816,26 @@ async fn run_server_manager(
         }
 
         let exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
-        eprintln!("Server exited with code {}", exit_code);
+        logging::info(&format!("Server exited with code {}", exit_code));
 
         if exit_code == EXIT_DONE {
             // Clean exit
             break;
         } else if exit_code == server::EXIT_IDLE_TIMEOUT {
             // Server shut down due to idle timeout - don't restart
-            eprintln!("Server shut down (idle timeout). No restart needed.");
+            logging::info("Server shut down (idle timeout). No restart needed.");
             break;
         } else if exit_code == EXIT_RELOAD_REQUESTED {
             // Reload - new binary should already be set via canary symlink
-            eprintln!("Server requested reload...");
+            logging::info("Server requested reload...");
             // Small delay for filesystem sync
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         } else if exit_code == EXIT_ROLLBACK_REQUESTED {
             // Rollback - use stable
-            eprintln!("Server requested rollback to stable...");
+            logging::info("Server requested rollback to stable...");
         } else {
             // Crash!
-            eprintln!("⚠️  Server crashed with exit code {}", exit_code);
+            logging::error(&format!("Server crashed with exit code {}", exit_code));
             server_crashed.store(true, Ordering::SeqCst);
 
             // Record crash
