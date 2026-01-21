@@ -617,13 +617,20 @@ impl App {
         let manager = self.mcp_manager.read().await;
         if !manager.config().servers.is_empty() {
             drop(manager);
-            let manager = self.mcp_manager.write().await;
-            if let Err(e) = manager.connect_all().await {
-                eprintln!("MCP init error: {}", e);
+            let mut init_error = None;
+            {
+                let manager = self.mcp_manager.write().await;
+                if let Err(e) = manager.connect_all().await {
+                    init_error = Some(format!("MCP init error: {}", e));
+                }
+                // Cache server names
+                self.mcp_server_names = manager.connected_servers().await;
             }
-            // Cache server names
-            self.mcp_server_names = manager.connected_servers().await;
-            drop(manager);
+            if let Some(msg) = init_error {
+                crate::logging::error(&msg);
+                self.display_messages.push(DisplayMessage::error(msg));
+                self.set_status_notice("MCP init failed");
+            }
 
             // Register MCP server tools
             let tools = crate::mcp::create_mcp_tools(Arc::clone(&self.mcp_manager)).await;
@@ -774,8 +781,13 @@ impl App {
                 let reload_ctx = ReloadContext::load().ok().flatten();
 
                 let continuation_msg = if let Some(ctx) = reload_ctx {
-                    let action = if ctx.is_rollback { "Rollback" } else { "Reload" };
-                    let task_info = ctx.task_context
+                    let action = if ctx.is_rollback {
+                        "Rollback"
+                    } else {
+                        "Reload"
+                    };
+                    let task_info = ctx
+                        .task_context
                         .map(|t| format!("\nYou were working on: {}", t))
                         .unwrap_or_default();
 
@@ -808,8 +820,13 @@ impl App {
 
             // Check if this was a reload that failed - inject failure message if so
             if let Ok(Some(ctx)) = ReloadContext::load() {
-                let action = if ctx.is_rollback { "Rollback" } else { "Reload" };
-                let task_info = ctx.task_context
+                let action = if ctx.is_rollback {
+                    "Rollback"
+                } else {
+                    "Reload"
+                };
+                let task_info = ctx
+                    .task_context
                     .map(|t| format!(" You were working on: {}", t))
                     .unwrap_or_default();
 
@@ -892,7 +909,10 @@ impl App {
 
             // Save session before migration
             if let Err(e) = self.session.save() {
-                eprintln!("Failed to save session before migration: {}", e);
+                let msg = format!("Failed to save session before migration: {}", e);
+                crate::logging::error(&msg);
+                self.display_messages.push(DisplayMessage::error(msg));
+                self.set_status_notice("Migration aborted");
                 return false;
             }
 
@@ -903,7 +923,8 @@ impl App {
             // We store the binary path in an env var for the reload handler
             std::env::set_var("JCODE_MIGRATE_BINARY", stable_binary);
 
-            eprintln!("Migrating to stable version {}...", version);
+            crate::logging::info(&format!("Migrating to stable version {}...", version));
+            self.set_status_notice(format!("Migrating to stable {}...", version));
             self.should_quit = true;
             return true;
         }
@@ -2013,8 +2034,13 @@ impl App {
                     let reload_ctx = ReloadContext::load().ok().flatten();
 
                     let continuation_msg = if let Some(ctx) = reload_ctx {
-                        let action = if ctx.is_rollback { "Rollback" } else { "Reload" };
-                        let task_info = ctx.task_context
+                        let action = if ctx.is_rollback {
+                            "Rollback"
+                        } else {
+                            "Reload"
+                        };
+                        let task_info = ctx
+                            .task_context
                             .map(|t| format!("\nYou were working on: {}", t))
                             .unwrap_or_default();
 
@@ -4443,8 +4469,13 @@ impl App {
                         };
                         let tool_result = self.registry.execute(&tool_name, input, ctx).await;
                         let native_result = match tool_result {
-                            Ok(output) => crate::provider::NativeToolResult::success(request_id, output.output),
-                            Err(e) => crate::provider::NativeToolResult::error(request_id, e.to_string()),
+                            Ok(output) => crate::provider::NativeToolResult::success(
+                                request_id,
+                                output.output,
+                            ),
+                            Err(e) => {
+                                crate::provider::NativeToolResult::error(request_id, e.to_string())
+                            }
                         };
                         if let Some(sender) = self.provider.native_result_sender() {
                             let _ = sender.send(native_result).await;
@@ -5851,7 +5882,7 @@ impl App {
             let listener = match UnixListener::bind(&socket_path) {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("Failed to bind debug socket: {}", e);
+                    crate::logging::error(&format!("Failed to bind debug socket: {}", e));
                     return;
                 }
             };
@@ -6272,6 +6303,33 @@ impl super::TuiState for App {
             }
         };
 
+        // Gather swarm info
+        let swarm_info = {
+            let subagent_status = self.subagent_status.clone();
+            let (session_count, client_count, session_names) = if self.is_remote {
+                (
+                    self.remote_sessions.len(),
+                    self.remote_client_count,
+                    self.remote_sessions.clone(),
+                )
+            } else {
+                // In local mode, just show current session
+                (1, None, vec![self.session.id.clone()])
+            };
+
+            // Only show if there's something interesting
+            if subagent_status.is_some() || session_count > 1 || client_count.is_some() {
+                Some(super::info_widget::SwarmInfo {
+                    session_count,
+                    subagent_status,
+                    client_count,
+                    session_names,
+                })
+            } else {
+                None
+            }
+        };
+
         super::info_widget::InfoWidgetData {
             todos,
             context_info,
@@ -6282,6 +6340,7 @@ impl super::TuiState for App {
             session_count,
             client_count,
             memory_info,
+            swarm_info,
         }
     }
 }
