@@ -54,7 +54,7 @@ pub trait Provider: Send + Sync {
         None
     }
 
-    /// Returns true if the provider executes tools internally (e.g., Claude Agent SDK).
+    /// Returns true if the provider executes tools internally (e.g., Claude Code CLI).
     /// When true, jcode should NOT execute tools locally - just record the tool calls.
     fn handles_tools_internally(&self) -> bool {
         false
@@ -70,7 +70,7 @@ pub trait Provider: Send + Sync {
     fn fork(&self) -> Arc<dyn Provider>;
 
     /// Get a sender for native tool results (if the provider supports it).
-    /// This is used by the Claude provider to send results back to the SDK bridge.
+    /// This is used by the Claude provider to send results back to a bridge (if any).
     fn native_result_sender(&self) -> Option<NativeToolResultSender> {
         None
     }
@@ -148,7 +148,7 @@ pub fn provider_for_model(model: &str) -> Option<&'static str> {
 
 /// MultiProvider wraps multiple providers and allows seamless model switching
 pub struct MultiProvider {
-    /// Claude SDK provider (uses Python bridge)
+    /// Claude Code CLI provider
     claude: Option<claude::ClaudeProvider>,
     /// Direct Anthropic API provider (no Python dependency)
     anthropic: Option<anthropic::AnthropicProvider>,
@@ -156,7 +156,7 @@ pub struct MultiProvider {
     active: RwLock<ActiveProvider>,
     has_claude_creds: bool,
     has_openai_creds: bool,
-    /// Use direct API instead of SDK for Claude models
+    /// Use direct API instead of Claude Code CLI for Claude models
     use_direct_api: bool,
 }
 
@@ -172,7 +172,7 @@ impl MultiProvider {
         let has_claude_creds = auth::claude::load_credentials().is_ok();
         let has_openai_creds = auth::codex::load_credentials().is_ok();
 
-        // Check if we should use direct API instead of SDK
+        // Check if we should use direct API instead of Claude Code CLI
         // Set JCODE_USE_DIRECT_API=1 to use direct Anthropic API
         let use_direct_api = std::env::var("JCODE_USE_DIRECT_API")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -185,7 +185,7 @@ impl MultiProvider {
             None
         };
 
-        // Direct Anthropic API provider (bypasses Python SDK)
+        // Direct Anthropic API provider (bypasses Claude Code CLI)
         let anthropic = if has_claude_creds && use_direct_api {
             crate::logging::info("Using direct Anthropic API (JCODE_USE_DIRECT_API=1)");
             Some(anthropic::AnthropicProvider::new())

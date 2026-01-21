@@ -1,6 +1,6 @@
 # J-Code
 
-A Rust coding agent that uses the official **Claude Agent SDK** (Claude Code) or **ChatGPT Pro** via OAuth.
+A Rust coding agent that uses the **Claude Code CLI** (Claude Max OAuth) or **ChatGPT Pro** via OAuth.
 
 ## Demo
 
@@ -9,7 +9,7 @@ A Rust coding agent that uses the official **Claude Agent SDK** (Claude Code) or
 ## Features
 
 - **No API keys needed** - Uses Claude Code CLI credentials and Codex OAuth
-- **Dual provider support** - Works with Claude Agent SDK and OpenAI/Codex
+- **Dual provider support** - Works with Claude Code CLI and OpenAI/Codex
 - **Streaming responses** - Real-time output as the model generates
 - **Server/Client architecture** - Run as daemon, connect from multiple clients
 - **20+ built-in tools** - File ops, search, web, shell, memory, and parallel execution
@@ -20,7 +20,7 @@ A Rust coding agent that uses the official **Claude Agent SDK** (Claude Code) or
 ## Prerequisites
 
 You need at least one of:
-- **Claude Max subscription** - Install the SDK: `pip install claude-agent-sdk`, then run `claude` to authenticate
+- **Claude Max subscription** - Install Claude Code CLI, then run `claude` to authenticate
 - **ChatGPT Pro/Plus subscription** - Run `codex login` to authenticate
 
 ## Installation
@@ -153,9 +153,9 @@ jcode --resume session_abc123_fox  # by full ID
 │   ClaudeProvider        │     │   OpenAIProvider        │
 │   (provider/claude.rs)  │     │   (provider/openai.rs)  │
 ├─────────────────────────┤     ├─────────────────────────┤
-│ - Claude Agent SDK      │     │ - Codex OAuth           │
-│ - Subprocess bridge     │     │ - Direct HTTP API       │
-│ - Tool execution by SDK │     │ - Local tool execution  │
+│ - Claude Code CLI       │     │ - Codex OAuth           │
+│ - CLI subprocess        │     │ - Direct HTTP API       │
+│ - Tool execution by CLI │     │ - Local tool execution  │
 │ - Session resume        │     │ - Reasoning effort ctrl │
 └─────────────────────────┘     └─────────────────────────┘
          │                               │
@@ -180,7 +180,7 @@ Provider Trait:
 
 **Key Design Decisions:**
 - `MultiProvider` allows seamless switching between Claude and OpenAI mid-session
-- Claude SDK handles tool execution internally; OpenAI requires local execution
+- Claude Code CLI handles tool execution internally; OpenAI requires local execution
 - Credentials are loaded lazily and cached
 
 </details>
@@ -890,7 +890,7 @@ MCP servers communicate via JSON-RPC 2.0 over stdio. See the [MCP specification]
 
 ## How It Works
 
-J-Code uses Claude Agent SDK to talk to Claude Code. Credentials are stored at:
+J-Code uses the Claude Code CLI to talk to Claude. Credentials are stored at:
 - `~/.claude/.credentials.json` (Claude Code CLI)
 - `~/.local/share/opencode/auth.json` (OpenCode, if installed)
 
@@ -904,7 +904,7 @@ For provider/auth details, see `OAUTH.md`.
 ## Testing
 
 - `cargo test` - Run all tests
-- `cargo run --bin test_api` - Claude Agent SDK smoke test
+- `cargo run --bin test_api` - Claude Code CLI smoke test
 - `cargo run --bin jcode-harness` - Tool harness (add `--include-network` for web tools)
 - `cargo run --release --bin tui_bench` - TUI rendering benchmark (see Architecture > Rendering Benchmarks)
 - `scripts/agent_trace.sh` - End-to-end agent smoke test (set `JCODE_PROVIDER=openai|claude`)

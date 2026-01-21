@@ -5,7 +5,7 @@ use jcode::provider::Provider;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    println!("Testing Claude Agent SDK provider...");
+    println!("Testing Claude Code CLI provider...");
     let provider = ClaudeProvider::new();
 
     let messages = vec![Message {
