@@ -14,6 +14,7 @@ mod message;
 mod prompt;
 mod protocol;
 mod provider;
+mod registry;
 mod server;
 mod session;
 mod sidecar;

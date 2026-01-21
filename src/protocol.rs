@@ -273,6 +273,12 @@ pub enum ServerEvent {
         /// Server binary version string (e.g. "v0.1.123 (abc1234)")
         #[serde(skip_serializing_if = "Option::is_none")]
         server_version: Option<String>,
+        /// Server name for multi-server support (e.g. "blazing")
+        #[serde(skip_serializing_if = "Option::is_none")]
+        server_name: Option<String>,
+        /// Server icon for display (e.g. "🔥")
+        #[serde(skip_serializing_if = "Option::is_none")]
+        server_icon: Option<String>,
         /// Whether a newer server binary is available on disk
         #[serde(skip_serializing_if = "Option::is_none")]
         server_has_update: Option<bool>,

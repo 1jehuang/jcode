@@ -9,6 +9,7 @@ use crate::protocol::{
     Request, ServerEvent,
 };
 use crate::provider::Provider;
+use crate::registry::{server_debug_socket_path, server_socket_path};
 use crate::tool::Registry;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -191,11 +192,46 @@ fn server_has_newer_binary() -> bool {
 /// Exit code when server shuts down due to idle timeout
 pub const EXIT_IDLE_TIMEOUT: i32 = 44;
 
+/// Server identity for multi-server support
+#[derive(Debug, Clone)]
+pub struct ServerIdentity {
+    /// Full server ID (e.g., "server_blazing_1705012345678")
+    pub id: String,
+    /// Short name (e.g., "blazing")
+    pub name: String,
+    /// Icon for display (e.g., "🔥")
+    pub icon: String,
+    /// Git hash of the binary
+    pub git_hash: String,
+    /// Version string (e.g., "v0.1.123")
+    pub version: String,
+}
+
+impl ServerIdentity {
+    /// Create identity for unnamed/legacy server
+    pub fn unnamed() -> Self {
+        Self {
+            id: "server_default".to_string(),
+            name: "default".to_string(),
+            icon: "🔮".to_string(),
+            git_hash: String::new(),
+            version: env!("JCODE_VERSION").to_string(),
+        }
+    }
+
+    /// Display name with icon (e.g., "🔥 blazing")
+    pub fn display_name(&self) -> String {
+        format!("{} {}", self.icon, self.name)
+    }
+}
+
 /// Server state
 pub struct Server {
     provider: Arc<dyn Provider>,
     socket_path: PathBuf,
     debug_socket_path: PathBuf,
+    /// Server identity for multi-server support
+    identity: ServerIdentity,
     /// Broadcast channel for streaming events to all subscribers
     event_tx: broadcast::Sender<ServerEvent>,
     /// Active sessions (session_id -> Agent)
@@ -228,6 +264,48 @@ impl Server {
             provider,
             socket_path: socket_path(),
             debug_socket_path: debug_socket_path(),
+            identity: ServerIdentity::unnamed(),
+            event_tx,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            is_processing: Arc::new(RwLock::new(false)),
+            session_id: Arc::new(RwLock::new(String::new())),
+            client_count: Arc::new(RwLock::new(0)),
+            file_touches: Arc::new(RwLock::new(HashMap::new())),
+            swarm_members: Arc::new(RwLock::new(HashMap::new())),
+            swarms_by_cwd: Arc::new(RwLock::new(HashMap::new())),
+            shared_context: Arc::new(RwLock::new(HashMap::new())),
+            client_debug_tx: Arc::new(RwLock::new(None)),
+            client_debug_response_tx,
+        }
+    }
+
+    /// Create a new server with a generated name and identity
+    /// Uses the registry for named socket paths
+    pub fn new_named(provider: Arc<dyn Provider>, git_hash: &str) -> Self {
+        use crate::id::{new_memorable_server_id, server_icon};
+
+        let (id, name) = new_memorable_server_id();
+        let icon = server_icon(&name).to_string();
+
+        let identity = ServerIdentity {
+            id,
+            name: name.clone(),
+            icon,
+            git_hash: git_hash.to_string(),
+            version: env!("JCODE_VERSION").to_string(),
+        };
+
+        let socket = server_socket_path(&name);
+        let debug_socket = server_debug_socket_path(&name);
+
+        let (event_tx, _) = broadcast::channel(1024);
+        let (client_debug_response_tx, _) = broadcast::channel(64);
+
+        Self {
+            provider,
+            socket_path: socket,
+            debug_socket_path: debug_socket,
+            identity,
             event_tx,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             is_processing: Arc::new(RwLock::new(false)),
@@ -251,6 +329,11 @@ impl Server {
         server.socket_path = socket_path;
         server.debug_socket_path = debug_socket_path;
         server
+    }
+
+    /// Get the server identity
+    pub fn identity(&self) -> &ServerIdentity {
+        &self.identity
     }
 
     /// Monitor the global Bus for FileTouch events and detect conflicts
@@ -409,6 +492,11 @@ impl Server {
 
     /// Start the server (both main and debug sockets)
     pub async fn run(&self) -> Result<()> {
+        // Ensure socket directory exists (for named sockets like /run/user/1000/jcode/)
+        if let Some(parent) = self.socket_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
         // Remove existing sockets
         let _ = std::fs::remove_file(&self.socket_path);
         let _ = std::fs::remove_file(&self.debug_socket_path);
@@ -416,6 +504,12 @@ impl Server {
         let main_listener = UnixListener::bind(&self.socket_path)?;
         let debug_listener = UnixListener::bind(&self.debug_socket_path)?;
 
+        // Log server identity
+        crate::logging::info(&format!(
+            "Server {} starting ({})",
+            self.identity.display_name(),
+            self.identity.version
+        ));
         crate::logging::info(&format!("Server listening on {:?}", self.socket_path));
         crate::logging::info(&format!("Debug socket on {:?}", self.debug_socket_path));
 
@@ -496,6 +590,8 @@ impl Server {
         let main_file_touches = Arc::clone(&self.file_touches);
         let main_client_debug_tx = Arc::clone(&self.client_debug_tx);
         let main_client_debug_response_tx = self.client_debug_response_tx.clone();
+        let main_server_name = self.identity.name.clone();
+        let main_server_icon = self.identity.icon.clone();
 
         let main_handle = tokio::spawn(async move {
             loop {
@@ -513,6 +609,8 @@ impl Server {
                         let file_touches = Arc::clone(&main_file_touches);
                         let client_debug_tx = Arc::clone(&main_client_debug_tx);
                         let client_debug_response_tx = main_client_debug_response_tx.clone();
+                        let server_name = main_server_name.clone();
+                        let server_icon = main_server_icon.clone();
 
                         // Increment client count
                         *client_count.write().await += 1;
@@ -532,6 +630,8 @@ impl Server {
                                 file_touches,
                                 client_debug_tx,
                                 client_debug_response_tx,
+                                server_name,
+                                server_icon,
                             )
                             .await;
 
@@ -612,6 +712,8 @@ async fn handle_client(
     file_touches: Arc<RwLock<HashMap<PathBuf, Vec<FileAccess>>>>,
     client_debug_tx: Arc<RwLock<Option<mpsc::UnboundedSender<(u64, String)>>>>,
     client_debug_response_tx: broadcast::Sender<(u64, String)>,
+    server_name: String,
+    server_icon: String,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -939,6 +1041,8 @@ async fn handle_client(
                     client_count: Some(current_client_count),
                     is_canary: Some(is_canary),
                     server_version: Some(env!("JCODE_VERSION").to_string()),
+                    server_name: Some(server_name.clone()),
+                    server_icon: Some(server_icon.clone()),
                     server_has_update: Some(server_has_newer_binary()),
                 };
                 let json = encode_event(&event);
@@ -1031,6 +1135,8 @@ async fn handle_client(
                             client_count: Some(current_client_count),
                             is_canary: Some(is_canary),
                             server_version: Some(env!("JCODE_VERSION").to_string()),
+                            server_name: Some(server_name.clone()),
+                            server_icon: Some(server_icon.clone()),
                             server_has_update: Some(server_has_newer_binary()),
                         };
                         let json = encode_event(&event);
