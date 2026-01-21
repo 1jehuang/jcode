@@ -1,5 +1,6 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
+use crate::tui::image::{display_image, ImageDisplayParams, ImageProtocol};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -77,6 +78,11 @@ impl Tool for ReadTool {
                     suggestions.join(", ")
                 ));
             }
+        }
+
+        // Check for image files and display in terminal if supported
+        if is_image_file(path) {
+            return handle_image_file(path, &params.file_path);
         }
 
         // Check for binary files
@@ -187,4 +193,115 @@ fn find_similar_files(path: &str) -> Vec<String> {
     }
 
     suggestions
+}
+
+/// Check if a file is an image based on extension
+fn is_image_file(path: &Path) -> bool {
+    if let Some(ext) = path.extension() {
+        let ext = ext.to_string_lossy().to_lowercase();
+        matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico"
+        )
+    } else {
+        false
+    }
+}
+
+/// Handle reading an image file - display in terminal if supported
+fn handle_image_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
+    let protocol = ImageProtocol::detect();
+
+    // Get file size for metadata
+    let metadata = std::fs::metadata(path)?;
+    let file_size = metadata.len();
+
+    // Try to get image dimensions
+    let dimensions = if let Ok(data) = std::fs::read(path) {
+        get_image_dimensions_from_data(&data)
+    } else {
+        None
+    };
+
+    let dim_str = dimensions
+        .map(|(w, h)| format!("{}x{}", w, h))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let size_str = if file_size < 1024 {
+        format!("{} bytes", file_size)
+    } else if file_size < 1024 * 1024 {
+        format!("{:.1} KB", file_size as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", file_size as f64 / 1024.0 / 1024.0)
+    };
+
+    // Display image in terminal if supported
+    if protocol.is_supported() {
+        let params = ImageDisplayParams::from_terminal();
+        match display_image(path, &params) {
+            Ok(true) => {
+                return Ok(ToolOutput::new(format!(
+                    "Image: {} ({})\nDimensions: {}\nDisplayed in terminal using {:?} protocol",
+                    file_path, size_str, dim_str, protocol
+                )));
+            }
+            Ok(false) => {
+                // Fall through to text output
+            }
+            Err(e) => {
+                crate::logging::info(&format!("Warning: Failed to display image: {}", e));
+                // Fall through to text output
+            }
+        }
+    }
+
+    // Fallback: return metadata about the image
+    Ok(ToolOutput::new(format!(
+        "Image: {} ({})\nDimensions: {}\nTerminal does not support inline images (try Kitty or iTerm2)",
+        file_path, size_str, dim_str
+    )))
+}
+
+/// Get image dimensions from raw data (duplicated from tui::image for convenience)
+fn get_image_dimensions_from_data(data: &[u8]) -> Option<(u32, u32)> {
+    // PNG: check signature and parse IHDR chunk
+    if data.len() > 24 && &data[0..8] == b"\x89PNG\r\n\x1a\n" {
+        let width = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
+        let height = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
+        return Some((width, height));
+    }
+
+    // JPEG: look for SOF0/SOF2 markers
+    if data.len() > 2 && data[0] == 0xFF && data[1] == 0xD8 {
+        let mut i = 2;
+        while i + 9 < data.len() {
+            if data[i] != 0xFF {
+                i += 1;
+                continue;
+            }
+            let marker = data[i + 1];
+            // SOF0 (baseline) or SOF2 (progressive)
+            if marker == 0xC0 || marker == 0xC2 {
+                let height = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
+                let width = u16::from_be_bytes([data[i + 7], data[i + 8]]) as u32;
+                return Some((width, height));
+            }
+            // Skip to next marker
+            if i + 3 < data.len() {
+                let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+                i += 2 + len;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // GIF: parse header
+    if data.len() > 10 && (&data[0..6] == b"GIF87a" || &data[0..6] == b"GIF89a") {
+        let width = u16::from_le_bytes([data[6], data[7]]) as u32;
+        let height = u16::from_le_bytes([data[8], data[9]]) as u32;
+        return Some((width, height));
+    }
+
+    None
 }

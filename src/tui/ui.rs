@@ -88,7 +88,11 @@ fn blend_color(from: Color, to: Color, t: f32) -> Color {
     let r = fr + (tr - fr) * t;
     let g = fg + (tg - fg) * t;
     let b = fb + (tb - fb) * t;
-    Color::Rgb(r.clamp(0.0, 255.0) as u8, g.clamp(0.0, 255.0) as u8, b.clamp(0.0, 255.0) as u8)
+    Color::Rgb(
+        r.clamp(0.0, 255.0) as u8,
+        g.clamp(0.0, 255.0) as u8,
+        b.clamp(0.0, 255.0) as u8,
+    )
 }
 
 /// Extract semantic version from full version string (e.g., "v0.1.0-dev (abc123)" -> "v0.1.0")
@@ -200,41 +204,138 @@ fn render_context_bar(
     let mut raw: Vec<(&str, String, usize, Color, &str)> = Vec::new();
 
     let sys = info.system_prompt_chars / 4;
-    if sys > 0 { raw.push(("⚙", "system".into(), sys, SYS_COLOR, "system")); }
+    if sys > 0 {
+        raw.push(("⚙", "system".into(), sys, SYS_COLOR, "system"));
+    }
 
-    if info.has_project_agents_md { raw.push(("📋", "AGENTS.md".into(), info.project_agents_md_chars / 4, DOCS_COLOR, "docs")); }
-    if info.has_project_claude_md { raw.push(("📝", "CLAUDE.md".into(), info.project_claude_md_chars / 4, DOCS_COLOR, "docs")); }
-    if info.has_global_agents_md { raw.push(("📋", "~/.AGENTS".into(), info.global_agents_md_chars / 4, DOCS_COLOR, "docs")); }
-    if info.has_global_claude_md { raw.push(("📝", "~/.CLAUDE".into(), info.global_claude_md_chars / 4, DOCS_COLOR, "docs")); }
+    if info.has_project_agents_md {
+        raw.push((
+            "📋",
+            "AGENTS.md".into(),
+            info.project_agents_md_chars / 4,
+            DOCS_COLOR,
+            "docs",
+        ));
+    }
+    if info.has_project_claude_md {
+        raw.push((
+            "📝",
+            "CLAUDE.md".into(),
+            info.project_claude_md_chars / 4,
+            DOCS_COLOR,
+            "docs",
+        ));
+    }
+    if info.has_global_agents_md {
+        raw.push((
+            "📋",
+            "~/.AGENTS".into(),
+            info.global_agents_md_chars / 4,
+            DOCS_COLOR,
+            "docs",
+        ));
+    }
+    if info.has_global_claude_md {
+        raw.push((
+            "📝",
+            "~/.CLAUDE".into(),
+            info.global_claude_md_chars / 4,
+            DOCS_COLOR,
+            "docs",
+        ));
+    }
 
-    if info.env_context_chars > 0 { raw.push(("🌍", "env".into(), info.env_context_chars / 4, OTHER_COLOR, "other")); }
-    if info.skills_chars > 0 { raw.push(("🔧", "skills".into(), info.skills_chars / 4, OTHER_COLOR, "other")); }
-    if info.selfdev_chars > 0 { raw.push(("🛠", "selfdev".into(), info.selfdev_chars / 4, OTHER_COLOR, "other")); }
+    if info.env_context_chars > 0 {
+        raw.push((
+            "🌍",
+            "env".into(),
+            info.env_context_chars / 4,
+            OTHER_COLOR,
+            "other",
+        ));
+    }
+    if info.skills_chars > 0 {
+        raw.push((
+            "🔧",
+            "skills".into(),
+            info.skills_chars / 4,
+            OTHER_COLOR,
+            "other",
+        ));
+    }
+    if info.selfdev_chars > 0 {
+        raw.push((
+            "🛠",
+            "selfdev".into(),
+            info.selfdev_chars / 4,
+            OTHER_COLOR,
+            "other",
+        ));
+    }
 
     if info.tool_defs_chars > 0 {
-        let lbl = if info.tool_defs_count > 0 { format!("tools ({})", info.tool_defs_count) } else { "tools".into() };
+        let lbl = if info.tool_defs_count > 0 {
+            format!("tools ({})", info.tool_defs_count)
+        } else {
+            "tools".into()
+        };
         raw.push(("🔨", lbl, info.tool_defs_chars / 4, TOOLS_COLOR, "tools"));
     }
     if info.user_messages_chars > 0 {
-        let lbl = if info.user_messages_count > 0 { format!("user ({})", info.user_messages_count) } else { "user".into() };
+        let lbl = if info.user_messages_count > 0 {
+            format!("user ({})", info.user_messages_count)
+        } else {
+            "user".into()
+        };
         raw.push(("👤", lbl, info.user_messages_chars / 4, MSGS_COLOR, "msgs"));
     }
     if info.assistant_messages_chars > 0 {
-        let lbl = if info.assistant_messages_count > 0 { format!("assistant ({})", info.assistant_messages_count) } else { "assistant".into() };
-        raw.push(("🤖", lbl, info.assistant_messages_chars / 4, MSGS_COLOR, "msgs"));
+        let lbl = if info.assistant_messages_count > 0 {
+            format!("assistant ({})", info.assistant_messages_count)
+        } else {
+            "assistant".into()
+        };
+        raw.push((
+            "🤖",
+            lbl,
+            info.assistant_messages_chars / 4,
+            MSGS_COLOR,
+            "msgs",
+        ));
     }
     if info.tool_calls_chars > 0 {
-        let lbl = if info.tool_calls_count > 0 { format!("calls ({})", info.tool_calls_count) } else { "calls".into() };
-        raw.push(("⚡", lbl, info.tool_calls_chars / 4, TOOL_IO_COLOR, "tool_io"));
+        let lbl = if info.tool_calls_count > 0 {
+            format!("calls ({})", info.tool_calls_count)
+        } else {
+            "calls".into()
+        };
+        raw.push((
+            "⚡",
+            lbl,
+            info.tool_calls_chars / 4,
+            TOOL_IO_COLOR,
+            "tool_io",
+        ));
     }
     if info.tool_results_chars > 0 {
-        let lbl = if info.tool_results_count > 0 { format!("results ({})", info.tool_results_count) } else { "results".into() };
-        raw.push(("📤", lbl, info.tool_results_chars / 4, TOOL_IO_COLOR, "tool_io"));
+        let lbl = if info.tool_results_count > 0 {
+            format!("results ({})", info.tool_results_count)
+        } else {
+            "results".into()
+        };
+        raw.push((
+            "📤",
+            lbl,
+            info.tool_results_chars / 4,
+            TOOL_IO_COLOR,
+            "tool_io",
+        ));
     }
 
     // Smart grouping
     let mut final_segs: Vec<(String, String, usize, Color)> = Vec::new();
-    let mut grouped: std::collections::HashMap<&str, (usize, Vec<String>)> = std::collections::HashMap::new();
+    let mut grouped: std::collections::HashMap<&str, (usize, Vec<String>)> =
+        std::collections::HashMap::new();
 
     for (icon, label, tokens, color, cat) in &raw {
         let pct = (*tokens as f64 / limit as f64) * 100.0;
@@ -247,12 +348,20 @@ fn render_context_bar(
         }
     }
 
-    for (cat, icon, color) in [("docs", "📄", DOCS_COLOR), ("msgs", "💬", MSGS_COLOR),
-                               ("tools", "🔨", TOOLS_COLOR), ("tool_io", "⚡", TOOL_IO_COLOR),
-                               ("other", "📦", OTHER_COLOR)] {
+    for (cat, icon, color) in [
+        ("docs", "📄", DOCS_COLOR),
+        ("msgs", "💬", MSGS_COLOR),
+        ("tools", "🔨", TOOLS_COLOR),
+        ("tool_io", "⚡", TOOL_IO_COLOR),
+        ("other", "📦", OTHER_COLOR),
+    ] {
         if let Some((tokens, items)) = grouped.get(cat) {
             if *tokens > 0 {
-                let lbl = if items.len() == 1 { items[0].clone() } else { format!("{} ({})", cat, items.len()) };
+                let lbl = if items.len() == 1 {
+                    items[0].clone()
+                } else {
+                    format!("{} ({})", cat, items.len())
+                };
                 final_segs.push((icon.to_string(), lbl, *tokens, color));
             }
         }
@@ -306,13 +415,13 @@ fn render_context_bar(
         ));
     }
     if empty_w > 0 {
-        bar.push(Span::styled("░".repeat(empty_w), Style::default().fg(EMPTY_COLOR)));
+        bar.push(Span::styled(
+            "░".repeat(empty_w),
+            Style::default().fg(EMPTY_COLOR),
+        ));
     }
     bar.push(Span::styled("] ", Style::default().fg(DIM_COLOR)));
-    bar.push(Span::styled(
-        tail,
-        Style::default().fg(DIM_COLOR),
-    ));
+    bar.push(Span::styled(tail, Style::default().fg(DIM_COLOR)));
     lines.push(Line::from(bar));
 
     // Detail list with dot leaders
@@ -537,7 +646,11 @@ fn shorten_model_name(model: &str) -> String {
     if model.contains("haiku") {
         return "claudehaiku".to_string();
     }
-    // Handle OpenAI models
+    // Handle OpenAI models (gpt-5.2-codex -> gpt5.2codex)
+    if model.starts_with("gpt-5") {
+        // e.g., "gpt-5.2-codex" -> "gpt5.2codex"
+        return model.replace("gpt-", "gpt").replace("-", "");
+    }
     if model.starts_with("gpt-4") {
         return model.replace("gpt-", "").replace("-", "");
     }
@@ -703,10 +816,7 @@ fn record_profile(prepare: Duration, draw: Duration, total: Duration) {
         let avg_total = state.total.as_secs_f64() * 1000.0 / frames;
         crate::logging::info(&format!(
             "TUI perf: {:.1} fps | prepare {:.2}ms | draw {:.2}ms | total {:.2}ms",
-            frames,
-            avg_prepare,
-            avg_draw,
-            avg_total
+            frames, avg_prepare, avg_draw, avg_total
         ));
         state.frames = 0;
         state.prepare = Duration::from_secs(0);
@@ -944,7 +1054,7 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
         // Combined badge when both modes are active
         mode_parts.push(Span::styled(" ", Style::default()));
         mode_parts.push(Span::styled(
-            " client self-dev ",
+            " CLIENT / SELF-DEV ",
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Rgb(255, 170, 50)), // Orange-amber blend
@@ -952,7 +1062,7 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     } else if is_canary {
         mode_parts.push(Span::styled(" ", Style::default()));
         mode_parts.push(Span::styled(
-            " self-dev ",
+            " SELF-DEV ",
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Rgb(255, 193, 7)), // Amber badge
@@ -960,7 +1070,7 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     } else if is_remote {
         mode_parts.push(Span::styled(" ", Style::default()));
         mode_parts.push(Span::styled(
-            " client ",
+            " CLIENT ",
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Rgb(100, 149, 237)), // Cornflower blue badge
@@ -971,7 +1081,7 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     if let Some(true) = app.server_update_available() {
         mode_parts.push(Span::styled(" ", Style::default()));
         mode_parts.push(Span::styled(
-            " server update ",
+            " SERVER UPDATE ",
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Rgb(255, 180, 80)), // Amber
@@ -980,7 +1090,7 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     if app.client_update_available() {
         mode_parts.push(Span::styled(" ", Style::default()));
         mode_parts.push(Span::styled(
-            " new client available ",
+            " CLIENT UPDATE ",
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Rgb(110, 200, 120)), // Soft green
@@ -992,7 +1102,12 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     // Line 2: Model ID, version, and build age (dimmed) + how to switch models
     let build_info = binary_age().unwrap_or_else(|| "unknown".to_string());
     lines.push(Line::from(Span::styled(
-        format!("{} · {} · built {} · /model to switch", model, semver(), build_info),
+        format!(
+            "{} · {} · built {} · /model to switch",
+            model,
+            semver(),
+            build_info
+        ),
         Style::default().fg(DIM_COLOR),
     )));
 
@@ -1310,12 +1425,7 @@ fn append_plain_text_lines(
     }
 }
 
-fn append_to_current_line(
-    lines: &mut Vec<Line<'static>>,
-    width: usize,
-    text: &str,
-    style: Style,
-) {
+fn append_to_current_line(lines: &mut Vec<Line<'static>>, width: usize, text: &str, style: Style) {
     if text.is_empty() {
         return;
     }
@@ -1375,7 +1485,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
             "user" => {
                 prompt_num += 1;
                 user_line_indices.push(lines.len()); // Track this line index
-                // Calculate distance from input prompt (distance 0)
+                                                     // Calculate distance from input prompt (distance 0)
                 let distance = total_prompts + pending_count + 1 - prompt_num;
                 let num_color = rainbow_prompt_color(distance);
                 // User messages: rainbow number, blue caret, bright text
@@ -1404,12 +1514,8 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 ]));
             }
             "tool" => {
-                let cached = get_cached_message_lines(
-                    msg,
-                    width,
-                    app.show_diffs(),
-                    render_tool_message,
-                );
+                let cached =
+                    get_cached_message_lines(msg, width, app.show_diffs(), render_tool_message);
                 lines.extend(cached);
             }
             "system" => {
@@ -1484,7 +1590,11 @@ where
     lines
 }
 
-fn render_assistant_message(msg: &DisplayMessage, width: u16, _show_diffs: bool) -> Vec<Line<'static>> {
+fn render_assistant_message(
+    msg: &DisplayMessage,
+    width: u16,
+    _show_diffs: bool,
+) -> Vec<Line<'static>> {
     let content_width = width as usize;
     let mut lines = markdown::render_markdown_with_width(&msg.content, Some(content_width));
     if !msg.tool_calls.is_empty() {
@@ -1582,8 +1692,7 @@ fn render_tool_message(msg: &DisplayMessage, width: u16, show_diffs: bool) -> Ve
             } else {
                 // Show first half and last half, with truncation indicator
                 let half = MAX_DIFF_LINES / 2;
-                let mut result: Vec<&ParsedDiffLine> =
-                    change_lines.iter().take(half).collect();
+                let mut result: Vec<&ParsedDiffLine> = change_lines.iter().take(half).collect();
                 result.extend(change_lines.iter().skip(total_changes - half));
                 (result, true)
             };
@@ -1613,8 +1722,10 @@ fn render_tool_message(msg: &DisplayMessage, width: u16, show_diffs: bool) -> Ve
             };
 
             // Build the line with syntax-highlighted content
-            let mut spans: Vec<Span<'static>> =
-                vec![Span::styled(line.prefix.clone(), Style::default().fg(base_color))];
+            let mut spans: Vec<Span<'static>> = vec![Span::styled(
+                line.prefix.clone(),
+                Style::default().fg(base_color),
+            )];
 
             // Apply syntax highlighting to content
             if !line.content.is_empty() {
@@ -1772,7 +1883,8 @@ fn draw_messages(
         Vec::new()
     };
     if visible_lines.len() < visible_height {
-        visible_lines.extend(std::iter::repeat(Line::from("")).take(visible_height - visible_lines.len()));
+        visible_lines
+            .extend(std::iter::repeat(Line::from("")).take(visible_height - visible_lines.len()));
     }
     let paragraph = Paragraph::new(visible_lines);
     frame.render_widget(paragraph, area);
@@ -1857,12 +1969,12 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         let secs = remaining.as_secs();
         let spinner_idx = (elapsed * 4.0) as usize % SPINNER_FRAMES.len();
         let spinner = SPINNER_FRAMES[spinner_idx];
-    let pending_count = pending_prompt_count(app);
-    let queued_info = if pending_count > 0 {
-        format!(" (+{} queued)", pending_count)
-    } else {
-        String::new()
-    };
+        let pending_count = pending_prompt_count(app);
+        let queued_info = if pending_count > 0 {
+            format!(" (+{} queued)", pending_count)
+        } else {
+            String::new()
+        };
         // Format time remaining in a human-readable way
         let time_str = if secs >= 3600 {
             let hours = secs / 3600;
@@ -1925,10 +2037,7 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 };
                 Line::from(vec![
                     Span::styled(spinner, Style::default().fg(AI_COLOR)),
-                    Span::styled(
-                        format!(" {}", status_text),
-                        Style::default().fg(DIM_COLOR),
-                    ),
+                    Span::styled(format!(" {}", status_text), Style::default().fg(DIM_COLOR)),
                 ])
             }
             ProcessingStatus::RunningTool(ref name) => {
@@ -1949,13 +2058,7 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 let filled_pos = ((progress * half_width as f32) as usize) % half_width;
                 // Left dots: animate left-to-right (towards command)
                 let left_bar: String = (0..half_width)
-                    .map(|i| {
-                        if i == filled_pos {
-                            '●'
-                        } else {
-                            '·'
-                        }
-                    })
+                    .map(|i| if i == filled_pos { '●' } else { '·' })
                     .collect();
                 // Right dots: animate right-to-left (towards command)
                 let right_bar: String = (0..half_width)
@@ -2102,10 +2205,7 @@ fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
         }
     }
     for msg in app.queued_messages() {
-        previews.push(format!(
-            "⏳ {}",
-            msg.chars().take(100).collect::<String>()
-        ));
+        previews.push(format!("⏳ {}", msg.chars().take(100).collect::<String>()));
     }
     previews
 }
@@ -2456,8 +2556,9 @@ fn diff_change_counts_for_tool(tool: &ToolCall, content: &str) -> (usize, usize)
     }
 
     match tool.name.as_str() {
-        "edit" | "Edit" => diff_counts_from_input_pair(&tool.input, "old_string", "new_string")
-            .unwrap_or((0, 0)),
+        "edit" | "Edit" => {
+            diff_counts_from_input_pair(&tool.input, "old_string", "new_string").unwrap_or((0, 0))
+        }
         "multiedit" => diff_counts_from_multiedit(&tool.input).unwrap_or((0, 0)),
         _ => (additions, deletions),
     }
@@ -2479,8 +2580,14 @@ fn diff_counts_from_multiedit(input: &serde_json::Value) -> Option<(usize, usize
     let mut deletions = 0usize;
 
     for edit in edits {
-        let old = edit.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-        let new = edit.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+        let old = edit
+            .get("old_string")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let new = edit
+            .get("new_string")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if old.is_empty() && new.is_empty() {
             continue;
         }
@@ -2568,7 +2675,9 @@ fn parse_diff_line(raw_line: &str) -> Option<ParsedDiffLine> {
 }
 
 fn trim_diff_content(content: &str) -> String {
-    content.trim_start_matches(|c| c == ' ' || c == '\t').to_string()
+    content
+        .trim_start_matches(|c| c == ' ' || c == '\t')
+        .to_string()
 }
 
 /// Extract prefix (line number + sign) and content from diff line

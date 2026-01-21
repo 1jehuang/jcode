@@ -203,7 +203,8 @@ pub fn build_system_prompt_with_context_and_memory(
 fn build_selfdev_prompt() -> String {
     let debug_socket_path = crate::server::debug_socket_path();
 
-    format!(r#"# Self-Development Mode
+    format!(
+        r#"# Self-Development Mode
 
 You are running in self-dev mode, working on the jcode codebase itself. You have access to additional tools:
 

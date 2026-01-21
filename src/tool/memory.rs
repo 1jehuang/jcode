@@ -1,7 +1,7 @@
 //! Memory tool for storing and recalling information across sessions
 
-use crate::memory::{MemoryCategory, MemoryEntry, MemoryManager};
 use super::{Tool, ToolContext, ToolOutput};
+use crate::memory::{MemoryCategory, MemoryEntry, MemoryManager};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -13,7 +13,9 @@ pub struct MemoryTool {
 
 impl MemoryTool {
     pub fn new() -> Self {
-        Self { manager: MemoryManager::new() }
+        Self {
+            manager: MemoryManager::new(),
+        }
     }
 }
 
@@ -36,7 +38,9 @@ struct MemoryInput {
 
 #[async_trait]
 impl Tool for MemoryTool {
-    fn name(&self) -> &str { "memory" }
+    fn name(&self) -> &str {
+        "memory"
+    }
 
     fn description(&self) -> &str {
         "Store and recall information across sessions. Use this to remember important facts about the codebase, user preferences, or lessons learned."
@@ -71,33 +75,45 @@ impl Tool for MemoryTool {
 
         match input.action.as_str() {
             "remember" => {
-                let content = input.content.ok_or_else(|| anyhow::anyhow!("content required"))?;
-                let category: MemoryCategory = input.category.as_deref().unwrap_or("fact").parse().unwrap();
-                let mut entry = MemoryEntry::new(category.clone(), &content).with_source(ctx.session_id);
-                if let Some(tags) = input.tags { entry = entry.with_tags(tags); }
+                let content = input
+                    .content
+                    .ok_or_else(|| anyhow::anyhow!("content required"))?;
+                let category: MemoryCategory =
+                    input.category.as_deref().unwrap_or("fact").parse().unwrap();
+                let mut entry =
+                    MemoryEntry::new(category.clone(), &content).with_source(ctx.session_id);
+                if let Some(tags) = input.tags {
+                    entry = entry.with_tags(tags);
+                }
                 let scope = input.scope.as_deref().unwrap_or("project");
                 let id = if scope == "global" {
                     self.manager.remember_global(entry)?
                 } else {
                     self.manager.remember_project(entry)?
                 };
-                Ok(ToolOutput::new(format!("Remembered {} ({}): \"{}\" [id: {}]", category, scope, content, id)))
+                Ok(ToolOutput::new(format!(
+                    "Remembered {} ({}): \"{}\" [id: {}]",
+                    category, scope, content, id
+                )))
             }
-            "recall" => {
-                match self.manager.get_prompt_memories(10) {
-                    Some(memories) => Ok(ToolOutput::new(format!("Memories:\n{}", memories))),
-                    None => Ok(ToolOutput::new("No memories stored yet.")),
-                }
-            }
+            "recall" => match self.manager.get_prompt_memories(10) {
+                Some(memories) => Ok(ToolOutput::new(format!("Memories:\n{}", memories))),
+                None => Ok(ToolOutput::new("No memories stored yet.")),
+            },
             "search" => {
-                let query = input.query.ok_or_else(|| anyhow::anyhow!("query required"))?;
+                let query = input
+                    .query
+                    .ok_or_else(|| anyhow::anyhow!("query required"))?;
                 let results = self.manager.search(&query)?;
                 if results.is_empty() {
                     Ok(ToolOutput::new(format!("No memories matching '{}'", query)))
                 } else {
                     let mut out = format!("Found {} memories:\n\n", results.len());
                     for e in results {
-                        out.push_str(&format!("- [{}] {}\n  id: {}\n\n", e.category, e.content, e.id));
+                        out.push_str(&format!(
+                            "- [{}] {}\n  id: {}\n\n",
+                            e.category, e.content, e.id
+                        ));
                     }
                     Ok(ToolOutput::new(out))
                 }
@@ -109,7 +125,10 @@ impl Tool for MemoryTool {
                 } else {
                     let mut out = format!("All memories ({}):\n\n", all.len());
                     for e in all {
-                        out.push_str(&format!("- [{}] {}\n  id: {}\n\n", e.category, e.content, e.id));
+                        out.push_str(&format!(
+                            "- [{}] {}\n  id: {}\n\n",
+                            e.category, e.content, e.id
+                        ));
                     }
                     Ok(ToolOutput::new(out))
                 }
@@ -128,5 +147,7 @@ impl Tool for MemoryTool {
 }
 
 impl Default for MemoryTool {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

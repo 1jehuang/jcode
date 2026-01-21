@@ -241,7 +241,9 @@ impl SessionPicker {
     }
 
     pub fn selected_session(&self) -> Option<&SessionInfo> {
-        self.list_state.selected().and_then(|i| self.sessions.get(i))
+        self.list_state
+            .selected()
+            .and_then(|i| self.sessions.get(i))
     }
 
     pub fn next(&mut self) {
@@ -332,11 +334,20 @@ impl SessionPicker {
 
                 // Line 1: icon + name + status + last message time
                 let line1 = Line::from(vec![
-                    Span::styled(format!("{} ", session.icon), Style::default().fg(Color::Rgb(110, 210, 255))),
+                    Span::styled(
+                        format!("{} ", session.icon),
+                        Style::default().fg(Color::Rgb(110, 210, 255)),
+                    ),
                     Span::styled(&session.short_name, name_style),
                     Span::styled(canary_marker, Style::default().fg(Color::Rgb(255, 193, 7))),
-                    Span::styled(format!(" {}", status_icon), Style::default().fg(status_color)),
-                    Span::styled(format!("  last: {}", last_msg_ago), Style::default().fg(DIM)),
+                    Span::styled(
+                        format!(" {}", status_icon),
+                        Style::default().fg(status_color),
+                    ),
+                    Span::styled(
+                        format!("  last: {}", last_msg_ago),
+                        Style::default().fg(DIM),
+                    ),
                 ]);
 
                 // Line 2: title (truncated)
@@ -347,7 +358,10 @@ impl SessionPicker {
                 };
                 let line2 = Line::from(vec![
                     Span::styled("   ", Style::default()),
-                    Span::styled(title_display, Style::default().fg(Color::Rgb(180, 180, 180))),
+                    Span::styled(
+                        title_display,
+                        Style::default().fg(Color::Rgb(180, 180, 180)),
+                    ),
                 ]);
 
                 // Line 3: stats - user msgs, assistant msgs, tokens
@@ -358,10 +372,16 @@ impl SessionPicker {
                 };
                 let line3 = Line::from(vec![
                     Span::styled("   ", Style::default()),
-                    Span::styled(format!("{}", session.user_message_count), Style::default().fg(USER_CLR)),
+                    Span::styled(
+                        format!("{}", session.user_message_count),
+                        Style::default().fg(USER_CLR),
+                    ),
                     Span::styled(" user", Style::default().fg(DIMMER)),
                     Span::styled(" · ", Style::default().fg(DIMMER)),
-                    Span::styled(format!("{}", session.assistant_message_count), Style::default().fg(Color::Rgb(129, 199, 132))),
+                    Span::styled(
+                        format!("{}", session.assistant_message_count),
+                        Style::default().fg(Color::Rgb(129, 199, 132)),
+                    ),
                     Span::styled(" assistant", Style::default().fg(DIMMER)),
                     Span::styled(" · ", Style::default().fg(DIMMER)),
                     Span::styled(tokens_display, Style::default().fg(DIMMER)),
@@ -371,7 +391,14 @@ impl SessionPicker {
                 let dir_part = if let Some(ref dir) = session.working_dir {
                     let dir_display = if dir.chars().count() > 30 {
                         let chars: Vec<char> = dir.chars().collect();
-                        let suffix: String = chars.iter().rev().take(27).collect::<Vec<_>>().into_iter().rev().collect();
+                        let suffix: String = chars
+                            .iter()
+                            .rev()
+                            .take(27)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
                         format!("...{}", suffix)
                     } else {
                         dir.clone()
@@ -382,7 +409,10 @@ impl SessionPicker {
                 };
                 let line4 = Line::from(vec![
                     Span::styled("   ", Style::default()),
-                    Span::styled(format!("created: {}", created_ago), Style::default().fg(DIMMER)),
+                    Span::styled(
+                        format!("created: {}", created_ago),
+                        Style::default().fg(DIMMER),
+                    ),
                     Span::styled(dir_part, Style::default().fg(DIMMER)),
                 ]);
 
@@ -409,8 +439,8 @@ impl SessionPicker {
     fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
         // Colors matching the actual TUI
         const USER_COLOR: Color = Color::Rgb(138, 180, 248); // Soft blue
-        const USER_TEXT: Color = Color::Rgb(220, 220, 220);  // Bright white for user text
-        const DIM_COLOR: Color = Color::Rgb(100, 100, 100);  // Dim gray
+        const USER_TEXT: Color = Color::Rgb(220, 220, 220); // Bright white for user text
+        const DIM_COLOR: Color = Color::Rgb(100, 100, 100); // Dim gray
         const HEADER_ICON_COLOR: Color = Color::Rgb(110, 210, 255); // Cyan
         const HEADER_SESSION_COLOR: Color = Color::Rgb(140, 220, 160); // Soft green
 
@@ -473,15 +503,24 @@ impl SessionPicker {
                 ("💥", text, Color::Rgb(220, 100, 100))
             }
             SessionStatus::Reloaded => ("🔄", "Reloaded".to_string(), Color::Rgb(138, 180, 248)),
-            SessionStatus::Compacted => ("📦", "Compacted (context too large)".to_string(), Color::Rgb(255, 193, 7)),
-            SessionStatus::RateLimited => ("⏳", "Rate limited".to_string(), Color::Rgb(186, 139, 255)),
+            SessionStatus::Compacted => (
+                "📦",
+                "Compacted (context too large)".to_string(),
+                Color::Rgb(255, 193, 7),
+            ),
+            SessionStatus::RateLimited => {
+                ("⏳", "Rate limited".to_string(), Color::Rgb(186, 139, 255))
+            }
             SessionStatus::Error { message } => {
                 let text = format!("Error: {}", safe_truncate(message, 40));
                 ("❌", text, Color::Rgb(220, 100, 100))
             }
         };
         lines.push(Line::from(vec![
-            Span::styled(format!("{} ", status_icon), Style::default().fg(status_color)),
+            Span::styled(
+                format!("{} ", status_icon),
+                Style::default().fg(status_color),
+            ),
             Span::styled(status_text, Style::default().fg(status_color)),
         ]));
 
@@ -519,7 +558,10 @@ impl SessionPicker {
                     let first_line = content.lines().next().unwrap_or("");
                     let max_width = (area.width as usize).saturating_sub(8);
                     let display = if first_line.chars().count() > max_width {
-                        format!("{}...", safe_truncate(first_line, max_width.saturating_sub(3)))
+                        format!(
+                            "{}...",
+                            safe_truncate(first_line, max_width.saturating_sub(3))
+                        )
                     } else {
                         first_line.to_string()
                     };
@@ -560,9 +602,10 @@ impl SessionPicker {
                         lines.push(md_line);
                     }
                     if content.lines().count() > 12 {
-                        lines.push(Line::from(vec![
-                            Span::styled("...", Style::default().fg(DIM_COLOR)),
-                        ]));
+                        lines.push(Line::from(vec![Span::styled(
+                            "...",
+                            Style::default().fg(DIM_COLOR),
+                        )]));
                     }
                     lines.push(Line::from("")); // Spacing after assistant message
                 }
@@ -698,7 +741,9 @@ impl SessionPicker {
 pub fn pick_session() -> Result<Option<PickerResult>> {
     // Check if we have a TTY
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        anyhow::bail!("Session picker requires an interactive terminal. Use --resume <session_id> directly.");
+        anyhow::bail!(
+            "Session picker requires an interactive terminal. Use --resume <session_id> directly."
+        );
     }
 
     let sessions = load_sessions()?;

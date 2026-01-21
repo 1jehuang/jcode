@@ -86,7 +86,8 @@ impl BenchState {
                 assistant.push_str("\n\n```rs\nfn bench() {\n    println!(\"hello\");\n}\n```\n");
             }
             if idx % 7 == 0 {
-                assistant.push_str("\n\n| col | val |\n| --- | --- |\n| a   | 1   |\n| b   | 2   |\n");
+                assistant
+                    .push_str("\n\n| col | val |\n| --- | --- |\n| a   | 1   |\n| b   | 2   |\n");
             }
             messages.push(DisplayMessage::assistant(assistant));
         }

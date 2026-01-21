@@ -24,7 +24,14 @@ const BRIDGE_SCRIPT: &str = include_str!("../../scripts/claude_agent_sdk_bridge.
 const AVAILABLE_MODELS: &[&str] = &["claude-opus-4-5-20251101"];
 
 /// Native tools that jcode handles locally (not SDK built-ins)
-const NATIVE_TOOL_NAMES: &[&str] = &["selfdev", "communicate", "memory", "remember", "session_search", "bg"];
+const NATIVE_TOOL_NAMES: &[&str] = &[
+    "selfdev",
+    "communicate",
+    "memory",
+    "remember",
+    "session_search",
+    "bg",
+];
 
 /// Native tool definition for SDK
 #[derive(Serialize)]
@@ -250,10 +257,10 @@ impl ClaudeSdkConfig {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
         if !AVAILABLE_MODELS.contains(&model.as_str()) {
-            eprintln!(
+            crate::logging::info(&format!(
                 "Warning: '{}' is not supported; falling back to '{}'",
                 model, DEFAULT_MODEL
-            );
+            ));
             model = DEFAULT_MODEL.to_string();
         }
 
@@ -289,10 +296,10 @@ impl ClaudeSdkConfig {
         let prompt_cache_ttl = match prompt_cache_ttl.as_deref() {
             Some("5m") | Some("1h") => prompt_cache_ttl,
             Some(other) => {
-                eprintln!(
+                crate::logging::info(&format!(
                     "Warning: Unsupported JCODE_CLAUDE_PROMPT_CACHE_TTL '{}'; expected '5m' or '1h'",
                     other
-                );
+                ));
                 None
             }
             None => None,
@@ -864,8 +871,7 @@ impl Provider for ClaudeProvider {
         let (tx, rx) = mpsc::channel(200);
 
         // Create channel for native tool results
-        let (native_result_tx, mut native_result_rx) =
-            mpsc::channel::<NativeToolResult>(50);
+        let (native_result_tx, mut native_result_rx) = mpsc::channel::<NativeToolResult>(50);
 
         // Store sender for external use
         if let Ok(mut guard) = self.native_result_sender.lock() {
@@ -897,7 +903,7 @@ impl Provider for ClaudeProvider {
             let mut stderr_reader = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = stderr_reader.next_line().await {
                 if !line.trim().is_empty() {
-                    eprintln!("[claude-sdk] {}", line);
+                    crate::logging::debug(&format!("[claude-sdk] {}", line));
                 }
             }
         });

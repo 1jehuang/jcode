@@ -224,8 +224,11 @@ pub fn load_scroll_keys() -> ScrollKeys {
     let (down, down_label) = parse_or_default(&cfg.keybindings.scroll_down, default_down, "Alt+J");
     let (page_up, page_up_label) =
         parse_or_default(&cfg.keybindings.scroll_page_up, default_page_up, "Alt+U");
-    let (page_down, page_down_label) =
-        parse_or_default(&cfg.keybindings.scroll_page_down, default_page_down, "Alt+D");
+    let (page_down, page_down_label) = parse_or_default(
+        &cfg.keybindings.scroll_page_down,
+        default_page_down,
+        "Alt+D",
+    );
 
     ScrollKeys {
         up,

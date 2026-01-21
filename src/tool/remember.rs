@@ -69,7 +69,10 @@ impl Notes {
             .iter()
             .filter(|n| {
                 n.content.to_lowercase().contains(&q)
-                    || n.tag.as_ref().map(|t| t.to_lowercase().contains(&q)).unwrap_or(false)
+                    || n.tag
+                        .as_ref()
+                        .map(|t| t.to_lowercase().contains(&q))
+                        .unwrap_or(false)
             })
             .collect()
     }
@@ -100,7 +103,9 @@ impl RememberTool {
         let mut hasher = DefaultHasher::new();
         cwd.hash(&mut hasher);
         let hash = format!("{:016x}", hasher.finish());
-        Ok(storage::jcode_dir()?.join("notes").join(format!("{}.json", hash)))
+        Ok(storage::jcode_dir()?
+            .join("notes")
+            .join(format!("{}.json", hash)))
     }
 }
 
@@ -180,7 +185,11 @@ impl Tool for RememberTool {
                 } else {
                     let mut output = format!("## {} Notes\n\n", notes.entries.len());
                     for note in &notes.entries {
-                        let tag = note.tag.as_ref().map(|t| format!(" [{}]", t)).unwrap_or_default();
+                        let tag = note
+                            .tag
+                            .as_ref()
+                            .map(|t| format!(" [{}]", t))
+                            .unwrap_or_default();
                         let date = note.created_at.format("%Y-%m-%d");
                         output.push_str(&format!(
                             "- **{}**{}: {}\n  _{}_\n\n",
@@ -202,7 +211,11 @@ impl Tool for RememberTool {
                 } else {
                     let mut output = format!("## {} notes matching '{}'\n\n", results.len(), query);
                     for note in results {
-                        let tag = note.tag.as_ref().map(|t| format!(" [{}]", t)).unwrap_or_default();
+                        let tag = note
+                            .tag
+                            .as_ref()
+                            .map(|t| format!(" [{}]", t))
+                            .unwrap_or_default();
                         output.push_str(&format!("- **{}**{}: {}\n\n", note.id, tag, note.content));
                     }
                     Ok(ToolOutput::new(output))

@@ -398,7 +398,7 @@ impl Server {
                     // Ignore other events
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    eprintln!("Bus monitor lagged by {} events", n);
+                    crate::logging::info(&format!("Bus monitor lagged by {} events", n));
                 }
                 Err(broadcast::error::RecvError::Closed) => {
                     break;
@@ -416,8 +416,8 @@ impl Server {
         let main_listener = UnixListener::bind(&self.socket_path)?;
         let debug_listener = UnixListener::bind(&self.debug_socket_path)?;
 
-        eprintln!("Server listening on {:?}", self.socket_path);
-        eprintln!("Debug socket on {:?}", self.debug_socket_path);
+        crate::logging::info(&format!("Server listening on {:?}", self.socket_path));
+        crate::logging::info(&format!("Debug socket on {:?}", self.debug_socket_path));
 
         // Spawn selfdev signal monitor (checks for reload/rollback signals)
         tokio::spawn(async {
@@ -457,26 +457,26 @@ impl Server {
                     // No clients connected
                     if idle_since.is_none() {
                         idle_since = Some(std::time::Instant::now());
-                        eprintln!(
+                        crate::logging::info(&format!(
                             "No clients connected. Server will exit after {} minutes of idle.",
                             IDLE_TIMEOUT_SECS / 60
-                        );
+                        ));
                     }
 
                     if let Some(since) = idle_since {
                         let idle_duration = since.elapsed().as_secs();
                         if idle_duration >= IDLE_TIMEOUT_SECS {
-                            eprintln!(
+                            crate::logging::info(&format!(
                                 "Server idle for {} minutes with no clients. Shutting down.",
                                 idle_duration / 60
-                            );
+                            ));
                             std::process::exit(EXIT_IDLE_TIMEOUT);
                         }
                     }
                 } else {
                     // Clients connected - reset idle timer
                     if idle_since.is_some() {
-                        eprintln!("Client connected. Idle timer cancelled.");
+                        crate::logging::info("Client connected. Idle timer cancelled.");
                     }
                     idle_since = None;
                 }
@@ -539,12 +539,12 @@ impl Server {
                             *client_count.write().await -= 1;
 
                             if let Err(e) = result {
-                                eprintln!("Client error: {}", e);
+                                crate::logging::error(&format!("Client error: {}", e));
                             }
                         });
                     }
                     Err(e) => {
-                        eprintln!("Main accept error: {}", e);
+                        crate::logging::error(&format!("Main accept error: {}", e));
                     }
                 }
             }
@@ -570,24 +570,23 @@ impl Server {
                         let client_debug_response_tx = debug_client_debug_response_tx.clone();
 
                         tokio::spawn(async move {
-                            if let Err(e) =
-                                handle_debug_client(
-                                    stream,
-                                    sessions,
-                                    is_processing,
-                                    session_id,
-                                    provider,
-                                    client_debug_tx,
-                                    client_debug_response_tx,
-                                )
-                                    .await
+                            if let Err(e) = handle_debug_client(
+                                stream,
+                                sessions,
+                                is_processing,
+                                session_id,
+                                provider,
+                                client_debug_tx,
+                                client_debug_response_tx,
+                            )
+                            .await
                             {
-                                eprintln!("Debug client error: {}", e);
+                                crate::logging::error(&format!("Debug client error: {}", e));
                             }
                         });
                     }
                     Err(e) => {
-                        eprintln!("Debug accept error: {}", e);
+                        crate::logging::error(&format!("Debug accept error: {}", e));
                     }
                 }
             }
@@ -969,7 +968,7 @@ async fn handle_client(
                             success: Some(false),
                             output: None,
                         });
-                        eprintln!("Reload failed: {}", e);
+                        crate::logging::error(&format!("Reload failed: {}", e));
                     }
                 });
 
@@ -1585,7 +1584,8 @@ async fn create_headless_session(
     Ok(serde_json::json!({
         "session_id": client_session_id,
         "working_dir": working_dir,
-    }).to_string())
+    })
+    .to_string())
 }
 
 async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Result<String> {
@@ -1671,8 +1671,9 @@ fn execute_client_debug_command(command: &str) -> String {
     // Visual debug commands
     if trimmed == "frame" || trimmed == "screen-json" {
         visual_debug::enable(); // Ensure enabled
-        return visual_debug::latest_frame_json()
-            .unwrap_or_else(|| "No frames captured yet. Try again after some UI activity.".to_string());
+        return visual_debug::latest_frame_json().unwrap_or_else(|| {
+            "No frames captured yet. Try again after some UI activity.".to_string()
+        });
     }
 
     if trimmed == "frame-normalized" || trimmed == "screen-json-normalized" {
@@ -1703,7 +1704,8 @@ fn execute_client_debug_command(command: &str) -> String {
         let enabled = visual_debug::is_enabled();
         return serde_json::json!({
             "visual_debug_enabled": enabled,
-        }).to_string();
+        })
+        .to_string();
     }
 
     if trimmed == "help" {
@@ -1717,10 +1719,14 @@ fn execute_client_debug_command(command: &str) -> String {
   help                     - Show this help
 
 Note: Visual debug captures TUI rendering state for debugging UI issues.
-Frames are captured automatically when visual debug is enabled."#.to_string();
+Frames are captured automatically when visual debug is enabled."#
+            .to_string();
     }
 
-    format!("Unknown client command: {}. Use client:help for available commands.", trimmed)
+    format!(
+        "Unknown client command: {}. Use client:help for available commands.",
+        trimmed
+    )
 }
 
 /// Parse namespaced debug command (e.g., "server:state", "client:frame", "tester:list")
@@ -1833,9 +1839,13 @@ async fn handle_debug_client(
                                             }
                                         }
                                     }
-                                }).await {
+                                })
+                                .await
+                                {
                                     Ok(result) => result,
-                                    Err(_) => Err(anyhow::anyhow!("Timeout waiting for client response")),
+                                    Err(_) => {
+                                        Err(anyhow::anyhow!("Timeout waiting for client response"))
+                                    }
                                 }
                             } else {
                                 Err(anyhow::anyhow!("Failed to send command to TUI client"))
@@ -1855,11 +1865,14 @@ async fn handle_debug_client(
                         } else if cmd == "sessions" {
                             let sessions_guard = sessions.read().await;
                             let session_list: Vec<_> = sessions_guard.keys().collect();
-                            Ok(serde_json::to_string_pretty(&session_list).unwrap_or_else(|_| "[]".to_string()))
+                            Ok(serde_json::to_string_pretty(&session_list)
+                                .unwrap_or_else(|_| "[]".to_string()))
                         } else if cmd == "help" {
                             Ok(debug_help_text())
                         } else {
-                            match resolve_debug_session(&sessions, &session_id, requested_session).await {
+                            match resolve_debug_session(&sessions, &session_id, requested_session)
+                                .await
+                            {
                                 Ok((_session, agent)) => execute_debug_command(agent, cmd).await,
                                 Err(e) => Err(e),
                             }
@@ -1931,7 +1944,8 @@ TESTER COMMANDS (tester: prefix):
 Examples:
   {"type":"debug_command","id":1,"command":"state"}
   {"type":"debug_command","id":2,"command":"client:frame"}
-  {"type":"debug_command","id":3,"command":"tester:list"}"#.to_string()
+  {"type":"debug_command","id":3,"command":"tester:list"}"#
+        .to_string()
 }
 
 /// Execute tester commands
@@ -1969,7 +1983,10 @@ async fn execute_tester_command(command: &str) -> Result<String> {
         }
     }
 
-    Err(anyhow::anyhow!("Unknown tester command: {}. Use tester:help for usage.", trimmed))
+    Err(anyhow::anyhow!(
+        "Unknown tester command: {}. Use tester:help for usage.",
+        trimmed
+    ))
 }
 
 /// Load testers from manifest file
@@ -2002,13 +2019,20 @@ async fn spawn_tester(opts: serde_json::Value) -> Result<String> {
     let binary_path = if let Some(b) = binary {
         PathBuf::from(b)
     } else if let Ok(canary) = crate::build::canary_binary_path() {
-        if canary.exists() { canary } else { std::env::current_exe()? }
+        if canary.exists() {
+            canary
+        } else {
+            std::env::current_exe()?
+        }
     } else {
         std::env::current_exe()?
     };
 
     if !binary_path.exists() {
-        return Err(anyhow::anyhow!("Binary not found: {}", binary_path.display()));
+        return Err(anyhow::anyhow!(
+            "Binary not found: {}",
+            binary_path.display()
+        ));
     }
 
     // Set up debug file paths for this tester
@@ -2023,8 +2047,14 @@ async fn spawn_tester(opts: serde_json::Value) -> Result<String> {
     let mut cmd = tokio::process::Command::new(&binary_path);
     cmd.current_dir(cwd);
     cmd.env("JCODE_SELFDEV_MODE", "1");
-    cmd.env("JCODE_DEBUG_CMD_PATH", debug_cmd.to_string_lossy().to_string());
-    cmd.env("JCODE_DEBUG_RESPONSE_PATH", debug_resp.to_string_lossy().to_string());
+    cmd.env(
+        "JCODE_DEBUG_CMD_PATH",
+        debug_cmd.to_string_lossy().to_string(),
+    );
+    cmd.env(
+        "JCODE_DEBUG_RESPONSE_PATH",
+        debug_resp.to_string_lossy().to_string(),
+    );
     cmd.arg("--debug-socket");
     cmd.stdout(Stdio::from(stdout_file));
     cmd.stderr(Stdio::from(stderr_file));
@@ -2053,20 +2083,28 @@ async fn spawn_tester(opts: serde_json::Value) -> Result<String> {
         "id": id,
         "pid": pid,
         "message": format!("Spawned tester {} (pid {})", id, pid)
-    }).to_string())
+    })
+    .to_string())
 }
 
 /// Execute a command on a specific tester
-async fn execute_tester_subcommand(tester_id: &str, cmd: &str, arg: Option<&str>) -> Result<String> {
+async fn execute_tester_subcommand(
+    tester_id: &str,
+    cmd: &str,
+    arg: Option<&str>,
+) -> Result<String> {
     let testers = load_testers()?;
-    let tester = testers.iter()
+    let tester = testers
+        .iter()
         .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(tester_id))
         .ok_or_else(|| anyhow::anyhow!("Tester not found: {}", tester_id))?;
 
-    let debug_cmd_path = tester.get("debug_cmd_path")
+    let debug_cmd_path = tester
+        .get("debug_cmd_path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Invalid tester config"))?;
-    let debug_resp_path = tester.get("debug_response_path")
+    let debug_resp_path = tester
+        .get("debug_response_path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Invalid tester config"))?;
 
@@ -2342,21 +2380,21 @@ fn do_server_reload() -> Result<()> {
     let repo_dir =
         get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
-    eprintln!("Server hot-reload starting...");
+    crate::logging::info("Server hot-reload starting...");
 
     // Pull latest changes
-    eprintln!("Pulling latest changes...");
+    crate::logging::info("Pulling latest changes...");
     let pull = ProcessCommand::new("git")
         .args(["pull", "-q"])
         .current_dir(&repo_dir)
         .status()?;
 
     if !pull.success() {
-        eprintln!("Warning: git pull failed, continuing with current code");
+        crate::logging::info("Warning: git pull failed, continuing with current code");
     }
 
     // Build release
-    eprintln!("Building...");
+    crate::logging::info("Building...");
     let build = ProcessCommand::new("cargo")
         .args(["build", "--release"])
         .current_dir(&repo_dir)
@@ -2367,10 +2405,10 @@ fn do_server_reload() -> Result<()> {
     }
 
     if let Err(e) = build::install_local_release(&repo_dir) {
-        eprintln!("Warning: install failed: {}", e);
+        crate::logging::info(&format!("Warning: install failed: {}", e));
     }
 
-    eprintln!("✓ Build complete, restarting server...");
+    crate::logging::info("✓ Build complete, restarting server...");
 
     // Find the new executable
     let exe = repo_dir.join("target/release/jcode");
@@ -2491,7 +2529,7 @@ async fn do_server_reload_with_progress(
     // Small delay to ensure the progress message is sent
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    eprintln!("Exec'ing into binary: {:?}", exe);
+    crate::logging::info(&format!("Exec'ing into binary: {:?}", exe));
 
     // Exec into new binary with serve command
     let err = ProcessCommand::new(&exe).arg("serve").exec();
@@ -2520,7 +2558,7 @@ async fn monitor_selfdev_signals() {
         if rebuild_path.exists() {
             if let Ok(_hash) = std::fs::read_to_string(&rebuild_path) {
                 let _ = std::fs::remove_file(&rebuild_path);
-                eprintln!("Server: reload signal received, exiting with code 42");
+                crate::logging::info("Server: reload signal received, exiting with code 42");
                 std::process::exit(42);
             }
         }
@@ -2530,7 +2568,7 @@ async fn monitor_selfdev_signals() {
         if rollback_path.exists() {
             if let Ok(_hash) = std::fs::read_to_string(&rollback_path) {
                 let _ = std::fs::remove_file(&rollback_path);
-                eprintln!("Server: rollback signal received, exiting with code 43");
+                crate::logging::info("Server: rollback signal received, exiting with code 43");
                 std::process::exit(43);
             }
         }

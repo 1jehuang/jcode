@@ -70,6 +70,8 @@ pub struct DisplayConfig {
     pub queue_mode: bool,
     /// Capture mouse events (default: false). Enables scroll wheel but disables terminal selection.
     pub mouse_capture: bool,
+    /// Enable debug socket for external control (default: false)
+    pub debug_socket: bool,
 }
 
 impl Default for DisplayConfig {
@@ -78,6 +80,7 @@ impl Default for DisplayConfig {
             show_diffs: true,
             queue_mode: false,
             mouse_capture: false,
+            debug_socket: false,
         }
     }
 }
@@ -125,7 +128,7 @@ impl Config {
         match toml::from_str(&content) {
             Ok(config) => Some(config),
             Err(e) => {
-                eprintln!("Warning: Failed to parse config file: {}", e);
+                crate::logging::error(&format!("Failed to parse config file: {}", e));
                 None
             }
         }
@@ -167,6 +170,11 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_MOUSE_CAPTURE") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.mouse_capture = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_DEBUG_SOCKET") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.debug_socket = parsed;
             }
         }
 
@@ -233,6 +241,9 @@ queue_mode = false
 # Capture mouse events (enables scroll wheel; disables terminal text selection)
 mouse_capture = false
 
+# Enable debug socket for external control/testing (default: false)
+debug_socket = false
+
 [provider]
 # Default model (optional, uses provider default if not set)
 # default_model = "claude-sonnet-4-20250514"
@@ -265,6 +276,7 @@ openai_reasoning_effort = "xhigh"
 - Show diffs: {}
 - Queue mode: {}
 - Mouse capture: {}
+- Debug socket: {}
 
 **Provider:**
 - Default model: {}
@@ -282,6 +294,7 @@ openai_reasoning_effort = "xhigh"
             self.display.show_diffs,
             self.display.queue_mode,
             self.display.mouse_capture,
+            self.display.debug_socket,
             self.provider
                 .default_model
                 .as_deref()

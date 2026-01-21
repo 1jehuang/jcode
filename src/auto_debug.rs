@@ -48,10 +48,10 @@ Start by reading the error carefully and determining the category before taking 
     match result {
         Ok(child) => {
             logging::info(&format!("Spawned auto-debug session (pid: {})", child.id()));
-            eprintln!(
-                "\n[auto-debug] Spawned Claude Code to analyze error (pid: {})",
+            logging::info(&format!(
+                "[auto-debug] Spawned Claude Code to analyze error (pid: {})",
                 child.id()
-            );
+            ));
         }
         Err(e) => {
             logging::error(&format!("Failed to spawn auto-debug: {}", e));
