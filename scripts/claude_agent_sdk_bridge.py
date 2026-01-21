@@ -341,7 +341,12 @@ async def _run() -> None:
     request_line = sys.stdin.readline()
     if not request_line:
         raise RuntimeError("No request received on stdin")
-    request = json.loads(request_line)
+
+    try:
+        request = json.loads(request_line)
+    except json.JSONDecodeError as e:
+        _write_output({"type": "error", "message": f"Invalid JSON request: {e}"})
+        return
 
     messages = request.get("messages", [])
     system_prompt = request.get("system", "") or ""
@@ -480,65 +485,84 @@ async def _run() -> None:
     query_start = time.time()
     saw_thinking = False
 
-    async for message in query(prompt=prompt_value, options=claude_options):
-        payload: Optional[Dict[str, Any]] = None
-        if isinstance(message, StreamEvent):
-            event = message.event
-            event_type = event.get("type", "")
+    try:
+        async for message in query(prompt=prompt_value, options=claude_options):
+            payload: Optional[Dict[str, Any]] = None
+            if isinstance(message, StreamEvent):
+                event = message.event
+                event_type = event.get("type", "")
 
-            # Track thinking timing from stream events
-            if event_type == "content_block_start":
-                block = event.get("content_block", {})
-                block_type = block.get("type")
-                if block_type == "thinking":
-                    thinking_start = time.time()
-                    in_thinking_block = True
+                # Track thinking timing from stream events
+                if event_type == "content_block_start":
+                    block = event.get("content_block", {})
+                    block_type = block.get("type")
+                    if block_type == "thinking":
+                        thinking_start = time.time()
+                        in_thinking_block = True
+                        saw_thinking = True
+                    elif block_type == "text" and thinking_start is not None and not thinking_done_emitted:
+                        # Text block started - emit thinking duration
+                        elapsed = time.time() - thinking_start
+                        thinking_payload = {"type": "thinking_done", "duration_secs": elapsed}
+                        if not _write_output(thinking_payload):
+                            return  # Pipe closed, exit cleanly
+                        thinking_done_emitted = True
+                elif event_type == "content_block_stop" and in_thinking_block:
+                    in_thinking_block = False
+
+                payload = _serialize_stream_event(message)
+            elif isinstance(message, AssistantMessage):
+                payload, has_thinking, has_non_thinking = _serialize_assistant_message(message)
+                # Track thinking from AssistantMessage
+                if has_thinking:
                     saw_thinking = True
-                elif block_type == "text" and thinking_start is not None and not thinking_done_emitted:
-                    # Text block started - emit thinking duration
-                    elapsed = time.time() - thinking_start
+                # Emit thinking duration when we see non-thinking content after thinking
+                # Use time from query start since thinking happens during API call
+                if has_non_thinking and saw_thinking and not thinking_done_emitted:
+                    elapsed = time.time() - query_start
+                    thinking_done_emitted = True
+                    # Emit thinking duration event
                     thinking_payload = {"type": "thinking_done", "duration_secs": elapsed}
                     if not _write_output(thinking_payload):
                         return  # Pipe closed, exit cleanly
-                    thinking_done_emitted = True
-            elif event_type == "content_block_stop" and in_thinking_block:
-                in_thinking_block = False
+            elif isinstance(message, ResultMessage):
+                payload = _serialize_result_message(message)
+            elif isinstance(message, SystemMessage):
+                # Check for compaction boundary
+                if hasattr(message, 'subtype') and message.subtype == 'compact_boundary':
+                    compact_meta = getattr(message, 'compact_metadata', {}) or {}
+                    payload = {
+                        "type": "compaction",
+                        "trigger": compact_meta.get("trigger", "unknown"),
+                        "pre_tokens": compact_meta.get("pre_tokens"),
+                    }
+                else:
+                    payload = None
+            elif isinstance(message, UserMessage):
+                # UserMessage contains tool_result blocks when SDK executes tools
+                payload = _serialize_user_message(message)
 
-            payload = _serialize_stream_event(message)
-        elif isinstance(message, AssistantMessage):
-            payload, has_thinking, has_non_thinking = _serialize_assistant_message(message)
-            # Track thinking from AssistantMessage
-            if has_thinking:
-                saw_thinking = True
-            # Emit thinking duration when we see non-thinking content after thinking
-            # Use time from query start since thinking happens during API call
-            if has_non_thinking and saw_thinking and not thinking_done_emitted:
-                elapsed = time.time() - query_start
-                thinking_done_emitted = True
-                # Emit thinking duration event
-                thinking_payload = {"type": "thinking_done", "duration_secs": elapsed}
-                if not _write_output(thinking_payload):
+            if payload is not None:
+                if not _write_output(payload):
                     return  # Pipe closed, exit cleanly
-        elif isinstance(message, ResultMessage):
-            payload = _serialize_result_message(message)
-        elif isinstance(message, SystemMessage):
-            # Check for compaction boundary
-            if hasattr(message, 'subtype') and message.subtype == 'compact_boundary':
-                compact_meta = getattr(message, 'compact_metadata', {}) or {}
-                payload = {
-                    "type": "compaction",
-                    "trigger": compact_meta.get("trigger", "unknown"),
-                    "pre_tokens": compact_meta.get("pre_tokens"),
-                }
-            else:
-                payload = None
-        elif isinstance(message, UserMessage):
-            # UserMessage contains tool_result blocks when SDK executes tools
-            payload = _serialize_user_message(message)
+    except BaseExceptionGroup as exc:
+        # Handle anyio task group exceptions (e.g., transport closed during native tool execution)
+        # Extract the actual exception and convert to a proper error response
+        errors = list(exc.exceptions) if hasattr(exc, 'exceptions') else [exc]
+        actual_exc = errors[0] if errors else exc
+        error_msg = str(actual_exc)
 
-        if payload is not None:
-            if not _write_output(payload):
-                return  # Pipe closed, exit cleanly
+        # Check for recoverable transport errors
+        if "not ready for writing" in error_msg or "ProcessTransport" in error_msg:
+            # Transport closed - likely the CLI exited during native tool execution
+            _write_output({
+                "type": "error",
+                "message": f"CLI transport closed during operation: {error_msg}",
+                "kind": "CLIConnectionError",
+            })
+        else:
+            # Re-raise non-transport errors
+            raise
 
 
 def main() -> None:
