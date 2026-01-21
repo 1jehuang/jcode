@@ -2,7 +2,7 @@ pub mod claude;
 pub mod openai;
 
 use crate::auth;
-use crate::message::{Message, StreamEvent, ToolDefinition};
+use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::Stream;
@@ -72,6 +72,33 @@ pub trait Provider: Send + Sync {
     /// This is used by the Claude provider to send results back to the SDK bridge.
     fn native_result_sender(&self) -> Option<NativeToolResultSender> {
         None
+    }
+
+    /// Simple completion that returns text directly (no streaming).
+    /// Useful for internal tasks like compaction summaries.
+    /// Default implementation uses complete() and collects the response.
+    async fn complete_simple(&self, prompt: &str, system: &str) -> Result<String> {
+        use futures::StreamExt;
+
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: prompt.to_string(),
+                cache_control: None,
+            }],
+        }];
+
+        let response = self.complete(&messages, &[], system, None).await?;
+        let mut result = String::new();
+        tokio::pin!(response);
+
+        while let Some(event) = response.next().await {
+            if let Ok(StreamEvent::TextDelta(text)) = event {
+                result.push_str(&text);
+            }
+        }
+
+        Ok(result)
     }
 }
 

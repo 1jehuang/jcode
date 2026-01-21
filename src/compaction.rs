@@ -204,11 +204,11 @@ impl CompactionManager {
                 self.pending_cutoff = 0;
             }
             Ok(Err(e)) => {
-                eprintln!("[compaction] Failed to generate summary: {}", e);
+                crate::logging::error(&format!("[compaction] Failed to generate summary: {}", e));
                 self.pending_cutoff = 0;
             }
             Err(e) => {
-                eprintln!("[compaction] Task panicked: {}", e);
+                crate::logging::error(&format!("[compaction] Task panicked: {}", e));
                 self.pending_cutoff = 0;
             }
         }
@@ -419,37 +419,14 @@ async fn generate_summary(
         conversation_text.push('\n');
     }
 
-    // Create summarization request
-    let summary_request = vec![Message {
-        role: Role::User,
-        content: vec![ContentBlock::Text {
-            text: format!("{}\n\n---\n\n{}", conversation_text, SUMMARY_PROMPT),
-            cache_control: None,
-        }],
-    }];
-
-    // Call provider (this uses remaining context budget)
-    // For now, we'll use a simple completion
-    // TODO: Add a simple complete method to Provider trait
-    let response = provider
-        .complete(
-            &summary_request,
-            &[],
+    // Generate summary using simple completion
+    let prompt = format!("{}\n\n---\n\n{}", conversation_text, SUMMARY_PROMPT);
+    let summary = provider
+        .complete_simple(
+            &prompt,
             "You are a helpful assistant that summarizes conversations.",
-            None,
         )
         .await?;
-
-    // Collect response
-    use futures::StreamExt;
-    let mut summary = String::new();
-    tokio::pin!(response);
-
-    while let Some(event) = response.next().await {
-        if let Ok(crate::message::StreamEvent::TextDelta(text)) = event {
-            summary.push_str(&text);
-        }
-    }
 
     Ok(CompactionResult {
         summary,
