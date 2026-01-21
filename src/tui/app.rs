@@ -5494,6 +5494,7 @@ impl App {
                         superseded_by: None,
                         strength: 1,
                         source: Some(self.session.id.clone()),
+                        embedding: None, // Will be generated when stored
                     };
 
                     // Store memory

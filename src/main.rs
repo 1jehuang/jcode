@@ -6,6 +6,7 @@ mod build;
 mod bus;
 mod compaction;
 mod config;
+mod embedding;
 mod id;
 mod logging;
 mod mcp;

@@ -27,7 +27,7 @@ futures = "0.3"
 async-trait = "0.1"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -52,6 +52,11 @@ libc = "0.2"             # Unix system calls (flock)
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 urlencoding = "2"        # URL encoding for web search
+
+# Embeddings (local inference) - pure Rust, no external deps
+tract-onnx = "0.21"      # ONNX model loading
+tract-hir = "0.21"       # High-level IR for inference
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }  # BERT tokenizer
 
 # OAuth
 base64 = "0.22"

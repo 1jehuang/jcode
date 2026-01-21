@@ -85,8 +85,10 @@ pub struct MemoryEvent {
 
 #[derive(Debug, Clone)]
 pub enum MemoryEventKind {
-    /// Embedding search found hits
-    EmbeddingHits { count: usize },
+    /// Embedding search started
+    EmbeddingStarted,
+    /// Embedding search completed
+    EmbeddingComplete { latency_ms: u64, hits: usize },
     /// Sidecar started checking
     SidecarStarted,
     /// Sidecar found memory relevant
@@ -1027,12 +1029,19 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
         let max_width = inner.width.saturating_sub(4) as usize;
         for event in activity.recent_events.iter().take(MAX_MEMORY_EVENTS) {
             let (icon, text, color) = match &event.kind {
-                MemoryEventKind::EmbeddingHits { count } => {
-                    ("→", format!("{} hits", count), Color::Rgb(140, 180, 255))
-                }
+                MemoryEventKind::EmbeddingStarted => (
+                    "🔍",
+                    "Embedding...".to_string(),
+                    Color::Rgb(140, 180, 255),
+                ),
+                MemoryEventKind::EmbeddingComplete { latency_ms, hits } => (
+                    "→",
+                    format!("{} hits ({}ms)", hits, latency_ms),
+                    Color::Rgb(140, 180, 255),
+                ),
                 MemoryEventKind::SidecarStarted => (
                     "⚡",
-                    "Sidecar started".to_string(),
+                    "Sidecar verifying".to_string(),
                     Color::Rgb(255, 200, 100),
                 ),
                 MemoryEventKind::SidecarRelevant { memory_preview } => {
