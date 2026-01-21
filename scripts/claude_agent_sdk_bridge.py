@@ -122,11 +122,16 @@ def _create_native_tool_handler(tool_name: str) -> Callable:
             "tool_name": tool_name,
             "input": args,
         }
-        _write_output(payload)
+        if not _write_output(payload):
+            # Pipe broken - jcode is gone
+            with _native_tool_lock:
+                _native_tool_pending.pop(request_id, None)
+            return {"content": [{"type": "text", "text": f"Failed to send {tool_name} request (pipe closed)"}], "is_error": True}
 
         # Wait for result asynchronously (with timeout) - does NOT block event loop
+        # Use 60 second timeout - native tools should be fast, long waits indicate issues
         try:
-            await asyncio.wait_for(event.wait(), timeout=300)  # 5 minute timeout
+            await asyncio.wait_for(event.wait(), timeout=60)
             with _native_tool_lock:
                 result_msg = _native_tool_pending.pop(request_id, {}).get("result", {})
 
@@ -144,7 +149,7 @@ def _create_native_tool_handler(tool_name: str) -> Callable:
             # Timeout - clean up
             with _native_tool_lock:
                 _native_tool_pending.pop(request_id, None)
-            return {"content": [{"type": "text", "text": f"Timeout waiting for {tool_name} execution"}], "is_error": True}
+            return {"content": [{"type": "text", "text": f"Timeout waiting for {tool_name} execution (60s)"}], "is_error": True}
 
     return handler
 
