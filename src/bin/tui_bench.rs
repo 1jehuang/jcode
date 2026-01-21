@@ -290,6 +290,12 @@ fn make_text(len: usize) -> String {
 }
 
 fn main() -> Result<()> {
+    if std::env::var("JCODE_TUI_PROFILE").is_ok() {
+        jcode::logging::init();
+        if let Some(path) = jcode::logging::log_path() {
+            println!("profile_log: {}", path.display());
+        }
+    }
     let args = Args::parse();
     let mut state = BenchState::new(args.turns, args.user_len, args.assistant_len, args.mode);
     let stream_text = make_text(args.assistant_len.max(args.stream_chunk));

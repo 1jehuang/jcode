@@ -6,6 +6,7 @@ pub mod build;
 pub mod bus;
 pub mod compaction;
 pub mod config;
+pub mod embedding;
 pub mod id;
 pub mod logging;
 pub mod mcp;
