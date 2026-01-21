@@ -40,10 +40,10 @@ impl OpenAIProvider {
         let mut model =
             std::env::var("JCODE_OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         if !AVAILABLE_MODELS.contains(&model.as_str()) {
-            eprintln!(
+            crate::logging::info(&format!(
                 "Warning: '{}' is not supported; falling back to '{}'",
                 model, DEFAULT_MODEL
-            );
+            ));
             model = DEFAULT_MODEL.to_string();
         }
 
@@ -58,10 +58,10 @@ impl OpenAIProvider {
         let prompt_cache_retention = match prompt_cache_retention.as_deref() {
             Some("in_memory") | Some("24h") => prompt_cache_retention,
             Some(other) => {
-                eprintln!(
+                crate::logging::info(&format!(
                     "Warning: Unsupported JCODE_OPENAI_PROMPT_CACHE_RETENTION '{}'; expected 'in_memory' or '24h'",
                     other
-                );
+                ));
                 None
             }
             None => None,
@@ -135,10 +135,10 @@ impl OpenAIProvider {
         match value.as_str() {
             "none" | "low" | "medium" | "high" | "xhigh" => Some(value),
             other => {
-                eprintln!(
+                crate::logging::info(&format!(
                     "Warning: Unsupported OpenAI reasoning effort '{}'; expected none|low|medium|high|xhigh. Using 'xhigh'.",
                     other
-                );
+                ));
                 Some("xhigh".to_string())
             }
         }
@@ -342,11 +342,11 @@ impl OpenAIResponsesStream {
                     return self.pending.pop_front();
                 }
                 "response.failed" | "error" => {
-                    let message = extract_error_message(&event.response)
-                        .unwrap_or_else(|| "OpenAI response stream error".to_string());
+                    let (message, retry_after_secs) =
+                        extract_error_with_retry(&event.response);
                     return Some(StreamEvent::Error {
                         message,
-                        retry_after_secs: None, // TODO: Extract from response headers if available
+                        retry_after_secs,
                     });
                 }
                 _ => {}
@@ -517,19 +517,47 @@ impl Provider for OpenAIProvider {
 
         if !response.status().is_success() {
             let status = response.status();
+            // Extract retry-after header before consuming response
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
+
             let body = response.text().await.unwrap_or_default();
             if should_refresh_token(status, &body) {
                 let refreshed_token = self.refresh_access_token().await?;
                 let retry = self.send_request(&request, &refreshed_token).await?;
                 if !retry.status().is_success() {
                     let retry_status = retry.status();
+                    let retry_after = retry
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok());
                     let retry_body = retry.text().await.unwrap_or_default();
-                    anyhow::bail!("OpenAI API error {}: {}", retry_status, retry_body);
+                    let msg = if status == StatusCode::TOO_MANY_REQUESTS {
+                        let wait_info = retry_after
+                            .map(|s| format!(" (retry after {}s)", s))
+                            .unwrap_or_default();
+                        format!("Rate limited{}: {}", wait_info, retry_body)
+                    } else {
+                        format!("OpenAI API error {}: {}", retry_status, retry_body)
+                    };
+                    anyhow::bail!("{}", msg);
                 }
                 let stream = OpenAIResponsesStream::new(retry.bytes_stream());
                 return Ok(Box::pin(stream));
             }
-            anyhow::bail!("OpenAI API error {}: {}", status, body);
+            let msg = if status == StatusCode::TOO_MANY_REQUESTS {
+                let wait_info = retry_after
+                    .map(|s| format!(" (retry after {}s)", s))
+                    .unwrap_or_default();
+                format!("Rate limited{}: {}", wait_info, body)
+            } else {
+                format!("OpenAI API error {}: {}", status, body)
+            };
+            anyhow::bail!("{}", msg);
         }
 
         let stream = OpenAIResponsesStream::new(response.bytes_stream());
@@ -604,13 +632,31 @@ fn should_refresh_token(status: StatusCode, body: &str) -> bool {
     false
 }
 
-fn extract_error_message(response: &Option<Value>) -> Option<String> {
-    let resp = response.as_ref()?;
-    let error = resp.get("error")?;
-    error
+fn extract_error_with_retry(response: &Option<Value>) -> (String, Option<u64>) {
+    let resp = match response.as_ref() {
+        Some(r) => r,
+        None => return ("OpenAI response stream error".to_string(), None),
+    };
+
+    let error = match resp.get("error") {
+        Some(e) => e,
+        None => return ("OpenAI response stream error".to_string(), None),
+    };
+
+    let message = error
         .get("message")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .unwrap_or("OpenAI response stream error")
+        .to_string();
+
+    // Try to extract retry_after from error object or response metadata
+    // OpenAI may include it in error.retry_after or response.retry_after
+    let retry_after = error
+        .get("retry_after")
+        .and_then(|v| v.as_u64())
+        .or_else(|| resp.get("retry_after").and_then(|v| v.as_u64()));
+
+    (message, retry_after)
 }
 
 #[cfg(test)]
