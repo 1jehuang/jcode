@@ -453,12 +453,22 @@ async def _run() -> None:
                 history_parts.append(f"Assistant: {text}")
 
         # Format: provide history as context, then the actual request
+        # IMPORTANT: Use streaming mode so SDK keeps stdin open for native tool communication
         if len(history_parts) > 1:
             # Has actual history - format as context
             history_context = "\n\n".join(history_parts[:-1])  # All but last
-            prompt_value = f"<conversation_history>\n{history_context}\n</conversation_history>\n\n{last_user_msg}"
+            context_prompt = f"<conversation_history>\n{history_context}\n</conversation_history>\n\n{last_user_msg}"
         else:
-            prompt_value = last_user_msg
+            context_prompt = last_user_msg
+
+        # Wrap as streaming message to keep stdin open for native tools
+        async def _wrap_as_stream() -> AsyncIterator[Dict[str, Any]]:
+            yield {
+                "type": "user",
+                "message": {"role": "user", "content": context_prompt},
+            }
+
+        prompt_value = _wrap_as_stream()
     else:
         prompt_value = _stream_messages(messages)
 
