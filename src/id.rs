@@ -6,6 +6,53 @@ pub fn new_id(prefix: &str) -> String {
     format!("{}_{}_{}", prefix, ts, rand)
 }
 
+/// Server modifiers (adjectives/verbs) with their icons
+/// Servers use modifiers while sessions use nouns, so together they form phrases like "blazing fox"
+const SERVER_MODIFIERS: &[(&str, &str)] = &[
+    // Adjectives
+    ("blazing", "🔥"),
+    ("frozen", "❄️"),
+    ("swift", "⚡"),
+    ("dark", "🌑"),
+    ("bright", "✨"),
+    ("crystal", "💎"),
+    ("iron", "⚙️"),
+    ("wild", "🌿"),
+    ("stone", "🪨"),
+    ("silent", "🔇"),
+    ("golden", "⭐"),
+    ("ancient", "🏛️"),
+    ("stormy", "⛈️"),
+    ("misty", "🌫️"),
+    ("icy", "🧊"),
+    ("cosmic", "🌌"),
+    ("lunar", "🌙"),
+    ("solar", "☀️"),
+    ("crimson", "🔴"),
+    ("azure", "🔵"),
+    ("emerald", "💚"),
+    ("amber", "🟠"),
+    ("violet", "🟣"),
+    ("proud", "👑"),
+    ("hollow", "🕳️"),
+    // Verbs (present participle)
+    ("rising", "🌅"),
+    ("falling", "🍂"),
+    ("rushing", "🌊"),
+    ("spinning", "💫"),
+    ("blooming", "🌸"),
+    ("sleeping", "💤"),
+    ("flowing", "💧"),
+    ("drifting", "🍃"),
+    ("howling", "🌬️"),
+    ("dancing", "💃"),
+    ("dreaming", "💭"),
+    ("seeking", "🔍"),
+    ("waiting", "⏳"),
+    ("burning", "🔥"),
+    ("glowing", "✨"),
+];
+
 /// Session names with their icons - only words with specific emojis
 const SESSION_NAMES: &[(&str, &str)] = &[
     // Animals
@@ -105,6 +152,45 @@ pub fn session_icon(name: &str) -> &'static str {
         .unwrap_or("💫")
 }
 
+/// Get an emoji icon for a server modifier
+pub fn server_icon(name: &str) -> &'static str {
+    SERVER_MODIFIERS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, icon)| *icon)
+        .unwrap_or("🔮")
+}
+
+/// Generate a memorable server name
+/// Returns (full_id, short_name) where:
+/// - full_id is the storage identifier like "server_blazing_1234567890"
+/// - short_name is the memorable part like "blazing"
+pub fn new_memorable_server_id() -> (String, String) {
+    let ts = Utc::now().timestamp_millis();
+    let rand: u64 = rand::random();
+
+    // Use the random value to pick a modifier
+    let idx = (rand as usize) % SERVER_MODIFIERS.len();
+    let (word, _) = SERVER_MODIFIERS[idx];
+
+    let short_name = word.to_string();
+    let full_id = format!("server_{}_{}", word, ts);
+
+    (full_id, short_name)
+}
+
+/// Try to extract the memorable name from a server ID
+/// e.g., "server_blazing_1234567890" -> Some("blazing")
+pub fn extract_server_name(server_id: &str) -> Option<&str> {
+    if server_id.starts_with("server_") {
+        let rest = &server_id[7..]; // Skip "server_"
+        if let Some(pos) = rest.rfind('_') {
+            return Some(&rest[..pos]);
+        }
+    }
+    None
+}
+
 /// Generate a memorable session name
 /// Returns (full_id, short_name) where:
 /// - full_id is the storage identifier like "session_fox_1234567890"
@@ -194,6 +280,51 @@ mod tests {
             let icon = session_icon(name);
             assert_eq!(icon, *expected_icon, "Icon mismatch for '{}'", name);
             assert_ne!(icon, "💫", "Name '{}' should have a specific icon", name);
+        }
+    }
+
+    #[test]
+    fn test_new_memorable_server_id() {
+        let (full_id, short_name) = new_memorable_server_id();
+
+        // Full ID should start with "server_"
+        assert!(full_id.starts_with("server_"));
+
+        // Short name should be non-empty
+        assert!(!short_name.is_empty());
+
+        // Full ID should contain the short name
+        assert!(full_id.contains(&short_name));
+
+        // Short name should have a specific icon (not default)
+        let icon = server_icon(&short_name);
+        assert_ne!(
+            icon, "🔮",
+            "Modifier '{}' should have a specific icon",
+            short_name
+        );
+    }
+
+    #[test]
+    fn test_extract_server_name() {
+        assert_eq!(
+            extract_server_name("server_blazing_1234567890"),
+            Some("blazing")
+        );
+        assert_eq!(
+            extract_server_name("server_rising_1234567890"),
+            Some("rising")
+        );
+        assert_eq!(extract_server_name("invalid"), None);
+        assert_eq!(extract_server_name("server_"), None);
+    }
+
+    #[test]
+    fn test_all_modifiers_have_icons() {
+        for (name, expected_icon) in SERVER_MODIFIERS {
+            let icon = server_icon(name);
+            assert_eq!(icon, *expected_icon, "Icon mismatch for '{}'", name);
+            assert_ne!(icon, "🔮", "Modifier '{}' should have a specific icon", name);
         }
     }
 }

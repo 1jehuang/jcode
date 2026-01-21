@@ -1,10 +1,11 @@
 //! Interactive session picker with preview
 //!
 //! Shows a list of sessions on the left, with a preview of the selected session's
-//! conversation on the right.
+//! conversation on the right. Sessions are grouped by server for multi-server support.
 
-use crate::id::session_icon;
+use crate::id::{server_icon, session_icon};
 use crate::message::{ContentBlock, Role};
+use crate::registry::{self, ServerInfo};
 use crate::session::{Session, SessionStatus};
 use crate::storage;
 use crate::tui::markdown;
@@ -17,6 +18,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Session info for display
@@ -36,6 +38,21 @@ pub struct SessionInfo {
     pub status: SessionStatus,
     pub estimated_tokens: usize,
     pub messages_preview: Vec<PreviewMessage>,
+    /// Server name this session belongs to (if running)
+    pub server_name: Option<String>,
+    /// Server icon
+    pub server_icon: Option<String>,
+}
+
+/// A group of sessions under a server
+#[derive(Clone)]
+pub struct ServerGroup {
+    pub name: String,
+    pub icon: String,
+    pub version: String,
+    pub git_hash: String,
+    pub is_running: bool,
+    pub sessions: Vec<SessionInfo>,
 }
 
 #[derive(Clone)]
@@ -153,6 +170,8 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
                         status,
                         estimated_tokens,
                         messages_preview,
+                        server_name: None,
+                        server_icon: None,
                     });
                 }
             }
@@ -163,6 +182,77 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
     sessions.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
 
     Ok(sessions)
+}
+
+/// Load running servers from the registry
+pub fn load_servers() -> Vec<ServerInfo> {
+    // Use blocking runtime for sync context
+    tokio::runtime::Handle::try_current()
+        .map(|handle| {
+            handle.block_on(async {
+                registry::list_servers().await.unwrap_or_default()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Load sessions grouped by server
+/// Returns (running_servers, orphan_sessions)
+pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
+    let all_sessions = load_sessions()?;
+    let servers = load_servers();
+
+    // Build a map of session names to their server
+    let mut session_to_server: HashMap<String, &ServerInfo> = HashMap::new();
+    for server in &servers {
+        for session_name in &server.sessions {
+            session_to_server.insert(session_name.clone(), server);
+        }
+    }
+
+    // Group sessions by server
+    let mut server_sessions: HashMap<String, Vec<SessionInfo>> = HashMap::new();
+    let mut orphan_sessions: Vec<SessionInfo> = Vec::new();
+
+    for mut session in all_sessions {
+        if let Some(server) = session_to_server.get(&session.short_name) {
+            session.server_name = Some(server.name.clone());
+            session.server_icon = Some(server.icon.clone());
+            server_sessions
+                .entry(server.name.clone())
+                .or_default()
+                .push(session);
+        } else {
+            orphan_sessions.push(session);
+        }
+    }
+
+    // Build server groups
+    let mut groups: Vec<ServerGroup> = servers
+        .iter()
+        .map(|server| {
+            let sessions = server_sessions
+                .remove(&server.name)
+                .unwrap_or_default();
+            ServerGroup {
+                name: server.name.clone(),
+                icon: server.icon.clone(),
+                version: server.version.clone(),
+                git_hash: server.git_hash.clone(),
+                is_running: true,
+                sessions,
+            }
+        })
+        .collect();
+
+    // Sort groups by newest session activity
+    groups.sort_by(|a, b| {
+        let a_latest = a.sessions.iter().map(|s| s.last_message_time).max();
+        let b_latest = b.sessions.iter().map(|s| s.last_message_time).max();
+        b_latest.cmp(&a_latest)
+    });
+
+    Ok((groups, orphan_sessions))
 }
 
 /// Safely truncate a string at a character boundary
