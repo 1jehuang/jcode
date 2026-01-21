@@ -420,8 +420,29 @@ async def _run() -> None:
             if isinstance(content, str):
                 text = content
             elif content:
-                texts = [b.get("text", "") for b in content if b.get("type") == "text"]
-                text = "\n\n".join(texts)
+                # Extract all content types, not just text
+                parts = []
+                for block in content:
+                    block_type = block.get("type", "")
+                    if block_type == "text":
+                        parts.append(block.get("text", ""))
+                    elif block_type == "tool_use":
+                        tool_name = block.get("name", "unknown")
+                        tool_input = block.get("input", {})
+                        # Format tool call concisely
+                        input_str = json.dumps(tool_input) if tool_input else ""
+                        if len(input_str) > 200:
+                            input_str = input_str[:200] + "..."
+                        parts.append(f"[Called tool: {tool_name}({input_str})]")
+                    elif block_type == "tool_result":
+                        tool_content = block.get("content", "")
+                        is_error = block.get("is_error", False)
+                        # Truncate long tool results
+                        if isinstance(tool_content, str) and len(tool_content) > 500:
+                            tool_content = tool_content[:500] + "..."
+                        status = "Error" if is_error else "Result"
+                        parts.append(f"[Tool {status}: {tool_content}]")
+                text = "\n".join(parts) if parts else ""
             else:
                 text = ""
 
