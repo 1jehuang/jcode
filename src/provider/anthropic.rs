@@ -3,7 +3,7 @@
 //! Uses the Anthropic Messages API directly without the Python SDK.
 //! This provides better control and eliminates the Python dependency.
 
-use super::{EventStream, Provider, NativeToolResultSender};
+use super::{EventStream, NativeToolResultSender, Provider};
 use crate::auth;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use anyhow::{Context, Result};
@@ -12,9 +12,8 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
-use tokio::sync::RwLock;
 use tokio_stream::wrappers::ReceiverStream;
 
 /// Anthropic Messages API endpoint
@@ -51,10 +50,17 @@ impl AnthropicProvider {
     }
 
     /// Get the access token from credentials
-    async fn get_access_token(&self) -> Result<String> {
+    /// Supports both OAuth tokens and direct API keys
+    async fn get_access_token(&self) -> Result<(String, bool)> {
+        // First check for direct API key in environment
+        if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+            return Ok((key, false)); // false = not OAuth
+        }
+
+        // Fall back to OAuth credentials
         let creds = auth::claude::load_credentials()
             .context("Failed to load Claude credentials")?;
-        Ok(creds.access_token)
+        Ok((creds.access_token, true)) // true = OAuth
     }
 
     /// Convert our Message type to Anthropic API format
@@ -133,8 +139,8 @@ impl Provider for AnthropicProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        let token = self.get_access_token().await?;
-        let model = self.model.read().await.clone();
+        let (token, is_oauth) = self.get_access_token().await?;
+        let model = self.model.read().unwrap().clone();
 
         // Format request
         let api_messages = self.format_messages(messages);
@@ -165,7 +171,7 @@ impl Provider for AnthropicProvider {
 
         // Spawn task to handle streaming
         tokio::spawn(async move {
-            if let Err(e) = stream_response(client, token, request, tx.clone()).await {
+            if let Err(e) = stream_response(client, token, is_oauth, request, tx.clone()).await {
                 let _ = tx.send(Err(e)).await;
             }
         });
@@ -174,14 +180,14 @@ impl Provider for AnthropicProvider {
     }
 
     fn model(&self) -> String {
-        self.model.blocking_read().clone()
+        self.model.read().unwrap().clone()
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
         if !AVAILABLE_MODELS.contains(&model) {
             anyhow::bail!("Model {} not supported by Anthropic provider", model);
         }
-        *self.model.blocking_write() = model.to_string();
+        *self.model.write().unwrap() = model.to_string();
         Ok(())
     }
 
@@ -196,7 +202,7 @@ impl Provider for AnthropicProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
             client: self.client.clone(),
-            model: Arc::new(RwLock::new(self.model.blocking_read().clone())),
+            model: Arc::new(RwLock::new(self.model.read().unwrap().clone())),
         })
     }
 
@@ -209,15 +215,28 @@ impl Provider for AnthropicProvider {
 async fn stream_response(
     client: Client,
     token: String,
+    is_oauth: bool,
     request: ApiRequest,
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<()> {
-    let response = client
+    // Build request with appropriate auth headers
+    let mut req = client
         .post(API_URL)
-        .header("x-api-key", &token)
         .header("anthropic-version", API_VERSION)
         .header("content-type", "application/json")
-        .header("accept", "text/event-stream")
+        .header("accept", "text/event-stream");
+
+    if is_oauth {
+        // OAuth tokens use Bearer auth and require beta header
+        req = req
+            .header("Authorization", format!("Bearer {}", token))
+            .header("anthropic-beta", "oauth-2025-04-20");
+    } else {
+        // Direct API keys use x-api-key
+        req = req.header("x-api-key", &token);
+    }
+
+    let response = req
         .json(&request)
         .send()
         .await
