@@ -3,7 +3,7 @@
 //! Shows a list of sessions on the left, with a preview of the selected session's
 //! conversation on the right. Sessions are grouped by server for multi-server support.
 
-use crate::id::{server_icon, session_icon};
+use crate::id::session_icon;
 use crate::message::{ContentBlock, Role};
 use crate::registry::{self, ServerInfo};
 use crate::session::{Session, SessionStatus};
@@ -308,72 +308,169 @@ fn format_time_ago(time: chrono::DateTime<chrono::Utc>) -> String {
     format!("{}mo ago", days / 30)
 }
 
+/// An item in the picker list - either a server header or a session
+#[derive(Clone)]
+pub enum PickerItem {
+    ServerHeader {
+        name: String,
+        icon: String,
+        version: String,
+        session_count: usize,
+    },
+    Session(SessionInfo),
+    OrphanHeader {
+        session_count: usize,
+    },
+}
+
 /// Interactive session picker
 pub struct SessionPicker {
+    /// Flat list of items (headers and sessions)
+    items: Vec<PickerItem>,
+    /// Just the sessions for selection
     sessions: Vec<SessionInfo>,
+    /// Map from items index to sessions index (only for Session items)
+    item_to_session: Vec<Option<usize>>,
     list_state: ListState,
     scroll_offset: u16,
     auto_scroll_preview: bool,
+    /// Number of running servers
+    server_count: usize,
 }
 
 impl SessionPicker {
     pub fn new(sessions: Vec<SessionInfo>) -> Self {
+        // Simple mode: no server grouping
+        let items: Vec<PickerItem> = sessions.iter().cloned().map(PickerItem::Session).collect();
+        let item_to_session: Vec<Option<usize>> = (0..sessions.len()).map(Some).collect();
+
         let mut list_state = ListState::default();
         if !sessions.is_empty() {
             list_state.select(Some(0));
         }
         Self {
+            items,
             sessions,
+            item_to_session,
             list_state,
             scroll_offset: 0,
             auto_scroll_preview: true,
+            server_count: 0,
+        }
+    }
+
+    /// Create a picker with server grouping
+    pub fn new_grouped(server_groups: Vec<ServerGroup>, orphan_sessions: Vec<SessionInfo>) -> Self {
+        let mut items: Vec<PickerItem> = Vec::new();
+        let mut all_sessions: Vec<SessionInfo> = Vec::new();
+        let mut item_to_session: Vec<Option<usize>> = Vec::new();
+
+        let server_count = server_groups.len();
+
+        // Add server groups
+        for group in server_groups {
+            // Server header
+            items.push(PickerItem::ServerHeader {
+                name: group.name.clone(),
+                icon: group.icon.clone(),
+                version: group.version.clone(),
+                session_count: group.sessions.len(),
+            });
+            item_to_session.push(None); // Header is not selectable
+
+            // Sessions under this server
+            for session in group.sessions {
+                let session_idx = all_sessions.len();
+                all_sessions.push(session.clone());
+                items.push(PickerItem::Session(session));
+                item_to_session.push(Some(session_idx));
+            }
+        }
+
+        // Add orphan sessions if any
+        if !orphan_sessions.is_empty() {
+            items.push(PickerItem::OrphanHeader {
+                session_count: orphan_sessions.len(),
+            });
+            item_to_session.push(None);
+
+            for session in orphan_sessions {
+                let session_idx = all_sessions.len();
+                all_sessions.push(session.clone());
+                items.push(PickerItem::Session(session));
+                item_to_session.push(Some(session_idx));
+            }
+        }
+
+        // Find first selectable item
+        let first_session_idx = item_to_session.iter().position(|x| x.is_some());
+        let mut list_state = ListState::default();
+        if let Some(idx) = first_session_idx {
+            list_state.select(Some(idx));
+        }
+
+        Self {
+            items,
+            sessions: all_sessions,
+            item_to_session,
+            list_state,
+            scroll_offset: 0,
+            auto_scroll_preview: true,
+            server_count,
         }
     }
 
     pub fn selected_session(&self) -> Option<&SessionInfo> {
-        self.list_state
-            .selected()
-            .and_then(|i| self.sessions.get(i))
+        self.list_state.selected().and_then(|i| {
+            self.item_to_session
+                .get(i)
+                .and_then(|opt| opt.as_ref())
+                .and_then(|session_idx| self.sessions.get(*session_idx))
+        })
+    }
+
+    /// Find next selectable item (skip headers)
+    fn next_selectable(&self, from: usize) -> Option<usize> {
+        for i in (from + 1)..self.items.len() {
+            if self.item_to_session.get(i).map(|x| x.is_some()).unwrap_or(false) {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Find previous selectable item (skip headers)
+    fn prev_selectable(&self, from: usize) -> Option<usize> {
+        for i in (0..from).rev() {
+            if self.item_to_session.get(i).map(|x| x.is_some()).unwrap_or(false) {
+                return Some(i);
+            }
+        }
+        None
     }
 
     pub fn next(&mut self) {
         if self.sessions.is_empty() {
             return;
         }
-        let i = match self.list_state.selected() {
-            Some(i) => {
-                // Don't wrap - stay at bottom
-                if i >= self.sessions.len() - 1 {
-                    i
-                } else {
-                    i + 1
-                }
-            }
-            None => 0,
-        };
-        self.list_state.select(Some(i));
-        self.scroll_offset = 0; // Reset preview scroll on selection change
-        self.auto_scroll_preview = true;
+        let current = self.list_state.selected().unwrap_or(0);
+        if let Some(next) = self.next_selectable(current) {
+            self.list_state.select(Some(next));
+            self.scroll_offset = 0;
+            self.auto_scroll_preview = true;
+        }
     }
 
     pub fn previous(&mut self) {
         if self.sessions.is_empty() {
             return;
         }
-        let i = match self.list_state.selected() {
-            Some(i) => {
-                // Don't wrap - stay at top
-                if i == 0 {
-                    0
-                } else {
-                    i - 1
-                }
-            }
-            None => 0,
-        };
-        self.list_state.select(Some(i));
-        self.scroll_offset = 0;
-        self.auto_scroll_preview = true;
+        let current = self.list_state.selected().unwrap_or(0);
+        if let Some(prev) = self.prev_selectable(current) {
+            self.list_state.select(Some(prev));
+            self.scroll_offset = 0;
+            self.auto_scroll_preview = true;
+        }
     }
 
     pub fn scroll_preview_down(&mut self) {
@@ -384,137 +481,199 @@ impl SessionPicker {
         self.scroll_offset = self.scroll_offset.saturating_sub(3);
     }
 
-    fn render_session_list(&mut self, frame: &mut Frame, area: Rect) {
-        // Colors
+    fn render_session_item(&self, session: &SessionInfo, is_selected: bool) -> ListItem<'static> {
         const DIM: Color = Color::Rgb(100, 100, 100);
         const DIMMER: Color = Color::Rgb(70, 70, 70);
         const USER_CLR: Color = Color::Rgb(138, 180, 248);
         const ACCENT: Color = Color::Rgb(186, 139, 255);
 
+        let last_msg_ago = format_time_ago(session.last_message_time);
+        let created_ago = format_time_ago(session.created_at);
+
+        // Name style
+        let name_style = if is_selected {
+            Style::default()
+                .fg(Color::Rgb(140, 220, 160))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let canary_marker = if session.is_canary { " 🔬" } else { "" };
+
+        // Status indicator with color
+        let (status_icon, status_color) = match &session.status {
+            SessionStatus::Active => ("▶", Color::Rgb(100, 200, 100)),
+            SessionStatus::Closed => ("✓", DIM),
+            SessionStatus::Crashed { .. } => ("💥", Color::Rgb(220, 100, 100)),
+            SessionStatus::Reloaded => ("🔄", USER_CLR),
+            SessionStatus::Compacted => ("📦", Color::Rgb(255, 193, 7)),
+            SessionStatus::RateLimited => ("⏳", ACCENT),
+            SessionStatus::Error { .. } => ("❌", Color::Rgb(220, 100, 100)),
+        };
+
+        // Line 1: icon + name + status + last message time
+        let line1 = Line::from(vec![
+            Span::styled("  ", Style::default()), // Indent for sessions under server
+            Span::styled(
+                format!("{} ", session.icon),
+                Style::default().fg(Color::Rgb(110, 210, 255)),
+            ),
+            Span::styled(session.short_name.clone(), name_style),
+            Span::styled(canary_marker, Style::default().fg(Color::Rgb(255, 193, 7))),
+            Span::styled(
+                format!(" {}", status_icon),
+                Style::default().fg(status_color),
+            ),
+            Span::styled(
+                format!("  last: {}", last_msg_ago),
+                Style::default().fg(DIM),
+            ),
+        ]);
+
+        // Line 2: title (truncated)
+        let title_display = if session.title.chars().count() > 42 {
+            format!("{}...", safe_truncate(&session.title, 39))
+        } else {
+            session.title.clone()
+        };
+        let line2 = Line::from(vec![
+            Span::styled("     ", Style::default()),
+            Span::styled(
+                title_display,
+                Style::default().fg(Color::Rgb(180, 180, 180)),
+            ),
+        ]);
+
+        // Line 3: stats - user msgs, assistant msgs, tokens
+        let tokens_display = if session.estimated_tokens >= 1000 {
+            format!("~{}k tok", session.estimated_tokens / 1000)
+        } else {
+            format!("~{} tok", session.estimated_tokens)
+        };
+        let line3 = Line::from(vec![
+            Span::styled("     ", Style::default()),
+            Span::styled(
+                format!("{}", session.user_message_count),
+                Style::default().fg(USER_CLR),
+            ),
+            Span::styled(" user", Style::default().fg(DIMMER)),
+            Span::styled(" · ", Style::default().fg(DIMMER)),
+            Span::styled(
+                format!("{}", session.assistant_message_count),
+                Style::default().fg(Color::Rgb(129, 199, 132)),
+            ),
+            Span::styled(" assistant", Style::default().fg(DIMMER)),
+            Span::styled(" · ", Style::default().fg(DIMMER)),
+            Span::styled(tokens_display, Style::default().fg(DIMMER)),
+        ]);
+
+        // Line 4: created time + working dir
+        let dir_part = if let Some(ref dir) = session.working_dir {
+            let dir_display = if dir.chars().count() > 28 {
+                let chars: Vec<char> = dir.chars().collect();
+                let suffix: String = chars
+                    .iter()
+                    .rev()
+                    .take(25)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                format!("...{}", suffix)
+            } else {
+                dir.clone()
+            };
+            format!("  📁 {}", dir_display)
+        } else {
+            String::new()
+        };
+        let line4 = Line::from(vec![
+            Span::styled("     ", Style::default()),
+            Span::styled(
+                format!("created: {}", created_ago),
+                Style::default().fg(DIMMER),
+            ),
+            Span::styled(dir_part, Style::default().fg(DIMMER)),
+        ]);
+
+        ListItem::new(vec![line1, line2, line3, line4, Line::from("")])
+    }
+
+    fn render_session_list(&mut self, frame: &mut Frame, area: Rect) {
+        const SERVER_COLOR: Color = Color::Rgb(255, 200, 100); // Amber for server headers
+        const DIM: Color = Color::Rgb(100, 100, 100);
+
         let items: Vec<ListItem> = self
-            .sessions
+            .items
             .iter()
             .enumerate()
-            .map(|(idx, session)| {
+            .map(|(idx, item)| {
                 let is_selected = self.list_state.selected() == Some(idx);
-                let last_msg_ago = format_time_ago(session.last_message_time);
-                let created_ago = format_time_ago(session.created_at);
 
-                // Name style
-                let name_style = if is_selected {
-                    Style::default()
-                        .fg(Color::Rgb(140, 220, 160))
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::White)
-                };
-
-                let canary_marker = if session.is_canary { " 🔬" } else { "" };
-
-                // Status indicator with color
-                let (status_icon, status_color) = match &session.status {
-                    SessionStatus::Active => ("▶", Color::Rgb(100, 200, 100)),
-                    SessionStatus::Closed => ("✓", DIM),
-                    SessionStatus::Crashed { .. } => ("💥", Color::Rgb(220, 100, 100)),
-                    SessionStatus::Reloaded => ("🔄", USER_CLR),
-                    SessionStatus::Compacted => ("📦", Color::Rgb(255, 193, 7)),
-                    SessionStatus::RateLimited => ("⏳", ACCENT),
-                    SessionStatus::Error { .. } => ("❌", Color::Rgb(220, 100, 100)),
-                };
-
-                // Line 1: icon + name + status + last message time
-                let line1 = Line::from(vec![
-                    Span::styled(
-                        format!("{} ", session.icon),
-                        Style::default().fg(Color::Rgb(110, 210, 255)),
-                    ),
-                    Span::styled(&session.short_name, name_style),
-                    Span::styled(canary_marker, Style::default().fg(Color::Rgb(255, 193, 7))),
-                    Span::styled(
-                        format!(" {}", status_icon),
-                        Style::default().fg(status_color),
-                    ),
-                    Span::styled(
-                        format!("  last: {}", last_msg_ago),
-                        Style::default().fg(DIM),
-                    ),
-                ]);
-
-                // Line 2: title (truncated)
-                let title_display = if session.title.chars().count() > 45 {
-                    format!("{}...", safe_truncate(&session.title, 42))
-                } else {
-                    session.title.clone()
-                };
-                let line2 = Line::from(vec![
-                    Span::styled("   ", Style::default()),
-                    Span::styled(
-                        title_display,
-                        Style::default().fg(Color::Rgb(180, 180, 180)),
-                    ),
-                ]);
-
-                // Line 3: stats - user msgs, assistant msgs, tokens
-                let tokens_display = if session.estimated_tokens >= 1000 {
-                    format!("~{}k tok", session.estimated_tokens / 1000)
-                } else {
-                    format!("~{} tok", session.estimated_tokens)
-                };
-                let line3 = Line::from(vec![
-                    Span::styled("   ", Style::default()),
-                    Span::styled(
-                        format!("{}", session.user_message_count),
-                        Style::default().fg(USER_CLR),
-                    ),
-                    Span::styled(" user", Style::default().fg(DIMMER)),
-                    Span::styled(" · ", Style::default().fg(DIMMER)),
-                    Span::styled(
-                        format!("{}", session.assistant_message_count),
-                        Style::default().fg(Color::Rgb(129, 199, 132)),
-                    ),
-                    Span::styled(" assistant", Style::default().fg(DIMMER)),
-                    Span::styled(" · ", Style::default().fg(DIMMER)),
-                    Span::styled(tokens_display, Style::default().fg(DIMMER)),
-                ]);
-
-                // Line 4: created time + working dir
-                let dir_part = if let Some(ref dir) = session.working_dir {
-                    let dir_display = if dir.chars().count() > 30 {
-                        let chars: Vec<char> = dir.chars().collect();
-                        let suffix: String = chars
-                            .iter()
-                            .rev()
-                            .take(27)
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                            .rev()
-                            .collect();
-                        format!("...{}", suffix)
-                    } else {
-                        dir.clone()
-                    };
-                    format!("  📁 {}", dir_display)
-                } else {
-                    String::new()
-                };
-                let line4 = Line::from(vec![
-                    Span::styled("   ", Style::default()),
-                    Span::styled(
-                        format!("created: {}", created_ago),
-                        Style::default().fg(DIMMER),
-                    ),
-                    Span::styled(dir_part, Style::default().fg(DIMMER)),
-                ]);
-
-                ListItem::new(vec![line1, line2, line3, line4, Line::from("")])
+                match item {
+                    PickerItem::ServerHeader { name, icon, version, session_count } => {
+                        // Server header - not selectable, acts as a group label
+                        let line1 = Line::from(vec![
+                            Span::styled(
+                                format!("{} ", icon),
+                                Style::default().fg(SERVER_COLOR),
+                            ),
+                            Span::styled(
+                                name.clone(),
+                                Style::default().fg(SERVER_COLOR).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("  {} · {} sessions", version, session_count),
+                                Style::default().fg(DIM),
+                            ),
+                        ]);
+                        ListItem::new(vec![line1])
+                    }
+                    PickerItem::OrphanHeader { session_count } => {
+                        // Orphan sessions header
+                        let line1 = Line::from(vec![
+                            Span::styled(
+                                "📦 ",
+                                Style::default().fg(DIM),
+                            ),
+                            Span::styled(
+                                "Other sessions",
+                                Style::default().fg(DIM).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("  {} sessions", session_count),
+                                Style::default().fg(DIM),
+                            ),
+                        ]);
+                        ListItem::new(vec![line1])
+                    }
+                    PickerItem::Session(session) => {
+                        self.render_session_item(session, is_selected)
+                    }
+                }
             })
             .collect();
+
+        // Title with server count
+        let title = if self.server_count > 0 {
+            format!(
+                " {} servers · {} sessions (↑↓ nav, Enter select, Esc quit) ",
+                self.server_count,
+                self.sessions.len()
+            )
+        } else {
+            format!(
+                " {} sessions (↑↓ navigate, Enter select, R restore crash, Esc quit) ",
+                self.sessions.len()
+            )
+        };
 
         let list = List::new(items)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Sessions (↑↓ navigate, Enter select, R restore last crash, Esc quit) ")
+                    .title(title)
                     .border_style(Style::default().fg(Color::Rgb(138, 180, 248))),
             )
             .highlight_style(
@@ -836,14 +995,19 @@ pub fn pick_session() -> Result<Option<PickerResult>> {
         );
     }
 
-    let sessions = load_sessions()?;
+    // Load sessions grouped by server
+    let (server_groups, orphan_sessions) = load_sessions_grouped()?;
 
-    if sessions.is_empty() {
+    // Check if there are any sessions at all
+    let total_sessions: usize = server_groups.iter().map(|g| g.sessions.len()).sum::<usize>()
+        + orphan_sessions.len();
+
+    if total_sessions == 0 {
         eprintln!("No sessions found.");
         return Ok(None);
     }
 
-    let picker = SessionPicker::new(sessions);
+    let picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
     picker.run()
 }
 
