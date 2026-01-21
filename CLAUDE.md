@@ -57,10 +57,13 @@ Logs are written to `~/.jcode/logs/` (daily files like `jcode-YYYY-MM-DD.log`).
 
 ## Environment Setup
 
-The Claude provider requires the Claude Agent SDK Python bridge:
+The Claude provider uses the Claude Code CLI (no Python SDK required). Optional overrides:
 
 ```bash
-export JCODE_CLAUDE_SDK_PYTHON=~/.venv/bin/python3
+export JCODE_CLAUDE_CLI_PATH=~/.local/bin/claude
+export JCODE_CLAUDE_CLI_MODEL=claude-opus-4-5-20251101
+export JCODE_CLAUDE_CLI_PERMISSION_MODE=bypassPermissions
+export JCODE_CLAUDE_CLI_PARTIAL=1
 ```
 
 ## Key Files

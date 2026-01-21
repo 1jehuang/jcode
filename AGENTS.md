@@ -38,7 +38,7 @@ The build also includes git hash and `-dev` suffix for uncommitted changes (e.g.
 - `jcode serve` / `jcode connect`: start the daemon and attach a client.
 - `cargo test`: run unit + integration tests.
 - `cargo test --test e2e`: run only end-to-end tests.
-- `cargo run --bin test_api`: Claude Agent SDK smoke test.
+- `cargo run --bin test_api`: Claude Code CLI smoke test.
 - `cargo run --bin jcode-harness -- --include-network`: exercise tool harness with optional network calls.
 - `scripts/agent_trace.sh`: end-to-end agent trace (set `JCODE_PROVIDER=openai|claude`).
 
