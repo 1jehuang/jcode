@@ -186,14 +186,18 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
 
 /// Load running servers from the registry
 pub fn load_servers() -> Vec<ServerInfo> {
-    // Use blocking runtime for sync context
-    tokio::runtime::Handle::try_current()
-        .map(|handle| {
-            handle.block_on(async {
-                registry::list_servers().await.unwrap_or_default()
-            })
+    // Check if we're inside an async runtime
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        // We're inside a runtime - use block_in_place to safely block
+        tokio::task::block_in_place(|| {
+            handle.block_on(async { registry::list_servers().await.unwrap_or_default() })
         })
-        .unwrap_or_default()
+    } else {
+        // No runtime - create a new one (sync context)
+        tokio::runtime::Runtime::new()
+            .map(|rt| rt.block_on(async { registry::list_servers().await.unwrap_or_default() }))
+            .unwrap_or_default()
+    }
 }
 
 /// Load sessions grouped by server

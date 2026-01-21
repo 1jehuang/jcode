@@ -4267,7 +4267,8 @@ impl App {
             }
 
             let tools = self.registry.definitions(None).await;
-            let memory_prompt = self.build_memory_prompt(&self.messages).await;
+            // Non-blocking memory: uses pending result from last turn, spawns check for next turn
+            let memory_prompt = self.build_memory_prompt_nonblocking(&self.messages);
             // Build system prompt with active skill
             let system_prompt = self.build_system_prompt(memory_prompt.as_deref());
 
@@ -4684,7 +4685,8 @@ impl App {
             }
 
             let tools = self.registry.definitions(None).await;
-            let memory_prompt = self.build_memory_prompt(&self.messages).await;
+            // Non-blocking memory: uses pending result from last turn, spawns check for next turn
+            let memory_prompt = self.build_memory_prompt_nonblocking(&self.messages);
             let system_prompt = self.build_system_prompt(memory_prompt.as_deref());
 
             self.status = ProcessingStatus::Sending;
@@ -5382,6 +5384,26 @@ impl App {
         prompt
     }
 
+    /// Get memory prompt using async non-blocking approach
+    /// Takes any pending memory from background check and spawns a new check for next turn
+    fn build_memory_prompt_nonblocking(&self, messages: &[Message]) -> Option<String> {
+        if self.is_remote {
+            return None;
+        }
+
+        // Take pending memory if available (computed in background during last turn)
+        let pending = crate::memory::take_pending_memory();
+
+        // Spawn a background check for the NEXT turn (doesn't block current send)
+        let manager = crate::memory::MemoryManager::new();
+        manager.spawn_relevance_check(messages.to_vec());
+
+        // Return pending memory from previous turn
+        pending.map(|p| p.prompt)
+    }
+
+    /// Legacy blocking memory prompt - kept for fallback but not used in normal flow
+    #[allow(dead_code)]
     async fn build_memory_prompt(&self, messages: &[Message]) -> Option<String> {
         if self.is_remote {
             return None;

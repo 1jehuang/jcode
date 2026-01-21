@@ -25,6 +25,62 @@ static MEMORY_ACTIVITY: Mutex<Option<MemoryActivity>> = Mutex::new(None);
 /// Maximum number of recent events to keep
 const MAX_RECENT_EVENTS: usize = 10;
 
+// === Async Memory Buffer ===
+
+/// Pending memory prompt from background check - ready to inject on next turn
+static PENDING_MEMORY: Mutex<Option<PendingMemory>> = Mutex::new(None);
+
+/// A pending memory result from async checking
+#[derive(Debug, Clone)]
+pub struct PendingMemory {
+    /// The formatted memory prompt ready for injection
+    pub prompt: String,
+    /// When this was computed
+    pub computed_at: Instant,
+    /// Number of relevant memories found
+    pub count: usize,
+}
+
+impl PendingMemory {
+    /// Check if this pending memory is still fresh (not too old)
+    pub fn is_fresh(&self) -> bool {
+        // Consider stale after 2 minutes
+        self.computed_at.elapsed().as_secs() < 120
+    }
+}
+
+/// Take pending memory if available and fresh
+pub fn take_pending_memory() -> Option<PendingMemory> {
+    if let Ok(mut guard) = PENDING_MEMORY.lock() {
+        if let Some(pending) = guard.take() {
+            if pending.is_fresh() {
+                return Some(pending);
+            }
+        }
+    }
+    None
+}
+
+/// Store a pending memory result
+pub fn set_pending_memory(prompt: String, count: usize) {
+    if let Ok(mut guard) = PENDING_MEMORY.lock() {
+        *guard = Some(PendingMemory {
+            prompt,
+            computed_at: Instant::now(),
+            count,
+        });
+    }
+}
+
+/// Check if there's a pending memory check in progress or result waiting
+pub fn has_pending_memory() -> bool {
+    PENDING_MEMORY
+        .lock()
+        .ok()
+        .map(|g| g.is_some())
+        .unwrap_or(false)
+}
+
 /// Get current memory activity state
 pub fn get_activity() -> Option<MemoryActivity> {
     MEMORY_ACTIVITY.lock().ok().and_then(|guard| guard.clone())
@@ -823,6 +879,150 @@ impl MemoryManager {
             .collect();
 
         Ok(matches)
+    }
+
+    // === Async Memory Checking ===
+
+    /// Spawn a background task to check memory relevance
+    /// Results are stored in PENDING_MEMORY and can be retrieved with take_pending_memory()
+    /// This method returns immediately and never blocks the caller
+    pub fn spawn_relevance_check(&self, messages: Vec<crate::message::Message>) {
+        let project_dir = self.project_dir.clone();
+
+        tokio::spawn(async move {
+            let manager = MemoryManager {
+                project_dir: project_dir.or_else(|| std::env::current_dir().ok()),
+            };
+
+            match manager.get_relevant_parallel(&messages).await {
+                Ok(Some(prompt)) => {
+                    let count = prompt.matches("\n-").count(); // rough count
+                    set_pending_memory(prompt, count);
+                    add_event(MemoryEventKind::SidecarComplete { latency_ms: 0 });
+                }
+                Ok(None) => {
+                    // No relevant memories - that's fine
+                    set_state(MemoryState::Idle);
+                }
+                Err(e) => {
+                    // Log but don't crash - memory is non-critical
+                    crate::logging::error(&format!("Background memory check failed: {}", e));
+                    add_event(MemoryEventKind::Error {
+                        message: e.to_string(),
+                    });
+                    set_state(MemoryState::Idle);
+                }
+            }
+        });
+    }
+
+    /// Get relevant memories with parallel sidecar calls (faster than sequential)
+    pub async fn get_relevant_parallel(
+        &self,
+        messages: &[crate::message::Message],
+    ) -> Result<Option<String>> {
+        let context = format_context_for_relevance(messages);
+        if context.is_empty() {
+            return Ok(None);
+        }
+
+        // Get top candidate memories by score
+        let mut candidates: Vec<_> = self
+            .list_all()?
+            .into_iter()
+            .filter(|entry| entry.active)
+            .collect();
+
+        candidates.sort_by(|a, b| {
+            let score_a = memory_score(a);
+            let score_b = memory_score(b);
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        candidates.truncate(MEMORY_RELEVANCE_MAX_CANDIDATES);
+
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        // Update activity state
+        set_state(MemoryState::SidecarChecking {
+            count: candidates.len(),
+        });
+        add_event(MemoryEventKind::SidecarStarted);
+
+        let sidecar = HaikuSidecar::new();
+
+        // Check relevance in PARALLEL batches (much faster than sequential)
+        const BATCH_SIZE: usize = 5;
+        let mut relevant = Vec::new();
+        let mut relevant_ids = Vec::new();
+
+        for batch in candidates.chunks(BATCH_SIZE) {
+            let futures: Vec<_> = batch
+                .iter()
+                .map(|memory| {
+                    let sidecar = sidecar.clone();
+                    let content = memory.content.clone();
+                    let context = context.clone();
+                    async move {
+                        let start = Instant::now();
+                        let result = sidecar.check_relevance(&content, &context).await;
+                        (result, start.elapsed())
+                    }
+                })
+                .collect();
+
+            let results = futures::future::join_all(futures).await;
+
+            for (memory, (result, elapsed)) in batch.iter().zip(results) {
+                match result {
+                    Ok((is_relevant, _reason)) => {
+                        add_event(MemoryEventKind::SidecarComplete {
+                            latency_ms: elapsed.as_millis() as u64,
+                        });
+
+                        if is_relevant {
+                            let preview = if memory.content.len() > 30 {
+                                format!("{}...", &memory.content[..30])
+                            } else {
+                                memory.content.clone()
+                            };
+                            add_event(MemoryEventKind::SidecarRelevant {
+                                memory_preview: preview,
+                            });
+                            relevant_ids.push(memory.id.clone());
+                            relevant.push(memory.clone());
+                        } else {
+                            add_event(MemoryEventKind::SidecarNotRelevant);
+                        }
+                    }
+                    Err(e) => {
+                        add_event(MemoryEventKind::Error {
+                            message: e.to_string(),
+                        });
+                        crate::logging::info(&format!("Sidecar relevance check failed: {}", e));
+                        // Continue checking other memories - don't fail completely
+                    }
+                }
+            }
+        }
+
+        let _ = self.touch_entries(&relevant_ids);
+
+        // Update final state
+        if relevant.is_empty() {
+            set_state(MemoryState::Idle);
+            return Ok(None);
+        }
+
+        set_state(MemoryState::FoundRelevant {
+            count: relevant.len(),
+        });
+
+        Ok(format_entries_for_prompt(&relevant, MEMORY_RELEVANCE_MAX_RESULTS)
+            .map(|entries| format!("# Memory\n\n{}", entries)))
     }
 }
 

@@ -379,6 +379,21 @@ impl Agent {
         prompt
     }
 
+    /// Non-blocking memory prompt - takes pending result and spawns check for next turn
+    fn build_memory_prompt_nonblocking(&self, messages: &[Message]) -> Option<String> {
+        // Take pending memory if available (computed in background during last turn)
+        let pending = crate::memory::take_pending_memory();
+
+        // Spawn a background check for the NEXT turn (doesn't block current send)
+        let manager = crate::memory::MemoryManager::new();
+        manager.spawn_relevance_check(messages.to_vec());
+
+        // Return pending memory from previous turn
+        pending.map(|p| p.prompt)
+    }
+
+    /// Legacy blocking memory prompt - kept for fallback
+    #[allow(dead_code)]
     async fn build_memory_prompt(&self, messages: &[Message]) -> Option<String> {
         let manager = crate::memory::MemoryManager::new();
         match manager.relevant_prompt_for_messages(messages).await {
@@ -574,7 +589,8 @@ impl Agent {
             }
 
             let tools = self.tool_definitions().await;
-            let memory_prompt = self.build_memory_prompt(&messages).await;
+            // Non-blocking memory: uses pending result from last turn, spawns check for next turn
+            let memory_prompt = self.build_memory_prompt_nonblocking(&messages);
             let system_prompt = self.build_system_prompt(memory_prompt.as_deref());
 
             logging::info(&format!(
@@ -1086,7 +1102,8 @@ impl Agent {
             }
 
             let tools = self.tool_definitions().await;
-            let memory_prompt = self.build_memory_prompt(&messages).await;
+            // Non-blocking memory: uses pending result from last turn, spawns check for next turn
+            let memory_prompt = self.build_memory_prompt_nonblocking(&messages);
             let system_prompt = self.build_system_prompt(memory_prompt.as_deref());
 
             let mut stream = self
@@ -1401,7 +1418,8 @@ impl Agent {
             }
 
             let tools = self.tool_definitions().await;
-            let memory_prompt = self.build_memory_prompt(&messages).await;
+            // Non-blocking memory: uses pending result from last turn, spawns check for next turn
+            let memory_prompt = self.build_memory_prompt_nonblocking(&messages);
             let system_prompt = self.build_system_prompt(memory_prompt.as_deref());
 
             let mut stream = self
