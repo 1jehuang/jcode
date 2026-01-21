@@ -27,6 +27,19 @@ pub struct SwarmInfo {
     pub session_names: Vec<String>,
 }
 
+/// Background task status for the info widget
+#[derive(Debug, Default, Clone)]
+pub struct BackgroundInfo {
+    /// Number of running background tasks
+    pub running_count: usize,
+    /// Names of running tasks (e.g., "bash", "task")
+    pub running_tasks: Vec<String>,
+    /// Memory agent status
+    pub memory_agent_active: bool,
+    /// Memory agent turn count
+    pub memory_agent_turns: usize,
+}
+
 /// Memory statistics for the info widget
 #[derive(Debug, Default, Clone)]
 pub struct MemoryInfo {
@@ -126,6 +139,8 @@ pub struct InfoWidgetData {
     pub memory_info: Option<MemoryInfo>,
     /// Swarm/subagent status
     pub swarm_info: Option<SwarmInfo>,
+    /// Background tasks status
+    pub background_info: Option<BackgroundInfo>,
 }
 
 impl InfoWidgetData {
@@ -136,6 +151,7 @@ impl InfoWidgetData {
             && self.model.is_none()
             && self.memory_info.is_none()
             && self.swarm_info.is_none()
+            && self.background_info.is_none()
     }
 }
 
@@ -540,6 +556,15 @@ fn compact_model_height(data: &InfoWidgetData) -> u16 {
     }
 }
 
+fn compact_background_height(data: &InfoWidgetData) -> u16 {
+    if let Some(info) = &data.background_info {
+        if info.running_count > 0 || info.memory_agent_active {
+            return 1;
+        }
+    }
+    0
+}
+
 fn compact_overview_height(data: &InfoWidgetData) -> u16 {
     compact_model_height(data)
         + compact_context_height(data)
@@ -547,6 +572,7 @@ fn compact_overview_height(data: &InfoWidgetData) -> u16 {
         + compact_queue_height(data)
         + compact_memory_height(data)
         + compact_swarm_height(data)
+        + compact_background_height(data)
 }
 
 fn expanded_context_height(data: &InfoWidgetData) -> u16 {
@@ -677,6 +703,13 @@ fn render_sections(
             } else {
                 lines.extend(render_swarm_compact(info));
             }
+        }
+    }
+
+    // Background tasks info
+    if let Some(info) = &data.background_info {
+        if info.running_count > 0 || info.memory_agent_active {
+            lines.extend(render_background_compact(info));
         }
     }
 
@@ -1206,6 +1239,46 @@ fn render_swarm_expanded(info: &SwarmInfo, inner: Rect) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn render_background_compact(info: &BackgroundInfo) -> Vec<Line<'static>> {
+    let mut spans: Vec<Span> = Vec::new();
+
+    // Show spinner icon for active background work
+    spans.push(Span::styled("⏳ ", Style::default().fg(Color::Rgb(180, 140, 255))));
+
+    let mut parts: Vec<String> = Vec::new();
+
+    // Memory agent status
+    if info.memory_agent_active {
+        parts.push(format!("mem:{}", info.memory_agent_turns));
+    }
+
+    // Running background tasks
+    if info.running_count > 0 {
+        if info.running_tasks.is_empty() {
+            parts.push(format!("bg:{}", info.running_count));
+        } else {
+            // Show task names
+            let task_str = info.running_tasks.join(",");
+            if task_str.len() > 15 {
+                parts.push(format!("bg:{}+", info.running_count));
+            } else {
+                parts.push(format!("bg:{}", task_str));
+            }
+        }
+    }
+
+    spans.push(Span::styled(
+        parts.join(" "),
+        Style::default().fg(Color::Rgb(160, 160, 170)),
+    ));
+
+    if spans.len() <= 1 {
+        return Vec::new();
+    }
+
+    vec![Line::from(spans)]
 }
 
 fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {

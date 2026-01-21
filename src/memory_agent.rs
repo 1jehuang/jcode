@@ -417,5 +417,10 @@ pub fn reset() {
     }
 }
 
+/// Check if the memory agent is currently processing (has been initialized)
+pub fn is_active() -> bool {
+    get().is_some()
+}
+
 // Re-export constants for use in memory.rs
 pub use crate::memory::{EMBEDDING_MAX_HITS, EMBEDDING_SIMILARITY_THRESHOLD};

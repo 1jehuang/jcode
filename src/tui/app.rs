@@ -6401,31 +6401,34 @@ impl super::TuiState for App {
             let project = manager.load_project().ok();
             let global = manager.load_global().ok();
 
-            match (project, global) {
+            let (project_count, global_count, by_category) = match (project, global) {
                 (Some(p), Some(g)) => {
                     let project_count = p.entries.len();
                     let global_count = g.entries.len();
-                    let total_count = project_count + global_count;
-
-                    if total_count > 0 {
-                        let mut by_category = std::collections::HashMap::new();
-                        for entry in p.entries.iter().chain(g.entries.iter()) {
-                            *by_category.entry(entry.category.to_string()).or_insert(0) += 1;
-                        }
-
-                        Some(super::info_widget::MemoryInfo {
-                            total_count,
-                            project_count,
-                            global_count,
-                            by_category,
-                            sidecar_available: true,
-                            activity: crate::memory::get_activity(),
-                        })
-                    } else {
-                        None
+                    let mut by_category = std::collections::HashMap::new();
+                    for entry in p.entries.iter().chain(g.entries.iter()) {
+                        *by_category.entry(entry.category.to_string()).or_insert(0) += 1;
                     }
+                    (project_count, global_count, by_category)
                 }
-                _ => None,
+                _ => (0, 0, std::collections::HashMap::new()),
+            };
+
+            let total_count = project_count + global_count;
+            let activity = crate::memory::get_activity();
+
+            // Show memory info if we have memories OR if there's activity (agent working)
+            if total_count > 0 || activity.is_some() {
+                Some(super::info_widget::MemoryInfo {
+                    total_count,
+                    project_count,
+                    global_count,
+                    by_category,
+                    sidecar_available: true,
+                    activity,
+                })
+            } else {
+                None
             }
         };
 
@@ -6456,6 +6459,27 @@ impl super::TuiState for App {
             }
         };
 
+        // Gather background task info
+        let background_info = {
+            let memory_agent_active = crate::memory_agent::is_active();
+
+            // Get running background tasks count
+            let bg_manager = crate::background::global();
+            // We can't easily get running count without async, so just check if memory agent is active
+            // Background tasks will show via swarm_info subagent_status
+
+            if memory_agent_active {
+                Some(super::info_widget::BackgroundInfo {
+                    running_count: 0, // TODO: track this properly
+                    running_tasks: Vec::new(),
+                    memory_agent_active,
+                    memory_agent_turns: 0, // TODO: expose this from memory_agent
+                })
+            } else {
+                None
+            }
+        };
+
         super::info_widget::InfoWidgetData {
             todos,
             context_info,
@@ -6467,6 +6491,7 @@ impl super::TuiState for App {
             client_count,
             memory_info,
             swarm_info,
+            background_info,
         }
     }
 }
