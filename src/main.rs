@@ -11,6 +11,7 @@ mod id;
 mod logging;
 mod mcp;
 mod memory;
+mod memory_agent;
 mod message;
 mod prompt;
 mod protocol;

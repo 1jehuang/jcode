@@ -30,6 +30,10 @@ const MAX_RECENT_EVENTS: usize = 10;
 /// Pending memory prompt from background check - ready to inject on next turn
 static PENDING_MEMORY: Mutex<Option<PendingMemory>> = Mutex::new(None);
 
+/// Guard to ensure only one memory check runs at a time
+static MEMORY_CHECK_IN_PROGRESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// A pending memory result from async checking
 #[derive(Debug, Clone)]
 pub struct PendingMemory {
@@ -476,7 +480,8 @@ fn format_message_context(message: &crate::message::Message) -> String {
     }
 }
 
-fn format_context_for_relevance(messages: &[crate::message::Message]) -> String {
+/// Format messages into a context string for relevance checking
+pub fn format_context_for_relevance(messages: &[crate::message::Message]) -> String {
     let mut chunks: Vec<String> = Vec::new();
     let mut total_chars = 0usize;
 
@@ -1012,7 +1017,16 @@ impl MemoryManager {
     /// Spawn a background task to check memory relevance
     /// Results are stored in PENDING_MEMORY and can be retrieved with take_pending_memory()
     /// This method returns immediately and never blocks the caller
+    /// Only ONE memory check runs at a time - additional calls are ignored
     pub fn spawn_relevance_check(&self, messages: Vec<crate::message::Message>) {
+        use std::sync::atomic::Ordering;
+
+        // Only spawn if no check is currently in progress
+        if MEMORY_CHECK_IN_PROGRESS.swap(true, Ordering::SeqCst) {
+            // Another check is already running - skip this one
+            return;
+        }
+
         let project_dir = self.project_dir.clone();
 
         tokio::spawn(async move {
@@ -1039,6 +1053,9 @@ impl MemoryManager {
                     set_state(MemoryState::Idle);
                 }
             }
+
+            // Release the guard when done
+            MEMORY_CHECK_IN_PROGRESS.store(false, Ordering::SeqCst);
         });
     }
 
@@ -1167,10 +1184,10 @@ impl MemoryManager {
 
 /// Embedding similarity threshold (0.0 - 1.0)
 /// Lower = more candidates, higher = fewer but more relevant
-const EMBEDDING_SIMILARITY_THRESHOLD: f32 = 0.4;
+pub const EMBEDDING_SIMILARITY_THRESHOLD: f32 = 0.4;
 
 /// Maximum embedding hits to verify with sidecar
-const EMBEDDING_MAX_HITS: usize = 10;
+pub const EMBEDDING_MAX_HITS: usize = 10;
 
 impl Default for MemoryManager {
     fn default() -> Self {
