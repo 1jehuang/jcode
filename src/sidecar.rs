@@ -17,6 +17,7 @@ const CLAUDE_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const DEFAULT_MAX_TOKENS: u32 = 1024;
 
 /// Lightweight client for Haiku sidecar calls
+#[derive(Clone)]
 pub struct HaikuSidecar {
     client: reqwest::Client,
     model: String,
