@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-#![allow(dead_code)]
 
 use super::info_widget;
 use super::markdown;
@@ -7,8 +6,7 @@ use super::visual_debug::{self, FrameCaptureBuilder, MessageCapture};
 use super::{DisplayMessage, ProcessingStatus, TuiState};
 use crate::message::ToolCall;
 use ratatui::{prelude::*, widgets::Paragraph};
-use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -721,7 +719,7 @@ struct PreparedMessages {
 struct BodyCacheKey {
     width: u16,
     show_diffs: bool,
-    messages_hash: u64,
+    messages_version: u64,
 }
 
 #[derive(Default)]
@@ -768,7 +766,6 @@ struct StreamingCacheState {
     key: Option<StreamingCacheKey>,
     text: String,
     wrapped_lines: Vec<Line<'static>>,
-    is_plain: bool,
 }
 
 static STREAMING_CACHE: OnceLock<Mutex<StreamingCacheState>> = OnceLock::new();
@@ -1221,7 +1218,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> PreparedMessages {
     let key = BodyCacheKey {
         width,
         show_diffs: app.show_diffs(),
-        messages_hash: hash_display_messages(app),
+        messages_version: app.display_messages_version(),
     };
 
     let mut cache = body_cache().lock().unwrap();
@@ -1254,7 +1251,6 @@ fn prepare_streaming_cached(
         width,
         prefix_blank,
     };
-    let is_plain = is_plain_streaming_text(streaming);
     let mut cache = streaming_cache().lock().unwrap();
 
     if cache.key.as_ref() == Some(&key) && cache.text == streaming {
@@ -1264,139 +1260,46 @@ fn prepare_streaming_cached(
         };
     }
 
-    if cache.key.as_ref() == Some(&key) && streaming.starts_with(&cache.text) {
-        let append = &streaming[cache.text.len()..];
-        if !append.is_empty()
-            && (cache.is_plain || streaming_allows_plain_append(&cache.text, append))
-        {
-            let style = streaming_plain_style(&cache.wrapped_lines);
-            append_plain_text_lines(
-                &mut cache.wrapped_lines,
-                width as usize,
-                append,
-                prefix_blank,
-                style,
-            );
-            cache.text = streaming.to_string();
-
-            return PreparedMessages {
-                wrapped_lines: cache.wrapped_lines.clone(),
-                wrapped_user_indices: Vec::new(),
-            };
+    if cache.key.as_ref() == Some(&key) {
+        // Streaming text only ever appends; extend cached lines incrementally.
+        if let Some(append) = streaming.strip_prefix(&cache.text) {
+            if !append.is_empty() {
+                append_plain_text_lines(
+                    &mut cache.wrapped_lines,
+                    width as usize,
+                    append,
+                    prefix_blank,
+                    Style::default().fg(AI_TEXT),
+                );
+                cache.text = streaming.to_string();
+                return PreparedMessages {
+                    wrapped_lines: cache.wrapped_lines.clone(),
+                    wrapped_user_indices: Vec::new(),
+                };
+            }
         }
     }
 
-    let prepared = prepare_streaming_full(streaming, width, prefix_blank);
+    let prepared = prepare_streaming_plain(streaming, width, prefix_blank);
     cache.key = Some(key);
     cache.text = streaming.to_string();
     cache.wrapped_lines = prepared.wrapped_lines.clone();
-    cache.is_plain = is_plain;
     prepared
 }
 
-fn prepare_streaming_full(streaming: &str, width: u16, prefix_blank: bool) -> PreparedMessages {
-    let mut lines: Vec<Line> = Vec::new();
+fn prepare_streaming_plain(streaming: &str, width: u16, prefix_blank: bool) -> PreparedMessages {
+    let mut lines: Vec<Line<'static>> = Vec::new();
     if prefix_blank {
         lines.push(Line::from(""));
     }
-    let content_width = width.saturating_sub(4) as usize;
-    let md_lines = markdown::render_markdown_with_width(streaming, Some(content_width));
-    lines.extend(md_lines);
+    append_plain_text_lines(
+        &mut lines,
+        width as usize,
+        streaming,
+        prefix_blank,
+        Style::default().fg(AI_TEXT),
+    );
     wrap_lines(lines, &[], width)
-}
-
-fn is_plain_streaming_text(text: &str) -> bool {
-    if text.is_empty() {
-        return true;
-    }
-    if contains_markdown_markers(text) {
-        return false;
-    }
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('#')
-            || trimmed.starts_with('>')
-            || trimmed.starts_with("```")
-            || trimmed.starts_with("- ")
-            || trimmed.starts_with("* ")
-            || trimmed.starts_with("+ ")
-            || trimmed.starts_with("|")
-        {
-            return false;
-        }
-    }
-    true
-}
-
-fn streaming_allows_plain_append(prev: &str, append: &str) -> bool {
-    if append.is_empty() {
-        return false;
-    }
-    if contains_markdown_markers(append) {
-        return false;
-    }
-    if markdown_has_open_code_block(prev) {
-        return false;
-    }
-    if markdown_table_might_be_open(prev) {
-        return false;
-    }
-    true
-}
-
-fn contains_markdown_markers(text: &str) -> bool {
-    if text.contains('`') || text.contains('*') || text.contains('_') || text.contains('|') {
-        return true;
-    }
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('#') || trimmed.starts_with('>') || trimmed.starts_with("```") {
-            return true;
-        }
-        if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
-            return true;
-        }
-    }
-    false
-}
-
-fn markdown_has_open_code_block(text: &str) -> bool {
-    let mut open = false;
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
-            open = !open;
-        }
-    }
-    open
-}
-
-fn markdown_table_might_be_open(text: &str) -> bool {
-    let mut last_non_empty: Option<&str> = None;
-    let mut has_sep = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        last_non_empty = Some(trimmed);
-        if trimmed.contains('|') && trimmed.contains("---") {
-            has_sep = true;
-        }
-    }
-    if let Some(last) = last_non_empty {
-        has_sep && last.contains('|')
-    } else {
-        false
-    }
-}
-
-fn streaming_plain_style(lines: &[Line<'static>]) -> Style {
-    lines
-        .last()
-        .and_then(|line| line.spans.last())
-        .map(|span| span.style)
-        .unwrap_or_else(|| Style::default().fg(AI_TEXT))
 }
 
 fn append_plain_text_lines(
@@ -1785,23 +1688,6 @@ fn wrap_lines(
         wrapped_lines,
         wrapped_user_indices,
     }
-}
-
-fn hash_display_messages(app: &dyn TuiState) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    app.display_messages().len().hash(&mut hasher);
-    for msg in app.display_messages() {
-        msg.role.hash(&mut hasher);
-        msg.content.hash(&mut hasher);
-        msg.tool_calls.hash(&mut hasher);
-        msg.title.hash(&mut hasher);
-        if let Some(tool) = &msg.tool_data {
-            tool.id.hash(&mut hasher);
-            tool.name.hash(&mut hasher);
-            tool.input.to_string().hash(&mut hasher);
-        }
-    }
-    hasher.finish()
 }
 
 fn hash_display_message(msg: &DisplayMessage) -> u64 {

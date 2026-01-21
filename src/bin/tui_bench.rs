@@ -56,6 +56,7 @@ enum BenchMode {
 
 struct BenchState {
     messages: Vec<DisplayMessage>,
+    messages_version: u64,
     streaming_text: String,
     input: String,
     cursor_pos: usize,
@@ -101,6 +102,7 @@ impl BenchState {
 
         Self {
             messages,
+            messages_version: 1,
             streaming_text: String::new(),
             input: String::new(),
             cursor_pos: 0,
@@ -122,6 +124,10 @@ impl BenchState {
 impl TuiState for BenchState {
     fn display_messages(&self) -> &[DisplayMessage] {
         &self.messages
+    }
+
+    fn display_messages_version(&self) -> u64 {
+        self.messages_version
     }
 
     fn streaming_text(&self) -> &str {
