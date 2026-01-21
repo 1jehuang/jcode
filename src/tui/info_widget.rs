@@ -14,6 +14,19 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// Swarm/subagent status for the info widget
+#[derive(Debug, Default, Clone)]
+pub struct SwarmInfo {
+    /// Number of sessions in the same swarm (same working directory)
+    pub session_count: usize,
+    /// Current subagent status (from Task tool execution)
+    pub subagent_status: Option<String>,
+    /// Number of connected clients (server mode)
+    pub client_count: Option<usize>,
+    /// List of session names in the swarm
+    pub session_names: Vec<String>,
+}
+
 /// Memory statistics for the info widget
 #[derive(Debug, Default, Clone)]
 pub struct MemoryInfo {
@@ -27,6 +40,65 @@ pub struct MemoryInfo {
     pub by_category: HashMap<String, usize>,
     /// Whether sidecar is available
     pub sidecar_available: bool,
+    /// Current memory activity
+    pub activity: Option<MemoryActivity>,
+}
+
+/// Represents current memory system activity
+#[derive(Debug, Clone)]
+pub struct MemoryActivity {
+    /// Current state of the memory system
+    pub state: MemoryState,
+    /// Recent events (most recent first)
+    pub recent_events: Vec<MemoryEvent>,
+}
+
+/// State of the memory sidecar
+#[derive(Debug, Clone, PartialEq)]
+pub enum MemoryState {
+    /// Idle, no activity
+    Idle,
+    /// Running embedding search
+    Embedding,
+    /// Sidecar checking relevance
+    SidecarChecking { count: usize },
+    /// Found relevant memories
+    FoundRelevant { count: usize },
+}
+
+impl Default for MemoryState {
+    fn default() -> Self {
+        MemoryState::Idle
+    }
+}
+
+/// A memory system event
+#[derive(Debug, Clone)]
+pub struct MemoryEvent {
+    /// Type of event
+    pub kind: MemoryEventKind,
+    /// When it happened
+    pub timestamp: Instant,
+    /// Optional details
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum MemoryEventKind {
+    /// Embedding search found hits
+    EmbeddingHits { count: usize },
+    /// Sidecar started checking
+    SidecarStarted,
+    /// Sidecar found memory relevant
+    SidecarRelevant { memory_preview: String },
+    /// Sidecar found memory not relevant
+    SidecarNotRelevant,
+    /// Sidecar call completed with latency
+    SidecarComplete { latency_ms: u64 },
+    /// Memory was surfaced to main agent
+    MemorySurfaced { memory_preview: String },
+    /// Error occurred
+    Error { message: String },
 }
 
 /// Minimum width needed to show the widget
@@ -50,7 +122,8 @@ pub struct InfoWidgetData {
     pub client_count: Option<usize>,
     /// Memory system statistics
     pub memory_info: Option<MemoryInfo>,
-    // TODO: Add swarm/subagent status summary to the info widget.
+    /// Swarm/subagent status
+    pub swarm_info: Option<SwarmInfo>,
 }
 
 impl InfoWidgetData {
@@ -60,6 +133,7 @@ impl InfoWidgetData {
             && self.queue_mode.is_none()
             && self.model.is_none()
             && self.memory_info.is_none()
+            && self.swarm_info.is_none()
     }
 }
 
@@ -276,13 +350,16 @@ pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
 }
 
 const MAX_CONTEXT_LINES: usize = 5;
-const MAX_TODO_LINES: usize = 8;
+const MAX_TODO_LINES: usize = 12;
+const MAX_MEMORY_EVENTS: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
 enum InfoPageKind {
     CompactOnly,
     TodosExpanded,
     ContextExpanded,
+    MemoryExpanded,
+    SwarmExpanded,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -328,6 +405,24 @@ fn compute_page_layout(
         candidates.push(InfoPage {
             kind: InfoPageKind::TodosExpanded,
             height: compact_height - todos_compact + todos_expanded,
+        });
+    }
+
+    let memory_compact = compact_memory_height(data);
+    let memory_expanded = expanded_memory_height(data);
+    if memory_expanded > 0 {
+        candidates.push(InfoPage {
+            kind: InfoPageKind::MemoryExpanded,
+            height: compact_height - memory_compact + memory_expanded,
+        });
+    }
+
+    let swarm_compact = compact_swarm_height(data);
+    let swarm_expanded = expanded_swarm_height(data);
+    if swarm_expanded > 0 {
+        candidates.push(InfoPage {
+            kind: InfoPageKind::SwarmExpanded,
+            height: compact_height - swarm_compact + swarm_expanded,
         });
     }
 
@@ -381,8 +476,18 @@ fn compute_page_layout(
 fn render_page(kind: InfoPageKind, data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
     match kind {
         InfoPageKind::CompactOnly => render_sections(data, inner, None),
-        InfoPageKind::TodosExpanded => render_sections(data, inner, Some(InfoPageKind::TodosExpanded)),
-        InfoPageKind::ContextExpanded => render_sections(data, inner, Some(InfoPageKind::ContextExpanded)),
+        InfoPageKind::TodosExpanded => {
+            render_sections(data, inner, Some(InfoPageKind::TodosExpanded))
+        }
+        InfoPageKind::ContextExpanded => {
+            render_sections(data, inner, Some(InfoPageKind::ContextExpanded))
+        }
+        InfoPageKind::MemoryExpanded => {
+            render_sections(data, inner, Some(InfoPageKind::MemoryExpanded))
+        }
+        InfoPageKind::SwarmExpanded => {
+            render_sections(data, inner, Some(InfoPageKind::SwarmExpanded))
+        }
     }
 }
 
@@ -439,6 +544,7 @@ fn compact_overview_height(data: &InfoWidgetData) -> u16 {
         + compact_todos_height(data)
         + compact_queue_height(data)
         + compact_memory_height(data)
+        + compact_swarm_height(data)
 }
 
 fn expanded_context_height(data: &InfoWidgetData) -> u16 {
@@ -454,14 +560,67 @@ fn expanded_todos_height(data: &InfoWidgetData) -> u16 {
     if data.todos.is_empty() {
         return 0;
     }
-    let todo_lines = data.todos.len().min(MAX_TODO_LINES);
-    let mut height = 1 + todo_lines as u16;
-    if data.todos.len() > MAX_TODO_LINES {
-        height += 1;
+    // Header (1) + progress bar (1) + todo items + possible "+N more" line
+    let available_lines = MAX_TODO_LINES.saturating_sub(2); // Same as in render
+    let todo_lines = data.todos.len().min(available_lines);
+    let mut height = 2 + todo_lines as u16; // Header + progress bar + items
+    if data.todos.len() > available_lines {
+        height += 1; // "+N more" line
     }
     height
 }
 
+fn expanded_memory_height(data: &InfoWidgetData) -> u16 {
+    if let Some(info) = &data.memory_info {
+        if info.total_count > 0 || info.activity.is_some() {
+            // Title line + stats line + activity lines
+            let mut height = 2u16;
+
+            // Add lines for activity
+            if let Some(activity) = &info.activity {
+                // State line
+                height += 1;
+                // Recent events (up to MAX_MEMORY_EVENTS)
+                let event_count = activity.recent_events.len().min(MAX_MEMORY_EVENTS);
+                height += event_count as u16;
+            }
+
+            // Category breakdown if we have memories
+            if !info.by_category.is_empty() {
+                height += 1; // One line for categories
+            }
+
+            return height;
+        }
+    }
+    0
+}
+
+fn compact_swarm_height(data: &InfoWidgetData) -> u16 {
+    if let Some(info) = &data.swarm_info {
+        // Show if we have active subagent or multiple sessions
+        if info.subagent_status.is_some() || info.session_count > 1 || info.client_count.is_some() {
+            return 1;
+        }
+    }
+    0
+}
+
+fn expanded_swarm_height(data: &InfoWidgetData) -> u16 {
+    if let Some(info) = &data.swarm_info {
+        if info.subagent_status.is_some() || info.session_count > 1 || info.client_count.is_some() {
+            // Title (1) + status line (1) + session list (up to 4)
+            let mut height = 2u16;
+            if info.subagent_status.is_some() {
+                height += 1; // Active subagent line
+            }
+            // Show session names (up to 4)
+            height += info.session_names.len().min(4) as u16;
+            return height;
+        }
+    }
+    0
+}
 
 fn render_sections(
     data: &InfoWidgetData,
@@ -497,10 +656,25 @@ fn render_sections(
         lines.extend(render_queue_compact(data, inner));
     }
 
-    // Memory info at the bottom
+    // Memory info
     if let Some(info) = &data.memory_info {
-        if info.total_count > 0 {
-            lines.extend(render_memory_compact(info));
+        if info.total_count > 0 || info.activity.is_some() {
+            if matches!(focus, Some(InfoPageKind::MemoryExpanded)) {
+                lines.extend(render_memory_expanded(info, inner));
+            } else {
+                lines.extend(render_memory_compact(info));
+            }
+        }
+    }
+
+    // Swarm/subagent info at the bottom
+    if let Some(info) = &data.swarm_info {
+        if info.subagent_status.is_some() || info.session_count > 1 || info.client_count.is_some() {
+            if matches!(focus, Some(InfoPageKind::SwarmExpanded)) {
+                lines.extend(render_swarm_expanded(info, inner));
+            } else {
+                lines.extend(render_swarm_compact(info));
+            }
         }
     }
 
@@ -513,39 +687,151 @@ fn render_todos_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
         return lines;
     }
 
-    lines.push(Line::from(vec![Span::styled(
-        "Todos",
-        Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
-    )]));
+    // Calculate stats
+    let total = data.todos.len();
+    let completed: usize = data
+        .todos
+        .iter()
+        .filter(|t| t.status == "completed")
+        .count();
+    let in_progress: usize = data
+        .todos
+        .iter()
+        .filter(|t| t.status == "in_progress")
+        .count();
 
-    for todo in data.todos.iter().take(MAX_TODO_LINES) {
-        let (icon, color) = match todo.status.as_str() {
-            "completed" => ("", Color::Rgb(100, 180, 100)),
-            "in_progress" => ("", Color::Rgb(255, 200, 100)),
-            _ => ("", Color::Rgb(120, 120, 130)),
-        };
+    // Header with progress
+    lines.push(Line::from(vec![
+        Span::styled(
+            "Todos ",
+            Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
+        ),
+        Span::styled(
+            format!("{}/{}", completed, total),
+            Style::default().fg(Color::Rgb(140, 140, 150)),
+        ),
+    ]));
 
-        let max_len = inner.width.saturating_sub(3) as usize;
-        let content = if todo.content.len() > max_len && max_len > 3 {
-            format!("{}...", &todo.content[..max_len.saturating_sub(3)])
-        } else {
-            todo.content.clone()
-        };
-
+    // Mini progress bar
+    let bar_width = inner.width.saturating_sub(2).min(20) as usize;
+    if bar_width >= 4 && total > 0 {
+        let filled = ((completed as f64 / total as f64) * bar_width as f64).round() as usize;
+        let empty = bar_width.saturating_sub(filled);
         lines.push(Line::from(vec![
-            Span::styled(format!("{} ", icon), Style::default().fg(color)),
-            Span::styled(content, Style::default().fg(Color::Rgb(160, 160, 170))),
+            Span::styled("[", Style::default().fg(Color::Rgb(90, 90, 100))),
+            Span::styled(
+                "█".repeat(filled),
+                Style::default().fg(Color::Rgb(100, 180, 100)),
+            ),
+            Span::styled(
+                "░".repeat(empty),
+                Style::default().fg(Color::Rgb(50, 50, 60)),
+            ),
+            Span::styled("]", Style::default().fg(Color::Rgb(90, 90, 100))),
         ]));
     }
 
-    if data.todos.len() > MAX_TODO_LINES {
+    // Sort todos: in_progress first, then pending, then completed
+    let mut sorted_todos: Vec<&crate::todo::TodoItem> = data.todos.iter().collect();
+    sorted_todos.sort_by(|a, b| {
+        let order = |s: &str| match s {
+            "in_progress" => 0,
+            "pending" => 1,
+            "completed" => 2,
+            "cancelled" => 3,
+            _ => 4,
+        };
+        order(&a.status).cmp(&order(&b.status))
+    });
+
+    // Render todos with priority colors
+    let available_lines = MAX_TODO_LINES.saturating_sub(2); // Account for header + bar
+    for todo in sorted_todos.iter().take(available_lines) {
+        let (icon, status_color) = match todo.status.as_str() {
+            "completed" => ("✓", Color::Rgb(100, 180, 100)),
+            "in_progress" => ("▶", Color::Rgb(255, 200, 100)),
+            "cancelled" => ("✗", Color::Rgb(120, 80, 80)),
+            _ => ("○", Color::Rgb(120, 120, 130)),
+        };
+
+        // Priority indicator
+        let priority_marker = match todo.priority.as_str() {
+            "high" => ("!", Color::Rgb(255, 120, 100)),
+            "medium" => ("", Color::Rgb(200, 180, 100)),
+            _ => ("", Color::Rgb(120, 120, 130)),
+        };
+
+        let max_len = inner.width.saturating_sub(4) as usize;
+        let content = truncate_smart(&todo.content, max_len);
+
+        // Dim completed items
+        let text_color = if todo.status == "completed" {
+            Color::Rgb(100, 100, 110)
+        } else if todo.status == "in_progress" {
+            Color::Rgb(200, 200, 210)
+        } else {
+            Color::Rgb(160, 160, 170)
+        };
+
+        let mut spans = vec![Span::styled(
+            format!("{} ", icon),
+            Style::default().fg(status_color),
+        )];
+
+        if !priority_marker.0.is_empty() {
+            spans.push(Span::styled(
+                format!("{}", priority_marker.0),
+                Style::default().fg(priority_marker.1),
+            ));
+        }
+
+        spans.push(Span::styled(content, Style::default().fg(text_color)));
+
+        lines.push(Line::from(spans));
+    }
+
+    // Show count of remaining items
+    let shown = available_lines.min(sorted_todos.len());
+    if data.todos.len() > shown {
+        let remaining = data.todos.len() - shown;
+        let remaining_completed = sorted_todos
+            .iter()
+            .skip(shown)
+            .filter(|t| t.status == "completed")
+            .count();
+        let desc = if remaining_completed == remaining {
+            format!("  +{} done", remaining)
+        } else if remaining_completed > 0 {
+            format!("  +{} more ({} done)", remaining, remaining_completed)
+        } else {
+            format!("  +{} more", remaining)
+        };
         lines.push(Line::from(vec![Span::styled(
-            format!("  +{} more", data.todos.len() - MAX_TODO_LINES),
+            desc,
             Style::default().fg(Color::Rgb(100, 100, 110)),
         )]));
     }
 
     lines
+}
+
+/// Truncate string smartly, trying to break at word boundaries
+fn truncate_smart(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_string();
+    }
+    if max_len <= 3 {
+        return "...".to_string();
+    }
+
+    let target = max_len - 3;
+    // Try to find a word boundary
+    if let Some(pos) = s[..target].rfind(' ') {
+        if pos > target / 2 {
+            return format!("{}...", &s[..pos]);
+        }
+    }
+    format!("{}...", &s[..target])
 }
 
 fn render_todos_compact(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static>> {
@@ -622,7 +908,295 @@ fn render_memory_compact(info: &MemoryInfo) -> Vec<Line<'static>> {
         ));
     }
 
+    // Show activity indicator if active
+    if let Some(activity) = &info.activity {
+        match &activity.state {
+            MemoryState::Embedding => {
+                spans.push(Span::styled(
+                    " · ",
+                    Style::default().fg(Color::Rgb(100, 100, 110)),
+                ));
+                spans.push(Span::styled(
+                    "🔍",
+                    Style::default().fg(Color::Rgb(255, 200, 100)),
+                ));
+            }
+            MemoryState::SidecarChecking { count } => {
+                spans.push(Span::styled(
+                    " · ",
+                    Style::default().fg(Color::Rgb(100, 100, 110)),
+                ));
+                spans.push(Span::styled(
+                    format!("⚡{}", count),
+                    Style::default().fg(Color::Rgb(255, 200, 100)),
+                ));
+            }
+            MemoryState::FoundRelevant { count } => {
+                spans.push(Span::styled(
+                    " · ",
+                    Style::default().fg(Color::Rgb(100, 100, 110)),
+                ));
+                spans.push(Span::styled(
+                    format!("✓{}", count),
+                    Style::default().fg(Color::Rgb(100, 200, 100)),
+                ));
+            }
+            MemoryState::Idle => {}
+        }
+    }
+
     vec![Line::from(spans)]
+}
+
+fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Title
+    lines.push(Line::from(vec![Span::styled(
+        "Memory",
+        Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
+    )]));
+
+    // Stats line
+    let mut stats_spans = vec![Span::styled(
+        format!("{} total", info.total_count),
+        Style::default().fg(Color::Rgb(160, 160, 170)),
+    )];
+    if info.project_count > 0 || info.global_count > 0 {
+        stats_spans.push(Span::styled(
+            format!(" ({}p/{}g)", info.project_count, info.global_count),
+            Style::default().fg(Color::Rgb(120, 120, 130)),
+        ));
+    }
+    lines.push(Line::from(stats_spans));
+
+    // Category breakdown
+    if !info.by_category.is_empty() {
+        let max_width = inner.width.saturating_sub(2) as usize;
+        let mut cat_parts: Vec<String> = info
+            .by_category
+            .iter()
+            .map(|(cat, count)| format!("{}:{}", &cat[..3.min(cat.len())], count))
+            .collect();
+        cat_parts.sort();
+        let cat_str = cat_parts.join(" ");
+        let cat_display = if cat_str.len() > max_width {
+            format!("{}…", &cat_str[..max_width.saturating_sub(1)])
+        } else {
+            cat_str
+        };
+        lines.push(Line::from(vec![Span::styled(
+            cat_display,
+            Style::default().fg(Color::Rgb(100, 100, 110)),
+        )]));
+    }
+
+    // Activity section
+    if let Some(activity) = &info.activity {
+        // Current state
+        let state_line = match &activity.state {
+            MemoryState::Idle => Line::from(vec![
+                Span::styled("○ ", Style::default().fg(Color::Rgb(100, 100, 110))),
+                Span::styled("Idle", Style::default().fg(Color::Rgb(120, 120, 130))),
+            ]),
+            MemoryState::Embedding => Line::from(vec![
+                Span::styled("🔍 ", Style::default().fg(Color::Rgb(255, 200, 100))),
+                Span::styled(
+                    "Searching...",
+                    Style::default().fg(Color::Rgb(180, 180, 190)),
+                ),
+            ]),
+            MemoryState::SidecarChecking { count } => Line::from(vec![
+                Span::styled("⚡ ", Style::default().fg(Color::Rgb(255, 200, 100))),
+                Span::styled(
+                    format!("Checking {} memories", count),
+                    Style::default().fg(Color::Rgb(180, 180, 190)),
+                ),
+            ]),
+            MemoryState::FoundRelevant { count } => Line::from(vec![
+                Span::styled("✓ ", Style::default().fg(Color::Rgb(100, 200, 100))),
+                Span::styled(
+                    format!("{} relevant", count),
+                    Style::default().fg(Color::Rgb(180, 180, 190)),
+                ),
+            ]),
+        };
+        lines.push(state_line);
+
+        // Recent events
+        let max_width = inner.width.saturating_sub(4) as usize;
+        for event in activity.recent_events.iter().take(MAX_MEMORY_EVENTS) {
+            let (icon, text, color) = match &event.kind {
+                MemoryEventKind::EmbeddingHits { count } => {
+                    ("→", format!("{} hits", count), Color::Rgb(140, 180, 255))
+                }
+                MemoryEventKind::SidecarStarted => (
+                    "⚡",
+                    "Sidecar started".to_string(),
+                    Color::Rgb(255, 200, 100),
+                ),
+                MemoryEventKind::SidecarRelevant { memory_preview } => {
+                    let preview = if memory_preview.len() > max_width.saturating_sub(4) {
+                        format!("{}…", &memory_preview[..max_width.saturating_sub(5)])
+                    } else {
+                        memory_preview.clone()
+                    };
+                    ("✓", preview, Color::Rgb(100, 200, 100))
+                }
+                MemoryEventKind::SidecarNotRelevant => {
+                    ("✗", "Not relevant".to_string(), Color::Rgb(150, 150, 160))
+                }
+                MemoryEventKind::SidecarComplete { latency_ms } => {
+                    ("⏱", format!("{}ms", latency_ms), Color::Rgb(140, 140, 150))
+                }
+                MemoryEventKind::MemorySurfaced { memory_preview } => {
+                    let preview = if memory_preview.len() > max_width.saturating_sub(4) {
+                        format!("{}…", &memory_preview[..max_width.saturating_sub(5)])
+                    } else {
+                        memory_preview.clone()
+                    };
+                    ("★", preview, Color::Rgb(255, 220, 100))
+                }
+                MemoryEventKind::Error { message } => {
+                    let msg = if message.len() > max_width.saturating_sub(4) {
+                        format!("{}…", &message[..max_width.saturating_sub(5)])
+                    } else {
+                        message.clone()
+                    };
+                    ("!", msg, Color::Rgb(255, 100, 100))
+                }
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", icon), Style::default().fg(color)),
+                Span::styled(text, Style::default().fg(Color::Rgb(140, 140, 150))),
+            ]));
+        }
+    }
+
+    lines
+}
+
+fn render_swarm_compact(info: &SwarmInfo) -> Vec<Line<'static>> {
+    let mut spans: Vec<Span> = Vec::new();
+
+    // Show active subagent status first (most important)
+    if let Some(status) = &info.subagent_status {
+        spans.push(Span::styled("▶ ", Style::default().fg(Color::Rgb(255, 200, 100))));
+        spans.push(Span::styled(
+            truncate_smart(status, 20),
+            Style::default().fg(Color::Rgb(180, 180, 190)),
+        ));
+    } else {
+        // Show swarm icon
+        spans.push(Span::styled("🔗 ", Style::default().fg(Color::Rgb(140, 180, 255))));
+    }
+
+    // Session count if > 1
+    if info.session_count > 1 {
+        if !spans.is_empty() && info.subagent_status.is_none() {
+            // Already have icon
+        } else if info.subagent_status.is_some() {
+            spans.push(Span::styled(" · ", Style::default().fg(Color::Rgb(100, 100, 110))));
+        }
+        spans.push(Span::styled(
+            format!("{}s", info.session_count),
+            Style::default().fg(Color::Rgb(140, 140, 150)),
+        ));
+    }
+
+    // Client count if present
+    if let Some(clients) = info.client_count {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", Style::default().fg(Color::Rgb(100, 100, 110))));
+        }
+        spans.push(Span::styled(
+            format!("{}c", clients),
+            Style::default().fg(Color::Rgb(140, 140, 150)),
+        ));
+    }
+
+    if spans.is_empty() {
+        return Vec::new();
+    }
+
+    vec![Line::from(spans)]
+}
+
+fn render_swarm_expanded(info: &SwarmInfo, inner: Rect) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Title
+    lines.push(Line::from(vec![Span::styled(
+        "Swarm",
+        Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
+    )]));
+
+    // Stats line
+    let mut stats_parts: Vec<Span> = Vec::new();
+    if info.session_count > 0 {
+        stats_parts.push(Span::styled(
+            format!(
+                "{} session{}",
+                info.session_count,
+                if info.session_count == 1 { "" } else { "s" }
+            ),
+            Style::default().fg(Color::Rgb(160, 160, 170)),
+        ));
+    }
+    if let Some(clients) = info.client_count {
+        if !stats_parts.is_empty() {
+            stats_parts.push(Span::styled(
+                " · ",
+                Style::default().fg(Color::Rgb(100, 100, 110)),
+            ));
+        }
+        stats_parts.push(Span::styled(
+            format!(
+                "{} client{}",
+                clients,
+                if clients == 1 { "" } else { "s" }
+            ),
+            Style::default().fg(Color::Rgb(160, 160, 170)),
+        ));
+    }
+    if !stats_parts.is_empty() {
+        lines.push(Line::from(stats_parts));
+    }
+
+    // Active subagent status
+    if let Some(status) = &info.subagent_status {
+        lines.push(Line::from(vec![
+            Span::styled("▶ ", Style::default().fg(Color::Rgb(255, 200, 100))),
+            Span::styled(
+                truncate_smart(status, inner.width.saturating_sub(4) as usize),
+                Style::default().fg(Color::Rgb(200, 200, 210)),
+            ),
+        ]));
+    }
+
+    // Session names (up to 4)
+    let max_name_len = inner.width.saturating_sub(4) as usize;
+    for name in info.session_names.iter().take(4) {
+        lines.push(Line::from(vec![
+            Span::styled("  · ", Style::default().fg(Color::Rgb(100, 100, 110))),
+            Span::styled(
+                truncate_smart(name, max_name_len),
+                Style::default().fg(Color::Rgb(140, 140, 150)),
+            ),
+        ]));
+    }
+
+    // Show count of remaining sessions
+    if info.session_names.len() > 4 {
+        let remaining = info.session_names.len() - 4;
+        lines.push(Line::from(vec![Span::styled(
+            format!("  +{} more", remaining),
+            Style::default().fg(Color::Rgb(100, 100, 110)),
+        )]));
+    }
+
+    lines
 }
 
 fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
@@ -671,7 +1245,11 @@ fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
 
         if let Some(sessions) = data.session_count {
             server_spans.push(Span::styled(
-                format!("{} session{}", sessions, if sessions == 1 { "" } else { "s" }),
+                format!(
+                    "{} session{}",
+                    sessions,
+                    if sessions == 1 { "" } else { "s" }
+                ),
                 Style::default().fg(Color::Rgb(140, 140, 150)),
             ));
         }
@@ -765,13 +1343,7 @@ fn render_context_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'stat
         let pct = ((tokens as f64 / total_tokens as f64) * 100.0)
             .round()
             .min(100.0) as usize;
-        let mut content = format!(
-            "{} {} {} {}%",
-            icon,
-            label,
-            format_token_k(tokens),
-            pct
-        );
+        let mut content = format!("{} {} {} {}%", icon, label, format_token_k(tokens), pct);
         if content.len() > max_len && max_len > 3 {
             content.truncate(max_len.saturating_sub(3));
             content.push_str("...");
@@ -829,7 +1401,10 @@ fn render_usage_bar(used_tokens: usize, limit_tokens: usize, width: u16) -> Line
     }
     let empty_cells = bar_width.saturating_sub(used_cells);
     let mut spans = Vec::new();
-    spans.push(Span::styled("[", Style::default().fg(Color::Rgb(90, 90, 100))));
+    spans.push(Span::styled(
+        "[",
+        Style::default().fg(Color::Rgb(90, 90, 100)),
+    ));
     spans.push(Span::styled(
         "█".repeat(used_cells),
         Style::default().fg(Color::Rgb(120, 200, 180)),
@@ -840,7 +1415,10 @@ fn render_usage_bar(used_tokens: usize, limit_tokens: usize, width: u16) -> Line
             Style::default().fg(Color::Rgb(50, 50, 60)),
         ));
     }
-    spans.push(Span::styled("]", Style::default().fg(Color::Rgb(90, 90, 100))));
+    spans.push(Span::styled(
+        "]",
+        Style::default().fg(Color::Rgb(90, 90, 100)),
+    ));
     Line::from(spans)
 }
 
