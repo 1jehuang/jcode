@@ -25,6 +25,7 @@ mod storage;
 mod todo;
 mod tool;
 mod tui;
+mod usage;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};

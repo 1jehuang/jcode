@@ -40,6 +40,17 @@ pub struct BackgroundInfo {
     pub memory_agent_turns: usize,
 }
 
+/// Subscription usage info for the info widget
+#[derive(Debug, Default, Clone)]
+pub struct UsageInfo {
+    /// Five-hour window utilization (0.0-1.0)
+    pub five_hour: f32,
+    /// Seven-day window utilization (0.0-1.0)
+    pub seven_day: f32,
+    /// Whether data was successfully fetched
+    pub available: bool,
+}
+
 /// Memory statistics for the info widget
 #[derive(Debug, Default, Clone)]
 pub struct MemoryInfo {
@@ -141,6 +152,8 @@ pub struct InfoWidgetData {
     pub swarm_info: Option<SwarmInfo>,
     /// Background tasks status
     pub background_info: Option<BackgroundInfo>,
+    /// Subscription usage info
+    pub usage_info: Option<UsageInfo>,
 }
 
 impl InfoWidgetData {
@@ -565,6 +578,15 @@ fn compact_background_height(data: &InfoWidgetData) -> u16 {
     0
 }
 
+fn compact_usage_height(data: &InfoWidgetData) -> u16 {
+    if let Some(info) = &data.usage_info {
+        if info.available {
+            return 1;
+        }
+    }
+    0
+}
+
 fn compact_overview_height(data: &InfoWidgetData) -> u16 {
     compact_model_height(data)
         + compact_context_height(data)
@@ -573,6 +595,7 @@ fn compact_overview_height(data: &InfoWidgetData) -> u16 {
         + compact_memory_height(data)
         + compact_swarm_height(data)
         + compact_background_height(data)
+        + compact_usage_height(data)
 }
 
 fn expanded_context_height(data: &InfoWidgetData) -> u16 {
@@ -710,6 +733,13 @@ fn render_sections(
     if let Some(info) = &data.background_info {
         if info.running_count > 0 || info.memory_agent_active {
             lines.extend(render_background_compact(info));
+        }
+    }
+
+    // Usage info (subscription limits)
+    if let Some(info) = &data.usage_info {
+        if info.available {
+            lines.extend(render_usage_compact(info));
         }
     }
 
@@ -1279,6 +1309,41 @@ fn render_background_compact(info: &BackgroundInfo) -> Vec<Line<'static>> {
     }
 
     vec![Line::from(spans)]
+}
+
+fn render_usage_compact(info: &UsageInfo) -> Vec<Line<'static>> {
+    if !info.available {
+        return Vec::new();
+    }
+
+    // Format like Claude Code: "Session 42% · Week 16%"
+    let five_hr_pct = (info.five_hour * 100.0).round() as u8;
+    let seven_day_pct = (info.seven_day * 100.0).round() as u8;
+
+    // Color code based on usage level
+    let five_hr_color = if five_hr_pct >= 80 {
+        Color::Rgb(255, 100, 100) // Red for high usage
+    } else if five_hr_pct >= 50 {
+        Color::Rgb(255, 200, 100) // Yellow for medium
+    } else {
+        Color::Rgb(100, 200, 100) // Green for low
+    };
+
+    let seven_day_color = if seven_day_pct >= 80 {
+        Color::Rgb(255, 100, 100)
+    } else if seven_day_pct >= 50 {
+        Color::Rgb(255, 200, 100)
+    } else {
+        Color::Rgb(100, 200, 100)
+    };
+
+    vec![Line::from(vec![
+        Span::styled("5h ", Style::default().fg(Color::Rgb(140, 140, 150))),
+        Span::styled(format!("{}%", five_hr_pct), Style::default().fg(five_hr_color)),
+        Span::styled(" · ", Style::default().fg(Color::Rgb(100, 100, 110))),
+        Span::styled("7d ", Style::default().fg(Color::Rgb(140, 140, 150))),
+        Span::styled(format!("{}%", seven_day_pct), Style::default().fg(seven_day_color)),
+    ])]
 }
 
 fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
