@@ -38,6 +38,7 @@ struct PendingFileDiff {
 pub struct ClientApp {
     // Display state (matching App for TuiState)
     display_messages: Vec<DisplayMessage>,
+    display_messages_version: u64,
     input: String,
     cursor_pos: usize,
     is_processing: bool,
@@ -78,10 +79,27 @@ pub struct ClientApp {
 }
 
 impl ClientApp {
+    fn bump_display_messages_version(&mut self) {
+        self.display_messages_version = self.display_messages_version.wrapping_add(1);
+    }
+
+    fn push_display_message(&mut self, message: DisplayMessage) {
+        self.display_messages.push(message);
+        self.bump_display_messages_version();
+    }
+
+    fn clear_display_messages(&mut self) {
+        if !self.display_messages.is_empty() {
+            self.display_messages.clear();
+            self.bump_display_messages_version();
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             // Display state
             display_messages: Vec::new(),
+            display_messages_version: 0,
             input: String::new(),
             cursor_pos: 0,
             is_processing: false,
@@ -161,7 +179,7 @@ impl ClientApp {
         {
             self.session_id = Some(session_id);
             for msg in messages {
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: msg.role,
                     content: msg.content,
                     tool_calls: msg.tool_calls.unwrap_or_default(),
@@ -199,7 +217,7 @@ impl ClientApp {
                     // Reconnecting after disconnect
                     reconnect_attempts += 1;
                     if reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
-                        self.display_messages.push(DisplayMessage {
+                        self.push_display_message(DisplayMessage {
                             role: "error".to_string(),
                             content: "Failed to reconnect after 30 seconds. Press Ctrl+C to quit."
                                 .to_string(),
@@ -238,7 +256,7 @@ impl ClientApp {
                     String::new()
                 };
 
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: format!("✓ Reconnected successfully.{}", reload_details),
                     tool_calls: Vec::new(),
@@ -328,7 +346,7 @@ impl ClientApp {
                                 // Server disconnected - try to reconnect
                                 self.server_disconnected = true;
                                 self.is_processing = false;
-                                self.display_messages.push(DisplayMessage {
+                                self.push_display_message(DisplayMessage {
                                     role: "system".to_string(),
                                     content: "Server disconnected. Reconnecting...".to_string(),
                                     tool_calls: Vec::new(),
@@ -450,9 +468,10 @@ impl ClientApp {
             }
             ServerEvent::Done { .. } => {
                 if !self.streaming_text.is_empty() {
-                    self.display_messages.push(DisplayMessage {
+                    let content = std::mem::take(&mut self.streaming_text);
+                    self.push_display_message(DisplayMessage {
                         role: "assistant".to_string(),
-                        content: std::mem::take(&mut self.streaming_text),
+                        content,
                         tool_calls: Vec::new(),
                         duration_secs: None,
                         title: None,
@@ -464,7 +483,7 @@ impl ClientApp {
                 self.pending_diffs.clear();
             }
             ServerEvent::Error { message, .. } => {
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "error".to_string(),
                     content: message,
                     tool_calls: Vec::new(),
@@ -479,7 +498,7 @@ impl ClientApp {
                 self.session_id = Some(session_id);
             }
             ServerEvent::Reloading { .. } => {
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: "🔄 Server reload initiated...".to_string(),
                     tool_calls: Vec::new(),
@@ -511,7 +530,7 @@ impl ClientApp {
                     }
                 }
 
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content,
                     tool_calls: Vec::new(),
@@ -547,7 +566,7 @@ impl ClientApp {
                 self.session_id = Some(session_id);
 
                 if session_changed {
-                    self.display_messages.clear();
+                    self.clear_display_messages();
                     self.streaming_text.clear();
                     self.streaming_tool_calls.clear();
                     self.streaming_input_tokens = 0;
@@ -570,7 +589,7 @@ impl ClientApp {
                 if session_changed || !self.has_loaded_history {
                     self.has_loaded_history = true;
                     for msg in messages {
-                        self.display_messages.push(DisplayMessage {
+                        self.push_display_message(DisplayMessage {
                             role: msg.role,
                             content: msg.content,
                             tool_calls: Vec::new(),
@@ -583,7 +602,7 @@ impl ClientApp {
             }
             ServerEvent::ModelChanged { model, error, .. } => {
                 if let Some(err) = error {
-                    self.display_messages.push(DisplayMessage {
+                    self.push_display_message(DisplayMessage {
                         role: "error".to_string(),
                         content: format!("Failed to switch model: {}", err),
                         tool_calls: Vec::new(),
@@ -594,7 +613,7 @@ impl ClientApp {
                     self.status_notice = Some(("Model switch failed".to_string(), Instant::now()));
                 } else {
                     self.provider_model = model.clone();
-                    self.display_messages.push(DisplayMessage {
+                    self.push_display_message(DisplayMessage {
                         role: "system".to_string(),
                         content: format!("✓ Switched to model: {}", model),
                         tool_calls: Vec::new(),
@@ -621,7 +640,7 @@ impl ClientApp {
                     }
                     NotificationType::Message => "💬 Message".to_string(),
                 };
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "notification".to_string(),
                     content: format!("{}\nFrom: {}\n\n{}", prefix, from, message),
                     tool_calls: Vec::new(),
@@ -686,7 +705,7 @@ impl ClientApp {
                     }
 
                     // Add user message to display
-                    self.display_messages.push(DisplayMessage {
+                    self.push_display_message(DisplayMessage {
                         role: "user".to_string(),
                         content: input.clone(),
                         tool_calls: Vec::new(),
@@ -751,6 +770,10 @@ fn generate_unified_diff(old: &str, new: &str, file_path: &str) -> String {
 impl TuiState for ClientApp {
     fn display_messages(&self) -> &[DisplayMessage] {
         &self.display_messages
+    }
+
+    fn display_messages_version(&self) -> u64 {
+        self.display_messages_version
     }
 
     fn streaming_text(&self) -> &str {

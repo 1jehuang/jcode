@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-#![allow(dead_code)]
 
 use super::keybind::{ModelSwitchKeys, ScrollKeys};
 use super::stream_buffer::StreamBuffer;
@@ -307,6 +306,7 @@ pub struct App {
     messages: Vec<Message>,
     session: Session,
     display_messages: Vec<DisplayMessage>,
+    display_messages_version: u64,
     input: String,
     cursor_pos: usize,
     scroll_offset: usize,
@@ -491,6 +491,7 @@ impl App {
             messages: Vec::new(),
             session,
             display_messages: Vec::new(),
+            display_messages_version: 0,
             input: String::new(),
             cursor_pos: 0,
             scroll_offset: 0,
@@ -628,7 +629,7 @@ impl App {
             }
             if let Some(msg) = init_error {
                 crate::logging::error(&msg);
-                self.display_messages.push(DisplayMessage::error(msg));
+                self.push_display_message(DisplayMessage::error(msg));
                 self.set_status_notice("MCP init failed");
             }
 
@@ -662,7 +663,7 @@ impl App {
                 }
                 total_chars += item.content.len();
 
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: item.role,
                     content: item.content,
                     tool_calls: item.tool_calls,
@@ -684,7 +685,7 @@ impl App {
             let mut restored_model = false;
             if let Some(model) = self.session.model.clone() {
                 if let Err(e) = self.provider.set_model(&model) {
-                    self.display_messages.push(DisplayMessage {
+                    self.push_display_message(DisplayMessage {
                         role: "system".to_string(),
                         content: format!("⚠ Failed to restore model '{}': {}", model, e),
                         tool_calls: vec![],
@@ -764,7 +765,7 @@ impl App {
 
             // Add success message with stats (only if there's actual content or a reload happened)
             if total_turns > 0 || is_reload {
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: message,
                     tool_calls: vec![],
@@ -830,7 +831,7 @@ impl App {
                     .map(|t| format!(" You were working on: {}", t))
                     .unwrap_or_default();
 
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: format!(
                         "⚠ {} failed. Session could not be restored. Previous version: {}, Target version: {}.{}\n\
@@ -911,7 +912,7 @@ impl App {
             if let Err(e) = self.session.save() {
                 let msg = format!("Failed to save session before migration: {}", e);
                 crate::logging::error(&msg);
-                self.display_messages.push(DisplayMessage::error(msg));
+                self.push_display_message(DisplayMessage::error(msg));
                 self.set_status_notice("Migration aborted");
                 return false;
             }
@@ -1844,7 +1845,7 @@ impl App {
                                 } else {
                                     "✓ Rate limit reset. Retrying...".to_string()
                                 };
-                                self.display_messages.push(DisplayMessage::system(msg));
+                                self.push_display_message(DisplayMessage::system(msg));
                                 self.pending_turn = true;
                             }
                         }
@@ -1904,7 +1905,7 @@ impl App {
                                     task.output_preview,
                                     task.task_id,
                                 );
-                                self.display_messages.push(DisplayMessage::system(notification.clone()));
+                                self.push_display_message(DisplayMessage::system(notification.clone()));
                                 // If not currently processing, inject as a message for the agent
                                 if !self.is_processing {
                                     self.messages.push(Message {
@@ -1959,7 +1960,7 @@ impl App {
                     }
                     reconnect_attempts += 1;
                     if reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
-                        self.display_messages.push(DisplayMessage::error(
+                        self.push_display_message(DisplayMessage::error(
                             "Failed to reconnect after 30 seconds. Press Ctrl+C to quit.",
                         ));
                         terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
@@ -2006,7 +2007,7 @@ impl App {
 
                 // Check if client also needs to reload (newer binary available)
                 if self.has_newer_binary() {
-                    self.display_messages.push(DisplayMessage::system(
+                    self.push_display_message(DisplayMessage::system(
                         "Server reloaded. Reloading client with newer binary...".to_string(),
                     ));
                     terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
@@ -2026,7 +2027,7 @@ impl App {
                     String::new()
                 };
 
-                self.display_messages.push(DisplayMessage::system(format!(
+                self.push_display_message(DisplayMessage::system(format!(
                     "✓ Reconnected successfully.{}",
                     reload_details
                 )));
@@ -2085,13 +2086,13 @@ impl App {
                 let exists_on_disk = crate::session::session_exists(&session_id);
                 if !exists_on_disk {
                     if resume_from_arg {
-                        self.display_messages.push(DisplayMessage::error(format!(
+                        self.push_display_message(DisplayMessage::error(format!(
                             "Failed to resume session: {} (not found)",
                             session_id
                         )));
                     }
                 } else if let Err(e) = remote.resume_session(&session_id).await {
-                    self.display_messages.push(DisplayMessage::error(format!(
+                    self.push_display_message(DisplayMessage::error(format!(
                         "Failed to resume session: {}",
                         e
                     )));
@@ -2123,7 +2124,7 @@ impl App {
                             None => {
                                 // Server disconnected
                                 self.is_processing = false;
-                                self.display_messages.push(DisplayMessage {
+                                self.push_display_message(DisplayMessage {
                                     role: "system".to_string(),
                                     content: "Server disconnected. Reconnecting...".to_string(),
                                     tool_calls: Vec::new(),
@@ -2143,7 +2144,7 @@ impl App {
                                 if !self.is_processing {
                                     if let Some(interleave_msg) = self.interleave_message.take() {
                                         if !interleave_msg.trim().is_empty() {
-                                            self.display_messages.push(DisplayMessage {
+                                            self.push_display_message(DisplayMessage {
                                                 role: "user".to_string(),
                                                 content: interleave_msg.clone(),
                                                 tool_calls: vec![],
@@ -2159,7 +2160,7 @@ impl App {
                                                     self.processing_started = Some(Instant::now());
                                                 }
                                                 Err(e) => {
-                                                    self.display_messages.push(DisplayMessage::error(format!(
+                                                    self.push_display_message(DisplayMessage::error(format!(
                                                         "Failed to send interleaved message: {}",
                                                         e
                                                     )));
@@ -2169,7 +2170,7 @@ impl App {
                                     } else if !self.queued_messages.is_empty() {
                                         let combined =
                                             std::mem::take(&mut self.queued_messages).join("\n\n");
-                                        self.display_messages.push(DisplayMessage {
+                                        self.push_display_message(DisplayMessage {
                                             role: "user".to_string(),
                                             content: combined.clone(),
                                             tool_calls: vec![],
@@ -2294,9 +2295,10 @@ impl App {
                 }
                 // Commit streaming text as assistant message
                 if !self.streaming_text.is_empty() {
-                    self.display_messages.push(DisplayMessage {
+                    let content = std::mem::take(&mut self.streaming_text);
+                    self.push_display_message(DisplayMessage {
                         role: "assistant".to_string(),
-                        content: std::mem::take(&mut self.streaming_text),
+                        content,
                         tool_calls: vec![],
                         duration_secs: None,
                         title: None,
@@ -2304,7 +2306,7 @@ impl App {
                     });
                 }
                 // Add tool result message
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "tool".to_string(),
                     content: display_output,
                     tool_calls: vec![],
@@ -2344,9 +2346,10 @@ impl App {
                     }
                     if !self.streaming_text.is_empty() {
                         let duration = self.processing_started.map(|s| s.elapsed().as_secs_f32());
-                        self.display_messages.push(DisplayMessage {
+                        let content = std::mem::take(&mut self.streaming_text);
+                        self.push_display_message(DisplayMessage {
                             role: "assistant".to_string(),
-                            content: std::mem::take(&mut self.streaming_text),
+                            content,
                             tool_calls: vec![],
                             duration_secs: duration,
                             title: None,
@@ -2364,7 +2367,7 @@ impl App {
                 }
             }
             ServerEvent::Error { message, .. } => {
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "error".to_string(),
                     content: message,
                     tool_calls: vec![],
@@ -2383,7 +2386,7 @@ impl App {
                 self.remote_session_id = Some(session_id);
             }
             ServerEvent::Reloading { .. } => {
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: "🔄 Server reload initiated...".to_string(),
                     tool_calls: vec![],
@@ -2415,7 +2418,7 @@ impl App {
                     }
                 }
 
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content,
                     tool_calls: vec![],
@@ -2452,7 +2455,7 @@ impl App {
                 let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
 
                 if session_changed {
-                    self.display_messages.clear();
+                    self.clear_display_messages();
                     self.streaming_text.clear();
                     self.streaming_tool_calls.clear();
                     self.thought_line_inserted = false;
@@ -2488,7 +2491,7 @@ impl App {
                 if session_changed || !remote.has_loaded_history() {
                     remote.mark_history_loaded();
                     for msg in messages {
-                        self.display_messages.push(DisplayMessage {
+                        self.push_display_message(DisplayMessage {
                             role: msg.role,
                             content: msg.content,
                             tool_calls: msg.tool_calls.unwrap_or_default(),
@@ -2501,7 +2504,7 @@ impl App {
             }
             ServerEvent::ModelChanged { model, error, .. } => {
                 if let Some(err) = error {
-                    self.display_messages.push(DisplayMessage::error(format!(
+                    self.push_display_message(DisplayMessage::error(format!(
                         "Failed to switch model: {}",
                         err
                     )));
@@ -2509,7 +2512,7 @@ impl App {
                 } else {
                     self.update_context_limit_for_model(&model);
                     self.remote_provider_model = Some(model.clone());
-                    self.display_messages.push(DisplayMessage::system(format!(
+                    self.push_display_message(DisplayMessage::system(format!(
                         "✓ Switched to model: {}",
                         model
                     )));
@@ -2598,7 +2601,7 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Char('l') if !self.is_processing => {
-                    self.display_messages.clear();
+                    self.clear_display_messages();
                     self.queued_messages.clear();
                     return Ok(());
                 }
@@ -2651,7 +2654,7 @@ impl App {
                 match self.send_action(true) {
                     SendAction::Submit => {
                         // Add user message to display
-                        self.display_messages.push(DisplayMessage {
+                        self.push_display_message(DisplayMessage {
                             role: "user".to_string(),
                             content: raw_input,
                             tool_calls: vec![],
@@ -2735,7 +2738,7 @@ impl App {
                             self.remote_server_has_update.unwrap_or(client_needs_reload);
 
                         if !client_needs_reload && !server_needs_reload {
-                            self.display_messages.push(DisplayMessage::system(
+                            self.push_display_message(DisplayMessage::system(
                                 "No newer binary found. Nothing to reload.".to_string(),
                             ));
                             return Ok(());
@@ -2743,14 +2746,14 @@ impl App {
 
                         // Reload server first (if needed), then client
                         if server_needs_reload {
-                            self.display_messages.push(DisplayMessage::system(
+                            self.push_display_message(DisplayMessage::system(
                                 "Reloading server with newer binary...".to_string(),
                             ));
                             remote.reload().await?;
                         }
 
                         if client_needs_reload {
-                            self.display_messages.push(DisplayMessage::system(
+                            self.push_display_message(DisplayMessage::system(
                                 "Reloading client with newer binary...".to_string(),
                             ));
                             let session_id = self
@@ -2765,8 +2768,9 @@ impl App {
 
                     // Handle /client-reload - force reload CLIENT binary
                     if trimmed == "/client-reload" {
-                        self.display_messages
-                            .push(DisplayMessage::system("Reloading client...".to_string()));
+                        self.push_display_message(DisplayMessage::system(
+                            "Reloading client...".to_string(),
+                        ));
                         let session_id = self
                             .remote_session_id
                             .clone()
@@ -2778,15 +2782,16 @@ impl App {
 
                     // Handle /server-reload - force reload SERVER (keeps client running)
                     if trimmed == "/server-reload" {
-                        self.display_messages
-                            .push(DisplayMessage::system("Reloading server...".to_string()));
+                        self.push_display_message(DisplayMessage::system(
+                            "Reloading server...".to_string(),
+                        ));
                         remote.reload().await?;
                         return Ok(());
                     }
 
                     // Handle /rebuild - rebuild and reload CLIENT binary
                     if trimmed == "/rebuild" {
-                        self.display_messages.push(DisplayMessage::system(
+                        self.push_display_message(DisplayMessage::system(
                             "Rebuilding (git pull + cargo build + tests)...".to_string(),
                         ));
                         let session_id = self
@@ -2814,7 +2819,7 @@ impl App {
                             .unwrap_or_else(|| "unknown".to_string());
 
                         if self.remote_available_models.is_empty() {
-                            self.display_messages.push(DisplayMessage::system(format!(
+                            self.push_display_message(DisplayMessage::system(format!(
                                 "**Available models:**\n  • {} (current)\n\nUse `/model <name>` to switch.",
                                 current
                             )));
@@ -2834,7 +2839,7 @@ impl App {
                             .collect::<Vec<_>>()
                             .join("\n");
 
-                        self.display_messages.push(DisplayMessage::system(format!(
+                        self.push_display_message(DisplayMessage::system(format!(
                             "**Available models:**\n{}\n\nUse `/model <name>` to switch.",
                             model_list
                         )));
@@ -2844,8 +2849,7 @@ impl App {
                     if let Some(model_name) = trimmed.strip_prefix("/model ") {
                         let model_name = model_name.trim();
                         if model_name.is_empty() {
-                            self.display_messages
-                                .push(DisplayMessage::error("Usage: /model <name>"));
+                            self.push_display_message(DisplayMessage::error("Usage: /model <name>"));
                             return Ok(());
                         }
                         remote.set_model(model_name).await?;
@@ -2856,7 +2860,7 @@ impl App {
                     match self.send_action(false) {
                         SendAction::Submit => {
                             // Add user message to display (show placeholder)
-                            self.display_messages.push(DisplayMessage {
+                            self.push_display_message(DisplayMessage {
                                 role: "user".to_string(),
                                 content: raw_input,
                                 tool_calls: vec![],
@@ -2928,7 +2932,7 @@ impl App {
         // For now, run the turn but poll for input during streaming
 
         if let Err(e) = self.run_turn_interactive(terminal, event_stream).await {
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "error".to_string(),
                 content: format!("Error: {}", e),
                 tool_calls: vec![],
@@ -3065,7 +3069,7 @@ impl App {
                 }
                 KeyCode::Char('l') if !self.is_processing => {
                     self.messages.clear();
-                    self.display_messages.clear();
+                    self.clear_display_messages();
                     self.queued_messages.clear();
                     self.pasted_contents.clear();
                     self.active_skill = None;
@@ -3374,7 +3378,7 @@ impl App {
             } else {
                 ""
             };
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: format!(
                     "**Commands:**\n\
@@ -3427,7 +3431,7 @@ impl App {
 
         if trimmed == "/clear" {
             self.messages.clear();
-            self.display_messages.clear();
+            self.clear_display_messages();
             self.queued_messages.clear();
             self.pasted_contents.clear();
             self.active_skill = None;
@@ -3441,7 +3445,7 @@ impl App {
         // Handle /config command
         if trimmed == "/config" {
             use crate::config::config;
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: config().display_string(),
                 tool_calls: vec![],
@@ -3456,7 +3460,7 @@ impl App {
             use crate::config::Config;
             match Config::create_default_config_file() {
                 Ok(path) => {
-                    self.display_messages.push(DisplayMessage {
+                    self.push_display_message(DisplayMessage {
                         role: "system".to_string(),
                         content: format!(
                             "Created default config file at:\n`{}`\n\nEdit this file to customize your keybindings and settings.",
@@ -3469,7 +3473,7 @@ impl App {
                     });
                 }
                 Err(e) => {
-                    self.display_messages.push(DisplayMessage {
+                    self.push_display_message(DisplayMessage {
                         role: "system".to_string(),
                         content: format!("Failed to create config file: {}", e),
                         tool_calls: vec![],
@@ -3488,7 +3492,7 @@ impl App {
                 if !path.exists() {
                     // Create default config first
                     if let Err(e) = Config::create_default_config_file() {
-                        self.display_messages.push(DisplayMessage {
+                        self.push_display_message(DisplayMessage {
                             role: "system".to_string(),
                             content: format!("Failed to create config file: {}", e),
                             tool_calls: vec![],
@@ -3502,7 +3506,7 @@ impl App {
 
                 // Open in editor
                 let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: format!(
                         "Opening config in editor...\n`{} {}`\n\n*Restart jcode after editing for changes to take effect.*",
@@ -3525,7 +3529,7 @@ impl App {
         if trimmed == "/debug-visual" || trimmed == "/debug-visual on" {
             use super::visual_debug;
             visual_debug::enable();
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: "Visual debugging enabled. Frames are being captured.\n\
                          Use `/debug-visual dump` to write captured frames to file.\n\
@@ -3543,7 +3547,7 @@ impl App {
         if trimmed == "/debug-visual off" {
             use super::visual_debug;
             visual_debug::disable();
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: "Visual debugging disabled.".to_string(),
                 tool_calls: vec![],
@@ -3559,7 +3563,7 @@ impl App {
             use super::visual_debug;
             match visual_debug::dump_to_file() {
                 Ok(path) => {
-                    self.display_messages.push(DisplayMessage {
+                    self.push_display_message(DisplayMessage {
                         role: "system".to_string(),
                         content: format!(
                             "Visual debug dump written to:\n`{}`\n\n\
@@ -3577,7 +3581,7 @@ impl App {
                     });
                 }
                 Err(e) => {
-                    self.display_messages.push(DisplayMessage {
+                    self.push_display_message(DisplayMessage {
                         role: "error".to_string(),
                         content: format!("Failed to write visual debug dump: {}", e),
                         tool_calls: vec![],
@@ -3594,7 +3598,7 @@ impl App {
         if trimmed == "/screenshot-mode" || trimmed == "/screenshot-mode on" {
             use super::screenshot;
             screenshot::enable();
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: "Screenshot mode enabled.\n\n\
                          Run the watcher in another terminal:\n\
@@ -3616,7 +3620,7 @@ impl App {
             use super::screenshot;
             screenshot::disable();
             screenshot::clear_all_signals();
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: "Screenshot mode disabled.".to_string(),
                 tool_calls: vec![],
@@ -3637,7 +3641,7 @@ impl App {
                         "manual_trigger": true,
                     }),
                 );
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: format!("Screenshot signal sent: {}", state_name),
                     tool_calls: vec![],
@@ -3653,7 +3657,7 @@ impl App {
         if trimmed == "/record" || trimmed == "/record start" {
             use super::test_harness;
             test_harness::start_recording();
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: "🎬 Recording started.\n\n\
                          All your keystrokes are now being recorded.\n\
@@ -3693,7 +3697,7 @@ impl App {
                 let _ = file.write_all(json.as_bytes());
             }
 
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: format!(
                     "🎬 Recording stopped.\n\n\
@@ -3718,7 +3722,7 @@ impl App {
         if trimmed == "/record cancel" {
             use super::test_harness;
             test_harness::stop_recording();
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: "🎬 Recording cancelled.".to_string(),
                 tool_calls: vec![],
@@ -3746,7 +3750,7 @@ impl App {
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: format!(
                     "**Available models:**\n{}\n\nUse `/model <name>` to switch.",
@@ -3770,7 +3774,7 @@ impl App {
                     self.update_context_limit_for_model(&active_model);
                     self.session.model = Some(active_model.clone());
                     let _ = self.session.save();
-                    self.display_messages.push(DisplayMessage {
+                    self.push_display_message(DisplayMessage {
                         role: "system".to_string(),
                         content: format!("✓ Switched to model: {}", active_model),
                         tool_calls: vec![],
@@ -3781,7 +3785,7 @@ impl App {
                     self.set_status_notice(format!("Model → {}", model_name));
                 }
                 Err(e) => {
-                    self.display_messages.push(DisplayMessage {
+                    self.push_display_message(DisplayMessage {
                         role: "error".to_string(),
                         content: format!("Failed to switch model: {}", e),
                         tool_calls: vec![],
@@ -3802,7 +3806,7 @@ impl App {
             } else {
                 ""
             };
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: format!("jcode {}{}", version, is_canary),
                 tool_calls: vec![],
@@ -3890,7 +3894,7 @@ impl App {
                 }
             }
 
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: info,
                 tool_calls: vec![],
@@ -3904,7 +3908,7 @@ impl App {
         if trimmed == "/reload" {
             // Smart reload: check if there's a newer binary
             if !self.has_newer_binary() {
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: "No newer binary found. Nothing to reload.\nUse /rebuild to build a new version.".to_string(),
                     tool_calls: vec![],
@@ -3914,7 +3918,7 @@ impl App {
                 });
                 return;
             }
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: "Reloading with newer binary...".to_string(),
                 tool_calls: vec![],
@@ -3934,7 +3938,7 @@ impl App {
         }
 
         if trimmed == "/rebuild" {
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: "Rebuilding jcode (git pull + cargo build + tests)...".to_string(),
                 tool_calls: vec![],
@@ -3957,7 +3961,7 @@ impl App {
         if let Some(skill_name) = SkillRegistry::parse_invocation(&input) {
             if let Some(skill) = self.skills.get(skill_name) {
                 self.active_skill = Some(skill_name.to_string());
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: format!("Activated skill: {} - {}", skill.name, skill.description),
                     tool_calls: vec![],
@@ -3966,7 +3970,7 @@ impl App {
                     tool_data: None,
                 });
             } else {
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "error".to_string(),
                     content: format!("Unknown skill: /{}", skill_name),
                     tool_calls: vec![],
@@ -3979,7 +3983,7 @@ impl App {
         }
 
         // Add user message to display (show placeholder to user, not full paste)
-        self.display_messages.push(DisplayMessage {
+        self.push_display_message(DisplayMessage {
             role: "user".to_string(),
             content: raw_input, // Show placeholder to user (condensed view)
             tool_calls: vec![],
@@ -4025,7 +4029,7 @@ impl App {
             let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
 
             // Add user message to display
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "user".to_string(),
                 content: combined.clone(),
                 tool_calls: vec![],
@@ -4055,7 +4059,7 @@ impl App {
             self.status = ProcessingStatus::Sending;
 
             if let Err(e) = self.run_turn_interactive(terminal, event_stream).await {
-                self.display_messages.push(DisplayMessage {
+                self.push_display_message(DisplayMessage {
                     role: "error".to_string(),
                     content: format!("Error: {}", e),
                     tool_calls: vec![],
@@ -4071,7 +4075,7 @@ impl App {
     fn cycle_model(&mut self, direction: i8) {
         let models = self.provider.available_models();
         if models.is_empty() {
-            self.display_messages.push(DisplayMessage::error(
+            self.push_display_message(DisplayMessage::error(
                 "Model switching is not available for this provider.",
             ));
             self.set_status_notice("Model switching not available");
@@ -4096,14 +4100,14 @@ impl App {
                 self.update_context_limit_for_model(next_model);
                 self.session.model = Some(self.provider.model());
                 let _ = self.session.save();
-                self.display_messages.push(DisplayMessage::system(format!(
+                self.push_display_message(DisplayMessage::system(format!(
                     "✓ Switched to model: {}",
                     next_model
                 )));
                 self.set_status_notice(format!("Model → {}", next_model));
             }
             Err(e) => {
-                self.display_messages.push(DisplayMessage::error(format!(
+                self.push_display_message(DisplayMessage::error(format!(
                     "Failed to switch model: {}",
                     e
                 )));
@@ -4203,7 +4207,7 @@ impl App {
         new_session.model = old_session.model.clone();
 
         self.messages.clear();
-        self.display_messages.clear();
+        self.clear_display_messages();
         self.queued_messages.clear();
         self.pasted_contents.clear();
         self.active_skill = None;
@@ -4225,7 +4229,7 @@ impl App {
                 role: role.clone(),
                 content: kept_blocks.clone(),
             });
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: match role {
                     Role::User => "user".to_string(),
                     Role::Assistant => "assistant".to_string(),
@@ -4247,7 +4251,7 @@ impl App {
         }
         let _ = self.session.save();
 
-        self.display_messages.push(DisplayMessage::system(format!(
+        self.push_display_message(DisplayMessage::system(format!(
             "Recovery complete. New session: {}. Tool calls stripped; context preserved.",
             self.session.id
         )));
@@ -4261,7 +4265,7 @@ impl App {
                     "Tool outputs are missing for this turn. {}\n\nPress Ctrl+R to recover into a new session with context copied.",
                     summary
                 );
-                self.display_messages.push(DisplayMessage::error(message));
+                self.push_display_message(DisplayMessage::error(message));
                 self.set_status_notice("Recovery needed");
                 return Ok(());
             }
@@ -4332,7 +4336,7 @@ impl App {
 
                             // Commit any pending text as a partial assistant message
                             if !self.streaming_text.is_empty() {
-                                self.display_messages.push(DisplayMessage {
+                                self.push_display_message(DisplayMessage {
                                     role: "assistant".to_string(),
                                     content: self.streaming_text.clone(),
                                     tool_calls: vec![],
@@ -4345,7 +4349,7 @@ impl App {
                             }
 
                             // Add tool call as its own display message
-                            self.display_messages.push(DisplayMessage {
+                            self.push_display_message(DisplayMessage {
                                 role: "tool".to_string(),
                                 content: tool.name.clone(),
                                 tool_calls: vec![],
@@ -4408,7 +4412,7 @@ impl App {
                             } else {
                                 String::new()
                             };
-                            self.display_messages.push(DisplayMessage::system(format!(
+                            self.push_display_message(DisplayMessage::system(format!(
                                 "⏳ Rate limit hit. Will auto-retry in {} seconds...{}",
                                 reset_duration.as_secs(),
                                 queued_info
@@ -4533,7 +4537,7 @@ impl App {
             if tool_calls.is_empty() {
                 // No tool calls - display full text_content
                 if !text_content.is_empty() {
-                    self.display_messages.push(DisplayMessage {
+                    self.push_display_message(DisplayMessage {
                         role: "assistant".to_string(),
                         content: text_content.clone(),
                         tool_calls: vec![],
@@ -4547,7 +4551,7 @@ impl App {
                 // Had tool calls - only display text that came AFTER the last tool
                 // (text before each tool was already committed in ToolUseEnd handler)
                 if !self.streaming_text.is_empty() {
-                    self.display_messages.push(DisplayMessage {
+                    self.push_display_message(DisplayMessage {
                         role: "assistant".to_string(),
                         content: self.streaming_text.clone(),
                         tool_calls: vec![],
@@ -4679,7 +4683,7 @@ impl App {
                     "Tool outputs are missing for this turn. {}\n\nPress Ctrl+R to recover into a new session with context copied.",
                     summary
                 );
-                self.display_messages.push(DisplayMessage::error(message));
+                self.push_display_message(DisplayMessage::error(message));
                 self.set_status_notice("Recovery needed");
                 return Ok(());
             }
@@ -4724,7 +4728,7 @@ impl App {
                                     if self.cancel_requested {
                                         self.cancel_requested = false;
                                         self.interleave_message = None;
-                                        self.display_messages.push(DisplayMessage {
+                                        self.push_display_message(DisplayMessage {
                                             role: "system".to_string(),
                                             content: "Interrupted".to_string(),
                                             tool_calls: vec![],
@@ -4792,7 +4796,7 @@ impl App {
                                     if self.cancel_requested {
                                         self.cancel_requested = false;
                                         self.interleave_message = None;
-                                        self.display_messages.push(DisplayMessage {
+                                        self.push_display_message(DisplayMessage {
                                             role: "system".to_string(),
                                             content: "Interrupted".to_string(),
                                             tool_calls: vec![],
@@ -4834,9 +4838,10 @@ impl App {
                                             }
                                             // Add display message for partial response
                                             if !self.streaming_text.is_empty() {
-                                                self.display_messages.push(DisplayMessage {
+                                                let content = std::mem::take(&mut self.streaming_text);
+                                                self.push_display_message(DisplayMessage {
                                                     role: "assistant".to_string(),
-                                                    content: std::mem::take(&mut self.streaming_text),
+                                                    content,
                                                     tool_calls: tool_calls.iter().map(|t| t.name.clone()).collect(),
                                                     duration_secs: None,
                                                     title: None,
@@ -4846,7 +4851,7 @@ impl App {
                                         }
                                         // Add user's interleaved message
                                         self.messages.push(Message::user(&interleave_msg));
-                                        self.display_messages.push(DisplayMessage {
+                                        self.push_display_message(DisplayMessage {
                                             role: "user".to_string(),
                                             content: interleave_msg,
                                             tool_calls: vec![],
@@ -4934,7 +4939,7 @@ impl App {
 
                                             // Commit any pending text as a partial assistant message
                                             if !self.streaming_text.is_empty() {
-                                                self.display_messages.push(DisplayMessage {
+                                                self.push_display_message(DisplayMessage {
                                                     role: "assistant".to_string(),
                                                     content: self.streaming_text.clone(),
                                                     tool_calls: vec![],
@@ -4947,7 +4952,7 @@ impl App {
                                             }
 
                                             // Add tool call as its own display message
-                                            self.display_messages.push(DisplayMessage {
+                                            self.push_display_message(DisplayMessage {
                                                 role: "tool".to_string(),
                                                 content: tool.name.clone(),
                                                 tool_calls: vec![],
@@ -5054,6 +5059,7 @@ impl App {
                                             dm.tool_data.as_ref().map(|td| &td.id) == Some(&tool_use_id)
                                         }) {
                                             dm.content = content.clone();
+                                            self.bump_display_messages_version();
                                         }
 
                                         // Clear this tool from streaming_tool_calls
@@ -5141,7 +5147,7 @@ impl App {
             if tool_calls.is_empty() {
                 // No tool calls - display full text_content
                 if !text_content.is_empty() {
-                    self.display_messages.push(DisplayMessage {
+                    self.push_display_message(DisplayMessage {
                         role: "assistant".to_string(),
                         content: text_content.clone(),
                         tool_calls: vec![],
@@ -5155,7 +5161,7 @@ impl App {
                 // Had tool calls - only display text that came AFTER the last tool
                 // (text before each tool was already committed in ToolUseEnd handler)
                 if !self.streaming_text.is_empty() {
-                    self.display_messages.push(DisplayMessage {
+                    self.push_display_message(DisplayMessage {
                         role: "assistant".to_string(),
                         content: self.streaming_text.clone(),
                         tool_calls: vec![],
@@ -5271,7 +5277,7 @@ impl App {
                                         if self.cancel_requested {
                                             self.cancel_requested = false;
                                             self.interleave_message = None;
-                                            self.display_messages.push(DisplayMessage {
+                                            self.push_display_message(DisplayMessage {
                                                 role: "system".to_string(),
                                                 content: "Interrupted".to_string(),
                                                 tool_calls: vec![],
@@ -5523,6 +5529,22 @@ impl App {
         &self.display_messages
     }
 
+    fn bump_display_messages_version(&mut self) {
+        self.display_messages_version = self.display_messages_version.wrapping_add(1);
+    }
+
+    fn push_display_message(&mut self, message: DisplayMessage) {
+        self.display_messages.push(message);
+        self.bump_display_messages_version();
+    }
+
+    fn clear_display_messages(&mut self) {
+        if !self.display_messages.is_empty() {
+            self.display_messages.clear();
+            self.bump_display_messages_version();
+        }
+    }
+
     /// Find word boundary going backward (for Ctrl+W, Alt+B)
     fn find_word_boundary_back(&self) -> usize {
         if self.cursor_pos == 0 {
@@ -5757,7 +5779,7 @@ impl App {
 
     fn push_turn_footer(&mut self, duration: Option<f32>) {
         if let Some(footer) = self.build_turn_footer(duration) {
-            self.display_messages.push(DisplayMessage {
+            self.push_display_message(DisplayMessage {
                 role: "meta".to_string(),
                 content: footer,
                 tool_calls: vec![],
@@ -6077,6 +6099,10 @@ impl App {
 impl super::TuiState for App {
     fn display_messages(&self) -> &[DisplayMessage] {
         &self.display_messages
+    }
+
+    fn display_messages_version(&self) -> u64 {
+        self.display_messages_version
     }
 
     fn streaming_text(&self) -> &str {
