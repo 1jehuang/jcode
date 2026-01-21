@@ -3172,9 +3172,10 @@ impl App {
                         let raw_input = std::mem::take(&mut self.input);
                         let expanded = self.expand_paste_placeholders(&raw_input);
                         self.pasted_contents.clear();
-                        self.queued_messages.insert(0, expanded);
                         self.cursor_pos = 0;
-                        self.set_status_notice("⏭ Queued to send next");
+                        // Set interleave_message so streaming code can pick it up
+                        self.interleave_message = Some(expanded);
+                        self.set_status_notice("⏭ Sending now (interleave)");
                     }
                 }
             }
@@ -3191,9 +3192,10 @@ impl App {
                             let raw_input = std::mem::take(&mut self.input);
                             let expanded = self.expand_paste_placeholders(&raw_input);
                             self.pasted_contents.clear();
-                            self.queued_messages.insert(0, expanded);
                             self.cursor_pos = 0;
-                            self.set_status_notice("⏭ Queued to send next");
+                            // Set interleave_message so streaming code can pick it up
+                            self.interleave_message = Some(expanded);
+                            self.set_status_notice("⏭ Sending now (interleave)");
                         }
                     }
                 }

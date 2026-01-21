@@ -1088,8 +1088,8 @@ fn render_swarm_compact(info: &SwarmInfo) -> Vec<Line<'static>> {
             Style::default().fg(Color::Rgb(180, 180, 190)),
         ));
     } else {
-        // Show swarm icon
-        spans.push(Span::styled("🔗 ", Style::default().fg(Color::Rgb(140, 180, 255))));
+        // Show swarm icon (bee for "swarm")
+        spans.push(Span::styled("🐝 ", Style::default().fg(Color::Rgb(255, 200, 100))));
     }
 
     // Session count if > 1
