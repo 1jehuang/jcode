@@ -1,3 +1,4 @@
+pub mod anthropic;
 pub mod claude;
 pub mod openai;
 
