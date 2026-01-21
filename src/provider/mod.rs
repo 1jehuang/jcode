@@ -148,11 +148,16 @@ pub fn provider_for_model(model: &str) -> Option<&'static str> {
 
 /// MultiProvider wraps multiple providers and allows seamless model switching
 pub struct MultiProvider {
+    /// Claude SDK provider (uses Python bridge)
     claude: Option<claude::ClaudeProvider>,
+    /// Direct Anthropic API provider (no Python dependency)
+    anthropic: Option<anthropic::AnthropicProvider>,
     openai: Option<openai::OpenAIProvider>,
     active: RwLock<ActiveProvider>,
     has_claude_creds: bool,
     has_openai_creds: bool,
+    /// Use direct API instead of SDK for Claude models
+    use_direct_api: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -167,9 +172,23 @@ impl MultiProvider {
         let has_claude_creds = auth::claude::load_credentials().is_ok();
         let has_openai_creds = auth::codex::load_credentials().is_ok();
 
+        // Check if we should use direct API instead of SDK
+        // Set JCODE_USE_DIRECT_API=1 to use direct Anthropic API
+        let use_direct_api = std::env::var("JCODE_USE_DIRECT_API")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         // Initialize providers based on available credentials
-        let claude = if has_claude_creds {
+        let claude = if has_claude_creds && !use_direct_api {
             Some(claude::ClaudeProvider::new())
+        } else {
+            None
+        };
+
+        // Direct Anthropic API provider (bypasses Python SDK)
+        let anthropic = if has_claude_creds && use_direct_api {
+            crate::logging::info("Using direct Anthropic API (JCODE_USE_DIRECT_API=1)");
+            Some(anthropic::AnthropicProvider::new())
         } else {
             None
         };
@@ -183,7 +202,7 @@ impl MultiProvider {
         };
 
         // Default to Claude if available, otherwise OpenAI
-        let active = if claude.is_some() {
+        let active = if claude.is_some() || anthropic.is_some() {
             ActiveProvider::Claude
         } else if openai.is_some() {
             ActiveProvider::OpenAI
@@ -194,10 +213,12 @@ impl MultiProvider {
 
         Self {
             claude,
+            anthropic,
             openai,
             active: RwLock::new(active),
             has_claude_creds,
             has_openai_creds,
+            use_direct_api,
         }
     }
 
@@ -232,7 +253,12 @@ impl Provider for MultiProvider {
     ) -> Result<EventStream> {
         match self.active_provider() {
             ActiveProvider::Claude => {
-                if let Some(ref claude) = self.claude {
+                // Prefer direct Anthropic API if available
+                if let Some(ref anthropic) = self.anthropic {
+                    anthropic
+                        .complete(messages, tools, system, resume_session_id)
+                        .await
+                } else if let Some(ref claude) = self.claude {
                     claude
                         .complete(messages, tools, system, resume_session_id)
                         .await
@@ -263,11 +289,16 @@ impl Provider for MultiProvider {
 
     fn model(&self) -> String {
         match self.active_provider() {
-            ActiveProvider::Claude => self
-                .claude
-                .as_ref()
-                .map(|c| c.model())
-                .unwrap_or_else(|| "claude-opus-4-5-20251101".to_string()),
+            ActiveProvider::Claude => {
+                // Prefer anthropic if available
+                if let Some(ref anthropic) = self.anthropic {
+                    anthropic.model()
+                } else if let Some(ref claude) = self.claude {
+                    claude.model()
+                } else {
+                    "claude-opus-4-5-20251101".to_string()
+                }
+            }
             ActiveProvider::OpenAI => self
                 .openai
                 .as_ref()
@@ -281,14 +312,17 @@ impl Provider for MultiProvider {
         let target_provider = provider_for_model(model);
 
         if target_provider == Some("claude") {
-            if self.claude.is_none() {
+            if self.claude.is_none() && self.anthropic.is_none() {
                 return Err(anyhow::anyhow!(
                     "Claude credentials not available. Run `claude` to log in first."
                 ));
             }
             // Switch active provider to Claude
             *self.active.write().unwrap() = ActiveProvider::Claude;
-            if let Some(ref claude) = self.claude {
+            // Set on whichever is available
+            if let Some(ref anthropic) = self.anthropic {
+                anthropic.set_model(model)
+            } else if let Some(ref claude) = self.claude {
                 claude.set_model(model)
             } else {
                 Ok(())
@@ -310,7 +344,9 @@ impl Provider for MultiProvider {
             // Unknown model - try current provider
             match self.active_provider() {
                 ActiveProvider::Claude => {
-                    if let Some(ref claude) = self.claude {
+                    if let Some(ref anthropic) = self.anthropic {
+                        anthropic.set_model(model)
+                    } else if let Some(ref claude) = self.claude {
                         claude.set_model(model)
                     } else {
                         Err(anyhow::anyhow!("Unknown model: {}", model))
@@ -336,11 +372,17 @@ impl Provider for MultiProvider {
 
     fn handles_tools_internally(&self) -> bool {
         match self.active_provider() {
-            ActiveProvider::Claude => self
-                .claude
-                .as_ref()
-                .map(|c| c.handles_tools_internally())
-                .unwrap_or(false),
+            ActiveProvider::Claude => {
+                // Direct API does NOT handle tools internally - jcode executes them
+                if self.anthropic.is_some() {
+                    false
+                } else {
+                    self.claude
+                        .as_ref()
+                        .map(|c| c.handles_tools_internally())
+                        .unwrap_or(false)
+                }
+            }
             ActiveProvider::OpenAI => self
                 .openai
                 .as_ref()
@@ -358,11 +400,17 @@ impl Provider for MultiProvider {
 
     fn supports_compaction(&self) -> bool {
         match self.active_provider() {
-            ActiveProvider::Claude => self
-                .claude
-                .as_ref()
-                .map(|c| c.supports_compaction())
-                .unwrap_or(false),
+            ActiveProvider::Claude => {
+                // Direct API supports compaction
+                if self.anthropic.is_some() {
+                    true
+                } else {
+                    self.claude
+                        .as_ref()
+                        .map(|c| c.supports_compaction())
+                        .unwrap_or(false)
+                }
+            }
             ActiveProvider::OpenAI => self
                 .openai
                 .as_ref()
@@ -381,7 +429,14 @@ impl Provider for MultiProvider {
 
     fn native_result_sender(&self) -> Option<NativeToolResultSender> {
         match self.active_provider() {
-            ActiveProvider::Claude => self.claude.as_ref().and_then(|c| c.native_result_sender()),
+            // Direct API doesn't use native result sender
+            ActiveProvider::Claude => {
+                if self.anthropic.is_some() {
+                    None
+                } else {
+                    self.claude.as_ref().and_then(|c| c.native_result_sender())
+                }
+            }
             ActiveProvider::OpenAI => None,
         }
     }
