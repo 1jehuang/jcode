@@ -169,6 +169,9 @@ pub struct MemoryEntry {
     /// ID of memory that superseded this one
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
+    /// Embedding vector for similarity search (384 dimensions for MiniLM)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f32>>,
 }
 
 fn default_active() -> bool {
@@ -191,6 +194,7 @@ impl MemoryEntry {
             strength: 1,
             active: true,
             superseded_by: None,
+            embedding: None,
         }
     }
 
@@ -224,6 +228,36 @@ impl MemoryEntry {
     pub fn supersede(&mut self, new_id: &str) {
         self.active = false;
         self.superseded_by = Some(new_id.to_string());
+    }
+
+    /// Set embedding vector
+    pub fn with_embedding(mut self, embedding: Vec<f32>) -> Self {
+        self.embedding = Some(embedding);
+        self
+    }
+
+    /// Generate and set embedding if not already present
+    /// Returns true if embedding was generated, false if already exists or failed
+    pub fn ensure_embedding(&mut self) -> bool {
+        if self.embedding.is_some() {
+            return false;
+        }
+
+        match crate::embedding::embed(&self.content) {
+            Ok(emb) => {
+                self.embedding = Some(emb);
+                true
+            }
+            Err(e) => {
+                crate::logging::info(&format!("Failed to generate embedding: {}", e));
+                false
+            }
+        }
+    }
+
+    /// Check if this memory has an embedding
+    pub fn has_embedding(&self) -> bool {
+        self.embedding.is_some()
     }
 }
 
@@ -618,6 +652,10 @@ impl MemoryManager {
     }
 
     pub fn remember_project(&self, entry: MemoryEntry) -> Result<String> {
+        let mut entry = entry;
+        // Generate embedding for new memory (non-blocking - if it fails, we store without embedding)
+        entry.ensure_embedding();
+
         let mut store = self.load_project()?;
         let id = store.add(entry);
         self.save_project(&store)?;
@@ -625,10 +663,98 @@ impl MemoryManager {
     }
 
     pub fn remember_global(&self, entry: MemoryEntry) -> Result<String> {
+        let mut entry = entry;
+        // Generate embedding for new memory
+        entry.ensure_embedding();
+
         let mut store = self.load_global()?;
         let id = store.add(entry);
         self.save_global(&store)?;
         Ok(id)
+    }
+
+    /// Find memories similar to the given text using embedding search
+    /// Returns memories with similarity above threshold, sorted by similarity
+    pub fn find_similar(&self, text: &str, threshold: f32, limit: usize) -> Result<Vec<(MemoryEntry, f32)>> {
+        // Generate embedding for query text
+        let query_embedding = match crate::embedding::embed(text) {
+            Ok(emb) => emb,
+            Err(e) => {
+                crate::logging::info(&format!("Embedding failed, falling back to keyword search: {}", e));
+                return Ok(Vec::new());
+            }
+        };
+
+        // Collect all memories with embeddings
+        let mut all_memories: Vec<MemoryEntry> = Vec::new();
+        if let Ok(project) = self.load_project() {
+            all_memories.extend(project.entries.into_iter().filter(|e| e.active));
+        }
+        if let Ok(global) = self.load_global() {
+            all_memories.extend(global.entries.into_iter().filter(|e| e.active));
+        }
+
+        // Filter to memories with embeddings and compute similarity
+        let mut scored: Vec<(MemoryEntry, f32)> = all_memories
+            .into_iter()
+            .filter_map(|entry| {
+                entry.embedding.as_ref().map(|emb| {
+                    let sim = crate::embedding::cosine_similarity(&query_embedding, emb);
+                    (entry.clone(), sim)
+                })
+            })
+            .filter(|(_, sim)| *sim >= threshold)
+            .collect();
+
+        // Sort by similarity (highest first)
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+
+        Ok(scored)
+    }
+
+    /// Ensure all memories have embeddings (backfill for existing memories)
+    pub fn backfill_embeddings(&self) -> Result<(usize, usize)> {
+        let mut generated = 0;
+        let mut failed = 0;
+
+        // Process project memories
+        if let Ok(mut store) = self.load_project() {
+            let mut changed = false;
+            for entry in &mut store.entries {
+                if entry.embedding.is_none() {
+                    if entry.ensure_embedding() {
+                        generated += 1;
+                        changed = true;
+                    } else {
+                        failed += 1;
+                    }
+                }
+            }
+            if changed {
+                self.save_project(&store)?;
+            }
+        }
+
+        // Process global memories
+        if let Ok(mut store) = self.load_global() {
+            let mut changed = false;
+            for entry in &mut store.entries {
+                if entry.embedding.is_none() {
+                    if entry.ensure_embedding() {
+                        generated += 1;
+                        changed = true;
+                    } else {
+                        failed += 1;
+                    }
+                }
+            }
+            if changed {
+                self.save_global(&store)?;
+            }
+        }
+
+        Ok((generated, failed))
     }
 
     fn touch_entries(&self, ids: &[String]) -> Result<()> {
@@ -916,7 +1042,10 @@ impl MemoryManager {
         });
     }
 
-    /// Get relevant memories with parallel sidecar calls (faster than sequential)
+    /// Get relevant memories using embedding search + sidecar verification
+    /// 1. Embed the context (fast, local, ~30ms)
+    /// 2. Find similar memories by embedding (instant)
+    /// 3. Only call sidecar for embedding hits (1-5 calls instead of 30)
     pub async fn get_relevant_parallel(
         &self,
         messages: &[crate::message::Message],
@@ -926,49 +1055,62 @@ impl MemoryManager {
             return Ok(None);
         }
 
-        // Get top candidate memories by score
-        let mut candidates: Vec<_> = self
-            .list_all()?
-            .into_iter()
-            .filter(|entry| entry.active)
-            .collect();
+        // Step 1: Embedding search (fast, local)
+        set_state(MemoryState::Embedding);
+        add_event(MemoryEventKind::EmbeddingStarted);
 
-        candidates.sort_by(|a, b| {
-            let score_a = memory_score(a);
-            let score_b = memory_score(b);
-            score_b
-                .partial_cmp(&score_a)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        candidates.truncate(MEMORY_RELEVANCE_MAX_CANDIDATES);
+        let embedding_start = Instant::now();
+        let candidates = match self.find_similar(&context, EMBEDDING_SIMILARITY_THRESHOLD, EMBEDDING_MAX_HITS) {
+            Ok(hits) => {
+                let latency_ms = embedding_start.elapsed().as_millis() as u64;
+                if hits.is_empty() {
+                    add_event(MemoryEventKind::EmbeddingComplete { latency_ms, hits: 0 });
+                    set_state(MemoryState::Idle);
+                    return Ok(None);
+                }
+                add_event(MemoryEventKind::EmbeddingComplete { latency_ms, hits: hits.len() });
+                hits
+            }
+            Err(e) => {
+                // Embedding failed - fall back to score-based selection
+                crate::logging::info(&format!("Embedding search failed, falling back: {}", e));
+                add_event(MemoryEventKind::Error { message: e.to_string() });
+
+                // Fallback: use score-based selection (old behavior)
+                let mut all: Vec<_> = self.list_all()?.into_iter().filter(|e| e.active).collect();
+                all.sort_by(|a, b| {
+                    memory_score(b).partial_cmp(&memory_score(a)).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                all.truncate(MEMORY_RELEVANCE_MAX_CANDIDATES);
+                all.into_iter().map(|e| (e, 0.0)).collect()
+            }
+        };
 
         if candidates.is_empty() {
+            set_state(MemoryState::Idle);
             return Ok(None);
         }
 
-        // Update activity state
-        set_state(MemoryState::SidecarChecking {
-            count: candidates.len(),
-        });
+        // Step 2: Sidecar verification (only for embedding hits - much fewer calls!)
+        set_state(MemoryState::SidecarChecking { count: candidates.len() });
         add_event(MemoryEventKind::SidecarStarted);
 
         let sidecar = HaikuSidecar::new();
-
-        // Check relevance in PARALLEL batches (much faster than sequential)
-        const BATCH_SIZE: usize = 5;
         let mut relevant = Vec::new();
         let mut relevant_ids = Vec::new();
 
+        // Process in parallel batches
+        const BATCH_SIZE: usize = 5;
         for batch in candidates.chunks(BATCH_SIZE) {
             let futures: Vec<_> = batch
                 .iter()
-                .map(|memory| {
+                .map(|(memory, _sim)| {
                     let sidecar = sidecar.clone();
                     let content = memory.content.clone();
-                    let context = context.clone();
+                    let ctx = context.clone();
                     async move {
                         let start = Instant::now();
-                        let result = sidecar.check_relevance(&content, &context).await;
+                        let result = sidecar.check_relevance(&content, &ctx).await;
                         (result, start.elapsed())
                     }
                 })
@@ -976,7 +1118,7 @@ impl MemoryManager {
 
             let results = futures::future::join_all(futures).await;
 
-            for (memory, (result, elapsed)) in batch.iter().zip(results) {
+            for ((memory, sim), (result, elapsed)) in batch.iter().zip(results) {
                 match result {
                     Ok((is_relevant, _reason)) => {
                         add_event(MemoryEventKind::SidecarComplete {
@@ -989,21 +1131,21 @@ impl MemoryManager {
                             } else {
                                 memory.content.clone()
                             };
-                            add_event(MemoryEventKind::SidecarRelevant {
-                                memory_preview: preview,
-                            });
+                            add_event(MemoryEventKind::SidecarRelevant { memory_preview: preview });
                             relevant_ids.push(memory.id.clone());
                             relevant.push(memory.clone());
+                            crate::logging::info(&format!(
+                                "Memory relevant (sim={:.2}): {}",
+                                sim,
+                                &memory.content[..memory.content.len().min(50)]
+                            ));
                         } else {
                             add_event(MemoryEventKind::SidecarNotRelevant);
                         }
                     }
                     Err(e) => {
-                        add_event(MemoryEventKind::Error {
-                            message: e.to_string(),
-                        });
-                        crate::logging::info(&format!("Sidecar relevance check failed: {}", e));
-                        // Continue checking other memories - don't fail completely
+                        add_event(MemoryEventKind::Error { message: e.to_string() });
+                        crate::logging::info(&format!("Sidecar check failed: {}", e));
                     }
                 }
             }
@@ -1011,20 +1153,24 @@ impl MemoryManager {
 
         let _ = self.touch_entries(&relevant_ids);
 
-        // Update final state
         if relevant.is_empty() {
             set_state(MemoryState::Idle);
             return Ok(None);
         }
 
-        set_state(MemoryState::FoundRelevant {
-            count: relevant.len(),
-        });
+        set_state(MemoryState::FoundRelevant { count: relevant.len() });
 
         Ok(format_entries_for_prompt(&relevant, MEMORY_RELEVANCE_MAX_RESULTS)
             .map(|entries| format!("# Memory\n\n{}", entries)))
     }
 }
+
+/// Embedding similarity threshold (0.0 - 1.0)
+/// Lower = more candidates, higher = fewer but more relevant
+const EMBEDDING_SIMILARITY_THRESHOLD: f32 = 0.4;
+
+/// Maximum embedding hits to verify with sidecar
+const EMBEDDING_MAX_HITS: usize = 10;
 
 impl Default for MemoryManager {
     fn default() -> Self {
