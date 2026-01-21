@@ -29,14 +29,17 @@ const TOPIC_CHANGE_THRESHOLD: f32 = 0.3;
 /// Maximum memories to surface per turn
 const MAX_MEMORIES_PER_TURN: usize = 5;
 
+/// Reset surfaced memories every N turns to allow re-surfacing
+const TURN_RESET_INTERVAL: usize = 50;
+
 /// Global memory agent instance
 static MEMORY_AGENT: tokio::sync::OnceCell<MemoryAgentHandle> = tokio::sync::OnceCell::const_new();
 
 /// Handle to communicate with the memory agent
 #[derive(Clone)]
 pub struct MemoryAgentHandle {
-    /// Send context updates to the agent
-    context_tx: mpsc::Sender<ContextUpdate>,
+    /// Send messages to the agent
+    tx: mpsc::Sender<AgentMessage>,
 }
 
 impl MemoryAgentHandle {
@@ -47,25 +50,35 @@ impl MemoryAgentHandle {
 
     /// Send a context update to the memory agent (sync, non-blocking)
     pub fn update_context_sync(&self, messages: Vec<crate::message::Message>) {
-        let update = ContextUpdate {
+        let msg = AgentMessage::Context {
             messages,
             timestamp: Instant::now(),
         };
         // Don't block if channel is full - memory is non-critical
-        let _ = self.context_tx.try_send(update);
+        let _ = self.tx.try_send(msg);
+    }
+
+    /// Reset all memory agent state (call on new session)
+    pub fn reset(&self) {
+        let _ = self.tx.try_send(AgentMessage::Reset);
     }
 }
 
-/// A context update from the main agent
-struct ContextUpdate {
-    messages: Vec<crate::message::Message>,
-    timestamp: Instant,
+/// Messages sent to the memory agent
+enum AgentMessage {
+    /// Context update with conversation messages
+    Context {
+        messages: Vec<crate::message::Message>,
+        timestamp: Instant,
+    },
+    /// Reset all agent state (e.g., on new session)
+    Reset,
 }
 
 /// The persistent memory agent state
 pub struct MemoryAgent {
-    /// Channel to receive context updates
-    context_rx: mpsc::Receiver<ContextUpdate>,
+    /// Channel to receive messages
+    rx: mpsc::Receiver<AgentMessage>,
 
     /// Haiku sidecar for LLM decisions
     sidecar: HaikuSidecar,
@@ -85,9 +98,9 @@ pub struct MemoryAgent {
 
 impl MemoryAgent {
     /// Create a new memory agent
-    fn new(context_rx: mpsc::Receiver<ContextUpdate>) -> Self {
+    fn new(rx: mpsc::Receiver<AgentMessage>) -> Self {
         Self {
-            context_rx,
+            rx,
             sidecar: HaikuSidecar::new(),
             memory_manager: MemoryManager::new(),
             last_context_embedding: None,
@@ -96,15 +109,40 @@ impl MemoryAgent {
         }
     }
 
+    /// Reset all agent state
+    fn reset(&mut self) {
+        crate::logging::info("Memory agent reset: clearing all state");
+        self.last_context_embedding = None;
+        self.surfaced_memories.clear();
+        self.turn_count = 0;
+    }
+
     /// Run the memory agent loop
     async fn run(mut self) {
         crate::logging::info("Memory agent started");
 
-        while let Some(update) = self.context_rx.recv().await {
-            self.turn_count += 1;
+        while let Some(msg) = self.rx.recv().await {
+            match msg {
+                AgentMessage::Reset => {
+                    self.reset();
+                }
+                AgentMessage::Context { messages, timestamp } => {
+                    self.turn_count += 1;
 
-            if let Err(e) = self.process_context(update).await {
-                crate::logging::error(&format!("Memory agent error: {}", e));
+                    // Periodic reset to prevent unbounded state growth
+                    if self.turn_count % TURN_RESET_INTERVAL == 0 {
+                        crate::logging::info(&format!(
+                            "Memory agent periodic reset at turn {} (clearing {} surfaced memories)",
+                            self.turn_count,
+                            self.surfaced_memories.len()
+                        ));
+                        self.surfaced_memories.clear();
+                    }
+
+                    if let Err(e) = self.process_context(messages, timestamp).await {
+                        crate::logging::error(&format!("Memory agent error: {}", e));
+                    }
+                }
             }
         }
 
@@ -112,9 +150,13 @@ impl MemoryAgent {
     }
 
     /// Process a context update
-    async fn process_context(&mut self, update: ContextUpdate) -> Result<()> {
+    async fn process_context(
+        &mut self,
+        messages: Vec<crate::message::Message>,
+        _timestamp: Instant,
+    ) -> Result<()> {
         // Format context for embedding
-        let context = memory::format_context_for_relevance(&update.messages);
+        let context = memory::format_context_for_relevance(&messages);
         if context.is_empty() {
             return Ok(());
         }
@@ -327,13 +369,13 @@ pub struct SourceContext {
 pub async fn init() -> Result<MemoryAgentHandle> {
     let handle = MEMORY_AGENT
         .get_or_init(|| async {
-            let (context_tx, context_rx) = mpsc::channel(CONTEXT_CHANNEL_CAPACITY);
+            let (tx, rx) = mpsc::channel(CONTEXT_CHANNEL_CAPACITY);
 
             // Spawn the memory agent task
-            let agent = MemoryAgent::new(context_rx);
+            let agent = MemoryAgent::new(rx);
             tokio::spawn(agent.run());
 
-            MemoryAgentHandle { context_tx }
+            MemoryAgentHandle { tx }
         })
         .await;
 
@@ -364,6 +406,14 @@ pub fn update_context_sync(messages: Vec<crate::message::Message>) {
                 handle.update_context_sync(messages);
             }
         });
+    }
+}
+
+/// Reset the memory agent state (call on new session)
+/// This clears surfaced memories, context embedding, and turn count
+pub fn reset() {
+    if let Some(handle) = get() {
+        handle.reset();
     }
 }
 

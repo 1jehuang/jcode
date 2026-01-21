@@ -1,50 +1,132 @@
 # Memory Architecture Design
 
-> **Status:** Ready for Implementation
-> **Updated:** 2026-01-19
+> **Status:** Implemented
+> **Updated:** 2026-01-20
 
-All cost and latency thresholds have been met. Local embeddings + Haiku sidecar are viable now.
+Local embeddings + Haiku sidecar are implemented and running in production.
 
 ## Overview
 
 A multi-layered memory system for cross-session learning that mimics how human memory works - relevant memories "pop up" when triggered by context rather than requiring explicit recall.
 
+**Key Design Decision:** The memory system is **fully async and non-blocking**. The main agent never waits for memory - results from turn N are available at turn N+1. This ensures memory never slows down the user experience.
+
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Main Agent (Opus)                         │
-│  - Has explicit memory tools (remember/recall/search)       │
-│  - Can be interrupted by sidecar with relevant info         │
-└──────────────▲──────────────────────────▲───────────────────┘
-               │                          │
-     explicit  │               sidecar    │
-     tool use  │               interrupt  │
-               │                          │
-┌──────────────┴────────┐    ┌────────────┴───────────────────┐
-│   Memory Tools        │    │   Memory Sidecar (Haiku/fast)  │
-│   (direct access)     │    │   - Spins up on embedding hit  │
-│                       │    │   - Does session_search        │
-│                       │    │   - Verifies relevance         │
-│                       │    │   - Follows metadata links     │
-└───────────────────────┘    └────────────▲───────────────────┘
-                                          │ trigger
-                                          │
-              ┌───────────────────────────┴───────────────────┐
-              │        Embedding Process (background)          │
-              │  - Runs occasionally while Opus works         │
-              │  - Embeds current context snippet             │
-              │  - Quick similarity search                    │
-              │  - Triggers sidecar if hits found             │
-              └───────────────────────────▲───────────────────┘
-                                          │
-              ┌───────────────────────────┴───────────────────┐
-              │              Memory Store                      │
-              │  - Categorized memories with embeddings       │
-              │  - Rich metadata for source tracking          │
-              │  - Project-local and user-global scopes       │
-              └───────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           MEMORY AGENT ARCHITECTURE                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────┐                              ┌─────────────────────────┐
+│     MAIN AGENT      │                              │     MEMORY AGENT        │
+│     (TUI App)       │                              │   (Background Task)     │
+├─────────────────────┤                              ├─────────────────────────┤
+│                     │      mpsc channel            │                         │
+│  build_memory_      │  ┌─────────────────────┐     │  Persistent State:      │
+│  prompt_nonblocking │  │   ContextUpdate     │     │  ├─ last_context_emb    │
+│         │           │  │   {messages, ts}    │     │  ├─ surfaced_memories   │
+│         ▼           │  └─────────────────────┘     │  └─ turn_count          │
+│  ┌──────────────┐   │            │                 │                         │
+│  │ take_pending │   │            │ try_send()      │                         │
+│  │ _memory()    │◄──┼────────────┼─────────────────┼──┐                      │
+│  └──────────────┘   │            │ (non-blocking)  │  │                      │
+│         │           │            ▼                 │  │                      │
+│         │           │  ┌─────────────────────┐     │  │                      │
+│         ▼           │  │  update_context_    │     │  │  set_pending_        │
+│  Return to LLM      │  │  sync()             │─────┼──┼─►memory()            │
+│  system prompt      │  └─────────────────────┘     │  │                      │
+│                     │                              │  │                      │
+└─────────────────────┘                              │  │                      │
+                                                     │  │                      │
+                         ┌───────────────────────────┼──┘                      │
+                         │                           │                         │
+                         ▼                           │                         │
+              ┌──────────────────────┐               │                         │
+              │   PROCESSING LOOP    │               │                         │
+              └──────────────────────┘               │                         │
+                         │                           │                         │
+         ┌───────────────┼───────────────┐           │                         │
+         ▼               ▼               ▼           │                         │
+┌─────────────┐  ┌─────────────┐  ┌─────────────┐    │                         │
+│  1. EMBED   │  │ 2. SEARCH   │  │ 3. SIDECAR  │    │                         │
+│   CONTEXT   │  │  MEMORIES   │  │   CHECK     │    │                         │
+├─────────────┤  ├─────────────┤  ├─────────────┤    │                         │
+│ all-MiniLM  │  │ cosine sim  │  │ Haiku LLM   │    │                         │
+│ -L6-v2      │  │ threshold   │  │ relevance   │    │                         │
+│ (local)     │  │ 0.4         │  │ check       │    │                         │
+│ ~30ms       │  │ max 10 hits │  │             │    │                         │
+└─────────────┘  └─────────────┘  └─────────────┘    │                         │
+         │               │               │           │                         │
+         └───────────────┴───────────────┘           │                         │
+                         │                           │                         │
+                         ▼                           │                         │
+              ┌──────────────────────┐               │                         │
+              │  TOPIC CHANGE        │               │                         │
+              │  DETECTION           │               │                         │
+              ├──────────────────────┤               │                         │
+              │ Compare embedding    │               │                         │
+              │ to last_context_emb  │               │                         │
+              │ If sim < 0.3:        │               │                         │
+              │   clear surfaced set │               │                         │
+              └──────────────────────┘               │                         │
+                         │                           │                         │
+                         ▼                           │                         │
+              ┌──────────────────────┐               │                         │
+              │  FILTER & STORE      │───────────────┘                         │
+              ├──────────────────────┤                                         │
+              │ Skip already         │                                         │
+              │ surfaced memories    │                                         │
+              │ Store in             │                                         │
+              │ PENDING_MEMORY       │                                         │
+              └──────────────────────┘                                         │
+                                                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              TIMING FLOW                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Turn N:                          Turn N+1:                                 │
+│  ┌─────────────────────────┐      ┌─────────────────────────┐               │
+│  │ 1. take_pending_memory  │      │ 1. take_pending_memory  │◄─── Gets      │
+│  │    (empty first time)   │      │    (returns Turn N      │     results   │
+│  │                         │      │     analysis)           │     from N    │
+│  │ 2. Send context to      │      │                         │               │
+│  │    memory agent         │      │ 2. Send context to      │               │
+│  │    (non-blocking)       │      │    memory agent         │               │
+│  │                         │      │                         │               │
+│  │ 3. Continue with LLM    │      │ 3. Continue with LLM    │               │
+│  │    call immediately     │      │    (has memory!)        │               │
+│  └─────────────────────────┘      └─────────────────────────┘               │
+│           │                                │                                │
+│           │ Background:                    │ Background:                    │
+│           └──► Memory agent                └──► Memory agent                │
+│                processes Turn N                 processes Turn N+1          │
+│                                                                             │
+│  KEY: Main agent NEVER blocks waiting for memory results                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Key Points:**
+- Memory agent is a **singleton** (OnceCell) - only one instance ever runs
+- Communication is **non-blocking** via `try_send()` on mpsc channel
+- Results arrive **one turn behind** (processed in background)
+- **Topic change detection** resets surfaced set when conversation shifts
+- **Surfaced tracking** prevents showing same memory twice
+
+### State Reset Triggers
+
+The memory agent resets its internal state to prevent unbounded growth:
+
+| Trigger | What Resets | Rationale |
+|---------|-------------|-----------|
+| Topic change (sim < 0.3) | `surfaced_memories` | New topic = new context, old memories may be relevant again |
+| Every 50 turns | `surfaced_memories` | Long sessions should re-surface important memories |
+| New session start | All state | Fresh session = fresh memory agent state |
+
+This ensures the memory agent doesn't accumulate stale state over long-running processes while still providing continuity within a conversation.
 
 ## Components
 
@@ -258,51 +340,49 @@ def handle_contradiction(old, new):
 
 ## Implementation Phases
 
-### Phase 1: Basic Memory Tools
+### Phase 1: Basic Memory Tools ✅
 - [x] Memory store with file persistence (`src/memory.rs`)
 - [x] Basic memory tool (`src/tool/memory.rs` - enabled)
 - [ ] CLI commands (`jcode memory list`, `jcode memory forget`)
 - [x] Re-enable and integrate with agent
-
-**Status:** Implemented
-- MemoryTool registered and active
-- Added trust levels, consolidation strength, superseded tracking
 
 ### Phase 2: End-of-Session Extraction
 - [ ] Hook into session close
 - [ ] Extraction prompt to summarize learnings
 - [ ] Automatic categorization
 
-**Status:** Ready now (uses existing models)
+### Phase 3: Embedding Search ✅
+- [x] Integrate `all-MiniLM-L6-v2` via tract-onnx (`src/embedding.rs`)
+- [x] Embedding field in MemoryEntry struct
+- [x] Background embedding process (async, non-blocking)
+- [x] Similarity search with cosine distance
 
-### Phase 3: Embedding Search
-- [ ] Integrate `all-MiniLM-L6-v2` via ONNX Runtime
-- [ ] Vector storage alongside memory JSON
-- [ ] Background embedding process
-- [ ] Similarity search
+**Implementation:**
+- Local embeddings via tract-onnx (~30ms, no external dependencies)
+- Auto-downloads model from HuggingFace on first use (~90MB)
+- Similarity threshold: 0.4, max 10 hits per search
 
-**Status:** Ready now
-- Local embeddings: ~30ms, free, consistent
-- API embeddings (if needed): $0.00001/call (10x cheaper than threshold)
+### Phase 4: Memory Agent ✅
+- [x] Persistent memory agent (`src/memory_agent.rs`)
+- [x] Async channel communication (non-blocking)
+- [x] Embedding-first search pipeline
+- [x] Haiku sidecar for relevance verification
+- [x] Topic change detection (embedding similarity < 0.3)
+- [x] Surfaced memory tracking (avoid repetition)
+- [x] Periodic state reset (every 50 turns)
+- [x] Session reset capability
 
-### Phase 4: Memory Sidecar
-- [x] Sidecar agent infrastructure (`src/sidecar.rs` - HaikuSidecar)
-- [ ] Session search integration
-- [x] Relevance verification (`check_relevance()`)
-- [ ] Main agent interruption protocol
-
-**Status:** Implemented
-- Claude Haiku 4.5: ~$0.003-0.005/call (context-dependent), <500ms latency
-- `HaikuSidecar` provides: `complete()`, `check_relevance()`, `extract_memories()`
-- Integrated with MemoryManager via `get_relevant_for_context()`, `extract_from_transcript()`
+**Implementation:**
+- Singleton agent via `tokio::sync::OnceCell`
+- Results available one turn behind (never blocks main agent)
+- State resets on topic change, every 50 turns, or on new session
 
 ### Phase 5: Full Integration
 - [ ] Decay/pruning background job
 - [ ] Consolidation on write
 - [ ] Contradiction detection
 - [ ] User control UI/CLI
-
-**Status:** After phases 1-4 stable
+- [ ] Memory agent tools (session_search, read_source)
 
 ## Privacy & Security
 
@@ -324,13 +404,21 @@ Before storing any memory, scan for:
 - Option to disable memory entirely
 - Export/import for backup
 
+## Resolved Questions
+
+1. **Embedding model choice:** ✅ Local all-MiniLM-L6-v2 via tract-onnx
+   - Consistent embeddings across devices, works offline, no API cost
+
+2. **Sidecar communication:** ✅ Async non-blocking architecture
+   - Memory agent runs in background, results available one turn behind
+   - No "interruption" needed - memory is injected into system prompt
+
 ## Open Questions
 
-1. **Embedding model choice:** Local (llama.cpp) vs API (OpenAI, Voyage)?
-2. **Sidecar communication:** How does sidecar interrupt main agent cleanly?
-3. **Multi-machine sync:** Should memories sync across devices?
-4. **Team sharing:** Should some memories be shareable across a team?
+1. **Multi-machine sync:** Should memories sync across devices?
+2. **Team sharing:** Should some memories be shareable across a team?
+3. **Memory agent tools:** Should the memory agent have deeper tools (session_search, read_source, web_search)?
 
 ---
 
-*Last updated: 2026-01-19*
+*Last updated: 2026-01-20*
