@@ -5385,7 +5385,7 @@ impl App {
     }
 
     /// Get memory prompt using async non-blocking approach
-    /// Takes any pending memory from background check and spawns a new check for next turn
+    /// Takes any pending memory from background check and sends context to memory agent for next turn
     fn build_memory_prompt_nonblocking(&self, messages: &[Message]) -> Option<String> {
         if self.is_remote {
             return None;
@@ -5394,9 +5394,8 @@ impl App {
         // Take pending memory if available (computed in background during last turn)
         let pending = crate::memory::take_pending_memory();
 
-        // Spawn a background check for the NEXT turn (doesn't block current send)
-        let manager = crate::memory::MemoryManager::new();
-        manager.spawn_relevance_check(messages.to_vec());
+        // Send context to memory agent for the NEXT turn (doesn't block current send)
+        crate::memory_agent::update_context_sync(messages.to_vec());
 
         // Return pending memory from previous turn
         pending.map(|p| p.prompt)
