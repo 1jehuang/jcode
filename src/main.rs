@@ -1028,7 +1028,7 @@ async fn debug_start_server(arg: &str, socket_path: Option<String>) -> Result<()
 async fn run_login(choice: &ProviderChoice) -> Result<()> {
     match choice {
         ProviderChoice::Claude | ProviderChoice::ClaudeSubprocess => {
-            eprintln!("Claude Agent SDK uses Claude Code CLI credentials.");
+            eprintln!("Claude Code CLI provider uses Claude Code CLI credentials.");
             eprintln!("Run `claude` or `claude setup-token` to authenticate.");
         }
         ProviderChoice::Openai => {

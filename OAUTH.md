@@ -1,10 +1,10 @@
-# Auth Notes: Claude Agent SDK + OpenAI/Codex
+# Auth Notes: Claude Code CLI + OpenAI/Codex
 
 This document explains how authentication works in J-Code.
 
 ## Overview
 
-J-Code uses the official Claude Agent SDK for Claude, and OAuth for OpenAI.
+J-Code uses the Claude Code CLI for Claude, and OAuth for OpenAI.
 
 Credentials are stored locally:
 - Claude Code CLI: `~/.claude/.credentials.json`
@@ -12,30 +12,32 @@ Credentials are stored locally:
 - OpenAI/Codex: `~/.codex/auth.json`
 
 Relevant code:
-- Claude Agent SDK bridge: `scripts/claude_agent_sdk_bridge.py`
 - Claude provider: `src/provider/claude.rs`
 - OpenAI login + refresh: `src/auth/oauth.rs`
 - OpenAI credentials parsing: `src/auth/codex.rs`
 - OpenAI requests: `src/provider/openai.rs`
 
-## Claude Agent SDK (Claude Max)
+## Claude Code CLI (Claude Max)
 
 ### Login steps
-1. Install the SDK: `pip install claude-agent-sdk`.
+1. Install the Claude Code CLI.
 2. Run `claude` (or `claude setup-token`) and complete login.
 3. Verify with `jcode --provider claude run "Say hello from jcode"`.
 
-J-Code does **not** store Claude OAuth tokens anymore; it relies on the Claude
-Code CLI credentials used by the SDK.
+J-Code does **not** store Claude OAuth tokens; it relies on the Claude Code CLI
+credentials in `~/.claude/.credentials.json` (or OpenCode credentials, if present).
 
 ### Configuration knobs
-These environment variables control the SDK bridge:
-- `JCODE_CLAUDE_SDK_PYTHON` (default: `python3`)
-- `JCODE_CLAUDE_SDK_MODEL` (default: `claude-sonnet-4-20250514`)
-- `JCODE_CLAUDE_SDK_PERMISSION_MODE` (default: `bypassPermissions`)
-- `JCODE_CLAUDE_SDK_CLI_PATH` (optional, custom `claude` binary)
-- `JCODE_CLAUDE_SDK_SCRIPT` (optional, custom bridge path)
-- `JCODE_CLAUDE_SDK_PARTIAL` (set to `0` to disable partial streaming)
+These environment variables control the Claude Code CLI provider:
+- `JCODE_CLAUDE_CLI_PATH` (default: `claude`)
+- `JCODE_CLAUDE_CLI_MODEL` (default: `claude-opus-4-5-20251101`)
+- `JCODE_CLAUDE_CLI_PERMISSION_MODE` (default: `bypassPermissions`)
+- `JCODE_CLAUDE_CLI_PARTIAL` (set to `0` to disable partial streaming)
+
+### Direct Anthropic API (optional)
+Set `JCODE_USE_DIRECT_API=1` to bypass the CLI and use the Anthropic Messages API.
+This requires tokens that Anthropic permits for direct API access (API keys, or
+OAuth tokens explicitly allowed for API usage).
 
 ## OpenAI / Codex OAuth
 

@@ -118,7 +118,7 @@ pub enum StreamEvent {
     ToolInputDelta(String),
     /// Tool use complete
     ToolUseEnd,
-    /// Tool result from provider (SDK already executed the tool)
+    /// Tool result from provider (provider already executed the tool)
     ToolResult {
         tool_use_id: String,
         content: String,
@@ -152,7 +152,7 @@ pub enum StreamEvent {
         trigger: String,
         pre_tokens: Option<u64>,
     },
-    /// Native tool call from Claude SDK that needs execution by jcode
+    /// Native tool call from a provider bridge that needs execution by jcode
     NativeToolCall {
         request_id: String,
         tool_name: String,

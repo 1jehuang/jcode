@@ -4289,7 +4289,7 @@ impl App {
             let mut current_tool_input = String::new();
             let mut first_event = true;
             let mut saw_message_end = false;
-            // Track tool results from SDK (already executed by Claude Agent SDK)
+            // Track tool results from provider (already executed by Claude Code CLI)
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
 
@@ -4765,7 +4765,7 @@ impl App {
             let mut first_event = true;
             let mut saw_message_end = false;
             let mut interleaved = false; // Track if we interleaved a message mid-stream
-                                         // Track tool results from SDK (already executed by Claude Agent SDK)
+                                         // Track tool results from provider (already executed by Claude Code CLI)
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
 

@@ -72,7 +72,7 @@ pub struct Agent {
     session: Session,
     active_skill: Option<String>,
     allowed_tools: Option<HashSet<String>>,
-    /// Provider-specific session ID for conversation resume (e.g., Claude SDK session)
+    /// Provider-specific session ID for conversation resume (e.g., Claude Code CLI session)
     provider_session_id: Option<String>,
     /// Pending swarm alerts to inject into the next turn
     pending_alerts: Vec<String>,
@@ -636,7 +636,7 @@ impl Agent {
             let mut usage_cache_creation: Option<u64> = None;
             let mut saw_message_end = false;
             let mut _thinking_start: Option<Instant> = None;
-            // Track tool results from SDK (already executed by Claude Agent SDK)
+            // Track tool results from provider (already executed by Claude Code CLI)
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
 
@@ -883,7 +883,7 @@ impl Agent {
                 tool_calls.len()
             ));
 
-            // If provider handles tools internally (like Claude Agent SDK), only run native tools locally
+            // If provider handles tools internally (like Claude Code CLI), only run native tools locally
             if self.provider.handles_tools_internally() {
                 tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
                 if tool_calls.is_empty() {

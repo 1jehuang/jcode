@@ -96,7 +96,7 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub messages: Vec<StoredMessage>,
-    /// Provider-specific session ID (e.g., Claude SDK session for resume)
+    /// Provider-specific session ID (e.g., Claude Code CLI session for resume)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_id: Option<String>,
     /// Model identifier for this session (e.g., "gpt-5.2-codex")
