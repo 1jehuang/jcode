@@ -14,6 +14,7 @@ pub mod message;
 pub mod prompt;
 pub mod protocol;
 pub mod provider;
+pub mod registry;
 pub mod server;
 pub mod session;
 pub mod sidecar;
