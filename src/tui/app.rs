@@ -6480,6 +6480,20 @@ impl super::TuiState for App {
             }
         };
 
+        // Gather subscription usage info
+        let usage_info = {
+            let usage = crate::usage::get_sync();
+            if usage.fetched_at.is_some() {
+                Some(super::info_widget::UsageInfo {
+                    five_hour: usage.five_hour,
+                    seven_day: usage.seven_day,
+                    available: true,
+                })
+            } else {
+                None
+            }
+        };
+
         super::info_widget::InfoWidgetData {
             todos,
             context_info,
@@ -6492,6 +6506,7 @@ impl super::TuiState for App {
             memory_info,
             swarm_info,
             background_info,
+            usage_info,
         }
     }
 }
