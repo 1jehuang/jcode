@@ -180,7 +180,10 @@ impl SelfDevTool {
             timestamp: chrono::Utc::now().to_rfc3339(),
             is_rollback: false,
         };
-        crate::logging::info(&format!("Saving reload context to {:?}", ReloadContext::path()));
+        crate::logging::info(&format!(
+            "Saving reload context to {:?}",
+            ReloadContext::path()
+        ));
         if let Err(e) = reload_ctx.save() {
             crate::logging::error(&format!("Failed to save reload context: {}", e));
             return Err(e);
@@ -295,7 +298,10 @@ impl SelfDevTool {
 
         // Debug socket info
         status.push_str("\n## Debug Socket\n\n");
-        status.push_str(&format!("**Path:** {}\n", server::debug_socket_path().display()));
+        status.push_str(&format!(
+            "**Path:** {}\n",
+            server::debug_socket_path().display()
+        ));
 
         // Recent crash info
         if let Some(ref crash) = manifest.last_crash {
@@ -398,11 +404,13 @@ impl SelfDevTool {
             debug_socket.display(),
             main_socket.display(),
             debug_socket.display()
-        )).with_metadata(info))
+        ))
+        .with_metadata(info))
     }
 
     async fn do_socket_help(&self) -> Result<ToolOutput> {
-        Ok(ToolOutput::new(r#"## Debug Socket Commands
+        Ok(ToolOutput::new(
+            r#"## Debug Socket Commands
 
 Commands are namespaced with `server:`, `client:`, or `tester:` prefixes.
 Unnamespaced commands default to `server:`.
@@ -441,7 +449,9 @@ Unnamespaced commands default to `server:`.
 | `tester:<id>:message:<text>` | Send message to tester |
 | `tester:<id>:stop` | Stop tester |
 
-Use the `debug_socket` tool to execute these commands directly."#.to_string()))
+Use the `debug_socket` tool to execute these commands directly."#
+                .to_string(),
+        ))
     }
 }
 
@@ -465,7 +475,10 @@ mod tests {
         let json = serde_json::to_string(&ctx).unwrap();
         let loaded: ReloadContext = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(loaded.task_context, Some("Testing the reload feature".to_string()));
+        assert_eq!(
+            loaded.task_context,
+            Some("Testing the reload feature".to_string())
+        );
         assert_eq!(loaded.version_before, "v0.1.100");
         assert_eq!(loaded.version_after, "abc1234");
         assert_eq!(loaded.session_id, "test-session-123");

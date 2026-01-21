@@ -322,15 +322,12 @@ fn normalize_string(s: &str) -> String {
         Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
             .unwrap()
     });
-    let session_id_re = SESSION_ID_RE.get_or_init(|| {
-        Regex::new(r"session_[0-9a-zA-Z_]+").unwrap()
-    });
+    let session_id_re = SESSION_ID_RE.get_or_init(|| Regex::new(r"session_[0-9a-zA-Z_]+").unwrap());
     let timestamp_re = TIMESTAMP_RE.get_or_init(|| {
         Regex::new(r"\d{10,13}").unwrap() // Unix timestamps (10-13 digits)
     });
-    let iso_date_re = ISO_DATE_RE.get_or_init(|| {
-        Regex::new(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}").unwrap()
-    });
+    let iso_date_re =
+        ISO_DATE_RE.get_or_init(|| Regex::new(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}").unwrap());
     let duration_re = DURATION_RE.get_or_init(|| {
         Regex::new(r"\d+(\.\d+)?s").unwrap() // Duration like "1.5s"
     });
@@ -348,7 +345,9 @@ fn normalize_string(s: &str) -> String {
 
     // Replace in order of specificity (most specific first)
     result = uuid_re.replace_all(&result, "<UUID>").to_string();
-    result = session_id_re.replace_all(&result, "<SESSION_ID>").to_string();
+    result = session_id_re
+        .replace_all(&result, "<SESSION_ID>")
+        .to_string();
     result = iso_date_re.replace_all(&result, "<ISO_DATE>").to_string();
     result = elapsed_re.replace_all(&result, "<ELAPSED>").to_string();
     result = tokens_re.replace_all(&result, "<TOKENS>").to_string();

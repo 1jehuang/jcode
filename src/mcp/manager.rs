@@ -36,7 +36,10 @@ impl McpManager {
     pub async fn connect_all(&self) -> Result<()> {
         for (name, config) in &self.config.servers {
             if let Err(e) = self.connect(name, config).await {
-                eprintln!("Failed to connect to MCP server '{}': {}", name, e);
+                crate::logging::error(&format!(
+                    "Failed to connect to MCP server '{}': {}",
+                    name, e
+                ));
             }
         }
         Ok(())

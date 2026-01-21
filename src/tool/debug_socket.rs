@@ -84,11 +84,7 @@ impl Tool for DebugSocketTool {
             format!("debug_socket server:{}", params.command)
         };
 
-        let result = execute_debug_command(
-            &params.command,
-            params.session_id,
-            timeout_secs,
-        ).await;
+        let result = execute_debug_command(&params.command, params.session_id, timeout_secs).await;
 
         match result {
             Ok(output) => Ok(ToolOutput::new(output).with_title(title)),
@@ -112,7 +108,13 @@ async fn execute_debug_command(
     )
     .await
     .map_err(|_| anyhow::anyhow!("Timeout connecting to debug socket"))?
-    .map_err(|e| anyhow::anyhow!("Failed to connect to debug socket at {}: {}", socket_path.display(), e))?;
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to connect to debug socket at {}: {}",
+            socket_path.display(),
+            e
+        )
+    })?;
 
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -150,11 +152,7 @@ async fn execute_debug_command(
                 Err(anyhow::anyhow!("{}", output))
             }
         }
-        ServerEvent::Error { message, .. } => {
-            Err(anyhow::anyhow!("{}", message))
-        }
-        _ => {
-            Err(anyhow::anyhow!("Unexpected response: {:?}", line.trim()))
-        }
+        ServerEvent::Error { message, .. } => Err(anyhow::anyhow!("{}", message)),
+        _ => Err(anyhow::anyhow!("Unexpected response: {:?}", line.trim())),
     }
 }

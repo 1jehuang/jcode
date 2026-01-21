@@ -71,8 +71,7 @@ impl Tool for BgTool {
             "list" => {
                 let tasks: Vec<background::TaskStatusFile> = manager.list().await;
                 if tasks.is_empty() {
-                    return Ok(ToolOutput::new("No background tasks found.")
-                        .with_title("bg list"));
+                    return Ok(ToolOutput::new("No background tasks found.").with_title("bg list"));
                 }
 
                 let mut output = String::from("Background Tasks:\n\n");

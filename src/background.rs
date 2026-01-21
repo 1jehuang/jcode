@@ -95,7 +95,11 @@ impl BackgroundTaskManager {
                     .unwrap()
             })
             .collect();
-        format!("{}{}", &timestamp.to_string()[timestamp.to_string().len().saturating_sub(6)..], rand_part)
+        format!(
+            "{}{}",
+            &timestamp.to_string()[timestamp.to_string().len().saturating_sub(6)..],
+            rand_part
+        )
     }
 
     /// Spawn a background task
@@ -147,7 +151,11 @@ impl BackgroundTaskManager {
             let (status, exit_code, error) = match &result {
                 Ok(task_result) => {
                     if task_result.error.is_some() {
-                        (BackgroundTaskStatus::Failed, task_result.exit_code, task_result.error.clone())
+                        (
+                            BackgroundTaskStatus::Failed,
+                            task_result.exit_code,
+                            task_result.error.clone(),
+                        )
                     } else {
                         (BackgroundTaskStatus::Completed, task_result.exit_code, None)
                     }
@@ -209,7 +217,10 @@ impl BackgroundTaskManager {
             handle,
         };
 
-        self.tasks.write().await.insert(task_id.clone(), running_task);
+        self.tasks
+            .write()
+            .await
+            .insert(task_id.clone(), running_task);
 
         BackgroundTaskInfo {
             task_id,
@@ -288,8 +299,8 @@ impl BackgroundTaskManager {
     /// Clean up old task files (older than specified hours)
     pub async fn cleanup(&self, max_age_hours: u64) -> Result<usize> {
         let mut removed = 0;
-        let cutoff = std::time::SystemTime::now()
-            - std::time::Duration::from_secs(max_age_hours * 3600);
+        let cutoff =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(max_age_hours * 3600);
 
         if let Ok(mut entries) = fs::read_dir(&self.output_dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {

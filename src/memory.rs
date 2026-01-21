@@ -8,11 +8,69 @@
 
 use crate::sidecar::HaikuSidecar;
 use crate::storage;
+use crate::tui::info_widget::{MemoryActivity, MemoryEvent, MemoryEventKind, MemoryState};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::Instant;
+
+// === Global Activity Tracking ===
+
+/// Global memory activity state - updated by sidecar, read by info widget
+static MEMORY_ACTIVITY: Mutex<Option<MemoryActivity>> = Mutex::new(None);
+
+/// Maximum number of recent events to keep
+const MAX_RECENT_EVENTS: usize = 10;
+
+/// Get current memory activity state
+pub fn get_activity() -> Option<MemoryActivity> {
+    MEMORY_ACTIVITY.lock().ok().and_then(|guard| guard.clone())
+}
+
+/// Update the memory activity state
+pub fn set_state(state: MemoryState) {
+    if let Ok(mut guard) = MEMORY_ACTIVITY.lock() {
+        if let Some(activity) = guard.as_mut() {
+            activity.state = state;
+        } else {
+            *guard = Some(MemoryActivity {
+                state,
+                recent_events: Vec::new(),
+            });
+        }
+    }
+}
+
+/// Add an event to the activity log
+pub fn add_event(kind: MemoryEventKind) {
+    if let Ok(mut guard) = MEMORY_ACTIVITY.lock() {
+        let event = MemoryEvent {
+            kind,
+            timestamp: Instant::now(),
+            detail: None,
+        };
+
+        if let Some(activity) = guard.as_mut() {
+            activity.recent_events.insert(0, event);
+            activity.recent_events.truncate(MAX_RECENT_EVENTS);
+        } else {
+            *guard = Some(MemoryActivity {
+                state: MemoryState::Idle,
+                recent_events: vec![event],
+            });
+        }
+    }
+}
+
+/// Clear activity (reset to idle with no events)
+pub fn clear_activity() {
+    if let Ok(mut guard) = MEMORY_ACTIVITY.lock() {
+        *guard = None;
+    }
+}
 
 /// Trust levels for memories
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -168,7 +226,10 @@ impl MemoryStore {
     }
 
     pub fn by_category(&self, category: &MemoryCategory) -> Vec<&MemoryEntry> {
-        self.entries.iter().filter(|e| &e.category == category).collect()
+        self.entries
+            .iter()
+            .filter(|e| &e.category == category)
+            .collect()
     }
 
     pub fn search(&self, query: &str) -> Vec<&MemoryEntry> {
@@ -177,7 +238,9 @@ impl MemoryStore {
             .iter()
             .filter(|e| {
                 e.content.to_lowercase().contains(&query_lower)
-                    || e.tags.iter().any(|t| t.to_lowercase().contains(&query_lower))
+                    || e.tags
+                        .iter()
+                        .any(|t| t.to_lowercase().contains(&query_lower))
             })
             .collect()
     }
@@ -199,7 +262,9 @@ impl MemoryStore {
         entries.sort_by(|a, b| {
             let score_a = memory_score(a);
             let score_b = memory_score(b);
-            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         entries.into_iter().take(limit).collect()
     }
@@ -212,7 +277,10 @@ impl MemoryStore {
 
         let mut sections: HashMap<&MemoryCategory, Vec<&str>> = HashMap::new();
         for entry in &relevant {
-            sections.entry(&entry.category).or_default().push(&entry.content);
+            sections
+                .entry(&entry.category)
+                .or_default()
+                .push(&entry.content);
         }
 
         let mut output = String::new();
@@ -239,7 +307,11 @@ impl MemoryStore {
             }
         }
 
-        if output.is_empty() { None } else { Some(output) }
+        if output.is_empty() {
+            None
+        } else {
+            Some(output)
+        }
     }
 }
 
@@ -267,11 +339,14 @@ fn format_content_block(block: &crate::message::ContentBlock) -> Option<String> 
             }
         }
         crate::message::ContentBlock::ToolUse { name, input, .. } => {
-            let input_str = serde_json::to_string(input).unwrap_or_else(|_| "<invalid json>".into());
+            let input_str =
+                serde_json::to_string(input).unwrap_or_else(|_| "<invalid json>".into());
             let input_str = truncate_chars(&input_str, MEMORY_CONTEXT_MAX_BLOCK_CHARS / 2);
             Some(format!("[Tool: {} input: {}]", name, input_str))
         }
-        crate::message::ContentBlock::ToolResult { content, is_error, .. } => {
+        crate::message::ContentBlock::ToolResult {
+            content, is_error, ..
+        } => {
             let label = if is_error.unwrap_or(false) {
                 "Tool error"
             } else {
@@ -342,7 +417,10 @@ fn format_entries_for_prompt(entries: &[MemoryEntry], limit: usize) -> Option<St
         if added >= limit {
             break;
         }
-        sections.entry(entry.category.clone()).or_default().push(entry);
+        sections
+            .entry(entry.category.clone())
+            .or_default()
+            .push(entry);
         added += 1;
     }
 
@@ -428,7 +506,9 @@ impl MemoryManager {
     }
 
     fn get_project_dir(&self) -> Option<PathBuf> {
-        self.project_dir.clone().or_else(|| std::env::current_dir().ok())
+        self.project_dir
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
     }
 
     fn project_memory_path(&self) -> Result<Option<PathBuf>> {
@@ -462,7 +542,11 @@ impl MemoryManager {
 
     pub fn load_global(&self) -> Result<MemoryStore> {
         let path = self.global_memory_path()?;
-        if path.exists() { storage::read_json(&path) } else { Ok(MemoryStore::new()) }
+        if path.exists() {
+            storage::read_json(&path)
+        } else {
+            Ok(MemoryStore::new())
+        }
     }
 
     pub fn save_project(&self, store: &MemoryStore) -> Result<()> {
@@ -496,8 +580,7 @@ impl MemoryManager {
             return Ok(());
         }
 
-        let id_set: std::collections::HashSet<&str> =
-            ids.iter().map(|id| id.as_str()).collect();
+        let id_set: std::collections::HashSet<&str> = ids.iter().map(|id| id.as_str()).collect();
 
         let mut project = self.load_project()?;
         let mut project_changed = false;
@@ -559,7 +642,9 @@ impl MemoryManager {
         max_candidates: usize,
         limit: usize,
     ) -> Result<Option<String>> {
-        let relevant = self.get_relevant_for_context(context, max_candidates).await?;
+        let relevant = self
+            .get_relevant_for_context(context, max_candidates)
+            .await?;
         if relevant.is_empty() {
             return Ok(None);
         }
@@ -662,40 +747,77 @@ impl MemoryManager {
             return Ok(Vec::new());
         }
 
+        // Update activity state - checking memories
+        set_state(MemoryState::SidecarChecking {
+            count: candidates.len(),
+        });
+        add_event(MemoryEventKind::SidecarStarted);
+
         let sidecar = HaikuSidecar::new();
         let mut relevant = Vec::new();
         let mut relevant_ids = Vec::new();
 
         for memory in candidates {
+            let start = Instant::now();
             match sidecar.check_relevance(&memory.content, context).await {
                 Ok((is_relevant, _reason)) => {
+                    let latency_ms = start.elapsed().as_millis() as u64;
+                    add_event(MemoryEventKind::SidecarComplete { latency_ms });
+
                     if is_relevant {
+                        let preview = if memory.content.len() > 30 {
+                            format!("{}...", &memory.content[..30])
+                        } else {
+                            memory.content.clone()
+                        };
+                        add_event(MemoryEventKind::SidecarRelevant {
+                            memory_preview: preview,
+                        });
                         relevant_ids.push(memory.id.clone());
                         relevant.push(memory);
+                    } else {
+                        add_event(MemoryEventKind::SidecarNotRelevant);
                     }
                 }
                 Err(e) => {
-                    // Log error but continue with other memories
-                    eprintln!("Sidecar relevance check failed: {}", e);
+                    add_event(MemoryEventKind::Error {
+                        message: e.to_string(),
+                    });
+                    crate::logging::error(&format!("Sidecar relevance check failed: {}", e));
                 }
             }
         }
 
         let _ = self.touch_entries(&relevant_ids);
 
+        // Update final state
+        if relevant.is_empty() {
+            set_state(MemoryState::Idle);
+        } else {
+            set_state(MemoryState::FoundRelevant {
+                count: relevant.len(),
+            });
+        }
+
         Ok(relevant)
     }
 
     /// Simple relevance check without sidecar (keyword-based)
     /// Use this for quick checks when sidecar is not needed
-    pub fn get_relevant_keywords(&self, keywords: &[&str], limit: usize) -> Result<Vec<MemoryEntry>> {
+    pub fn get_relevant_keywords(
+        &self,
+        keywords: &[&str],
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>> {
         let all = self.list_all()?;
 
         let matches: Vec<_> = all
             .into_iter()
             .filter(|e| {
                 let content_lower = e.content.to_lowercase();
-                keywords.iter().any(|kw| content_lower.contains(&kw.to_lowercase()))
+                keywords
+                    .iter()
+                    .any(|kw| content_lower.contains(&kw.to_lowercase()))
             })
             .take(limit)
             .collect();

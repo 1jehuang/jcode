@@ -76,7 +76,9 @@ pub struct SimulatedInstant {
 
 impl SimulatedInstant {
     pub fn elapsed(&self) -> Duration {
-        let now = get_test_clock().map(|c| c.read().unwrap().now_ms()).unwrap_or(0);
+        let now = get_test_clock()
+            .map(|c| c.read().unwrap().now_ms())
+            .unwrap_or(0);
         Duration::from_millis(now.saturating_sub(self.offset_ms))
     }
 
@@ -141,7 +143,10 @@ static EVENT_RECORDER: OnceLock<Mutex<EventRecorder>> = OnceLock::new();
 #[serde(tag = "type", content = "data")]
 pub enum TestEvent {
     /// Key press event
-    Key { code: String, modifiers: Vec<String> },
+    Key {
+        code: String,
+        modifiers: Vec<String>,
+    },
     /// Mouse event (click, scroll)
     Mouse { kind: String, x: u16, y: u16 },
     /// Terminal resize
@@ -440,7 +445,8 @@ impl TestBundle {
     /// Load from file.
     pub fn load(path: &PathBuf) -> std::io::Result<Self> {
         let content = fs::read_to_string(path)?;
-        serde_json::from_str(&content).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        serde_json::from_str(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
     /// Get default bundle output path.
@@ -456,13 +462,21 @@ impl TestBundle {
 fn chrono_now() -> String {
     // Simple ISO 8601 timestamp
     let now = std::time::SystemTime::now();
-    let duration = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let duration = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     format!("{}ms", duration.as_millis())
 }
 
 fn sanitize_filename(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -538,7 +552,11 @@ impl HeadlessBuffer {
     pub fn to_text(&self) -> String {
         self.cells
             .iter()
-            .map(|row| row.iter().map(|c| if c.char == '\0' { ' ' } else { c.char }).collect::<String>())
+            .map(|row| {
+                row.iter()
+                    .map(|c| if c.char == '\0' { ' ' } else { c.char })
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -797,7 +815,7 @@ pub fn strip_ansi(s: &str) -> String {
             // Skip escape sequence
             if chars.peek() == Some(&'[') {
                 chars.next(); // consume '['
-                // Skip until we hit a letter
+                              // Skip until we hit a letter
                 while let Some(&next) = chars.peek() {
                     chars.next();
                     if next.is_ascii_alphabetic() {
@@ -815,9 +833,7 @@ pub fn strip_ansi(s: &str) -> String {
 
 /// Compare two strings ignoring whitespace differences.
 pub fn strings_equal_normalized(a: &str, b: &str) -> bool {
-    let normalize = |s: &str| {
-        s.split_whitespace().collect::<Vec<_>>().join(" ")
-    };
+    let normalize = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     normalize(a) == normalize(b)
 }
 
@@ -860,8 +876,22 @@ mod tests {
     #[test]
     fn test_headless_buffer() {
         let mut buffer = HeadlessBuffer::new(80, 24);
-        buffer.set(0, 0, Cell { char: 'H', ..Default::default() });
-        buffer.set(1, 0, Cell { char: 'i', ..Default::default() });
+        buffer.set(
+            0,
+            0,
+            Cell {
+                char: 'H',
+                ..Default::default()
+            },
+        );
+        buffer.set(
+            1,
+            0,
+            Cell {
+                char: 'i',
+                ..Default::default()
+            },
+        );
 
         assert!(buffer.contains_text("Hi"));
         assert!(!buffer.contains_text("Hello"));
