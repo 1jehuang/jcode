@@ -542,12 +542,12 @@ Benchmark Modes:
 │   - Tests real-time rendering performance                      │
 └─────────────────────────────────────────────────────────────────┘
 
-Output:
+Example Output:
   mode: Idle
-  frames: 300
-  total_ms: 245.67
-  avg_ms: 0.82
-  fps: 1221.3
+  frames: 1000
+  total_ms: 677.94
+  avg_ms: 0.68
+  fps: 1475.1
 
 Performance Targets:
   - Idle:      < 1ms/frame (1000+ fps headroom)
@@ -555,12 +555,34 @@ Performance Targets:
   - With 200 turns of history + markdown + syntax highlighting
 ```
 
+**Benchmark Results (1000 frames, 200 turns, 120x40 terminal):**
+
+| Mode | Avg Frame | FPS | Memory (RSS) |
+|------|-----------|-----|--------------|
+| Idle | 0.68ms | 1475 | 18 MB |
+| Streaming | 0.67ms | 1498 | 18 MB |
+
 **What It Measures:**
 - Markdown parsing throughput
 - Syntax highlighting performance
 - Text wrapping and layout calculation
 - Scroll offset handling
 - Widget rendering overhead
+
+**Real-World Usage:**
+
+The benchmark measures raw rendering throughput (no throttling). In practice, the TUI is event-driven and only renders when needed:
+- User input (keystrokes)
+- New streaming text arrives
+- Scroll/resize events
+- Animation ticks (status spinner)
+
+Typical resource usage for a running jcode session:
+- **TUI client**: ~170 MB RAM, near-idle CPU when waiting
+- **Server**: ~185 MB RAM, ~1% CPU when idle
+- **During streaming**: Brief CPU spikes for rendering, still sub-ms per frame
+
+The sub-millisecond frame times mean plenty of headroom—even at 60 FPS, rendering uses only ~4% of available time budget.
 
 </details>
 

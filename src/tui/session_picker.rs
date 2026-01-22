@@ -235,9 +235,7 @@ pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
     let mut groups: Vec<ServerGroup> = servers
         .iter()
         .map(|server| {
-            let sessions = server_sessions
-                .remove(&server.name)
-                .unwrap_or_default();
+            let sessions = server_sessions.remove(&server.name).unwrap_or_default();
             ServerGroup {
                 name: server.name.clone(),
                 icon: server.icon.clone(),
@@ -436,7 +434,12 @@ impl SessionPicker {
     /// Find next selectable item (skip headers)
     fn next_selectable(&self, from: usize) -> Option<usize> {
         for i in (from + 1)..self.items.len() {
-            if self.item_to_session.get(i).map(|x| x.is_some()).unwrap_or(false) {
+            if self
+                .item_to_session
+                .get(i)
+                .map(|x| x.is_some())
+                .unwrap_or(false)
+            {
                 return Some(i);
             }
         }
@@ -446,7 +449,12 @@ impl SessionPicker {
     /// Find previous selectable item (skip headers)
     fn prev_selectable(&self, from: usize) -> Option<usize> {
         for i in (0..from).rev() {
-            if self.item_to_session.get(i).map(|x| x.is_some()).unwrap_or(false) {
+            if self
+                .item_to_session
+                .get(i)
+                .map(|x| x.is_some())
+                .unwrap_or(false)
+            {
                 return Some(i);
             }
         }
@@ -616,16 +624,20 @@ impl SessionPicker {
                 let is_selected = self.list_state.selected() == Some(idx);
 
                 match item {
-                    PickerItem::ServerHeader { name, icon, version, session_count } => {
+                    PickerItem::ServerHeader {
+                        name,
+                        icon,
+                        version,
+                        session_count,
+                    } => {
                         // Server header - not selectable, acts as a group label
                         let line1 = Line::from(vec![
-                            Span::styled(
-                                format!("{} ", icon),
-                                Style::default().fg(SERVER_COLOR),
-                            ),
+                            Span::styled(format!("{} ", icon), Style::default().fg(SERVER_COLOR)),
                             Span::styled(
                                 name.clone(),
-                                Style::default().fg(SERVER_COLOR).add_modifier(Modifier::BOLD),
+                                Style::default()
+                                    .fg(SERVER_COLOR)
+                                    .add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(
                                 format!("  {} · {} sessions", version, session_count),
@@ -637,10 +649,7 @@ impl SessionPicker {
                     PickerItem::OrphanHeader { session_count } => {
                         // Orphan sessions header
                         let line1 = Line::from(vec![
-                            Span::styled(
-                                "📦 ",
-                                Style::default().fg(DIM),
-                            ),
+                            Span::styled("📦 ", Style::default().fg(DIM)),
                             Span::styled(
                                 "Other sessions",
                                 Style::default().fg(DIM).add_modifier(Modifier::BOLD),
@@ -652,9 +661,7 @@ impl SessionPicker {
                         ]);
                         ListItem::new(vec![line1])
                     }
-                    PickerItem::Session(session) => {
-                        self.render_session_item(session, is_selected)
-                    }
+                    PickerItem::Session(session) => self.render_session_item(session, is_selected),
                 }
             })
             .collect();
@@ -1003,7 +1010,10 @@ pub fn pick_session() -> Result<Option<PickerResult>> {
     let (server_groups, orphan_sessions) = load_sessions_grouped()?;
 
     // Check if there are any sessions at all
-    let total_sessions: usize = server_groups.iter().map(|g| g.sessions.len()).sum::<usize>()
+    let total_sessions: usize = server_groups
+        .iter()
+        .map(|g| g.sessions.len())
+        .sum::<usize>()
         + orphan_sessions.len();
 
     if total_sessions == 0 {

@@ -126,7 +126,10 @@ impl MemoryAgent {
                 AgentMessage::Reset => {
                     self.reset();
                 }
-                AgentMessage::Context { messages, timestamp } => {
+                AgentMessage::Context {
+                    messages,
+                    timestamp,
+                } => {
                     self.turn_count += 1;
 
                     // Periodic reset to prevent unbounded state growth
@@ -225,9 +228,7 @@ impl MemoryAgent {
         });
         memory::add_event(MemoryEventKind::SidecarStarted);
 
-        let relevant = self
-            .evaluate_candidates(&context, new_candidates)
-            .await?;
+        let relevant = self.evaluate_candidates(&context, new_candidates).await?;
 
         if relevant.is_empty() {
             memory::set_state(MemoryState::Idle);
@@ -290,17 +291,13 @@ impl MemoryAgent {
                             &entry.content[..entry.content.len().min(40)],
                             reason
                         ));
-                        memory::add_event(
-                            MemoryEventKind::SidecarRelevant {
-                                memory_preview: entry.content[..entry.content.len().min(30)]
-                                    .to_string(),
-                            },
-                        );
+                        memory::add_event(MemoryEventKind::SidecarRelevant {
+                            memory_preview: entry.content[..entry.content.len().min(30)]
+                                .to_string(),
+                        });
                         relevant.push(entry.clone());
                     } else {
-                        memory::add_event(
-                            MemoryEventKind::SidecarNotRelevant,
-                        );
+                        memory::add_event(MemoryEventKind::SidecarNotRelevant);
                     }
                 }
                 Err(e) => {
