@@ -59,12 +59,38 @@ struct OpenCodeAnthropicAuth {
 }
 
 pub fn load_credentials() -> Result<ClaudeCredentials> {
-    // First try OpenCode credentials (they work with the API)
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    // Try Claude Code credentials first (preferred, more widely compatible)
+    if let Ok(creds) = load_claude_code_credentials() {
+        if creds.expires_at > now_ms {
+            crate::logging::info("Using Claude Code credentials");
+            return Ok(creds);
+        }
+    }
+
+    // Try OpenCode credentials if Claude Code expired or unavailable
     if let Ok(creds) = load_opencode_credentials() {
+        if creds.expires_at > now_ms {
+            return Ok(creds);
+        }
+    }
+
+    // Fall back to any available credentials (even if expired)
+    if let Ok(creds) = load_claude_code_credentials() {
+        crate::logging::info("Claude OAuth token expired; will attempt refresh.");
         return Ok(creds);
     }
 
-    // Fall back to Claude Code credentials
+    if let Ok(creds) = load_opencode_credentials() {
+        crate::logging::info("OpenCode token expired; will attempt refresh.");
+        return Ok(creds);
+    }
+
+    anyhow::bail!("No Claude or OpenCode credentials found")
+}
+
+fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
     let path = claude_code_path()?;
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Could not read credentials from {:?}", path))?;
@@ -75,12 +101,6 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
     let oauth = file
         .claude_ai_oauth
         .context("No claudeAiOauth found in credentials")?;
-
-    // Check if token is expired
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    if oauth.expires_at < now_ms {
-        crate::logging::info("Claude OAuth token expired; will attempt refresh.");
-    }
 
     Ok(ClaudeCredentials {
         access_token: oauth.access_token,
