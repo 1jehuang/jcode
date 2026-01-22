@@ -21,6 +21,8 @@ const OAUTH_BETA_HEADERS: &str = "oauth-2025-04-20,claude-code-20250219";
 
 /// Claude Code identity block required for OAuth direct API access
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+const CLAUDE_CODE_JCODE_NOTICE: &str =
+    "You are jcode, powered by Claude Code. You are a third-party CLI, not the official Claude Code CLI.";
 
 /// Maximum tokens for sidecar responses (keep small for speed/cost)
 const DEFAULT_MAX_TOKENS: u32 = 1024;
@@ -240,6 +242,10 @@ fn build_system_param(system: &str) -> Option<ApiSystem<'_>> {
     blocks.push(ApiSystemBlock {
         block_type: "text",
         text: CLAUDE_CODE_IDENTITY,
+    });
+    blocks.push(ApiSystemBlock {
+        block_type: "text",
+        text: CLAUDE_CODE_JCODE_NOTICE,
     });
     if !system.is_empty() {
         blocks.push(ApiSystemBlock {

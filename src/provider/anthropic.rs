@@ -36,6 +36,8 @@ const API_VERSION: &str = "2023-06-01";
 
 /// Claude Code identity block required for OAuth direct API access
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+const CLAUDE_CODE_JCODE_NOTICE: &str =
+    "You are jcode, powered by Claude Code. You are a third-party CLI, not the official Claude Code CLI.";
 
 fn map_tool_name_for_oauth(name: &str) -> String {
     match name {
@@ -149,7 +151,12 @@ impl AnthropicProvider {
                     } else {
                         name.clone()
                     },
-                    input: input.clone(),
+                    // Anthropic API requires input to be an object, not null
+                    input: if input.is_null() {
+                        serde_json::json!({})
+                    } else {
+                        input.clone()
+                    },
                 }),
                 ContentBlock::ToolResult {
                     tool_use_id,
@@ -601,6 +608,10 @@ fn build_system_param(system: &str, is_oauth: bool) -> Option<ApiSystem> {
         blocks.push(ApiSystemBlock {
             block_type: "text",
             text: CLAUDE_CODE_IDENTITY.to_string(),
+        });
+        blocks.push(ApiSystemBlock {
+            block_type: "text",
+            text: CLAUDE_CODE_JCODE_NOTICE.to_string(),
         });
         if !system.is_empty() {
             blocks.push(ApiSystemBlock {
