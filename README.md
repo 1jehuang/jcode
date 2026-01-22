@@ -10,12 +10,13 @@ A Rust coding agent that uses the **Claude Code CLI** (Claude Max OAuth) or **Ch
 
 - **No API keys needed** - Uses Claude Code CLI credentials and Codex OAuth
 - **Dual provider support** - Works with Claude Code CLI and OpenAI/Codex
-- **Streaming responses** - Real-time output as the model generates
 - **Server/Client architecture** - Run as daemon, connect from multiple clients
 - **20+ built-in tools** - File ops, search, web, shell, memory, and parallel execution
 - **MCP support** - Extend with Model Context Protocol servers
 - **Cross-session memory** - Learns and remembers across sessions
 - **Swarm coordination** - Multiple agents can work together with conflict detection
+- **NO RENDERING ISSUES** - Unlike a certain Cl@ude C*de (also renders at 1k+fps)
+- **Innovative TUI** - Info widgets, status line, pagnitation
 
 ## Prerequisites
 
