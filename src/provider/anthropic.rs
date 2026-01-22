@@ -25,6 +25,12 @@ const DEFAULT_MODEL: &str = "claude-opus-4-5-20251101";
 /// API version header
 const API_VERSION: &str = "2023-06-01";
 
+/// Maximum number of retries for transient errors
+const MAX_RETRIES: u32 = 3;
+
+/// Base delay for exponential backoff (in milliseconds)
+const RETRY_BASE_DELAY_MS: u64 = 1000;
+
 /// Available models
 pub const AVAILABLE_MODELS: &[&str] = &[
     "claude-opus-4-5-20251101",
@@ -40,8 +46,8 @@ pub struct AnthropicProvider {
 
 impl AnthropicProvider {
     pub fn new() -> Self {
-        let model = std::env::var("JCODE_ANTHROPIC_MODEL")
-            .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let model =
+            std::env::var("JCODE_ANTHROPIC_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
         Self {
             client: Client::new(),
@@ -58,8 +64,8 @@ impl AnthropicProvider {
         }
 
         // Fall back to OAuth credentials
-        let creds = auth::claude::load_credentials()
-            .context("Failed to load Claude credentials")?;
+        let creds =
+            auth::claude::load_credentials().context("Failed to load Claude credentials")?;
         Ok((creds.access_token, true)) // true = OAuth
     }
 
@@ -89,9 +95,9 @@ impl AnthropicProvider {
         blocks
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::Text { text, .. } => Some(ApiContentBlock::Text {
-                    text: text.clone(),
-                }),
+                ContentBlock::Text { text, .. } => {
+                    Some(ApiContentBlock::Text { text: text.clone() })
+                }
                 ContentBlock::ToolUse { id, name, input } => Some(ApiContentBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
@@ -169,10 +175,59 @@ impl Provider for AnthropicProvider {
         // Clone what we need for the async task
         let client = self.client.clone();
 
-        // Spawn task to handle streaming
+        // Spawn task to handle streaming with retry logic
         tokio::spawn(async move {
-            if let Err(e) = stream_response(client, token, is_oauth, request, tx.clone()).await {
-                let _ = tx.send(Err(e)).await;
+            let mut last_error = None;
+
+            for attempt in 0..MAX_RETRIES {
+                if attempt > 0 {
+                    // Exponential backoff: 1s, 2s, 4s
+                    let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    crate::logging::info(&format!(
+                        "Retrying Anthropic API request (attempt {}/{})",
+                        attempt + 1,
+                        MAX_RETRIES
+                    ));
+                }
+
+                match stream_response(
+                    client.clone(),
+                    token.clone(),
+                    is_oauth,
+                    request.clone(),
+                    tx.clone(),
+                )
+                .await
+                {
+                    Ok(()) => return, // Success
+                    Err(e) => {
+                        let error_str = e.to_string().to_lowercase();
+                        // Check if this is a transient/retryable error
+                        if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                            crate::logging::info(&format!(
+                                "Transient error, will retry: {}",
+                                e
+                            ));
+                            last_error = Some(e);
+                            continue;
+                        }
+                        // Non-retryable or final attempt
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                }
+            }
+
+            // All retries exhausted
+            if let Some(e) = last_error {
+                let _ = tx
+                    .send(Err(anyhow::anyhow!(
+                        "Failed after {} retries: {}",
+                        MAX_RETRIES,
+                        e
+                    )))
+                    .await;
             }
         });
 
@@ -289,6 +344,27 @@ async fn stream_response(
     }
 
     Ok(())
+}
+
+/// Check if an error is transient and should be retried
+fn is_retryable_error(error_str: &str) -> bool {
+    // Network/connection errors
+    error_str.contains("connection reset")
+        || error_str.contains("connection closed")
+        || error_str.contains("connection refused")
+        || error_str.contains("broken pipe")
+        || error_str.contains("timed out")
+        || error_str.contains("timeout")
+        // Stream/decode errors
+        || error_str.contains("error decoding")
+        || error_str.contains("error reading")
+        || error_str.contains("unexpected eof")
+        || error_str.contains("incomplete message")
+        // Server errors (5xx)
+        || error_str.contains("502 bad gateway")
+        || error_str.contains("503 service unavailable")
+        || error_str.contains("504 gateway timeout")
+        || error_str.contains("overloaded")
 }
 
 /// Accumulator for tool_use blocks (input comes in chunks)
@@ -423,7 +499,7 @@ fn process_sse_event(
 // API Types
 // ============================================================================
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ApiRequest {
     model: String,
     max_tokens: u32,
@@ -435,7 +511,7 @@ struct ApiRequest {
     stream: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ApiMessage {
     role: String,
     content: Vec<ApiContentBlock>,
@@ -461,7 +537,7 @@ enum ApiContentBlock {
     },
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ApiTool {
     name: String,
     description: String,
