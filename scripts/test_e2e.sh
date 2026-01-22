@@ -46,6 +46,13 @@ echo "Test 6: E2E integration tests..."
 cargo test --test e2e --quiet
 echo "✓ E2E tests passed"
 
+if [[ "${JCODE_REAL_PROVIDER:-0}" == "1" ]]; then
+    echo ""
+    echo "Test 7: Real provider smoke (JCODE_REAL_PROVIDER=1)..."
+    scripts/real_provider_smoke.sh
+    echo "✓ Real provider smoke passed"
+fi
+
 echo ""
 echo "=== All tests passed! ==="
 echo ""
