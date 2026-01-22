@@ -19,6 +19,12 @@ use tokio_stream::wrappers::ReceiverStream;
 const DEFAULT_MODEL: &str = "claude-opus-4-5-20251101";
 const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 
+/// Maximum number of retries for transient errors
+const MAX_RETRIES: u32 = 3;
+
+/// Base delay for exponential backoff (in milliseconds)
+const RETRY_BASE_DELAY_MS: u64 = 1000;
+
 /// Available Claude models
 const AVAILABLE_MODELS: &[&str] = &["claude-opus-4-5-20251101"];
 
@@ -648,19 +654,57 @@ impl Provider for ClaudeProvider {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
         tokio::spawn(async move {
-            if let Err(e) = run_claude_cli(
-                config,
-                current_model,
-                tool_names,
-                system_prompt,
-                resume,
-                prompt,
-                cwd,
-                tx.clone(),
-            )
-            .await
-            {
-                let _ = tx.send(Err(e)).await;
+            let mut last_error = None;
+
+            for attempt in 0..MAX_RETRIES {
+                if attempt > 0 {
+                    // Exponential backoff: 1s, 2s, 4s
+                    let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    crate::logging::info(&format!(
+                        "Retrying Claude CLI request (attempt {}/{})",
+                        attempt + 1,
+                        MAX_RETRIES
+                    ));
+                }
+
+                match run_claude_cli(
+                    config.clone(),
+                    current_model.clone(),
+                    tool_names.clone(),
+                    system_prompt.clone(),
+                    resume.clone(),
+                    prompt.clone(),
+                    cwd.clone(),
+                    tx.clone(),
+                )
+                .await
+                {
+                    Ok(()) => return, // Success
+                    Err(e) => {
+                        let error_str = e.to_string().to_lowercase();
+                        // Check if this is a transient/retryable error
+                        if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                            crate::logging::info(&format!("Transient error, will retry: {}", e));
+                            last_error = Some(e);
+                            continue;
+                        }
+                        // Non-retryable or final attempt
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                }
+            }
+
+            // All retries exhausted
+            if let Some(e) = last_error {
+                let _ = tx
+                    .send(Err(anyhow::anyhow!(
+                        "Failed after {} retries: {}",
+                        MAX_RETRIES,
+                        e
+                    )))
+                    .await;
             }
         });
 
@@ -837,6 +881,32 @@ async fn run_claude_cli(
     }
 
     Ok(())
+}
+
+/// Check if an error is transient and should be retried
+fn is_retryable_error(error_str: &str) -> bool {
+    // Network/connection errors
+    error_str.contains("connection reset")
+        || error_str.contains("connection closed")
+        || error_str.contains("connection refused")
+        || error_str.contains("broken pipe")
+        || error_str.contains("timed out")
+        || error_str.contains("timeout")
+        // Stream/decode errors
+        || error_str.contains("error decoding")
+        || error_str.contains("error reading")
+        || error_str.contains("unexpected eof")
+        || error_str.contains("incomplete message")
+        // Claude CLI specific errors
+        || error_str.contains("processtransport")
+        || error_str.contains("not ready for writing")
+        || error_str.contains("taskgroup")
+        || error_str.contains("sub-exception")
+        // Server errors (5xx)
+        || error_str.contains("502 bad gateway")
+        || error_str.contains("503 service unavailable")
+        || error_str.contains("504 gateway timeout")
+        || error_str.contains("overloaded")
 }
 
 fn to_claude_tool_name(name: &str) -> String {
