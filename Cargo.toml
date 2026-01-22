@@ -79,6 +79,9 @@ arboard = "3"              # Clipboard support
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 pulldown-cmark = "0.12"
 
+# PDF parsing
+pdf-extract = "0.8"
+
 [dev-dependencies]
 async-stream = "0.3"
 
