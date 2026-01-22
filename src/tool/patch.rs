@@ -3,6 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use similar::{ChangeTag, TextDiff};
 use std::path::Path;
 
 pub struct PatchTool;
@@ -69,14 +70,20 @@ impl Tool for PatchTool {
         let mut results = Vec::new();
 
         for patch in patches {
-            let result = apply_patch(&patch).await;
+            let result = apply_patch_with_diff(&patch).await;
             match result {
-                Ok(msg) => results.push(format!("✓ {}: {}", patch.path, msg)),
+                Ok((msg, diff)) => {
+                    if diff.is_empty() {
+                        results.push(format!("✓ {}: {}", patch.path, msg));
+                    } else {
+                        results.push(format!("✓ {}: {}\n{}", patch.path, msg, diff));
+                    }
+                }
                 Err(e) => results.push(format!("✗ {}: {}", patch.path, e)),
             }
         }
 
-        Ok(ToolOutput::new(results.join("\n")))
+        Ok(ToolOutput::new(results.join("\n\n")))
     }
 }
 
@@ -197,14 +204,17 @@ fn parse_hunk(lines: &[&str], i: &mut usize) -> Option<Hunk> {
     })
 }
 
-async fn apply_patch(patch: &FilePatch) -> Result<String> {
+/// Apply a patch and return (status_message, diff_output)
+async fn apply_patch_with_diff(patch: &FilePatch) -> Result<(String, String)> {
     let path = Path::new(&patch.path);
 
     // Handle deletion
     if patch.is_delete {
         if path.exists() {
+            let old_content = tokio::fs::read_to_string(path).await.unwrap_or_default();
             tokio::fs::remove_file(path).await?;
-            return Ok("deleted".to_string());
+            let diff = generate_diff(&old_content, "", 1);
+            return Ok(("deleted".to_string(), diff));
         } else {
             return Err(anyhow::anyhow!("file does not exist"));
         }
@@ -229,8 +239,9 @@ async fn apply_patch(patch: &FilePatch) -> Result<String> {
             .map(|l| format!("{}\n", l))
             .collect();
 
-        tokio::fs::write(path, content).await?;
-        return Ok("created".to_string());
+        tokio::fs::write(path, &content).await?;
+        let diff = generate_diff("", &content, 1);
+        return Ok(("created".to_string(), diff));
     }
 
     // Handle modification
@@ -238,8 +249,16 @@ async fn apply_patch(patch: &FilePatch) -> Result<String> {
         return Err(anyhow::anyhow!("file does not exist"));
     }
 
-    let content = tokio::fs::read_to_string(path).await?;
-    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+    let old_content = tokio::fs::read_to_string(path).await?;
+    let mut lines: Vec<String> = old_content.lines().map(|s| s.to_string()).collect();
+
+    // Find the first affected line for diff context
+    let first_line = patch
+        .hunks
+        .iter()
+        .map(|h| h.old_start)
+        .min()
+        .unwrap_or(1);
 
     // Apply hunks in reverse order to preserve line numbers
     for hunk in patch.hunks.iter().rev() {
@@ -251,7 +270,56 @@ async fn apply_patch(patch: &FilePatch) -> Result<String> {
     }
 
     let new_content = lines.join("\n") + "\n";
-    tokio::fs::write(path, new_content).await?;
+    tokio::fs::write(path, &new_content).await?;
 
-    Ok(format!("modified ({} hunks)", patch.hunks.len()))
+    let diff = generate_diff(&old_content, &new_content, first_line);
+    Ok((format!("modified ({} hunks)", patch.hunks.len()), diff))
+}
+
+/// Generate a compact diff with line numbers (max 30 lines)
+fn generate_diff(old: &str, new: &str, start_line: usize) -> String {
+    let diff = TextDiff::from_lines(old, new);
+    let mut output = String::new();
+    let mut line_count = 0;
+    const MAX_LINES: usize = 30;
+
+    let mut old_line = start_line;
+    let mut new_line = start_line;
+
+    for change in diff.iter_all_changes() {
+        if line_count >= MAX_LINES {
+            output.push_str("... (diff truncated)\n");
+            break;
+        }
+
+        let content = change.value().trim_end_matches('\n');
+        let (prefix, line_num) = match change.tag() {
+            ChangeTag::Delete => {
+                let num = old_line;
+                old_line += 1;
+                if content.trim().is_empty() {
+                    continue;
+                }
+                ("-", num)
+            }
+            ChangeTag::Insert => {
+                let num = new_line;
+                new_line += 1;
+                if content.trim().is_empty() {
+                    continue;
+                }
+                ("+", num)
+            }
+            ChangeTag::Equal => {
+                old_line += 1;
+                new_line += 1;
+                continue;
+            }
+        };
+
+        output.push_str(&format!("{}{} {}\n", line_num, prefix, content));
+        line_count += 1;
+    }
+
+    output.trim_end().to_string()
 }
