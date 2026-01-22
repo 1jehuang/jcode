@@ -39,10 +39,24 @@ Set `JCODE_USE_DIRECT_API=1` to bypass the CLI and use the Anthropic Messages AP
 This requires tokens that Anthropic permits for direct API access (API keys, or
 OAuth tokens explicitly allowed for API usage).
 
-When using Claude Code OAuth tokens with the direct API, jcode automatically
-adds a Claude Code identity system block and remaps certain tool names to avoid
-OAuth restrictions on reserved names. This is handled automatically by the
-Anthropic provider:
+#### Claude OAuth direct API compatibility
+Claude Code OAuth tokens can be used directly against the Messages API, but only
+if the request matches the Claude Code "OAuth contract". jcode handles this
+automatically when `JCODE_USE_DIRECT_API=1` and Claude OAuth credentials are
+present.
+
+Required behaviors (applied by the Anthropic provider):
+- Use the Messages endpoint with `?beta=true`.
+- Send `User-Agent: claude-cli/1.0.0`.
+- Send `anthropic-beta: oauth-2025-04-20,claude-code-20250219`.
+- Prepend the system blocks with the Claude Code identity line as the first
+  block:
+  - `You are Claude Code, Anthropic's official CLI for Claude.`
+
+Tool name allow-list:
+Claude OAuth requests reject certain tool names. jcode remaps tool names on the
+wire and maps them back on responses so native tools continue to work. The
+mapping is:
 - `bash` → `shell_exec`
 - `read` → `file_read`
 - `write` → `file_write`
@@ -52,6 +66,11 @@ Anthropic provider:
 - `task` → `task_runner`
 - `todoread` → `todo_read`
 - `todowrite` → `todo_write`
+
+Notes:
+- If the OAuth token expires, refresh via the Claude OAuth refresh endpoint.
+- Without the identity line and allow-listed tool names, the API will reject
+  OAuth requests even if the token is otherwise valid.
 
 ## OpenAI / Codex OAuth
 
