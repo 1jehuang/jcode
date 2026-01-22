@@ -39,6 +39,20 @@ Set `JCODE_USE_DIRECT_API=1` to bypass the CLI and use the Anthropic Messages AP
 This requires tokens that Anthropic permits for direct API access (API keys, or
 OAuth tokens explicitly allowed for API usage).
 
+When using Claude Code OAuth tokens with the direct API, jcode automatically
+adds a Claude Code identity system block and remaps certain tool names to avoid
+OAuth restrictions on reserved names. This is handled automatically by the
+Anthropic provider:
+- `bash` → `shell_exec`
+- `read` → `file_read`
+- `write` → `file_write`
+- `edit` → `file_edit`
+- `glob` → `file_glob`
+- `grep` → `file_grep`
+- `task` → `task_runner`
+- `todoread` → `todo_read`
+- `todowrite` → `todo_write`
+
 ## OpenAI / Codex OAuth
 
 ### Login steps
