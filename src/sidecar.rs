@@ -7,11 +7,17 @@ use crate::auth;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// Haiku 4.5 model identifier
-pub const HAIKU_MODEL: &str = "claude-haiku-4-5-20241022";
+/// Haiku 3.5 model identifier (works with OAuth)
+pub const HAIKU_MODEL: &str = "claude-3-5-haiku-20241022";
 
-/// Claude Messages API endpoint
-const CLAUDE_API_URL: &str = "https://api.anthropic.com/v1/messages";
+/// Claude Messages API endpoint (with beta=true for OAuth)
+const CLAUDE_API_URL: &str = "https://api.anthropic.com/v1/messages?beta=true";
+
+/// User-Agent for OAuth requests (must match Claude CLI format)
+const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/1.0.0";
+
+/// Beta headers required for OAuth
+const OAUTH_BETA_HEADERS: &str = "oauth-2025-04-20,claude-code-20250219";
 
 /// Maximum tokens for sidecar responses (keep small for speed/cost)
 const DEFAULT_MAX_TOKENS: u32 = 1024;
@@ -58,8 +64,10 @@ impl HaikuSidecar {
         let response = self
             .client
             .post(CLAUDE_API_URL)
-            .header("x-api-key", &creds.access_token)
+            .header("Authorization", format!("Bearer {}", creds.access_token))
+            .header("User-Agent", CLAUDE_CLI_USER_AGENT)
             .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", OAUTH_BETA_HEADERS)
             .header("content-type", "application/json")
             .json(&request)
             .send()

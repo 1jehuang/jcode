@@ -89,9 +89,9 @@ async fn fetch_usage() -> Result<UsageData> {
         .get(USAGE_URL)
         .header("Accept", "application/json")
         .header("Content-Type", "application/json")
-        .header("User-Agent", "jcode/0.1")
+        .header("User-Agent", "claude-cli/1.0.0")
         .header("Authorization", format!("Bearer {}", creds.access_token))
-        .header("anthropic-beta", "oauth-2025-04-20")
+        .header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219")
         .send()
         .await
         .context("Failed to fetch usage data")?;
