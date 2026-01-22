@@ -18,8 +18,10 @@ const EMBEDDING_DIM: usize = 384;
 const MAX_SEQ_LENGTH: usize = 256;
 
 /// Download URLs for model files
-const MODEL_URL: &str = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx";
-const TOKENIZER_URL: &str = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
+const MODEL_URL: &str =
+    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx";
+const TOKENIZER_URL: &str =
+    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
 
 /// Global cached model (loaded once, reused)
 static EMBEDDER: OnceLock<Result<Embedder, String>> = OnceLock::new();
@@ -107,9 +109,7 @@ impl Embedder {
         ])?;
 
         // Extract embedding (mean pooling over sequence)
-        let output = outputs[0]
-            .to_array_view::<f32>()?
-            .to_owned();
+        let output = outputs[0].to_array_view::<f32>()?.to_owned();
 
         // Mean pooling: average over sequence dimension (axis 1)
         // Output shape is [1, seq_len, 384], we want [384]

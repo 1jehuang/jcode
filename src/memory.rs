@@ -680,12 +680,20 @@ impl MemoryManager {
 
     /// Find memories similar to the given text using embedding search
     /// Returns memories with similarity above threshold, sorted by similarity
-    pub fn find_similar(&self, text: &str, threshold: f32, limit: usize) -> Result<Vec<(MemoryEntry, f32)>> {
+    pub fn find_similar(
+        &self,
+        text: &str,
+        threshold: f32,
+        limit: usize,
+    ) -> Result<Vec<(MemoryEntry, f32)>> {
         // Generate embedding for query text
         let query_embedding = match crate::embedding::embed(text) {
             Ok(emb) => emb,
             Err(e) => {
-                crate::logging::info(&format!("Embedding failed, falling back to keyword search: {}", e));
+                crate::logging::info(&format!(
+                    "Embedding failed, falling back to keyword search: {}",
+                    e
+                ));
                 return Ok(Vec::new());
             }
         };
@@ -1077,31 +1085,43 @@ impl MemoryManager {
         add_event(MemoryEventKind::EmbeddingStarted);
 
         let embedding_start = Instant::now();
-        let candidates = match self.find_similar(&context, EMBEDDING_SIMILARITY_THRESHOLD, EMBEDDING_MAX_HITS) {
-            Ok(hits) => {
-                let latency_ms = embedding_start.elapsed().as_millis() as u64;
-                if hits.is_empty() {
-                    add_event(MemoryEventKind::EmbeddingComplete { latency_ms, hits: 0 });
-                    set_state(MemoryState::Idle);
-                    return Ok(None);
+        let candidates =
+            match self.find_similar(&context, EMBEDDING_SIMILARITY_THRESHOLD, EMBEDDING_MAX_HITS) {
+                Ok(hits) => {
+                    let latency_ms = embedding_start.elapsed().as_millis() as u64;
+                    if hits.is_empty() {
+                        add_event(MemoryEventKind::EmbeddingComplete {
+                            latency_ms,
+                            hits: 0,
+                        });
+                        set_state(MemoryState::Idle);
+                        return Ok(None);
+                    }
+                    add_event(MemoryEventKind::EmbeddingComplete {
+                        latency_ms,
+                        hits: hits.len(),
+                    });
+                    hits
                 }
-                add_event(MemoryEventKind::EmbeddingComplete { latency_ms, hits: hits.len() });
-                hits
-            }
-            Err(e) => {
-                // Embedding failed - fall back to score-based selection
-                crate::logging::info(&format!("Embedding search failed, falling back: {}", e));
-                add_event(MemoryEventKind::Error { message: e.to_string() });
+                Err(e) => {
+                    // Embedding failed - fall back to score-based selection
+                    crate::logging::info(&format!("Embedding search failed, falling back: {}", e));
+                    add_event(MemoryEventKind::Error {
+                        message: e.to_string(),
+                    });
 
-                // Fallback: use score-based selection (old behavior)
-                let mut all: Vec<_> = self.list_all()?.into_iter().filter(|e| e.active).collect();
-                all.sort_by(|a, b| {
-                    memory_score(b).partial_cmp(&memory_score(a)).unwrap_or(std::cmp::Ordering::Equal)
-                });
-                all.truncate(MEMORY_RELEVANCE_MAX_CANDIDATES);
-                all.into_iter().map(|e| (e, 0.0)).collect()
-            }
-        };
+                    // Fallback: use score-based selection (old behavior)
+                    let mut all: Vec<_> =
+                        self.list_all()?.into_iter().filter(|e| e.active).collect();
+                    all.sort_by(|a, b| {
+                        memory_score(b)
+                            .partial_cmp(&memory_score(a))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    all.truncate(MEMORY_RELEVANCE_MAX_CANDIDATES);
+                    all.into_iter().map(|e| (e, 0.0)).collect()
+                }
+            };
 
         if candidates.is_empty() {
             set_state(MemoryState::Idle);
@@ -1109,7 +1129,9 @@ impl MemoryManager {
         }
 
         // Step 2: Sidecar verification (only for embedding hits - much fewer calls!)
-        set_state(MemoryState::SidecarChecking { count: candidates.len() });
+        set_state(MemoryState::SidecarChecking {
+            count: candidates.len(),
+        });
         add_event(MemoryEventKind::SidecarStarted);
 
         let sidecar = HaikuSidecar::new();
@@ -1148,7 +1170,9 @@ impl MemoryManager {
                             } else {
                                 memory.content.clone()
                             };
-                            add_event(MemoryEventKind::SidecarRelevant { memory_preview: preview });
+                            add_event(MemoryEventKind::SidecarRelevant {
+                                memory_preview: preview,
+                            });
                             relevant_ids.push(memory.id.clone());
                             relevant.push(memory.clone());
                             crate::logging::info(&format!(
@@ -1161,7 +1185,9 @@ impl MemoryManager {
                         }
                     }
                     Err(e) => {
-                        add_event(MemoryEventKind::Error { message: e.to_string() });
+                        add_event(MemoryEventKind::Error {
+                            message: e.to_string(),
+                        });
                         crate::logging::info(&format!("Sidecar check failed: {}", e));
                     }
                 }
@@ -1175,10 +1201,14 @@ impl MemoryManager {
             return Ok(None);
         }
 
-        set_state(MemoryState::FoundRelevant { count: relevant.len() });
+        set_state(MemoryState::FoundRelevant {
+            count: relevant.len(),
+        });
 
-        Ok(format_entries_for_prompt(&relevant, MEMORY_RELEVANCE_MAX_RESULTS)
-            .map(|entries| format!("# Memory\n\n{}", entries)))
+        Ok(
+            format_entries_for_prompt(&relevant, MEMORY_RELEVANCE_MAX_RESULTS)
+                .map(|entries| format!("# Memory\n\n{}", entries)),
+        )
     }
 }
 

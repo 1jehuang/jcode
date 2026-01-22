@@ -342,8 +342,7 @@ impl OpenAIResponsesStream {
                     return self.pending.pop_front();
                 }
                 "response.failed" | "error" => {
-                    let (message, retry_after_secs) =
-                        extract_error_with_retry(&event.response);
+                    let (message, retry_after_secs) = extract_error_with_retry(&event.response);
                     return Some(StreamEvent::Error {
                         message,
                         retry_after_secs,

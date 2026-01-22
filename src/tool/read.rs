@@ -85,6 +85,11 @@ impl Tool for ReadTool {
             return handle_image_file(path, &params.file_path);
         }
 
+        // Check for PDF files and extract text
+        if is_pdf_file(path) {
+            return handle_pdf_file(path, &params.file_path);
+        }
+
         // Check for binary files
         if is_binary_file(path) {
             return Ok(ToolOutput::new(format!(
@@ -150,9 +155,9 @@ fn is_binary_file(path: &Path) -> bool {
     if let Some(ext) = path.extension() {
         let ext = ext.to_string_lossy().to_lowercase();
         let binary_exts = [
-            "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "pdf", "zip", "tar", "gz", "bz2",
-            "xz", "7z", "rar", "exe", "dll", "so", "dylib", "o", "a", "class", "pyc", "wasm",
-            "mp3", "mp4", "avi", "mov", "mkv", "flac", "ogg", "wav",
+            "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "zip", "tar", "gz", "bz2", "xz",
+            "7z", "rar", "exe", "dll", "so", "dylib", "o", "a", "class", "pyc", "wasm", "mp3",
+            "mp4", "avi", "mov", "mkv", "flac", "ogg", "wav",
         ];
         if binary_exts.contains(&ext.as_str()) {
             return true;
@@ -304,4 +309,67 @@ fn get_image_dimensions_from_data(data: &[u8]) -> Option<(u32, u32)> {
     }
 
     None
+}
+
+/// Check if a file is a PDF based on extension
+fn is_pdf_file(path: &Path) -> bool {
+    if let Some(ext) = path.extension() {
+        ext.to_string_lossy().to_lowercase() == "pdf"
+    } else {
+        false
+    }
+}
+
+/// Handle reading a PDF file - extract text content
+fn handle_pdf_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
+    // Get file metadata
+    let metadata = std::fs::metadata(path)?;
+    let file_size = metadata.len();
+
+    let size_str = if file_size < 1024 {
+        format!("{} bytes", file_size)
+    } else if file_size < 1024 * 1024 {
+        format!("{:.1} KB", file_size as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", file_size as f64 / 1024.0 / 1024.0)
+    };
+
+    // Extract text from PDF
+    match pdf_extract::extract_text(path) {
+        Ok(text) => {
+            let mut output = String::new();
+            output.push_str(&format!("PDF: {} ({})\n", file_path, size_str));
+            output.push_str(&format!("{}\n", "=".repeat(60)));
+
+            // Split into pages (pdf_extract uses form feed \x0c as page separator)
+            let pages: Vec<&str> = text.split('\x0c').collect();
+            let page_count = pages.len();
+
+            output.push_str(&format!("Pages: {}\n\n", page_count));
+
+            for (i, page) in pages.iter().enumerate() {
+                let page_text = page.trim();
+                if !page_text.is_empty() {
+                    output.push_str(&format!("--- Page {} ---\n", i + 1));
+                    // Limit each page to reasonable length
+                    if page_text.len() > 10000 {
+                        output.push_str(&page_text[..10000]);
+                        output.push_str("\n... (page truncated)\n");
+                    } else {
+                        output.push_str(page_text);
+                    }
+                    output.push_str("\n\n");
+                }
+            }
+
+            Ok(ToolOutput::new(output))
+        }
+        Err(e) => {
+            // Fall back to metadata only if text extraction fails
+            Ok(ToolOutput::new(format!(
+                "PDF: {} ({})\nCould not extract text: {}\nThis may be a scanned/image-based PDF.",
+                file_path, size_str, e
+            )))
+        }
+    }
 }

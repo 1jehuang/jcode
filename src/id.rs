@@ -324,7 +324,11 @@ mod tests {
         for (name, expected_icon) in SERVER_MODIFIERS {
             let icon = server_icon(name);
             assert_eq!(icon, *expected_icon, "Icon mismatch for '{}'", name);
-            assert_ne!(icon, "🔮", "Modifier '{}' should have a specific icon", name);
+            assert_ne!(
+                icon, "🔮",
+                "Modifier '{}' should have a specific icon",
+                name
+            );
         }
     }
 }

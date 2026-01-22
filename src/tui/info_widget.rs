@@ -1092,11 +1092,9 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
         let max_width = inner.width.saturating_sub(4) as usize;
         for event in activity.recent_events.iter().take(MAX_MEMORY_EVENTS) {
             let (icon, text, color) = match &event.kind {
-                MemoryEventKind::EmbeddingStarted => (
-                    "🔍",
-                    "Embedding...".to_string(),
-                    Color::Rgb(140, 180, 255),
-                ),
+                MemoryEventKind::EmbeddingStarted => {
+                    ("🔍", "Embedding...".to_string(), Color::Rgb(140, 180, 255))
+                }
                 MemoryEventKind::EmbeddingComplete { latency_ms, hits } => (
                     "→",
                     format!("{} hits ({}ms)", hits, latency_ms),
@@ -1154,14 +1152,20 @@ fn render_swarm_compact(info: &SwarmInfo) -> Vec<Line<'static>> {
 
     // Show active subagent status first (most important)
     if let Some(status) = &info.subagent_status {
-        spans.push(Span::styled("▶ ", Style::default().fg(Color::Rgb(255, 200, 100))));
+        spans.push(Span::styled(
+            "▶ ",
+            Style::default().fg(Color::Rgb(255, 200, 100)),
+        ));
         spans.push(Span::styled(
             truncate_smart(status, 20),
             Style::default().fg(Color::Rgb(180, 180, 190)),
         ));
     } else {
         // Show swarm icon (bee for "swarm")
-        spans.push(Span::styled("🐝 ", Style::default().fg(Color::Rgb(255, 200, 100))));
+        spans.push(Span::styled(
+            "🐝 ",
+            Style::default().fg(Color::Rgb(255, 200, 100)),
+        ));
     }
 
     // Session count if > 1
@@ -1169,7 +1173,10 @@ fn render_swarm_compact(info: &SwarmInfo) -> Vec<Line<'static>> {
         if !spans.is_empty() && info.subagent_status.is_none() {
             // Already have icon
         } else if info.subagent_status.is_some() {
-            spans.push(Span::styled(" · ", Style::default().fg(Color::Rgb(100, 100, 110))));
+            spans.push(Span::styled(
+                " · ",
+                Style::default().fg(Color::Rgb(100, 100, 110)),
+            ));
         }
         spans.push(Span::styled(
             format!("{}s", info.session_count),
@@ -1180,7 +1187,10 @@ fn render_swarm_compact(info: &SwarmInfo) -> Vec<Line<'static>> {
     // Client count if present
     if let Some(clients) = info.client_count {
         if !spans.is_empty() {
-            spans.push(Span::styled(" · ", Style::default().fg(Color::Rgb(100, 100, 110))));
+            spans.push(Span::styled(
+                " · ",
+                Style::default().fg(Color::Rgb(100, 100, 110)),
+            ));
         }
         spans.push(Span::styled(
             format!("{}c", clients),
@@ -1224,11 +1234,7 @@ fn render_swarm_expanded(info: &SwarmInfo, inner: Rect) -> Vec<Line<'static>> {
             ));
         }
         stats_parts.push(Span::styled(
-            format!(
-                "{} client{}",
-                clients,
-                if clients == 1 { "" } else { "s" }
-            ),
+            format!("{} client{}", clients, if clients == 1 { "" } else { "s" }),
             Style::default().fg(Color::Rgb(160, 160, 170)),
         ));
     }
@@ -1275,7 +1281,10 @@ fn render_background_compact(info: &BackgroundInfo) -> Vec<Line<'static>> {
     let mut spans: Vec<Span> = Vec::new();
 
     // Show spinner icon for active background work
-    spans.push(Span::styled("⏳ ", Style::default().fg(Color::Rgb(180, 140, 255))));
+    spans.push(Span::styled(
+        "⏳ ",
+        Style::default().fg(Color::Rgb(180, 140, 255)),
+    ));
 
     let mut parts: Vec<String> = Vec::new();
 
@@ -1339,10 +1348,16 @@ fn render_usage_compact(info: &UsageInfo) -> Vec<Line<'static>> {
 
     vec![Line::from(vec![
         Span::styled("5h ", Style::default().fg(Color::Rgb(140, 140, 150))),
-        Span::styled(format!("{}%", five_hr_pct), Style::default().fg(five_hr_color)),
+        Span::styled(
+            format!("{}%", five_hr_pct),
+            Style::default().fg(five_hr_color),
+        ),
         Span::styled(" · ", Style::default().fg(Color::Rgb(100, 100, 110))),
         Span::styled("7d ", Style::default().fg(Color::Rgb(140, 140, 150))),
-        Span::styled(format!("{}%", seven_day_pct), Style::default().fg(seven_day_color)),
+        Span::styled(
+            format!("{}%", seven_day_pct),
+            Style::default().fg(seven_day_color),
+        ),
     ])]
 }
 
