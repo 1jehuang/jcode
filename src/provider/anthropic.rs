@@ -19,6 +19,15 @@ use tokio_stream::wrappers::ReceiverStream;
 /// Anthropic Messages API endpoint
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 
+/// OAuth endpoint (with beta=true query param)
+const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
+
+/// User-Agent for OAuth requests (must match Claude CLI format)
+const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/1.0.0";
+
+/// Beta headers required for OAuth
+const OAUTH_BETA_HEADERS: &str = "oauth-2025-04-20,claude-code-20250219";
+
 /// Default model
 const DEFAULT_MODEL: &str = "claude-opus-4-5-20251101";
 
@@ -275,17 +284,24 @@ async fn stream_response(
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<()> {
     // Build request with appropriate auth headers
+    let url = if is_oauth { API_URL_OAUTH } else { API_URL };
+
     let mut req = client
-        .post(API_URL)
+        .post(url)
         .header("anthropic-version", API_VERSION)
         .header("content-type", "application/json")
         .header("accept", "text/event-stream");
 
     if is_oauth {
-        // OAuth tokens use Bearer auth and require beta header
+        // OAuth tokens require:
+        // 1. Bearer auth (NOT x-api-key)
+        // 2. User-Agent matching Claude CLI
+        // 3. Multiple beta headers
+        // 4. ?beta=true query param (in URL above)
         req = req
             .header("Authorization", format!("Bearer {}", token))
-            .header("anthropic-beta", "oauth-2025-04-20");
+            .header("User-Agent", CLAUDE_CLI_USER_AGENT)
+            .header("anthropic-beta", OAUTH_BETA_HEADERS);
     } else {
         // Direct API keys use x-api-key
         req = req.header("x-api-key", &token);

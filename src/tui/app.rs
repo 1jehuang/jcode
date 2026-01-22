@@ -4427,6 +4427,15 @@ impl App {
                         // Track start but don't display - wait for ThinkingDone
                         self.thinking_start = Some(Instant::now());
                     }
+                    StreamEvent::ThinkingDelta(thinking_text) => {
+                        // Display reasoning/thinking content from OpenAI
+                        // Flush any pending text first
+                        if let Some(chunk) = self.stream_buffer.flush() {
+                            self.streaming_text.push_str(&chunk);
+                        }
+                        // Insert thinking content as a thought line
+                        self.insert_thought_line(format!("💭 {}", thinking_text));
+                    }
                     StreamEvent::ThinkingEnd => {
                         // Don't display here - ThinkingDone has accurate timing
                         self.thinking_start = None;
@@ -5009,6 +5018,13 @@ impl App {
                                     StreamEvent::ThinkingStart => {
                                         self.thinking_start = Some(Instant::now());
                                         self.broadcast_debug(super::backend::DebugEvent::ThinkingStart);
+                                    }
+                                    StreamEvent::ThinkingDelta(thinking_text) => {
+                                        // Display reasoning/thinking content from OpenAI
+                                        if let Some(chunk) = self.stream_buffer.flush() {
+                                            self.streaming_text.push_str(&chunk);
+                                        }
+                                        self.insert_thought_line(format!("💭 {}", thinking_text));
                                     }
                                     StreamEvent::ThinkingEnd => {
                                         self.thinking_start = None;
