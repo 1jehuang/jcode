@@ -2138,10 +2138,14 @@ impl App {
                                 continue 'outer;
                             }
                             Some(server_event) => {
-                                self.handle_server_event(server_event, &mut remote);
+                                let at_safe_point = self.handle_server_event(server_event, &mut remote);
 
-                                // Process pending interleave or queued messages after turn completes
-                                if !self.is_processing {
+                                // Process pending interleave or queued messages at safe points
+                                // Safe points: after turn completes OR after tool completes (in ASAP mode)
+                                let should_send_queued = !self.is_processing
+                                    || (at_safe_point && !self.queue_mode);
+
+                                if should_send_queued {
                                     if let Some(interleave_msg) = self.interleave_message.take() {
                                         if !interleave_msg.trim().is_empty() {
                                             self.push_display_message(DisplayMessage {
@@ -2228,12 +2232,13 @@ impl App {
         })
     }
 
-    /// Handle a server event in remote mode
+    /// Handle a server event. Returns true if we're at a "safe point" for interleaving
+    /// (after a tool completes but before the turn ends).
     fn handle_server_event(
         &mut self,
         event: crate::protocol::ServerEvent,
         remote: &mut super::backend::RemoteConnection,
-    ) {
+    ) -> bool {
         use crate::protocol::ServerEvent;
 
         match event {
@@ -2243,7 +2248,7 @@ impl App {
                         self.streaming_text.push_str(&chunk);
                     }
                     self.insert_thought_line(thought_line);
-                    return;
+                    return false;
                 }
                 // Update status from Sending to Streaming on first text
                 if matches!(self.status, ProcessingStatus::Sending) {
@@ -2253,6 +2258,7 @@ impl App {
                     self.streaming_text.push_str(&chunk);
                 }
                 self.last_stream_activity = Some(Instant::now());
+                false
             }
             ServerEvent::ToolStart { id, name } => {
                 remote.handle_tool_start(&id, &name);
@@ -2262,9 +2268,11 @@ impl App {
                     name,
                     input: serde_json::Value::Null,
                 });
+                false
             }
             ServerEvent::ToolInput { delta } => {
                 remote.handle_tool_input(&delta);
+                false
             }
             ServerEvent::ToolExec { id, name } => {
                 // Update streaming_tool_calls with parsed input before clearing
@@ -2273,6 +2281,7 @@ impl App {
                     tc.input = parsed_input.clone();
                 }
                 remote.handle_tool_exec(&id, &name);
+                false
             }
             ServerEvent::ToolDone {
                 id,
@@ -2320,6 +2329,8 @@ impl App {
                 });
                 self.streaming_tool_calls.clear();
                 self.status = ProcessingStatus::Streaming;
+                // This is a safe point to interleave messages
+                true
             }
             ServerEvent::TokenUsage {
                 input,
@@ -2335,6 +2346,7 @@ impl App {
                 if cache_creation_input.is_some() {
                     self.streaming_cache_creation_tokens = cache_creation_input;
                 }
+                false
             }
             ServerEvent::Done { id } => {
                 // Only process Done for our current message request
@@ -2365,6 +2377,7 @@ impl App {
                     self.thought_line_inserted = false;
                     remote.clear_pending();
                 }
+                false
             }
             ServerEvent::Error { message, .. } => {
                 self.push_display_message(DisplayMessage {
@@ -2380,10 +2393,12 @@ impl App {
                 self.interleave_message = None;
                 self.thought_line_inserted = false;
                 remote.clear_pending();
+                false
             }
             ServerEvent::SessionId { session_id } => {
                 remote.set_session_id(session_id.clone());
                 self.remote_session_id = Some(session_id);
+                false
             }
             ServerEvent::Reloading { .. } => {
                 self.push_display_message(DisplayMessage {
@@ -2394,6 +2409,7 @@ impl App {
                     title: Some("Reload".to_string()),
                     tool_data: None,
                 });
+                false
             }
             ServerEvent::ReloadProgress {
                 step,
@@ -2435,6 +2451,7 @@ impl App {
                 // Update status notice
                 self.status_notice =
                     Some((format!("Reload: {}", message), std::time::Instant::now()));
+                false
             }
             ServerEvent::History {
                 messages,
@@ -2501,6 +2518,7 @@ impl App {
                         });
                     }
                 }
+                false
             }
             ServerEvent::ModelChanged { model, error, .. } => {
                 if let Some(err) = error {
@@ -2518,8 +2536,9 @@ impl App {
                     )));
                     self.set_status_notice(format!("Model → {}", model));
                 }
+                false
             }
-            _ => {}
+            _ => false,
         }
     }
 
@@ -2637,6 +2656,17 @@ impl App {
                         "Immediate mode: messages send next (no interrupt)"
                     };
                     self.set_status_notice(mode_str);
+                    return Ok(());
+                }
+                KeyCode::Up => {
+                    // Ctrl+Up: retrieve last queued message for editing
+                    if self.input.is_empty() && !self.queued_messages.is_empty() {
+                        if let Some(msg) = self.queued_messages.pop() {
+                            self.input = msg;
+                            self.cursor_pos = self.input.len();
+                            self.set_status_notice("Retrieved queued message for editing");
+                        }
+                    }
                     return Ok(());
                 }
                 _ => {}
@@ -2886,25 +2916,16 @@ impl App {
                     }
                 }
             }
-            KeyCode::Up => {
-                // If input is empty and there are queued messages, bring last one back for editing
-                if self.input.is_empty() && !self.queued_messages.is_empty() {
-                    if let Some(msg) = self.queued_messages.pop() {
-                        self.input = msg;
-                        self.cursor_pos = self.input.len();
-                    }
-                } else {
-                    self.scroll_offset = self.scroll_offset.saturating_add(1);
-                }
+            KeyCode::Up | KeyCode::PageUp => {
+                // Scroll up (increase offset from bottom)
+                let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
+                let inc = if code == KeyCode::PageUp { 10 } else { 1 };
+                self.scroll_offset = (self.scroll_offset + inc).min(max_estimate);
             }
-            KeyCode::Down => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(1);
-            }
-            KeyCode::PageUp => {
-                self.scroll_offset = self.scroll_offset.saturating_add(10);
-            }
-            KeyCode::PageDown => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(10);
+            KeyCode::Down | KeyCode::PageDown => {
+                // Scroll down (decrease offset, 0 = bottom)
+                let dec = if code == KeyCode::PageDown { 10 } else { 1 };
+                self.scroll_offset = self.scroll_offset.saturating_sub(dec);
             }
             KeyCode::Esc => {
                 if self.is_processing {
