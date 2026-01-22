@@ -34,6 +34,41 @@ const DEFAULT_MODEL: &str = "claude-opus-4-5-20251101";
 /// API version header
 const API_VERSION: &str = "2023-06-01";
 
+/// Claude Code identity block required for OAuth direct API access
+const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+fn map_tool_name_for_oauth(name: &str) -> String {
+    match name {
+        "bash" => "shell_exec",
+        "read" => "file_read",
+        "write" => "file_write",
+        "edit" => "file_edit",
+        "glob" => "file_glob",
+        "grep" => "file_grep",
+        "task" => "task_runner",
+        "todoread" => "todo_read",
+        "todowrite" => "todo_write",
+        _ => name,
+    }
+    .to_string()
+}
+
+fn map_tool_name_from_oauth(name: &str) -> String {
+    match name {
+        "shell_exec" => "bash",
+        "file_read" => "read",
+        "file_write" => "write",
+        "file_edit" => "edit",
+        "file_glob" => "glob",
+        "file_grep" => "grep",
+        "task_runner" => "task",
+        "todo_read" => "todoread",
+        "todo_write" => "todowrite",
+        _ => name,
+    }
+    .to_string()
+}
+
 /// Maximum number of retries for transient errors
 const MAX_RETRIES: u32 = 3;
 
@@ -79,7 +114,7 @@ impl AnthropicProvider {
     }
 
     /// Convert our Message type to Anthropic API format
-    fn format_messages(&self, messages: &[Message]) -> Vec<ApiMessage> {
+    fn format_messages(&self, messages: &[Message], is_oauth: bool) -> Vec<ApiMessage> {
         messages
             .iter()
             .map(|msg| {
@@ -88,7 +123,7 @@ impl AnthropicProvider {
                     Role::Assistant => "assistant",
                 };
 
-                let content = self.format_content_blocks(&msg.content);
+                let content = self.format_content_blocks(&msg.content, is_oauth);
 
                 ApiMessage {
                     role: role.to_string(),
@@ -100,7 +135,7 @@ impl AnthropicProvider {
     }
 
     /// Convert our ContentBlock to Anthropic API format
-    fn format_content_blocks(&self, blocks: &[ContentBlock]) -> Vec<ApiContentBlock> {
+    fn format_content_blocks(&self, blocks: &[ContentBlock], is_oauth: bool) -> Vec<ApiContentBlock> {
         blocks
             .iter()
             .filter_map(|block| match block {
@@ -109,7 +144,11 @@ impl AnthropicProvider {
                 }
                 ContentBlock::ToolUse { id, name, input } => Some(ApiContentBlock::ToolUse {
                     id: id.clone(),
-                    name: name.clone(),
+                    name: if is_oauth {
+                        map_tool_name_for_oauth(name)
+                    } else {
+                        name.clone()
+                    },
                     input: input.clone(),
                 }),
                 ContentBlock::ToolResult {
@@ -127,11 +166,15 @@ impl AnthropicProvider {
     }
 
     /// Convert tool definitions to Anthropic API format
-    fn format_tools(&self, tools: &[ToolDefinition]) -> Vec<ApiTool> {
+    fn format_tools(&self, tools: &[ToolDefinition], is_oauth: bool) -> Vec<ApiTool> {
         tools
             .iter()
             .map(|tool| ApiTool {
-                name: tool.name.clone(),
+                name: if is_oauth {
+                    map_tool_name_for_oauth(&tool.name)
+                } else {
+                    tool.name.clone()
+                },
                 description: tool.description.clone(),
                 input_schema: tool.input_schema.clone(),
             })
@@ -158,18 +201,14 @@ impl Provider for AnthropicProvider {
         let model = self.model.read().unwrap().clone();
 
         // Format request
-        let api_messages = self.format_messages(messages);
-        let api_tools = self.format_tools(tools);
+        let api_messages = self.format_messages(messages, is_oauth);
+        let api_tools = self.format_tools(tools, is_oauth);
 
         let request = ApiRequest {
             model: model.clone(),
             max_tokens: 16384,
-            system: if system.is_empty() {
-                None
-            } else {
-                Some(system.to_string())
-            },
-            messages: api_messages,
+            system: build_system_param(system, is_oauth),
+            messages: format_messages_with_identity(api_messages, is_oauth),
             tools: if api_tools.is_empty() {
                 None
             } else {
@@ -283,6 +322,11 @@ async fn stream_response(
     request: ApiRequest,
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<()> {
+    if std::env::var("JCODE_ANTHROPIC_DEBUG").map(|v| v == "1").unwrap_or(false) {
+        if let Ok(json) = serde_json::to_string_pretty(&request) {
+            crate::logging::info(&format!("Anthropic request payload:\n{}", json));
+        }
+    }
     // Build request with appropriate auth headers
     let url = if is_oauth { API_URL_OAUTH } else { API_URL };
 
@@ -338,6 +382,7 @@ async fn stream_response(
                 &mut current_tool_use,
                 &mut input_tokens,
                 &mut output_tokens,
+                is_oauth,
             );
             for stream_event in events {
                 if tx.send(Ok(stream_event)).await.is_err() {
@@ -427,6 +472,7 @@ fn process_sse_event(
     current_tool_use: &mut Option<ToolUseAccumulator>,
     input_tokens: &mut Option<u64>,
     output_tokens: &mut Option<u64>,
+    is_oauth: bool,
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
@@ -446,13 +492,21 @@ fn process_sse_event(
                         // Text block starting - nothing to emit yet
                     }
                     ApiContentBlockStart::ToolUse { id, name } => {
+                        let mapped_name = if is_oauth {
+                            map_tool_name_from_oauth(&name)
+                        } else {
+                            name.clone()
+                        };
                         // Start accumulating tool use
                         *current_tool_use = Some(ToolUseAccumulator {
                             id: id.clone(),
-                            name: name.clone(),
+                            name: mapped_name.clone(),
                             input_json: String::new(),
                         });
-                        events.push(StreamEvent::ToolUseStart { id, name });
+                        events.push(StreamEvent::ToolUseStart {
+                            id,
+                            name: mapped_name,
+                        });
                     }
                 }
             }
@@ -520,11 +574,67 @@ struct ApiRequest {
     model: String,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<ApiSystem>,
     messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<ApiTool>>,
     stream: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(untagged)]
+enum ApiSystem {
+    Text(String),
+    Blocks(Vec<ApiSystemBlock>),
+}
+
+#[derive(Serialize, Clone)]
+struct ApiSystemBlock {
+    #[serde(rename = "type")]
+    block_type: &'static str,
+    text: String,
+}
+
+fn build_system_param(system: &str, is_oauth: bool) -> Option<ApiSystem> {
+    if is_oauth {
+        let mut blocks = Vec::new();
+        blocks.push(ApiSystemBlock {
+            block_type: "text",
+            text: CLAUDE_CODE_IDENTITY.to_string(),
+        });
+        if !system.is_empty() {
+            blocks.push(ApiSystemBlock {
+                block_type: "text",
+                text: system.to_string(),
+            });
+        }
+        return Some(ApiSystem::Blocks(blocks));
+    }
+
+    if system.is_empty() {
+        None
+    } else {
+        Some(ApiSystem::Text(system.to_string()))
+    }
+}
+
+fn format_messages_with_identity(
+    messages: Vec<ApiMessage>,
+    is_oauth: bool,
+) -> Vec<ApiMessage> {
+    if !is_oauth {
+        return messages;
+    }
+
+    let mut out = Vec::with_capacity(messages.len() + 1);
+    out.push(ApiMessage {
+        role: "user".to_string(),
+        content: vec![ApiContentBlock::Text {
+            text: CLAUDE_CODE_IDENTITY.to_string(),
+        }],
+    });
+    out.extend(messages);
+    out
 }
 
 #[derive(Serialize, Clone)]

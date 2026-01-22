@@ -19,6 +19,9 @@ const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/1.0.0";
 /// Beta headers required for OAuth
 const OAUTH_BETA_HEADERS: &str = "oauth-2025-04-20,claude-code-20250219";
 
+/// Claude Code identity block required for OAuth direct API access
+const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
 /// Maximum tokens for sidecar responses (keep small for speed/cost)
 const DEFAULT_MAX_TOKENS: u32 = 1024;
 
@@ -54,7 +57,7 @@ impl HaikuSidecar {
         let request = MessagesRequest {
             model: &self.model,
             max_tokens: self.max_tokens,
-            system: Some(system),
+            system: build_system_param(system),
             messages: vec![Message {
                 role: "user",
                 content: user_message,
@@ -208,7 +211,7 @@ struct MessagesRequest<'a> {
     model: &'a str,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<&'a str>,
+    system: Option<ApiSystem<'a>>,
     messages: Vec<Message<'a>>,
 }
 
@@ -216,6 +219,35 @@ struct MessagesRequest<'a> {
 struct Message<'a> {
     role: &'a str,
     content: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ApiSystem<'a> {
+    Text(&'a str),
+    Blocks(Vec<ApiSystemBlock<'a>>),
+}
+
+#[derive(Serialize)]
+struct ApiSystemBlock<'a> {
+    #[serde(rename = "type")]
+    block_type: &'static str,
+    text: &'a str,
+}
+
+fn build_system_param(system: &str) -> Option<ApiSystem<'_>> {
+    let mut blocks = Vec::new();
+    blocks.push(ApiSystemBlock {
+        block_type: "text",
+        text: CLAUDE_CODE_IDENTITY,
+    });
+    if !system.is_empty() {
+        blocks.push(ApiSystemBlock {
+            block_type: "text",
+            text: system,
+        });
+    }
+    Some(ApiSystem::Blocks(blocks))
 }
 
 #[derive(Deserialize)]
