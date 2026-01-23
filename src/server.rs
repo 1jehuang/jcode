@@ -148,10 +148,15 @@ fn server_update_candidate() -> Option<(PathBuf, &'static str)> {
         }
     }
 
-    let repo_dir = crate::build::get_repo_dir()?;
-    let exe = repo_dir.join("target/release/jcode");
-    if exe.exists() {
-        return Some((exe, "release"));
+    if let Some(repo_dir) = crate::build::get_repo_dir() {
+        let exe = repo_dir.join("target/release/jcode");
+        if exe.exists() {
+            return Some((exe, "release"));
+        }
+    }
+
+    if let Some(exe) = crate::build::jcode_path_in_path() {
+        return Some((exe, "path"));
     }
     None
 }
@@ -162,31 +167,30 @@ fn canonicalize_or(path: PathBuf) -> PathBuf {
 
 fn server_has_newer_binary() -> bool {
     let current_exe = std::env::current_exe().ok();
-    let startup_mtime = current_exe
-        .as_ref()
-        .and_then(|p| std::fs::metadata(p).ok())
-        .and_then(|m| m.modified().ok());
     let Some((candidate, _label)) = server_update_candidate() else {
         return false;
     };
 
-    if let Some(current_exe) = current_exe {
-        let current = canonicalize_or(current_exe);
-        let candidate_path = canonicalize_or(candidate.clone());
-        if candidate_path != current {
-            return true;
-        }
-    }
+    let current_mtime = current_exe
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok());
+    let candidate_mtime = std::fs::metadata(&candidate)
+        .ok()
+        .and_then(|m| m.modified().ok());
 
-    if let Some(startup_mtime) = startup_mtime {
-        if let Ok(metadata) = std::fs::metadata(&candidate) {
-            if let Ok(current_mtime) = metadata.modified() {
-                return current_mtime > startup_mtime;
+    match (current_mtime, candidate_mtime) {
+        (Some(current), Some(candidate)) => candidate > current,
+        _ => {
+            if let Some(current_exe) = current_exe {
+                let current = canonicalize_or(current_exe);
+                let candidate_path = canonicalize_or(candidate);
+                current != candidate_path
+            } else {
+                false
             }
         }
     }
-
-    false
 }
 
 /// Exit code when server shuts down due to idle timeout
@@ -749,6 +753,10 @@ async fn handle_client(
         registry.register_selfdev_tools().await;
     }
 
+    // Get a handle to the soft interrupt queue BEFORE wrapping in Mutex
+    // This allows queueing interrupts while the agent is processing
+    let soft_interrupt_queue = new_agent.soft_interrupt_queue();
+
     let agent = Arc::new(Mutex::new(new_agent));
     {
         let mut sessions_guard = sessions.write().await;
@@ -917,6 +925,19 @@ async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::Done { id: message_id });
                     }
                 }
+            }
+
+            Request::SoftInterrupt {
+                id,
+                content,
+                urgent,
+            } => {
+                // Queue a soft interrupt message to be injected at the next safe point
+                // Uses the pre-extracted queue handle so we don't need the agent lock
+                if let Ok(mut q) = soft_interrupt_queue.lock() {
+                    q.push(crate::agent::SoftInterruptMessage { content, urgent });
+                }
+                let _ = client_event_tx.send(ServerEvent::Ack { id });
             }
 
             Request::Clear { id } => {
@@ -2549,15 +2570,17 @@ async fn do_server_reload_with_progress(
     // Step 1: Find repo
     send_progress("init", "🔄 Starting hot-reload...", None, None);
 
-    let repo_dir =
-        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
-
-    send_progress(
-        "init",
-        &format!("📁 Repository: {}", repo_dir.display()),
-        Some(true),
-        None,
-    );
+    let repo_dir = get_repo_dir();
+    if let Some(repo_dir) = &repo_dir {
+        send_progress(
+            "init",
+            &format!("📁 Repository: {}", repo_dir.display()),
+            Some(true),
+            None,
+        );
+    } else {
+        send_progress("init", "📁 Repository: (not found)", Some(true), None);
+    }
 
     // Step 2: Check for binary
     let (exe, exe_label) = server_update_candidate().ok_or_else(|| {
@@ -2609,19 +2632,21 @@ async fn do_server_reload_with_progress(
     );
 
     // Step 4: Show current git state (informational)
-    let head_output = ProcessCommand::new("git")
-        .args(["log", "--oneline", "-1"])
-        .current_dir(&repo_dir)
-        .output();
+    if let Some(repo_dir) = &repo_dir {
+        let head_output = ProcessCommand::new("git")
+            .args(["log", "--oneline", "-1"])
+            .current_dir(repo_dir)
+            .output();
 
-    if let Ok(output) = head_output {
-        let head_str = String::from_utf8_lossy(&output.stdout);
-        send_progress(
-            "git",
-            &format!("📍 HEAD: {}", head_str.trim()),
-            Some(true),
-            None,
-        );
+        if let Ok(output) = head_output {
+            let head_str = String::from_utf8_lossy(&output.stdout);
+            send_progress(
+                "git",
+                &format!("📍 HEAD: {}", head_str.trim()),
+                Some(true),
+                None,
+            );
+        }
     }
 
     // Step 5: Exec

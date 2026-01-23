@@ -609,6 +609,15 @@ impl App {
             }
         }
 
+        // Fallback: check the binary in PATH
+        if let Some(exe) = crate::build::jcode_path_in_path() {
+            if let Ok(metadata) = std::fs::metadata(&exe) {
+                if let Ok(current_mtime) = metadata.modified() {
+                    return current_mtime > startup_mtime;
+                }
+            }
+        }
+
         false
     }
 
@@ -857,6 +866,368 @@ impl App {
 
     /// Check for and process debug commands from file
     /// Commands: "message:<text>", "reload", "state", "quit"
+    fn handle_debug_command(&mut self, cmd: &str) -> String {
+        let cmd = cmd.trim();
+        if cmd.starts_with("message:") {
+            let msg = cmd.strip_prefix("message:").unwrap_or("");
+            // Inject the message as if user typed it
+            self.input = msg.to_string();
+            self.submit_input();
+            self.debug_trace
+                .record("message", format!("submitted:{}", msg));
+            format!("OK: queued message '{}'", msg)
+        } else if cmd == "reload" {
+            // Trigger reload
+            self.input = "/reload".to_string();
+            self.submit_input();
+            self.debug_trace.record("reload", "triggered".to_string());
+            "OK: reload triggered".to_string()
+        } else if cmd == "state" {
+            // Return current state as JSON for easier parsing
+            serde_json::json!({
+                "processing": self.is_processing,
+                "messages": self.messages.len(),
+                "display_messages": self.display_messages.len(),
+                "input": self.input,
+                "cursor_pos": self.cursor_pos,
+                "scroll_offset": self.scroll_offset,
+                "queued_messages": self.queued_messages.len(),
+                "provider_session_id": self.provider_session_id,
+                "model": self.provider.name(),
+                "version": env!("JCODE_VERSION"),
+            })
+            .to_string()
+        } else if cmd == "snapshot" {
+            let snapshot = self.build_debug_snapshot();
+            serde_json::to_string_pretty(&snapshot).unwrap_or_else(|_| "{}".to_string())
+        } else if cmd.starts_with("wait:") {
+            let raw = cmd.strip_prefix("wait:").unwrap_or("0");
+            if let Ok(ms) = raw.parse::<u64>() {
+                return self.apply_wait_ms(ms);
+            }
+            format!("ERR: invalid wait '{}'", raw)
+        } else if cmd == "wait" {
+            if self.is_processing {
+                "wait: processing".to_string()
+            } else {
+                "wait: idle".to_string()
+            }
+        } else if cmd == "last_response" {
+            // Get last assistant message
+            self.display_messages
+                .iter()
+                .rev()
+                .find(|m| m.role == "assistant" || m.role == "error")
+                .map(|m| format!("last_response: [{}] {}", m.role, m.content))
+                .unwrap_or_else(|| "last_response: none".to_string())
+        } else if cmd == "history" {
+            // Return all messages as JSON
+            let msgs: Vec<serde_json::Value> = self
+                .display_messages
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "role": m.role,
+                        "content": m.content,
+                        "tool_calls": m.tool_calls,
+                    })
+                })
+                .collect();
+            serde_json::to_string_pretty(&msgs).unwrap_or_else(|_| "[]".to_string())
+        } else if cmd == "screen" {
+            // Capture current visual state
+            use super::visual_debug;
+            visual_debug::enable(); // Ensure enabled
+                                    // Force a frame dump to file and return path
+            match visual_debug::dump_to_file() {
+                Ok(path) => format!("screen: {}", path.display()),
+                Err(e) => format!("screen error: {}", e),
+            }
+        } else if cmd == "screen-json" {
+            use super::visual_debug;
+            visual_debug::enable();
+            visual_debug::latest_frame_json()
+                .unwrap_or_else(|| "screen-json: no frames captured".to_string())
+        } else if cmd == "screen-json-normalized" {
+            use super::visual_debug;
+            visual_debug::enable();
+            visual_debug::latest_frame_json_normalized()
+                .unwrap_or_else(|| "screen-json-normalized: no frames captured".to_string())
+        } else if cmd.starts_with("assert:") {
+            let raw = cmd.strip_prefix("assert:").unwrap_or("");
+            self.handle_assertions(raw)
+        } else if cmd.starts_with("run:") {
+            let raw = cmd.strip_prefix("run:").unwrap_or("");
+            self.handle_script_run(raw)
+        } else if cmd == "quit" {
+            self.should_quit = true;
+            "OK: quitting".to_string()
+        } else if cmd == "trace-start" {
+            self.debug_trace.enabled = true;
+            self.debug_trace.started_at = Instant::now();
+            self.debug_trace.events.clear();
+            "OK: trace started".to_string()
+        } else if cmd == "trace-stop" {
+            self.debug_trace.enabled = false;
+            "OK: trace stopped".to_string()
+        } else if cmd == "trace" {
+            serde_json::to_string_pretty(&self.debug_trace.events)
+                .unwrap_or_else(|_| "[]".to_string())
+        } else if cmd.starts_with("scroll:") {
+            let dir = cmd.strip_prefix("scroll:").unwrap_or("");
+            match dir {
+                "up" => {
+                    if self.scroll_offset > 0 {
+                        self.scroll_offset = self.scroll_offset.saturating_sub(5);
+                    }
+                    format!("scroll: up to {}", self.scroll_offset)
+                }
+                "down" => {
+                    self.scroll_offset += 5;
+                    format!("scroll: down to {}", self.scroll_offset)
+                }
+                "top" => {
+                    self.scroll_offset = 0;
+                    "scroll: top".to_string()
+                }
+                "bottom" => {
+                    self.scroll_offset = usize::MAX / 2;
+                    "scroll: bottom".to_string()
+                }
+                _ => format!("scroll error: unknown direction '{}'", dir),
+            }
+        } else if cmd.starts_with("keys:") {
+            let keys_str = cmd.strip_prefix("keys:").unwrap_or("");
+            let mut results = Vec::new();
+            for key_spec in keys_str.split(',') {
+                match self.parse_and_inject_key(key_spec.trim()) {
+                    Ok(desc) => {
+                        self.debug_trace.record("key", format!("{}", desc));
+                        results.push(format!("OK: {}", desc));
+                    }
+                    Err(e) => results.push(format!("ERR: {}", e)),
+                }
+            }
+            results.join("\n")
+        } else if cmd == "input" {
+            format!("input: {:?}", self.input)
+        } else if cmd.starts_with("set_input:") {
+            let new_input = cmd.strip_prefix("set_input:").unwrap_or("");
+            self.input = new_input.to_string();
+            self.cursor_pos = self.input.len();
+            self.debug_trace
+                .record("input", format!("set:{}", self.input));
+            format!("OK: input set to {:?}", self.input)
+        } else if cmd == "submit" {
+            if self.input.is_empty() {
+                "submit error: input is empty".to_string()
+            } else {
+                self.submit_input();
+                self.debug_trace.record("input", "submitted".to_string());
+                "OK: submitted".to_string()
+            }
+        } else if cmd == "record-start" {
+            use super::test_harness;
+            test_harness::start_recording();
+            "OK: event recording started".to_string()
+        } else if cmd == "record-stop" {
+            use super::test_harness;
+            test_harness::stop_recording();
+            "OK: event recording stopped".to_string()
+        } else if cmd == "record-events" {
+            use super::test_harness;
+            test_harness::get_recorded_events_json()
+        } else if cmd == "clock-enable" {
+            use super::test_harness;
+            test_harness::enable_test_clock();
+            "OK: test clock enabled".to_string()
+        } else if cmd == "clock-disable" {
+            use super::test_harness;
+            test_harness::disable_test_clock();
+            "OK: test clock disabled".to_string()
+        } else if cmd.starts_with("clock-advance:") {
+            use super::test_harness;
+            let ms_str = cmd.strip_prefix("clock-advance:").unwrap_or("0");
+            match ms_str.parse::<u64>() {
+                Ok(ms) => {
+                    test_harness::advance_clock(std::time::Duration::from_millis(ms));
+                    format!("OK: clock advanced {}ms", ms)
+                }
+                Err(_) => "clock-advance error: invalid ms value".to_string(),
+            }
+        } else if cmd == "clock-now" {
+            use super::test_harness;
+            format!("clock: {}ms", test_harness::now_ms())
+        } else if cmd.starts_with("replay:") {
+            use super::test_harness;
+            let json = cmd.strip_prefix("replay:").unwrap_or("[]");
+            match test_harness::EventPlayer::from_json(json) {
+                Ok(mut player) => {
+                    player.start();
+                    let mut results = Vec::new();
+                    while let Some(event) = player.next_event() {
+                        results.push(format!("{:?}", event));
+                    }
+                    format!(
+                        "replay: {} events processed, {} remaining",
+                        results.len(),
+                        player.remaining()
+                    )
+                }
+                Err(e) => format!("replay error: {}", e),
+            }
+        } else if cmd.starts_with("bundle-start:") {
+            let name = cmd.strip_prefix("bundle-start:").unwrap_or("test");
+            std::env::set_var("JCODE_TEST_BUNDLE", name);
+            format!("OK: test bundle '{}' started", name)
+        } else if cmd == "bundle-save" {
+            use super::test_harness::TestBundle;
+            let name = std::env::var("JCODE_TEST_BUNDLE").unwrap_or_else(|_| "unnamed".to_string());
+            let bundle = TestBundle::new(&name);
+            let path = TestBundle::default_path(&name);
+            match bundle.save(&path) {
+                Ok(_) => format!("OK: bundle saved to {}", path.display()),
+                Err(e) => format!("bundle-save error: {}", e),
+            }
+        } else if cmd.starts_with("script:") {
+            let raw = cmd.strip_prefix("script:").unwrap_or("{}");
+            match serde_json::from_str::<super::test_harness::TestScript>(raw) {
+                Ok(script) => self.handle_test_script(script),
+                Err(e) => format!("script error: {}", e),
+            }
+        } else if cmd == "version" {
+            format!("version: {}", env!("JCODE_VERSION"))
+        } else if cmd == "help" {
+            "Debug commands:\n\
+                 - message:<text> - inject and submit a message\n\
+                 - reload - trigger /reload\n\
+                 - state - get basic state info\n\
+                 - snapshot - get combined state + frame snapshot JSON\n\
+                 - assert:<json> - run assertions (see docs)\n\
+                 - run:<json> - run scripted steps + assertions\n\
+                 - trace-start - start recording trace events\n\
+                 - trace-stop - stop recording trace events\n\
+                 - trace - dump trace events JSON\n\
+                 - quit - exit the TUI\n\
+                 - last_response - get last assistant message\n\
+                 - history - get all messages as JSON\n\
+                 - screen - dump visual debug frames\n\
+                 - screen-json - dump latest visual frame JSON\n\
+                 - screen-json-normalized - dump normalized frame (for diffs)\n\
+                 - wait - check if processing\n\
+                 - wait:<ms> - block until idle or timeout\n\
+                 - scroll:<up|down|top|bottom> - control scroll\n\
+                 - keys:<keyspec> - inject key events (e.g. keys:ctrl+r)\n\
+                 - input - get current input buffer\n\
+                 - set_input:<text> - set input buffer\n\
+                 - submit - submit current input\n\
+                 - record-start - start event recording\n\
+                 - record-stop - stop event recording\n\
+                 - record-events - get recorded events JSON\n\
+                 - clock-enable - enable deterministic test clock\n\
+                 - clock-disable - disable test clock\n\
+                 - clock-advance:<ms> - advance test clock\n\
+                 - clock-now - get current clock time\n\
+                 - replay:<json> - replay recorded events\n\
+                 - bundle-start:<name> - start test bundle\n\
+                 - bundle-save - save test bundle\n\
+                 - script:<json> - run test script\n\
+                 - version - get version\n\
+                 - help - show this help"
+                .to_string()
+        } else {
+            format!("ERROR: unknown command '{}'. Use 'help' for list.", cmd)
+        }
+    }
+
+    async fn handle_debug_command_remote(
+        &mut self,
+        cmd: &str,
+        remote: &mut super::backend::RemoteConnection,
+    ) -> String {
+        let cmd = cmd.trim();
+        if cmd.starts_with("message:") {
+            let msg = cmd.strip_prefix("message:").unwrap_or("");
+            self.input = msg.to_string();
+            let result = self
+                .handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), remote)
+                .await;
+            if let Err(e) = result {
+                return format!("ERR: {}", e);
+            }
+            self.debug_trace
+                .record("message", format!("submitted:{}", msg));
+            return format!("OK: queued message '{}'", msg);
+        }
+        if cmd == "reload" {
+            self.input = "/reload".to_string();
+            let result = self
+                .handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), remote)
+                .await;
+            if let Err(e) = result {
+                return format!("ERR: {}", e);
+            }
+            self.debug_trace.record("reload", "triggered".to_string());
+            return "OK: reload triggered".to_string();
+        }
+        if cmd == "state" {
+            return serde_json::json!({
+                "processing": self.is_processing,
+                "messages": self.messages.len(),
+                "display_messages": self.display_messages.len(),
+                "input": self.input,
+                "cursor_pos": self.cursor_pos,
+                "scroll_offset": self.scroll_offset,
+                "queued_messages": self.queued_messages.len(),
+                "provider_session_id": self.provider_session_id,
+                "provider_name": self.remote_provider_name.clone(),
+                "model": self
+                    .remote_provider_model
+                    .as_deref()
+                    .unwrap_or(self.provider.name()),
+                "remote": true,
+                "server_version": self.remote_server_version.clone(),
+                "server_has_update": self.remote_server_has_update,
+                "version": env!("JCODE_VERSION"),
+            })
+            .to_string();
+        }
+        if cmd.starts_with("keys:") {
+            let keys_str = cmd.strip_prefix("keys:").unwrap_or("");
+            let mut results = Vec::new();
+            for key_spec in keys_str.split(',') {
+                match self
+                    .parse_and_inject_key_remote(key_spec.trim(), remote)
+                    .await
+                {
+                    Ok(desc) => {
+                        self.debug_trace.record("key", format!("{}", desc));
+                        results.push(format!("OK: {}", desc));
+                    }
+                    Err(e) => results.push(format!("ERR: {}", e)),
+                }
+            }
+            return results.join("\n");
+        }
+        if cmd == "submit" {
+            if self.input.is_empty() {
+                return "submit error: input is empty".to_string();
+            }
+            let result = self
+                .handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), remote)
+                .await;
+            if let Err(e) = result {
+                return format!("ERR: {}", e);
+            }
+            self.debug_trace.record("input", "submitted".to_string());
+            return "OK: submitted".to_string();
+        }
+        if cmd.starts_with("run:") || cmd.starts_with("script:") {
+            return "ERR: script/run not supported in remote debug mode".to_string();
+        }
+        self.handle_debug_command(cmd)
+    }
+
     /// Check for new stable version and trigger migration if at safe point
     fn check_stable_version(&mut self) {
         // Only check every 5 seconds to avoid excessive file reads
@@ -1170,6 +1541,89 @@ impl App {
         serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
     }
 
+    fn handle_test_script(&mut self, script: super::test_harness::TestScript) -> String {
+        use super::test_harness::TestStep;
+
+        let mut results = Vec::new();
+        for step in &script.steps {
+            let step_result = match step {
+                TestStep::Message { content } => {
+                    self.input = content.clone();
+                    self.submit_input();
+                    format!("message: {}", content)
+                }
+                TestStep::SetInput { text } => {
+                    self.input = text.clone();
+                    self.cursor_pos = self.input.len();
+                    format!("set_input: {}", text)
+                }
+                TestStep::Submit => {
+                    if !self.input.is_empty() {
+                        self.submit_input();
+                        "submit: OK".to_string()
+                    } else {
+                        "submit: skipped (empty)".to_string()
+                    }
+                }
+                TestStep::WaitIdle { timeout_ms } => {
+                    let _ = self.apply_wait_ms(timeout_ms.unwrap_or(30000));
+                    "wait_idle: done".to_string()
+                }
+                TestStep::Wait { ms } => {
+                    std::thread::sleep(std::time::Duration::from_millis(*ms));
+                    format!("wait: {}ms", ms)
+                }
+                TestStep::Checkpoint { name } => format!("checkpoint: {}", name),
+                TestStep::Command { cmd } => {
+                    format!("command: {} (nested commands not supported)", cmd)
+                }
+                TestStep::Keys { keys } => {
+                    let mut key_results = Vec::new();
+                    for key_spec in keys.split(',') {
+                        match self.parse_and_inject_key(key_spec.trim()) {
+                            Ok(desc) => key_results.push(format!("OK: {}", desc)),
+                            Err(e) => key_results.push(format!("ERR: {}", e)),
+                        }
+                    }
+                    format!("keys: {}", key_results.join(", "))
+                }
+                TestStep::Scroll { direction } => {
+                    match direction.as_str() {
+                        "up" => self.scroll_offset = self.scroll_offset.saturating_add(5),
+                        "down" => self.scroll_offset = self.scroll_offset.saturating_sub(5),
+                        "top" => self.scroll_offset = usize::MAX,
+                        "bottom" => self.scroll_offset = 0,
+                        _ => {}
+                    }
+                    format!("scroll: {}", direction)
+                }
+                TestStep::Assert { assertions } => {
+                    let parsed: Vec<DebugAssertion> = assertions
+                        .iter()
+                        .filter_map(|a| serde_json::from_value(a.clone()).ok())
+                        .collect();
+                    let results = self.eval_assertions(&parsed);
+                    let passed = results.iter().all(|r| r.ok);
+                    format!(
+                        "assert: {} ({}/{})",
+                        if passed { "PASS" } else { "FAIL" },
+                        results.iter().filter(|r| r.ok).count(),
+                        results.len()
+                    )
+                }
+                TestStep::Snapshot { name } => format!("snapshot: {}", name),
+            };
+            results.push(step_result);
+        }
+
+        serde_json::json!({
+            "script": script.name,
+            "steps": results,
+            "completed": true
+        })
+        .to_string()
+    }
+
     fn apply_wait_ms(&mut self, wait_ms: u64) -> String {
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
         while Instant::now() < deadline {
@@ -1333,371 +1787,7 @@ impl App {
             self.debug_trace
                 .record("cmd", format!("{}", cmd.to_string()));
 
-            let response = if cmd.starts_with("message:") {
-                let msg = cmd.strip_prefix("message:").unwrap_or("");
-                // Inject the message as if user typed it
-                self.input = msg.to_string();
-                self.submit_input();
-                self.debug_trace
-                    .record("message", format!("submitted:{}", msg));
-                format!("OK: queued message '{}'", msg)
-            } else if cmd == "reload" {
-                // Trigger reload
-                self.input = "/reload".to_string();
-                self.submit_input();
-                self.debug_trace.record("reload", "triggered".to_string());
-                "OK: reload triggered".to_string()
-            } else if cmd == "state" {
-                // Return current state as JSON for easier parsing
-                serde_json::json!({
-                    "processing": self.is_processing,
-                    "messages": self.messages.len(),
-                    "display_messages": self.display_messages.len(),
-                    "input": self.input,
-                    "cursor_pos": self.cursor_pos,
-                    "scroll_offset": self.scroll_offset,
-                    "queued_messages": self.queued_messages.len(),
-                    "provider_session_id": self.provider_session_id,
-                    "model": self.provider.name(),
-                    "version": env!("JCODE_VERSION"),
-                })
-                .to_string()
-            } else if cmd == "snapshot" {
-                let snapshot = self.build_debug_snapshot();
-                serde_json::to_string_pretty(&snapshot).unwrap_or_else(|_| "{}".to_string())
-            } else if cmd == "trace-start" {
-                self.debug_trace.enabled = true;
-                self.debug_trace.started_at = Instant::now();
-                self.debug_trace.events.clear();
-                "OK: trace started".to_string()
-            } else if cmd == "trace-stop" {
-                self.debug_trace.enabled = false;
-                "OK: trace stopped".to_string()
-            } else if cmd == "trace" {
-                serde_json::to_string_pretty(&self.debug_trace.events)
-                    .unwrap_or_else(|_| "[]".to_string())
-            } else if cmd.starts_with("assert:") {
-                let raw = cmd.strip_prefix("assert:").unwrap_or("");
-                self.handle_assertions(raw)
-            } else if cmd.starts_with("run:") {
-                let raw = cmd.strip_prefix("run:").unwrap_or("");
-                self.handle_script_run(raw)
-            } else if cmd == "quit" {
-                self.should_quit = true;
-                "OK: quitting".to_string()
-            } else if cmd == "last_response" {
-                // Get last assistant message
-                self.display_messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == "assistant" || m.role == "error")
-                    .map(|m| format!("last_response: [{}] {}", m.role, m.content))
-                    .unwrap_or_else(|| "last_response: none".to_string())
-            } else if cmd == "history" {
-                // Return all messages as JSON
-                let msgs: Vec<serde_json::Value> = self
-                    .display_messages
-                    .iter()
-                    .map(|m| {
-                        serde_json::json!({
-                            "role": m.role,
-                            "content": m.content,
-                            "tool_calls": m.tool_calls,
-                        })
-                    })
-                    .collect();
-                serde_json::to_string_pretty(&msgs).unwrap_or_else(|_| "[]".to_string())
-            } else if cmd == "screen" {
-                // Capture current visual state
-                use super::visual_debug;
-                visual_debug::enable(); // Ensure enabled
-                                        // Force a frame dump to file and return path
-                match visual_debug::dump_to_file() {
-                    Ok(path) => format!("screen: {}", path.display()),
-                    Err(e) => format!("screen error: {}", e),
-                }
-            } else if cmd == "screen-json" {
-                use super::visual_debug;
-                visual_debug::enable();
-                visual_debug::latest_frame_json()
-                    .unwrap_or_else(|| "screen-json: no frames captured".to_string())
-            } else if cmd == "screen-json-normalized" {
-                use super::visual_debug;
-                visual_debug::enable();
-                visual_debug::latest_frame_json_normalized()
-                    .unwrap_or_else(|| "screen-json-normalized: no frames captured".to_string())
-            } else if cmd == "wait" {
-                // Return whether we're still processing
-                if self.is_processing {
-                    "wait: processing".to_string()
-                } else {
-                    "wait: idle".to_string()
-                }
-            } else if cmd.starts_with("scroll:") {
-                let dir = cmd.strip_prefix("scroll:").unwrap_or("");
-                match dir {
-                    "up" => {
-                        if self.scroll_offset > 0 {
-                            self.scroll_offset = self.scroll_offset.saturating_sub(5);
-                        }
-                        format!("scroll: up to {}", self.scroll_offset)
-                    }
-                    "down" => {
-                        self.scroll_offset += 5;
-                        format!("scroll: down to {}", self.scroll_offset)
-                    }
-                    "top" => {
-                        self.scroll_offset = 0;
-                        "scroll: top".to_string()
-                    }
-                    "bottom" => {
-                        // Set to a large value; rendering will clamp it
-                        self.scroll_offset = usize::MAX / 2;
-                        "scroll: bottom".to_string()
-                    }
-                    _ => format!("scroll error: unknown direction '{}'", dir),
-                }
-            } else if cmd.starts_with("keys:") {
-                // Parse and inject key events
-                // Format: keys:ctrl+r or keys:enter or keys:a,b,c (multiple)
-                let keys_str = cmd.strip_prefix("keys:").unwrap_or("");
-                let mut results = Vec::new();
-                for key_spec in keys_str.split(',') {
-                    match self.parse_and_inject_key(key_spec.trim()) {
-                        Ok(desc) => {
-                            self.debug_trace.record("key", format!("{}", desc));
-                            results.push(format!("OK: {}", desc));
-                        }
-                        Err(e) => results.push(format!("ERR: {}", e)),
-                    }
-                }
-                results.join("\n")
-            } else if cmd == "input" {
-                // Return current input buffer
-                format!("input: {:?}", self.input)
-            } else if cmd.starts_with("set_input:") {
-                // Set input buffer directly
-                let new_input = cmd.strip_prefix("set_input:").unwrap_or("");
-                self.input = new_input.to_string();
-                self.cursor_pos = self.input.len();
-                self.debug_trace
-                    .record("input", format!("set:{}", self.input));
-                format!("OK: input set to {:?}", self.input)
-            } else if cmd == "submit" {
-                // Submit current input
-                if self.input.is_empty() {
-                    "submit error: input is empty".to_string()
-                } else {
-                    self.submit_input();
-                    self.debug_trace.record("input", "submitted".to_string());
-                    "OK: submitted".to_string()
-                }
-            // Test harness commands
-            } else if cmd == "record-start" {
-                use super::test_harness;
-                test_harness::start_recording();
-                "OK: event recording started".to_string()
-            } else if cmd == "record-stop" {
-                use super::test_harness;
-                test_harness::stop_recording();
-                "OK: event recording stopped".to_string()
-            } else if cmd == "record-events" {
-                use super::test_harness;
-                test_harness::get_recorded_events_json()
-            } else if cmd == "clock-enable" {
-                use super::test_harness;
-                test_harness::enable_test_clock();
-                "OK: test clock enabled".to_string()
-            } else if cmd == "clock-disable" {
-                use super::test_harness;
-                test_harness::disable_test_clock();
-                "OK: test clock disabled".to_string()
-            } else if cmd.starts_with("clock-advance:") {
-                use super::test_harness;
-                let ms_str = cmd.strip_prefix("clock-advance:").unwrap_or("0");
-                match ms_str.parse::<u64>() {
-                    Ok(ms) => {
-                        test_harness::advance_clock(std::time::Duration::from_millis(ms));
-                        format!("OK: clock advanced {}ms", ms)
-                    }
-                    Err(_) => "clock-advance error: invalid ms value".to_string(),
-                }
-            } else if cmd == "clock-now" {
-                use super::test_harness;
-                format!("clock: {}ms", test_harness::now_ms())
-            } else if cmd.starts_with("replay:") {
-                use super::test_harness;
-                let json = cmd.strip_prefix("replay:").unwrap_or("[]");
-                match test_harness::EventPlayer::from_json(json) {
-                    Ok(mut player) => {
-                        player.start();
-                        let mut results = Vec::new();
-                        // Process immediate events (offset 0)
-                        while let Some(event) = player.next_event() {
-                            results.push(format!("{:?}", event));
-                        }
-                        format!(
-                            "replay: {} events processed, {} remaining",
-                            results.len(),
-                            player.remaining()
-                        )
-                    }
-                    Err(e) => format!("replay error: {}", e),
-                }
-            } else if cmd.starts_with("bundle-start:") {
-                let name = cmd.strip_prefix("bundle-start:").unwrap_or("test");
-                // Store bundle name for later
-                std::env::set_var("JCODE_TEST_BUNDLE", name);
-                format!("OK: test bundle '{}' started", name)
-            } else if cmd == "bundle-save" {
-                use super::test_harness::TestBundle;
-                let name =
-                    std::env::var("JCODE_TEST_BUNDLE").unwrap_or_else(|_| "unnamed".to_string());
-                let bundle = TestBundle::new(&name);
-                let path = TestBundle::default_path(&name);
-                match bundle.save(&path) {
-                    Ok(_) => format!("OK: bundle saved to {}", path.display()),
-                    Err(e) => format!("bundle-save error: {}", e),
-                }
-            } else if cmd.starts_with("script:") {
-                use super::test_harness::TestScript;
-                let json = cmd.strip_prefix("script:").unwrap_or("{}");
-                match TestScript::from_json(json) {
-                    Ok(script) => {
-                        // Execute the script steps
-                        let mut results = Vec::new();
-                        for step in &script.steps {
-                            let step_result = match step {
-                                super::test_harness::TestStep::Message { content } => {
-                                    self.input = content.clone();
-                                    self.submit_input();
-                                    format!("message: {}", content)
-                                }
-                                super::test_harness::TestStep::SetInput { text } => {
-                                    self.input = text.clone();
-                                    self.cursor_pos = self.input.len();
-                                    format!("set_input: {}", text)
-                                }
-                                super::test_harness::TestStep::Submit => {
-                                    if !self.input.is_empty() {
-                                        self.submit_input();
-                                        "submit: OK".to_string()
-                                    } else {
-                                        "submit: skipped (empty)".to_string()
-                                    }
-                                }
-                                super::test_harness::TestStep::WaitIdle { timeout_ms } => {
-                                    let _ = self.apply_wait_ms(timeout_ms.unwrap_or(30000));
-                                    "wait_idle: done".to_string()
-                                }
-                                super::test_harness::TestStep::Wait { ms } => {
-                                    std::thread::sleep(std::time::Duration::from_millis(*ms));
-                                    format!("wait: {}ms", ms)
-                                }
-                                super::test_harness::TestStep::Checkpoint { name } => {
-                                    format!("checkpoint: {}", name)
-                                }
-                                super::test_harness::TestStep::Command { cmd } => {
-                                    format!("command: {} (nested commands not supported)", cmd)
-                                }
-                                super::test_harness::TestStep::Keys { keys } => {
-                                    let mut key_results = Vec::new();
-                                    for key_spec in keys.split(',') {
-                                        match self.parse_and_inject_key(key_spec.trim()) {
-                                            Ok(desc) => key_results.push(format!("OK: {}", desc)),
-                                            Err(e) => key_results.push(format!("ERR: {}", e)),
-                                        }
-                                    }
-                                    format!("keys: {}", key_results.join(", "))
-                                }
-                                super::test_harness::TestStep::Scroll { direction } => {
-                                    match direction.as_str() {
-                                        "up" => {
-                                            self.scroll_offset =
-                                                self.scroll_offset.saturating_add(5)
-                                        }
-                                        "down" => {
-                                            self.scroll_offset =
-                                                self.scroll_offset.saturating_sub(5)
-                                        }
-                                        "top" => self.scroll_offset = usize::MAX,
-                                        "bottom" => self.scroll_offset = 0,
-                                        _ => {}
-                                    }
-                                    format!("scroll: {}", direction)
-                                }
-                                super::test_harness::TestStep::Assert { assertions } => {
-                                    let parsed: Vec<DebugAssertion> = assertions
-                                        .iter()
-                                        .filter_map(|a| serde_json::from_value(a.clone()).ok())
-                                        .collect();
-                                    let results = self.eval_assertions(&parsed);
-                                    let passed = results.iter().all(|r| r.ok);
-                                    format!(
-                                        "assert: {} ({}/{})",
-                                        if passed { "PASS" } else { "FAIL" },
-                                        results.iter().filter(|r| r.ok).count(),
-                                        results.len()
-                                    )
-                                }
-                                super::test_harness::TestStep::Snapshot { name } => {
-                                    format!("snapshot: {}", name)
-                                }
-                            };
-                            results.push(step_result);
-                        }
-                        serde_json::json!({
-                            "script": script.name,
-                            "steps": results,
-                            "completed": true
-                        })
-                        .to_string()
-                    }
-                    Err(e) => format!("script error: {}", e),
-                }
-            } else if cmd == "version" {
-                format!("version: {}", env!("JCODE_VERSION"))
-            } else if cmd == "help" {
-                "Debug commands:\n\
-                 - message:<text> - inject and submit a message\n\
-                 - reload - trigger /reload\n\
-                 - state - get current state as JSON\n\
-                 - snapshot - get combined state + frame snapshot JSON\n\
-                 - assert:<json> - run assertions (see docs)\n\
-                 - run:<json> - run scripted steps + assertions\n\
-                 - trace-start - start recording trace events\n\
-                 - trace-stop - stop recording trace events\n\
-                 - trace - dump trace events JSON\n\
-                 - quit - exit the TUI\n\
-                 - last_response - get last assistant message\n\
-                 - history - get all messages as JSON\n\
-                 - screen - dump visual debug frames\n\
-                 - screen-json - dump latest visual frame JSON\n\
-                 - screen-json-normalized - dump normalized frame (for diffs)\n\
-                 - wait - check if processing\n\
-                 - wait:<ms> - block until idle or timeout\n\
-                 - scroll:<up|down|top|bottom> - control scroll\n\
-                 - keys:<keyspec> - inject key events (e.g. keys:ctrl+r)\n\
-                 - input - get current input buffer\n\
-                 - set_input:<text> - set input buffer\n\
-                 - submit - submit current input\n\
-                 - record-start - start event recording\n\
-                 - record-stop - stop event recording\n\
-                 - record-events - get recorded events JSON\n\
-                 - clock-enable - enable deterministic test clock\n\
-                 - clock-disable - disable test clock\n\
-                 - clock-advance:<ms> - advance test clock\n\
-                 - clock-now - get current clock time\n\
-                 - replay:<json> - replay recorded events\n\
-                 - bundle-start:<name> - start test bundle\n\
-                 - bundle-save - save test bundle\n\
-                 - script:<json> - run test script\n\
-                 - version - get version\n\
-                 - help - show this help"
-                    .to_string()
-            } else {
-                format!("ERROR: unknown command '{}'. Use 'help' for list.", cmd)
-            };
+            let response = self.handle_debug_command(cmd);
 
             // Write response
             let _ = std::fs::write(debug_response_path(), &response);
@@ -1706,8 +1796,29 @@ impl App {
         None
     }
 
-    /// Parse a key specification and inject it as an event
-    fn parse_and_inject_key(&mut self, key_spec: &str) -> Result<String, String> {
+    async fn check_debug_command_remote(
+        &mut self,
+        remote: &mut super::backend::RemoteConnection,
+    ) -> Option<String> {
+        let cmd_path = debug_cmd_path();
+        if let Ok(cmd) = std::fs::read_to_string(&cmd_path) {
+            // Remove command file immediately
+            let _ = std::fs::remove_file(&cmd_path);
+            let cmd = cmd.trim();
+
+            self.debug_trace
+                .record("cmd", format!("{}", cmd.to_string()));
+
+            let response = self.handle_debug_command_remote(cmd, remote).await;
+
+            // Write response
+            let _ = std::fs::write(debug_response_path(), &response);
+            return Some(response);
+        }
+        None
+    }
+
+    fn parse_key_spec(&self, key_spec: &str) -> Result<(KeyCode, KeyModifiers), String> {
         let key_spec = key_spec.to_lowercase();
         let parts: Vec<&str> = key_spec.split('+').collect();
 
@@ -1749,10 +1860,26 @@ impl App {
             _ => return Err(format!("Unknown key: {}", key_part)),
         };
 
-        // Create and handle the key event
+        Ok((key_code, modifiers))
+    }
+
+    /// Parse a key specification and inject it as an event
+    fn parse_and_inject_key(&mut self, key_spec: &str) -> Result<String, String> {
+        let (key_code, modifiers) = self.parse_key_spec(key_spec)?;
         let key_event = crossterm::event::KeyEvent::new(key_code, modifiers);
         self.handle_key_event(key_event);
+        Ok(format!("injected {:?} with {:?}", key_code, modifiers))
+    }
 
+    async fn parse_and_inject_key_remote(
+        &mut self,
+        key_spec: &str,
+        remote: &mut super::backend::RemoteConnection,
+    ) -> Result<String, String> {
+        let (key_code, modifiers) = self.parse_key_spec(key_spec)?;
+        self.handle_remote_key(key_code, modifiers, remote)
+            .await
+            .map_err(|e| format!("{}", e))?;
         Ok(format!("injected {:?} with {:?}", key_code, modifiers))
     }
 
@@ -2123,6 +2250,8 @@ impl App {
                                 self.streaming_text.push_str(&chunk);
                             }
                         }
+                        // Check for debug commands (remote mode)
+                        let _ = self.check_debug_command_remote(&mut remote).await;
                     }
                     event = remote.next_event() => {
                         match event {
@@ -2570,7 +2699,10 @@ impl App {
                 let skip_info = tools_skipped
                     .map(|n| format!(" ({} tools skipped)", n))
                     .unwrap_or_default();
-                self.set_status_notice(format!("✓ Message injected at point {}{}", point, skip_info));
+                self.set_status_notice(format!(
+                    "✓ Message injected at point {}{}",
+                    point, skip_info
+                ));
 
                 // Update the pending message display to show it was injected
                 // Find and update the "(pending injection)" message if present
@@ -2927,7 +3059,9 @@ impl App {
                     if let Some(model_name) = trimmed.strip_prefix("/model ") {
                         let model_name = model_name.trim();
                         if model_name.is_empty() {
-                            self.push_display_message(DisplayMessage::error("Usage: /model <name>"));
+                            self.push_display_message(DisplayMessage::error(
+                                "Usage: /model <name>",
+                            ));
                             return Ok(());
                         }
                         remote.set_model(model_name).await?;

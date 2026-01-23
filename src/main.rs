@@ -495,6 +495,8 @@ async fn run_tui(
     debug_socket: bool,
 ) -> Result<()> {
     let terminal = ratatui::init();
+    // Initialize mermaid image picker (queries terminal for graphics protocol support)
+    crate::tui::mermaid::init_picker();
     let mouse_capture = crate::config::config().display.mouse_capture;
     // Enable bracketed paste mode for proper paste handling in terminals like Kitty
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
@@ -603,17 +605,21 @@ fn hot_reload(session_id: &str) -> Result<()> {
         }
     }
 
-    let repo_dir =
-        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
-
-    // Get the binary path - use the known location in the repo
-    let exe = repo_dir.join("target/release/jcode");
-    if !exe.exists() {
-        anyhow::bail!(
-            "Binary not found at {:?}. Run 'cargo build --release' first.",
-            exe
-        );
-    }
+    // Get the binary path - prefer repo release if available
+    let exe = if let Some(repo_dir) = get_repo_dir() {
+        let candidate = repo_dir.join("target/release/jcode");
+        if candidate.exists() {
+            candidate
+        } else {
+            crate::build::jcode_path_in_path()
+                .or_else(|| std::env::current_exe().ok())
+                .ok_or_else(|| anyhow::anyhow!("No reloadable binary found on PATH"))?
+        }
+    } else {
+        crate::build::jcode_path_in_path()
+            .or_else(|| std::env::current_exe().ok())
+            .ok_or_else(|| anyhow::anyhow!("No reloadable binary found on PATH"))?
+    };
 
     // Show binary info
     if let Ok(metadata) = std::fs::metadata(&exe) {
@@ -1114,6 +1120,8 @@ async fn run_client() -> Result<()> {
 /// Run TUI client connected to server
 async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
     let terminal = ratatui::init();
+    // Initialize mermaid image picker (queries terminal for graphics protocol support)
+    crate::tui::mermaid::init_picker();
     let mouse_capture = crate::config::config().display.mouse_capture;
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
     if mouse_capture {
@@ -1656,6 +1664,8 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
 
     // Run client TUI
     let terminal = ratatui::init();
+    // Initialize mermaid image picker (queries terminal for graphics protocol support)
+    crate::tui::mermaid::init_picker();
     let mouse_capture = crate::config::config().display.mouse_capture;
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
     if mouse_capture {
