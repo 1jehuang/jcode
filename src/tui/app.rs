@@ -2146,92 +2146,70 @@ impl App {
                                 let at_safe_point = self.handle_server_event(server_event, &mut remote);
 
                                 // Process pending interleave or queued messages
-                                // If processing: use soft interrupt (no cancel, inject at safe point)
-                                // If not processing: send directly
-                                let has_queued = self.interleave_message.is_some()
-                                    || !self.queued_messages.is_empty();
-
-                                if has_queued {
-                                    if self.is_processing {
-                                        // Use soft interrupt - no cancel, message injected at next safe point
-                                        if let Some(interleave_msg) = self.interleave_message.take() {
-                                            if !interleave_msg.trim().is_empty() {
-                                                // Show in UI immediately for feedback
-                                                self.push_display_message(DisplayMessage {
-                                                    role: "user".to_string(),
-                                                    content: format!("⏳ {}", interleave_msg),
-                                                    tool_calls: vec![],
-                                                    duration_secs: None,
-                                                    title: Some("(pending injection)".to_string()),
-                                                    tool_data: None,
-                                                });
-                                                // Send soft interrupt to server
-                                                if let Err(e) = remote.soft_interrupt(interleave_msg, false).await {
-                                                    self.push_display_message(DisplayMessage::error(format!(
-                                                        "Failed to queue soft interrupt: {}", e
-                                                    )));
-                                                }
-                                            }
-                                        }
-                                        // Also send any queued messages as soft interrupts
-                                        if !self.queued_messages.is_empty() {
-                                            let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
+                                // If processing: only interleave via soft interrupt
+                                // If not processing: send interleave or queued messages directly
+                                if self.is_processing {
+                                    // Use soft interrupt - no cancel, message injected at next safe point
+                                    if let Some(interleave_msg) = self.interleave_message.take() {
+                                        if !interleave_msg.trim().is_empty() {
+                                            // Show in UI immediately for feedback
                                             self.push_display_message(DisplayMessage {
                                                 role: "user".to_string(),
-                                                content: format!("⏳ {}", combined),
+                                                content: format!("⏳ {}", interleave_msg),
                                                 tool_calls: vec![],
                                                 duration_secs: None,
                                                 title: Some("(pending injection)".to_string()),
                                                 tool_data: None,
                                             });
-                                            if let Err(e) = remote.soft_interrupt(combined, false).await {
+                                            // Send soft interrupt to server
+                                            if let Err(e) = remote.soft_interrupt(interleave_msg, false).await {
                                                 self.push_display_message(DisplayMessage::error(format!(
                                                     "Failed to queue soft interrupt: {}", e
                                                 )));
                                             }
                                         }
-                                    } else {
-                                        // Not processing - send directly
-                                        if let Some(interleave_msg) = self.interleave_message.take() {
-                                            if !interleave_msg.trim().is_empty() {
-                                                self.push_display_message(DisplayMessage {
-                                                    role: "user".to_string(),
-                                                    content: interleave_msg.clone(),
-                                                    tool_calls: vec![],
-                                                    duration_secs: None,
-                                                    title: None,
-                                                    tool_data: None,
-                                                });
-                                                match remote.send_message(interleave_msg).await {
-                                                    Ok(msg_id) => {
-                                                        self.current_message_id = Some(msg_id);
-                                                        self.is_processing = true;
-                                                        self.status = ProcessingStatus::Sending;
-                                                        self.processing_started = Some(Instant::now());
-                                                    }
-                                                    Err(e) => {
-                                                        self.push_display_message(DisplayMessage::error(format!(
-                                                            "Failed to send message: {}", e
-                                                        )));
-                                                    }
-                                                }
-                                            }
-                                        } else if !self.queued_messages.is_empty() {
-                                            let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
+                                    }
+                                } else {
+                                    // Not processing - send directly
+                                    if let Some(interleave_msg) = self.interleave_message.take() {
+                                        if !interleave_msg.trim().is_empty() {
                                             self.push_display_message(DisplayMessage {
                                                 role: "user".to_string(),
-                                                content: combined.clone(),
+                                                content: interleave_msg.clone(),
                                                 tool_calls: vec![],
                                                 duration_secs: None,
                                                 title: None,
                                                 tool_data: None,
                                             });
-                                            if let Ok(msg_id) = remote.send_message(combined).await {
-                                                self.current_message_id = Some(msg_id);
-                                                self.is_processing = true;
-                                                self.status = ProcessingStatus::Sending;
-                                                self.processing_started = Some(Instant::now());
+                                            match remote.send_message(interleave_msg).await {
+                                                Ok(msg_id) => {
+                                                    self.current_message_id = Some(msg_id);
+                                                    self.is_processing = true;
+                                                    self.status = ProcessingStatus::Sending;
+                                                    self.processing_started = Some(Instant::now());
+                                                }
+                                                Err(e) => {
+                                                    self.push_display_message(DisplayMessage::error(format!(
+                                                        "Failed to send message: {}", e
+                                                    )));
+                                                }
                                             }
+                                        }
+                                    } else if !self.queued_messages.is_empty() {
+                                        let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
+                                        self.push_display_message(DisplayMessage {
+                                            role: "user".to_string(),
+                                            content: combined.clone(),
+                                            tool_calls: vec![],
+                                            duration_secs: None,
+                                            title: None,
+                                            tool_data: None,
+                                        });
+                                        if let Ok(msg_id) = remote.send_message(combined).await {
+                                            self.current_message_id = Some(msg_id);
+                                            self.is_processing = true;
+                                            self.status = ProcessingStatus::Sending;
+                                            self.processing_started = Some(Instant::now());
                                         }
                                     }
                                 }
@@ -2774,8 +2752,8 @@ impl App {
                         self.queued_messages.push(expanded);
                     }
                     SendAction::Interleave => {
-                        self.queued_messages.insert(0, expanded);
-                        self.set_status_notice("⏭ Queued to send next");
+                        self.interleave_message = Some(expanded);
+                        self.set_status_notice("⏭ Sending now (interleave)");
                     }
                 }
             }
@@ -2980,8 +2958,8 @@ impl App {
                             self.queued_messages.push(expanded);
                         }
                         SendAction::Interleave => {
-                            self.queued_messages.insert(0, expanded);
-                            self.set_status_notice("⏭ Queued to send next");
+                            self.interleave_message = Some(expanded);
+                            self.set_status_notice("⏭ Sending now (interleave)");
                         }
                     }
                 }
