@@ -6,8 +6,10 @@
 //! - Can hot-reload server without losing TUI
 //! - TUI can reconnect after server restart
 
+use super::markdown::IncrementalMarkdownRenderer;
 use super::{DisplayMessage, ProcessingStatus, TuiState};
 use crate::message::ToolCall;
+use std::cell::RefCell;
 use crate::protocol::{NotificationType, Request, ServerEvent};
 use crate::server;
 use anyhow::Result;
@@ -76,6 +78,8 @@ pub struct ClientApp {
     reload_info: Vec<String>,
     // Context info (what's loaded in system prompt)
     context_info: crate::prompt::ContextInfo,
+    // Incremental markdown renderer for streaming text
+    streaming_md_renderer: RefCell<IncrementalMarkdownRenderer>,
 }
 
 impl ClientApp {
@@ -141,6 +145,7 @@ impl ClientApp {
                 );
                 info
             },
+            streaming_md_renderer: RefCell::new(IncrementalMarkdownRenderer::new(None)),
         }
     }
 
@@ -943,5 +948,11 @@ impl TuiState for ClientApp {
     fn info_widget_data(&self) -> super::info_widget::InfoWidgetData {
         // Deprecated client - return empty widget data
         super::info_widget::InfoWidgetData::default()
+    }
+
+    fn render_streaming_markdown(&self, width: usize) -> Vec<ratatui::text::Line<'static>> {
+        let mut renderer = self.streaming_md_renderer.borrow_mut();
+        renderer.set_width(Some(width));
+        renderer.update(&self.streaming_text)
     }
 }

@@ -3,6 +3,7 @@
 //! This module contains the common display state, input handling,
 //! and helper methods used by both local and remote TUI modes.
 
+use super::markdown::IncrementalMarkdownRenderer;
 use super::{DisplayMessage, ProcessingStatus};
 use crate::message::ToolCall;
 use crossterm::event::KeyCode;
@@ -36,6 +37,9 @@ pub struct TuiCore {
     pub should_quit: bool,
     pub processing_started: Option<Instant>,
     pub last_stream_activity: Option<Instant>,
+
+    // Incremental markdown rendering for streaming text
+    pub streaming_md_renderer: IncrementalMarkdownRenderer,
 }
 
 impl Default for TuiCore {
@@ -63,6 +67,7 @@ impl TuiCore {
             should_quit: false,
             processing_started: None,
             last_stream_activity: None,
+            streaming_md_renderer: IncrementalMarkdownRenderer::new(None),
         }
     }
 
@@ -271,6 +276,7 @@ impl TuiCore {
         self.status = ProcessingStatus::Idle;
         self.subagent_status = None;
         self.last_stream_activity = None;
+        self.streaming_md_renderer.reset();
     }
 
     /// Update last activity timestamp
