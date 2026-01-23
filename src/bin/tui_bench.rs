@@ -282,6 +282,11 @@ impl TuiState for BenchState {
     fn info_widget_data(&self) -> InfoWidgetData {
         self.info_widget.clone()
     }
+
+    fn render_streaming_markdown(&self, width: usize) -> Vec<ratatui::text::Line<'static>> {
+        // For benchmarks, just use the standard markdown renderer
+        jcode::tui::markdown::render_markdown_with_width(&self.streaming_text, Some(width))
+    }
 }
 
 fn make_text(len: usize) -> String {

@@ -4,7 +4,7 @@ mod core;
 pub mod image;
 pub mod info_widget;
 mod keybind;
-pub(crate) mod markdown;
+pub mod markdown;
 pub mod mermaid;
 pub mod screenshot;
 pub mod session_picker;
@@ -23,6 +23,7 @@ pub use core::TuiCore;
 
 use crate::message::ToolCall;
 use ratatui::prelude::Frame;
+use ratatui::text::Line;
 use std::time::Duration;
 
 /// Trait for TUI state - implemented by both App and ClientApp
@@ -85,6 +86,9 @@ pub trait TuiState {
     fn server_update_available(&self) -> Option<bool>;
     /// Get info widget data (todos, client count, etc.)
     fn info_widget_data(&self) -> info_widget::InfoWidgetData;
+    /// Render streaming text using incremental markdown renderer
+    /// This is more efficient than re-rendering on every frame
+    fn render_streaming_markdown(&self, width: usize) -> Vec<Line<'static>>;
 }
 
 pub(crate) fn subscribe_metadata() -> (Option<String>, Option<bool>) {
