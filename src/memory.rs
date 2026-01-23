@@ -1224,3 +1224,179 @@ impl Default for MemoryManager {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::{ContentBlock, Message, Role};
+    use serde_json::json;
+    use std::fs;
+    use std::path::Path;
+    use std::sync::Mutex;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_temp_home<F, T>(f: F) -> T
+    where
+        F: FnOnce(&Path) -> T,
+    {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let old = std::env::var("JCODE_HOME").ok();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("jcode-test-{}", unique));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        std::env::set_var("JCODE_HOME", &dir);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&dir)));
+
+        match old {
+            Some(value) => std::env::set_var("JCODE_HOME", value),
+            None => std::env::remove_var("JCODE_HOME"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    #[test]
+    fn pending_memory_freshness_and_clear() {
+        {
+            let mut guard = PENDING_MEMORY.lock().expect("pending memory lock");
+            *guard = None;
+        }
+
+        set_pending_memory("hello".to_string(), 2);
+        assert!(has_pending_memory());
+        let pending = take_pending_memory().expect("pending memory");
+        assert_eq!(pending.prompt, "hello");
+        assert_eq!(pending.count, 2);
+        assert!(!has_pending_memory());
+
+        {
+            let mut guard = PENDING_MEMORY.lock().expect("pending memory lock");
+            *guard = Some(PendingMemory {
+                prompt: "stale".to_string(),
+                computed_at: Instant::now() - Duration::from_secs(121),
+                count: 1,
+            });
+        }
+        assert!(take_pending_memory().is_none());
+    }
+
+    #[test]
+    fn format_context_includes_roles_and_tools() {
+        let messages = vec![
+            Message::user("Hello world"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "memory".to_string(),
+                    input: json!({"action": "list"}),
+                }],
+            },
+            Message::tool_result("tool-1", "ok", false),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "tool-2".to_string(),
+                    content: "boom".to_string(),
+                    is_error: Some(true),
+                }],
+            },
+        ];
+
+        let context = format_context_for_relevance(&messages);
+        assert!(context.contains("User:\nHello world"));
+        assert!(context.contains("[Tool: memory input:"));
+        assert!(context.contains("[Tool result: ok]"));
+        assert!(context.contains("[Tool error: boom]"));
+    }
+
+    #[test]
+    fn memory_store_format_groups_by_category() {
+        let mut store = MemoryStore::new();
+        let now = Utc::now();
+        let mut correction = MemoryEntry::new(MemoryCategory::Correction, "Fix lint rules");
+        correction.updated_at = now;
+        let mut fact = MemoryEntry::new(MemoryCategory::Fact, "Uses tokio");
+        fact.updated_at = now;
+        let mut preference =
+            MemoryEntry::new(MemoryCategory::Preference, "Prefers ASCII-only edits");
+        preference.updated_at = now;
+        let mut entity = MemoryEntry::new(MemoryCategory::Entity, "Jeremy");
+        entity.updated_at = now;
+        let mut custom = MemoryEntry::new(MemoryCategory::Custom("team".to_string()), "Platform");
+        custom.updated_at = now;
+
+        store.add(correction);
+        store.add(fact);
+        store.add(preference);
+        store.add(entity);
+        store.add(custom);
+
+        let output = store.format_for_prompt(10).expect("formatted output");
+        let correction_idx = output.find("### corrections").expect("correction heading");
+        let fact_idx = output.find("### facts").expect("fact heading");
+        let preference_idx = output.find("### preferences").expect("preference heading");
+        let entity_idx = output.find("### entitys").expect("entity heading");
+        let custom_idx = output.find("### team").expect("custom heading");
+
+        assert!(correction_idx < fact_idx);
+        assert!(fact_idx < preference_idx);
+        assert!(preference_idx < entity_idx);
+        assert!(entity_idx < custom_idx);
+    }
+
+    #[test]
+    fn memory_store_search_matches_content_and_tags() {
+        let mut store = MemoryStore::new();
+        let entry = MemoryEntry::new(MemoryCategory::Fact, "Uses Tokio runtime")
+            .with_tags(vec!["async".to_string()]);
+        store.add(entry);
+
+        let content_hits = store.search("tokio");
+        assert_eq!(content_hits.len(), 1);
+
+        let tag_hits = store.search("ASYNC");
+        assert_eq!(tag_hits.len(), 1);
+    }
+
+    #[test]
+    fn manager_persists_and_forgets_memories() {
+        with_temp_home(|_dir| {
+            let manager = MemoryManager::new();
+            let entry_project = MemoryEntry::new(MemoryCategory::Fact, "Project memory")
+                .with_embedding(vec![0.0]);
+            let entry_global = MemoryEntry::new(MemoryCategory::Preference, "Global memory")
+                .with_embedding(vec![0.0]);
+
+            let project_id = manager
+                .remember_project(entry_project)
+                .expect("remember project");
+            let global_id = manager
+                .remember_global(entry_global)
+                .expect("remember global");
+
+            let all = manager.list_all().expect("list all");
+            assert_eq!(all.len(), 2);
+
+            let search = manager.search("global").expect("search");
+            assert_eq!(search.len(), 1);
+
+            assert!(manager.forget(&project_id).expect("forget project"));
+            let remaining = manager.list_all().expect("list all");
+            assert_eq!(remaining.len(), 1);
+
+            assert!(!manager.forget(&project_id).expect("forget missing"));
+            assert!(manager.forget(&global_id).expect("forget global"));
+        });
+    }
+}
