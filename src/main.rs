@@ -1705,6 +1705,16 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
     // Don't remove the socket or lock file - server is still running
     let _ = lock_file.lock().await.take();
 
+    // Check for hot-reload request (no rebuild)
+    if let Some(ref reload_session_id) = run_result.reload_session {
+        hot_reload(reload_session_id)?;
+    }
+
+    // Check for hot-rebuild request (full git pull + cargo build + tests)
+    if let Some(ref rebuild_session_id) = run_result.rebuild_session {
+        hot_rebuild(rebuild_session_id)?;
+    }
+
     // Check if reload/rollback was requested - exec into new binary
     if let Some(code) = run_result.exit_code {
         if code == EXIT_RELOAD_REQUESTED || code == EXIT_ROLLBACK_REQUESTED {
