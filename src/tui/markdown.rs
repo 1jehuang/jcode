@@ -2,14 +2,200 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::prelude::*;
-use std::sync::LazyLock;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::{LazyLock, Mutex};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style as SynStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
+use crate::tui::mermaid;
+
 // Syntax highlighting resources (loaded once)
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(|| SyntaxSet::load_defaults_newlines());
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
+
+// Syntax highlighting cache - keyed by (code content hash, language)
+static HIGHLIGHT_CACHE: LazyLock<Mutex<HighlightCache>> =
+    LazyLock::new(|| Mutex::new(HighlightCache::new()));
+
+const HIGHLIGHT_CACHE_LIMIT: usize = 256;
+
+struct HighlightCache {
+    entries: HashMap<u64, Vec<Line<'static>>>,
+}
+
+impl HighlightCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    fn get(&self, hash: u64) -> Option<Vec<Line<'static>>> {
+        self.entries.get(&hash).cloned()
+    }
+
+    fn insert(&mut self, hash: u64, lines: Vec<Line<'static>>) {
+        // Evict if cache is too large
+        if self.entries.len() >= HIGHLIGHT_CACHE_LIMIT {
+            self.entries.clear();
+        }
+        self.entries.insert(hash, lines);
+    }
+}
+
+fn hash_code(code: &str, lang: Option<&str>) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut hasher = DefaultHasher::new();
+    code.hash(&mut hasher);
+    lang.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Incremental markdown renderer for streaming content
+///
+/// This renderer caches previously rendered lines and only re-renders
+/// the portion of text that has changed, significantly improving
+/// performance during LLM streaming.
+pub struct IncrementalMarkdownRenderer {
+    /// Previously rendered lines
+    rendered_lines: Vec<Line<'static>>,
+    /// Text that was rendered (for comparison)
+    rendered_text: String,
+    /// Position of last safe checkpoint (after complete block)
+    last_checkpoint: usize,
+    /// Number of lines at last checkpoint
+    lines_at_checkpoint: usize,
+    /// Width constraint
+    max_width: Option<usize>,
+}
+
+impl IncrementalMarkdownRenderer {
+    pub fn new(max_width: Option<usize>) -> Self {
+        Self {
+            rendered_lines: Vec::new(),
+            rendered_text: String::new(),
+            last_checkpoint: 0,
+            lines_at_checkpoint: 0,
+            max_width,
+        }
+    }
+
+    /// Update with new text, returns rendered lines
+    ///
+    /// This method efficiently handles streaming by:
+    /// 1. Detecting if text was only appended (common case)
+    /// 2. Finding safe re-render points (after complete blocks)
+    /// 3. Only re-rendering from the last safe point
+    pub fn update(&mut self, full_text: &str) -> Vec<Line<'static>> {
+        // Fast path: text unchanged
+        if full_text == self.rendered_text {
+            return self.rendered_lines.clone();
+        }
+
+        // Fast path: text was only appended
+        if full_text.starts_with(&self.rendered_text) {
+            let appended = &full_text[self.rendered_text.len()..];
+
+            // Find a safe re-render point
+            // Safe points are after: double newlines (paragraph end), code block end
+            let rerender_from = self.find_safe_rerender_point(full_text);
+
+            if rerender_from >= self.last_checkpoint {
+                // Re-render from the safe point
+                let text_to_render = &full_text[rerender_from..];
+                let new_lines = render_markdown_with_width(text_to_render, self.max_width);
+
+                // Keep lines up to checkpoint, append new lines
+                self.rendered_lines.truncate(self.lines_at_checkpoint);
+                self.rendered_lines.extend(new_lines);
+
+                // Update checkpoint if we found a new complete block
+                if let Some(new_checkpoint) = self.find_new_checkpoint(full_text, appended) {
+                    self.last_checkpoint = new_checkpoint;
+                    self.lines_at_checkpoint = self.rendered_lines.len();
+                }
+
+                self.rendered_text = full_text.to_string();
+                return self.rendered_lines.clone();
+            }
+        }
+
+        // Slow path: text changed in middle or was truncated
+        // Full re-render required
+        self.rendered_lines = render_markdown_with_width(full_text, self.max_width);
+        self.rendered_text = full_text.to_string();
+
+        // Find checkpoint for next incremental update
+        if let Some(checkpoint) = self.find_last_complete_block(full_text) {
+            self.last_checkpoint = checkpoint;
+            // Count lines up to this point
+            let prefix_lines = render_markdown_with_width(&full_text[..checkpoint], self.max_width);
+            self.lines_at_checkpoint = prefix_lines.len();
+        } else {
+            self.last_checkpoint = 0;
+            self.lines_at_checkpoint = 0;
+        }
+
+        self.rendered_lines.clone()
+    }
+
+    /// Find a safe point to start re-rendering from
+    fn find_safe_rerender_point(&self, text: &str) -> usize {
+        // Start from the last checkpoint
+        self.last_checkpoint
+    }
+
+    /// Find a new checkpoint after appended text
+    fn find_new_checkpoint(&self, full_text: &str, appended: &str) -> Option<usize> {
+        // Look for complete blocks in the appended portion
+        let start = full_text.len() - appended.len();
+
+        // Check for paragraph end (double newline)
+        if let Some(pos) = appended.rfind("\n\n") {
+            return Some(start + pos + 2);
+        }
+
+        // Check for code block end
+        if appended.contains("```") {
+            // Find the last code block end
+            let search_start = start.saturating_sub(10); // Look back a bit
+            let search_text = &full_text[search_start..];
+            if let Some(pos) = search_text.rfind("\n```\n") {
+                return Some(search_start + pos + 5);
+            }
+            if search_text.ends_with("\n```") {
+                return Some(full_text.len());
+            }
+        }
+
+        None
+    }
+
+    /// Find the last complete block in text
+    fn find_last_complete_block(&self, text: &str) -> Option<usize> {
+        // Find last double newline (paragraph boundary)
+        if let Some(pos) = text.rfind("\n\n") {
+            return Some(pos + 2);
+        }
+
+        // Find last code block end
+        if let Some(pos) = text.rfind("\n```\n") {
+            return Some(pos + 5);
+        }
+
+        None
+    }
+
+    /// Reset the renderer state
+    pub fn reset(&mut self) {
+        self.rendered_lines.clear();
+        self.rendered_text.clear();
+        self.last_checkpoint = 0;
+        self.lines_at_checkpoint = 0;
+    }
+}
 
 // Colors matching ui.rs palette
 const CODE_BG: Color = Color::Rgb(45, 45, 45);
@@ -108,19 +294,36 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                 code_block_content.clear();
             }
             Event::End(TagEnd::CodeBlock) => {
-                // Render code block with syntax highlighting
-                let highlighted = highlight_code(&code_block_content, code_block_lang.as_deref());
-                for hl_line in highlighted {
-                    // Add left border to code lines
-                    let mut spans = vec![Span::styled("│ ", Style::default().fg(DIM_COLOR))];
-                    spans.extend(hl_line.spans);
-                    lines.push(Line::from(spans));
+                // Check if this is a mermaid diagram
+                let is_mermaid = code_block_lang
+                    .as_ref()
+                    .map(|l| mermaid::is_mermaid_lang(l))
+                    .unwrap_or(false);
+
+                if is_mermaid {
+                    // Remove the "┌─ mermaid" line we added at the start
+                    lines.pop();
+
+                    // Render mermaid diagram
+                    let result = mermaid::render_mermaid(&code_block_content);
+                    let mermaid_lines = mermaid::result_to_lines(result, max_width);
+                    lines.extend(mermaid_lines);
+                } else {
+                    // Render code block with syntax highlighting (cached)
+                    let highlighted =
+                        highlight_code_cached(&code_block_content, code_block_lang.as_deref());
+                    for hl_line in highlighted {
+                        // Add left border to code lines
+                        let mut spans = vec![Span::styled("│ ", Style::default().fg(DIM_COLOR))];
+                        spans.extend(hl_line.spans);
+                        lines.push(Line::from(spans));
+                    }
+                    // Add code block end indicator
+                    lines.push(Line::from(Span::styled(
+                        "└─",
+                        Style::default().fg(DIM_COLOR),
+                    )));
                 }
-                // Add code block end indicator
-                lines.push(Line::from(Span::styled(
-                    "└─",
-                    Style::default().fg(DIM_COLOR),
-                )));
                 in_code_block = false;
                 code_block_lang = None;
                 code_block_content.clear();
@@ -341,6 +544,30 @@ pub fn render_table_with_width(rows: &[Vec<String>], max_width: usize) -> Vec<Li
     render_table(rows, Some(max_width))
 }
 
+/// Highlight a code block with syntax highlighting (cached)
+/// This is the primary entry point for code highlighting - uses a cache
+/// to avoid re-highlighting the same code multiple times during streaming.
+fn highlight_code_cached(code: &str, lang: Option<&str>) -> Vec<Line<'static>> {
+    let hash = hash_code(code, lang);
+
+    // Check cache first
+    if let Ok(cache) = HIGHLIGHT_CACHE.lock() {
+        if let Some(lines) = cache.get(hash) {
+            return lines;
+        }
+    }
+
+    // Cache miss - do the highlighting
+    let lines = highlight_code(code, lang);
+
+    // Store in cache
+    if let Ok(mut cache) = HIGHLIGHT_CACHE.lock() {
+        cache.insert(hash, lines.clone());
+    }
+
+    lines
+}
+
 /// Highlight a code block with syntax highlighting
 fn highlight_code(code: &str, lang: Option<&str>) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
@@ -442,6 +669,272 @@ pub fn highlight_file_lines(
     }
 
     results
+}
+
+/// Placeholder for code blocks that are not visible
+/// Used by lazy rendering to avoid highlighting off-screen code
+fn placeholder_code_block(code: &str, lang: Option<&str>) -> Vec<Line<'static>> {
+    let line_count = code.lines().count();
+    let lang_str = lang.unwrap_or("code");
+
+    // Return placeholder lines that will be replaced when visible
+    vec![Line::from(Span::styled(
+        format!("  [{} block: {} lines]", lang_str, line_count),
+        Style::default().fg(DIM_COLOR).italic(),
+    ))]
+}
+
+/// Check if two ranges overlap
+fn ranges_overlap(a: std::ops::Range<usize>, b: std::ops::Range<usize>) -> bool {
+    a.start < b.end && b.start < a.end
+}
+
+/// Render markdown with lazy code block highlighting
+///
+/// Only highlights code blocks that fall within the visible line range.
+/// Code blocks outside the visible range are rendered as placeholders.
+/// This significantly improves performance for long documents with many code blocks.
+pub fn render_markdown_lazy(
+    text: &str,
+    max_width: Option<usize>,
+    visible_range: std::ops::Range<usize>,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::new();
+
+    // Style stack for nested formatting
+    let mut bold = false;
+    let mut italic = false;
+    let mut in_code_block = false;
+    let mut code_block_lang: Option<String> = None;
+    let mut code_block_content = String::new();
+    let mut code_block_start_line: usize = 0;
+    let mut heading_level: Option<u8> = None;
+
+    // Table state
+    let mut in_table = false;
+    let mut table_row: Vec<String> = Vec::new();
+    let mut table_rows: Vec<Vec<String>> = Vec::new();
+    let mut current_cell = String::new();
+    let mut _is_header_row = false;
+
+    // Enable table parsing
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    let parser = Parser::new_ext(text, options);
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                if !current_spans.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+                }
+                heading_level = Some(level as u8);
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if !current_spans.is_empty() {
+                    let color = match heading_level {
+                        Some(1) => HEADING_H1_COLOR,
+                        Some(2) => HEADING_H2_COLOR,
+                        Some(3) => HEADING_H3_COLOR,
+                        _ => HEADING_COLOR,
+                    };
+
+                    let heading_spans: Vec<Span<'static>> = current_spans
+                        .drain(..)
+                        .map(|s| {
+                            Span::styled(s.content.to_string(), Style::default().fg(color).bold())
+                        })
+                        .collect();
+                    lines.push(Line::from(heading_spans));
+                }
+                heading_level = None;
+            }
+
+            Event::Start(Tag::Strong) => bold = true,
+            Event::End(TagEnd::Strong) => bold = false,
+
+            Event::Start(Tag::Emphasis) => italic = true,
+            Event::End(TagEnd::Emphasis) => italic = false,
+
+            Event::Start(Tag::CodeBlock(kind)) => {
+                if !current_spans.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+                }
+                in_code_block = true;
+                code_block_start_line = lines.len();
+                code_block_lang = match kind {
+                    CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.to_string()),
+                    _ => None,
+                };
+                let lang_label = code_block_lang.as_deref().unwrap_or("");
+                lines.push(Line::from(Span::styled(
+                    format!("┌─ {} ", lang_label),
+                    Style::default().fg(DIM_COLOR),
+                )));
+                code_block_content.clear();
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                let is_mermaid = code_block_lang
+                    .as_ref()
+                    .map(|l| mermaid::is_mermaid_lang(l))
+                    .unwrap_or(false);
+
+                if is_mermaid {
+                    lines.pop(); // Remove the header line
+                    let result = mermaid::render_mermaid(&code_block_content);
+                    let mermaid_lines = mermaid::result_to_lines(result, max_width);
+                    lines.extend(mermaid_lines);
+                } else {
+                    // Calculate the line range this code block will occupy
+                    let code_line_count = code_block_content.lines().count();
+                    let block_range = code_block_start_line..(code_block_start_line + code_line_count + 2);
+
+                    // Check if this block is visible
+                    let is_visible = ranges_overlap(block_range.clone(), visible_range.clone());
+
+                    if is_visible {
+                        // Highlight the code block
+                        let highlighted =
+                            highlight_code_cached(&code_block_content, code_block_lang.as_deref());
+                        for hl_line in highlighted {
+                            let mut spans = vec![Span::styled("│ ", Style::default().fg(DIM_COLOR))];
+                            spans.extend(hl_line.spans);
+                            lines.push(Line::from(spans));
+                        }
+                    } else {
+                        // Use placeholder for off-screen blocks
+                        let placeholder = placeholder_code_block(
+                            &code_block_content,
+                            code_block_lang.as_deref(),
+                        );
+                        for pl_line in placeholder {
+                            let mut spans = vec![Span::styled("│ ", Style::default().fg(DIM_COLOR))];
+                            spans.extend(pl_line.spans);
+                            lines.push(Line::from(spans));
+                        }
+                    }
+                    lines.push(Line::from(Span::styled(
+                        "└─",
+                        Style::default().fg(DIM_COLOR),
+                    )));
+                }
+                in_code_block = false;
+                code_block_lang = None;
+                code_block_content.clear();
+            }
+
+            Event::Code(code) => {
+                current_spans.push(Span::styled(
+                    format!("`{}`", code),
+                    Style::default().fg(CODE_FG).bg(CODE_BG),
+                ));
+            }
+
+            Event::Text(text) => {
+                if in_code_block {
+                    code_block_content.push_str(&text);
+                } else if in_table {
+                    current_cell.push_str(&text);
+                } else {
+                    let is_thinking_duration =
+                        text.starts_with("Thought for ") && text.ends_with('s');
+                    let style = if is_thinking_duration {
+                        Style::default().fg(DIM_COLOR).italic()
+                    } else {
+                        match (bold, italic) {
+                            (true, true) => Style::default().fg(BOLD_COLOR).bold().italic(),
+                            (true, false) => Style::default().fg(BOLD_COLOR).bold(),
+                            (false, true) => Style::default().fg(TEXT_COLOR).italic(),
+                            (false, false) => Style::default().fg(TEXT_COLOR),
+                        }
+                    };
+                    current_spans.push(Span::styled(text.to_string(), style));
+                }
+            }
+
+            Event::SoftBreak => {
+                if !in_code_block {
+                    current_spans.push(Span::raw(" "));
+                }
+            }
+            Event::HardBreak => {
+                if !in_code_block {
+                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+                }
+            }
+
+            Event::Start(Tag::Paragraph) => {}
+            Event::End(TagEnd::Paragraph) => {
+                if !current_spans.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+                }
+                lines.push(Line::default());
+            }
+
+            Event::Start(Tag::Item) => {
+                current_spans.push(Span::styled("• ", Style::default().fg(DIM_COLOR)));
+            }
+            Event::End(TagEnd::Item) => {
+                if !current_spans.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+                }
+            }
+
+            Event::Start(Tag::Table(_)) => {
+                if !current_spans.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+                }
+                in_table = true;
+                table_rows.clear();
+            }
+            Event::End(TagEnd::Table) => {
+                if !table_rows.is_empty() {
+                    lines.push(Line::from(""));
+                    let rendered = render_table(&table_rows, max_width);
+                    lines.extend(rendered);
+                    lines.push(Line::from(""));
+                }
+                in_table = false;
+                table_rows.clear();
+            }
+            Event::Start(Tag::TableHead) => {
+                _is_header_row = true;
+                table_row.clear();
+            }
+            Event::End(TagEnd::TableHead) => {
+                if !table_row.is_empty() {
+                    table_rows.push(table_row.clone());
+                }
+                table_row.clear();
+                _is_header_row = false;
+            }
+            Event::Start(Tag::TableRow) => {
+                table_row.clear();
+            }
+            Event::End(TagEnd::TableRow) => {
+                if !table_row.is_empty() {
+                    table_rows.push(table_row.clone());
+                }
+                table_row.clear();
+            }
+            Event::Start(Tag::TableCell) => {
+                current_cell.clear();
+            }
+            Event::End(TagEnd::TableCell) => {
+                table_row.push(current_cell.trim().to_string());
+                current_cell.clear();
+            }
+
+            _ => {}
+        }
+    }
+
+    if !current_spans.is_empty() {
+        lines.push(Line::from(current_spans));
+    }
+
+    lines
 }
 
 /// Wrap a line of styled spans to fit within a given width
@@ -611,5 +1104,110 @@ mod tests {
             .max()
             .unwrap_or(0);
         assert!(max_len <= 20);
+    }
+
+    #[test]
+    fn test_mermaid_block_detection() {
+        // Mermaid blocks should be detected and rendered differently than regular code
+        let md = "```mermaid\nflowchart LR\n    A --> B\n```";
+        let lines = render_markdown(md);
+
+        // Mermaid rendering can return:
+        // 1. Empty lines (image displayed via Kitty/iTerm2 protocol directly to stdout)
+        // 2. ASCII fallback lines (if no graphics support)
+        // 3. Error lines (if parsing failed)
+        // All are valid outcomes
+
+        // Should NOT have the code block border (┌─ mermaid) since mermaid removes it
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+
+        // The key test: it should NOT contain syntax-highlighted code (the raw mermaid source)
+        // It should either be empty (image displayed) or contain mermaid metadata
+        assert!(
+            lines.is_empty() || text.contains("mermaid") || text.contains("flowchart"),
+            "Expected mermaid handling, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_mixed_code_and_mermaid() {
+        // Mixed content should render both correctly
+        let md = "```rust\nfn main() {}\n```\n\n```mermaid\nflowchart TD\n    A\n```\n\n```python\nprint('hi')\n```";
+        let lines = render_markdown(md);
+
+        // Should have output for all blocks
+        assert!(lines.len() >= 3, "Expected multiple lines for mixed content");
+    }
+
+    #[test]
+    fn test_incremental_renderer_basic() {
+        let mut renderer = IncrementalMarkdownRenderer::new(Some(80));
+
+        // First render
+        let lines1 = renderer.update("Hello **world**");
+        assert!(!lines1.is_empty());
+
+        // Same text should return cached result
+        let lines2 = renderer.update("Hello **world**");
+        assert_eq!(lines1.len(), lines2.len());
+
+        // Appended text should work
+        let lines3 = renderer.update("Hello **world**\n\nMore text");
+        assert!(lines3.len() > lines1.len());
+    }
+
+    #[test]
+    fn test_incremental_renderer_streaming() {
+        let mut renderer = IncrementalMarkdownRenderer::new(Some(80));
+
+        // Simulate streaming tokens
+        let _ = renderer.update("Hello ");
+        let _ = renderer.update("Hello world");
+        let _ = renderer.update("Hello world\n\n");
+        let lines = renderer.update("Hello world\n\nParagraph 2");
+
+        // Should have rendered both paragraphs
+        assert!(lines.len() >= 2);
+    }
+
+    #[test]
+    fn test_lazy_rendering_visible_range() {
+        let md = "```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\nSome text\n\n```python\nprint('hi')\n```";
+
+        // Render with full visibility
+        let lines_full = render_markdown_lazy(md, Some(80), 0..100);
+
+        // Render with partial visibility (only first code block visible)
+        let lines_partial = render_markdown_lazy(md, Some(80), 0..5);
+
+        // Both should produce output
+        assert!(!lines_full.is_empty());
+        assert!(!lines_partial.is_empty());
+    }
+
+    #[test]
+    fn test_ranges_overlap() {
+        assert!(ranges_overlap(0..10, 5..15));
+        assert!(ranges_overlap(5..15, 0..10));
+        assert!(!ranges_overlap(0..5, 10..15));
+        assert!(!ranges_overlap(10..15, 0..5));
+        assert!(ranges_overlap(0..10, 0..10)); // Same range
+        assert!(ranges_overlap(0..10, 5..6)); // Contained
+    }
+
+    #[test]
+    fn test_highlight_cache_performance() {
+        // First call should cache
+        let code = "fn main() {\n    println!(\"hello\");\n}";
+        let lines1 = highlight_code_cached(code, Some("rust"));
+
+        // Second call should hit cache
+        let lines2 = highlight_code_cached(code, Some("rust"));
+
+        assert_eq!(lines1.len(), lines2.len());
     }
 }

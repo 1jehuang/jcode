@@ -5,6 +5,7 @@ pub mod image;
 pub mod info_widget;
 mod keybind;
 pub(crate) mod markdown;
+pub mod mermaid;
 pub mod screenshot;
 pub mod session_picker;
 mod stream_buffer;

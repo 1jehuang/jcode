@@ -82,6 +82,9 @@ pulldown-cmark = "0.12"
 # PDF parsing
 pdf-extract = "0.8"
 
+# Mermaid diagram rendering
+mermaid-rs-renderer = { path = "../mermaid-rs-renderer" }
+
 [dev-dependencies]
 async-stream = "0.3"
 
