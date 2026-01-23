@@ -1,11 +1,23 @@
 //! Terminal image display support
 //!
-//! Supports Kitty graphics protocol (Kitty, Ghostty) and iTerm2 inline images.
+//! Supports Kitty graphics protocol (Kitty, Ghostty), iTerm2 inline images,
+//! and Sixel graphics (xterm, foot, mlterm, WezTerm).
 //! Falls back to a simple placeholder if no image protocol is available.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use std::io::{self, Write};
 use std::path::Path;
+use std::process::Command;
+use std::sync::LazyLock;
+
+/// Cache whether ImageMagick is available for Sixel conversion
+static HAS_IMAGEMAGICK: LazyLock<bool> = LazyLock::new(|| {
+    Command::new("convert")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+});
 
 /// Terminal image protocol support
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -14,6 +26,8 @@ pub enum ImageProtocol {
     Kitty,
     /// iTerm2 inline images
     ITerm2,
+    /// Sixel graphics (xterm, foot, mlterm, WezTerm)
+    Sixel,
     /// No image support
     None,
 }
@@ -26,17 +40,24 @@ impl ImageProtocol {
             return Self::Kitty;
         }
 
-        // Check TERM for kitty
+        // Check TERM for kitty or ghostty
         if let Ok(term) = std::env::var("TERM") {
-            if term.contains("kitty") {
+            if term.contains("kitty") || term.contains("ghostty") {
                 return Self::Kitty;
             }
         }
 
-        // Check for iTerm2
+        // Check TERM_PROGRAM for Ghostty
         if let Ok(term_program) = std::env::var("TERM_PROGRAM") {
+            if term_program == "ghostty" {
+                return Self::Kitty;
+            }
             if term_program == "iTerm.app" {
                 return Self::ITerm2;
+            }
+            // WezTerm supports Sixel
+            if term_program == "WezTerm" {
+                return Self::Sixel;
             }
         }
 
@@ -47,7 +68,43 @@ impl ImageProtocol {
             }
         }
 
+        // Check for Sixel-capable terminals
+        if Self::detect_sixel() {
+            return Self::Sixel;
+        }
+
         Self::None
+    }
+
+    /// Detect if terminal supports Sixel graphics
+    fn detect_sixel() -> bool {
+        // Only enable Sixel if we have ImageMagick to do the conversion
+        if !*HAS_IMAGEMAGICK {
+            return false;
+        }
+
+        if let Ok(term) = std::env::var("TERM") {
+            let term_lower = term.to_lowercase();
+            // Known Sixel-capable terminals
+            if term_lower.contains("xterm")
+                || term_lower.contains("foot")
+                || term_lower.contains("mlterm")
+                || term_lower.contains("yaft")
+                || term_lower.contains("mintty")
+                || term_lower.contains("contour")
+            {
+                return true;
+            }
+        }
+
+        // Check TERM_PROGRAM for other Sixel terminals
+        if let Ok(prog) = std::env::var("TERM_PROGRAM") {
+            if prog == "mintty" || prog == "contour" {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Check if image display is supported
@@ -108,6 +165,7 @@ pub fn display_image(path: &Path, params: &ImageDisplayParams) -> io::Result<boo
     match protocol {
         ImageProtocol::Kitty => display_kitty(&data, params, img_width, img_height),
         ImageProtocol::ITerm2 => display_iterm2(&data, path, params, img_width, img_height),
+        ImageProtocol::Sixel => display_sixel(path, params, img_width, img_height),
         ImageProtocol::None => Ok(false),
     }
 }
@@ -302,6 +360,53 @@ fn display_iterm2(
     )?;
 
     // Newline after image
+    writeln!(stdout)?;
+    stdout.flush()?;
+
+    Ok(true)
+}
+
+/// Display image using Sixel graphics protocol
+///
+/// Uses ImageMagick's `convert` command to generate Sixel output.
+/// This is the same approach used by image.nvim and other terminal image tools.
+fn display_sixel(
+    path: &Path,
+    params: &ImageDisplayParams,
+    img_width: u32,
+    img_height: u32,
+) -> io::Result<bool> {
+    if !*HAS_IMAGEMAGICK {
+        return Ok(false);
+    }
+
+    let (cols, rows) =
+        calculate_display_size(img_width, img_height, params.max_cols, params.max_rows);
+
+    // Calculate pixel dimensions based on typical terminal cell size
+    // Assuming ~8px wide x 16px tall cells (common default)
+    let pixel_width = (cols as u32) * 8;
+    let pixel_height = (rows as u32) * 16;
+
+    // Use ImageMagick to convert to Sixel
+    // -geometry: resize to fit
+    // -colors 256: limit palette for Sixel
+    // sixel:-: output Sixel to stdout
+    let output = Command::new("convert")
+        .arg(path)
+        .arg("-geometry")
+        .arg(format!("{}x{}>", pixel_width, pixel_height))
+        .arg("-colors")
+        .arg("256")
+        .arg("sixel:-")
+        .output()?;
+
+    if !output.status.success() {
+        return Ok(false);
+    }
+
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(&output.stdout)?;
     writeln!(stdout)?;
     stdout.flush()?;
 
