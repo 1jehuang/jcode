@@ -31,6 +31,21 @@ pub fn get_repo_dir() -> Option<PathBuf> {
     None
 }
 
+/// Find the jcode binary on PATH (returns first match)
+pub fn jcode_path_in_path() -> Option<PathBuf> {
+    let exe_name = if cfg!(windows) { "jcode.exe" } else { "jcode" };
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(exe_name);
+        if let Ok(metadata) = std::fs::metadata(&candidate) {
+            if metadata.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 /// Check if a directory is the jcode repository
 pub fn is_jcode_repo(dir: &std::path::Path) -> bool {
     // Check for Cargo.toml with name = "jcode"
