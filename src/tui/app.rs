@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use super::keybind::{ModelSwitchKeys, ScrollKeys};
+use super::markdown::IncrementalMarkdownRenderer;
 use super::stream_buffer::StreamBuffer;
 use crate::bus::{BackgroundTaskStatus, Bus, BusEvent, ToolEvent, ToolStatus};
 use crate::config::config;
@@ -17,6 +18,7 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, 
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -427,6 +429,8 @@ pub struct App {
     reload_info: Vec<String>,
     // Debug trace for scripted testing
     debug_trace: DebugTrace,
+    // Incremental markdown renderer for streaming text (uses RefCell for interior mutability)
+    streaming_md_renderer: RefCell<IncrementalMarkdownRenderer>,
 }
 
 /// A placeholder provider for remote mode (never actually called)
@@ -562,6 +566,7 @@ impl App {
             rate_limit_pending_message: None,
             reload_info: Vec::new(),
             debug_trace: DebugTrace::new(),
+            streaming_md_renderer: RefCell::new(IncrementalMarkdownRenderer::new(None)),
         }
     }
 
@@ -2140,53 +2145,93 @@ impl App {
                             Some(server_event) => {
                                 let at_safe_point = self.handle_server_event(server_event, &mut remote);
 
-                                // Process pending interleave or queued messages at safe points
-                                // Safe points: after turn completes OR after tool completes (in ASAP mode)
-                                let should_send_queued = !self.is_processing
-                                    || (at_safe_point && !self.queue_mode);
+                                // Process pending interleave or queued messages
+                                // If processing: use soft interrupt (no cancel, inject at safe point)
+                                // If not processing: send directly
+                                let has_queued = self.interleave_message.is_some()
+                                    || !self.queued_messages.is_empty();
 
-                                if should_send_queued {
-                                    if let Some(interleave_msg) = self.interleave_message.take() {
-                                        if !interleave_msg.trim().is_empty() {
+                                if has_queued {
+                                    if self.is_processing {
+                                        // Use soft interrupt - no cancel, message injected at next safe point
+                                        if let Some(interleave_msg) = self.interleave_message.take() {
+                                            if !interleave_msg.trim().is_empty() {
+                                                // Show in UI immediately for feedback
+                                                self.push_display_message(DisplayMessage {
+                                                    role: "user".to_string(),
+                                                    content: format!("⏳ {}", interleave_msg),
+                                                    tool_calls: vec![],
+                                                    duration_secs: None,
+                                                    title: Some("(pending injection)".to_string()),
+                                                    tool_data: None,
+                                                });
+                                                // Send soft interrupt to server
+                                                if let Err(e) = remote.soft_interrupt(interleave_msg, false).await {
+                                                    self.push_display_message(DisplayMessage::error(format!(
+                                                        "Failed to queue soft interrupt: {}", e
+                                                    )));
+                                                }
+                                            }
+                                        }
+                                        // Also send any queued messages as soft interrupts
+                                        if !self.queued_messages.is_empty() {
+                                            let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
                                             self.push_display_message(DisplayMessage {
                                                 role: "user".to_string(),
-                                                content: interleave_msg.clone(),
+                                                content: format!("⏳ {}", combined),
+                                                tool_calls: vec![],
+                                                duration_secs: None,
+                                                title: Some("(pending injection)".to_string()),
+                                                tool_data: None,
+                                            });
+                                            if let Err(e) = remote.soft_interrupt(combined, false).await {
+                                                self.push_display_message(DisplayMessage::error(format!(
+                                                    "Failed to queue soft interrupt: {}", e
+                                                )));
+                                            }
+                                        }
+                                    } else {
+                                        // Not processing - send directly
+                                        if let Some(interleave_msg) = self.interleave_message.take() {
+                                            if !interleave_msg.trim().is_empty() {
+                                                self.push_display_message(DisplayMessage {
+                                                    role: "user".to_string(),
+                                                    content: interleave_msg.clone(),
+                                                    tool_calls: vec![],
+                                                    duration_secs: None,
+                                                    title: None,
+                                                    tool_data: None,
+                                                });
+                                                match remote.send_message(interleave_msg).await {
+                                                    Ok(msg_id) => {
+                                                        self.current_message_id = Some(msg_id);
+                                                        self.is_processing = true;
+                                                        self.status = ProcessingStatus::Sending;
+                                                        self.processing_started = Some(Instant::now());
+                                                    }
+                                                    Err(e) => {
+                                                        self.push_display_message(DisplayMessage::error(format!(
+                                                            "Failed to send message: {}", e
+                                                        )));
+                                                    }
+                                                }
+                                            }
+                                        } else if !self.queued_messages.is_empty() {
+                                            let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
+                                            self.push_display_message(DisplayMessage {
+                                                role: "user".to_string(),
+                                                content: combined.clone(),
                                                 tool_calls: vec![],
                                                 duration_secs: None,
                                                 title: None,
                                                 tool_data: None,
                                             });
-                                            match remote.send_message(interleave_msg).await {
-                                                Ok(msg_id) => {
-                                                    self.current_message_id = Some(msg_id);
-                                                    self.is_processing = true;
-                                                    self.status = ProcessingStatus::Sending;
-                                                    self.processing_started = Some(Instant::now());
-                                                }
-                                                Err(e) => {
-                                                    self.push_display_message(DisplayMessage::error(format!(
-                                                        "Failed to send interleaved message: {}",
-                                                        e
-                                                    )));
-                                                }
+                                            if let Ok(msg_id) = remote.send_message(combined).await {
+                                                self.current_message_id = Some(msg_id);
+                                                self.is_processing = true;
+                                                self.status = ProcessingStatus::Sending;
+                                                self.processing_started = Some(Instant::now());
                                             }
-                                        }
-                                    } else if !self.queued_messages.is_empty() {
-                                        let combined =
-                                            std::mem::take(&mut self.queued_messages).join("\n\n");
-                                        self.push_display_message(DisplayMessage {
-                                            role: "user".to_string(),
-                                            content: combined.clone(),
-                                            tool_calls: vec![],
-                                            duration_secs: None,
-                                            title: None,
-                                            tool_data: None,
-                                        });
-                                        if let Ok(msg_id) = remote.send_message(combined).await {
-                                            self.current_message_id = Some(msg_id);
-                                            self.is_processing = true;
-                                            self.status = ProcessingStatus::Sending;
-                                            self.processing_started = Some(Instant::now());
                                         }
                                     }
                                 }
@@ -2535,6 +2580,31 @@ impl App {
                         model
                     )));
                     self.set_status_notice(format!("Model → {}", model));
+                }
+                false
+            }
+            ServerEvent::SoftInterruptInjected {
+                content,
+                point,
+                tools_skipped,
+            } => {
+                // Update status to show injection happened
+                let skip_info = tools_skipped
+                    .map(|n| format!(" ({} tools skipped)", n))
+                    .unwrap_or_default();
+                self.set_status_notice(format!("✓ Message injected at point {}{}", point, skip_info));
+
+                // Update the pending message display to show it was injected
+                // Find and update the "(pending injection)" message if present
+                for msg in self.display_messages.iter_mut().rev() {
+                    if msg.title.as_deref() == Some("(pending injection)")
+                        && msg.content.contains(&content)
+                    {
+                        // Update to show it was injected
+                        msg.content = content.clone();
+                        msg.title = Some(format!("(injected at point {}{})", point, skip_info));
+                        break;
+                    }
                 }
                 false
             }
@@ -4027,6 +4097,7 @@ impl App {
         self.is_processing = true;
         self.status = ProcessingStatus::Sending;
         self.streaming_text.clear();
+        self.streaming_md_renderer.borrow_mut().reset();
         self.stream_buffer.clear();
         self.thought_line_inserted = false;
         self.streaming_tool_calls.clear();
@@ -6571,6 +6642,12 @@ impl super::TuiState for App {
             background_info,
             usage_info,
         }
+    }
+
+    fn render_streaming_markdown(&self, width: usize) -> Vec<ratatui::text::Line<'static>> {
+        let mut renderer = self.streaming_md_renderer.borrow_mut();
+        renderer.set_width(Some(width));
+        renderer.update(&self.streaming_text)
     }
 }
 

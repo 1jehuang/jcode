@@ -195,6 +195,14 @@ impl IncrementalMarkdownRenderer {
         self.last_checkpoint = 0;
         self.lines_at_checkpoint = 0;
     }
+
+    /// Update width constraint, resets if changed
+    pub fn set_width(&mut self, max_width: Option<usize>) {
+        if self.max_width != max_width {
+            self.max_width = max_width;
+            self.reset();
+        }
+    }
 }
 
 // Colors matching ui.rs palette

@@ -24,7 +24,7 @@ const USER_BG: Color = Color::Rgb(35, 40, 50); // Subtle dark blue background fo
 const AI_TEXT: Color = Color::Rgb(220, 220, 215); // Softer warm white (AI messages)
 const HEADER_ICON_COLOR: Color = Color::Rgb(120, 210, 230); // Teal for session icon
 const HEADER_NAME_COLOR: Color = Color::Rgb(190, 210, 235); // Soft blue-gray for JCode label
-const HEADER_SESSION_COLOR: Color = Color::Rgb(150, 220, 190); // Seafoam for session name
+const HEADER_SESSION_COLOR: Color = Color::Rgb(255, 255, 255); // White for session name
 
 // Spinner frames for animated status
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -62,16 +62,13 @@ fn header_animation_color(elapsed: f32) -> Color {
     )
 }
 
-/// Create animated span for the header text during startup
-fn animated_header_span(text: &str, elapsed: f32) -> Span<'static> {
-    let color = header_fade_color(header_animation_color(elapsed), elapsed, 0.12);
-    Span::styled(text.to_string(), Style::default().fg(color))
+fn header_fade_t(elapsed: f32, offset: f32) -> f32 {
+    let t = ((elapsed - offset) / HEADER_ANIM_DURATION).clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
 }
 
 fn header_fade_color(target: Color, elapsed: f32, offset: f32) -> Color {
-    let t = ((elapsed - offset) / HEADER_ANIM_DURATION).clamp(0.0, 1.0);
-    let eased = 1.0 - (1.0 - t).powi(3);
-    blend_color(DIM_COLOR, target, eased)
+    blend_color(DIM_COLOR, target, header_fade_t(elapsed, offset))
 }
 
 fn blend_color(from: Color, to: Color, t: f32) -> Color {
@@ -93,6 +90,32 @@ fn blend_color(from: Color, to: Color, t: f32) -> Color {
     )
 }
 
+/// Chrome-style sweep highlight across header text.
+fn header_chrome_color(base: Color, pos: f32, elapsed: f32, intensity: f32) -> Color {
+    const HIGHLIGHT: Color = Color::Rgb(235, 245, 255);
+    const SHADOW: Color = Color::Rgb(70, 80, 95);
+    const SPEED: f32 = 0.12;
+    const WIDTH: f32 = 0.22;
+
+    let center = (elapsed * SPEED) % 1.0;
+    let mut dist = (pos - center).abs();
+    dist = dist.min(1.0 - dist);
+    let shine = (1.0 - (dist / WIDTH).clamp(0.0, 1.0)).powf(2.4);
+
+    let micro = ((pos * 12.0 + elapsed * 2.6).sin() * 0.5 + 0.5) * 0.12;
+    let shimmer = (shine * 0.9 + micro).clamp(0.0, 1.0) * intensity;
+
+    let shadow_center = (center + 0.5) % 1.0;
+    let mut shadow_dist = (pos - shadow_center).abs();
+    shadow_dist = shadow_dist.min(1.0 - shadow_dist);
+    let shadow = (1.0 - (shadow_dist / (WIDTH * 1.2)).clamp(0.0, 1.0)).powf(2.0)
+        * 0.16
+        * intensity;
+
+    let darkened = blend_color(base, SHADOW, shadow);
+    blend_color(darkened, HIGHLIGHT, shimmer)
+}
+
 /// Extract semantic version from full version string (e.g., "v0.1.0-dev (abc123)" -> "v0.1.0")
 fn semver() -> &'static str {
     static SEMVER: OnceLock<String> = OnceLock::new();
@@ -109,25 +132,38 @@ fn semver() -> &'static str {
 
 /// Create multi-color spans for the header line
 fn header_spans(icon: &str, session: &str, model: &str, elapsed: f32) -> Vec<Span<'static>> {
-    vec![
-        Span::styled(
-            format!("{} ", icon),
-            Style::default().fg(header_fade_color(HEADER_ICON_COLOR, elapsed, 0.00)),
-        ),
-        Span::styled(
-            "JCode ".to_string(),
-            Style::default().fg(header_fade_color(HEADER_NAME_COLOR, elapsed, 0.06)),
-        ),
-        Span::styled(
-            format!("{} ", capitalize(session)),
-            Style::default().fg(header_fade_color(HEADER_SESSION_COLOR, elapsed, 0.12)),
-        ),
-        Span::styled(
-            "· ".to_string(),
-            Style::default().fg(header_fade_color(DIM_COLOR, elapsed, 0.18)),
-        ),
-        animated_header_span(model, elapsed),
-    ]
+    let segments = [
+        (format!("{} ", icon), HEADER_ICON_COLOR, 0.00),
+        ("JCode ".to_string(), HEADER_NAME_COLOR, 0.06),
+        (format!("{} ", capitalize(session)), HEADER_SESSION_COLOR, 0.12),
+        ("· ".to_string(), DIM_COLOR, 0.18),
+        (model.to_string(), header_animation_color(elapsed), 0.12),
+    ];
+
+    let total_chars: usize = segments
+        .iter()
+        .map(|(text, _, _)| text.chars().count())
+        .sum();
+    let total = total_chars.max(1);
+    let mut spans = Vec::with_capacity(total_chars);
+    let mut idx = 0usize;
+
+    for (text, target, offset) in segments {
+        let fade = header_fade_t(elapsed, offset);
+        let base = header_fade_color(target, elapsed, offset);
+        for ch in text.chars() {
+            let pos = if total > 1 {
+                idx as f32 / (total - 1) as f32
+            } else {
+                0.0
+            };
+            let color = header_chrome_color(base, pos, elapsed, fade);
+            spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
+            idx += 1;
+        }
+    }
+
+    spans
 }
 
 /// Capitalize first letter of a string
@@ -1452,10 +1488,9 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
             if !lines.is_empty() {
                 lines.push(Line::from(""));
             }
-            // Use markdown rendering to match final display
+            // Use incremental markdown rendering for better streaming performance
             let content_width = width.saturating_sub(4) as usize;
-            let md_lines =
-                markdown::render_markdown_with_width(app.streaming_text(), Some(content_width));
+            let md_lines = app.render_streaming_markdown(content_width);
             lines.extend(md_lines);
         }
         // Tool calls are now shown inline in display_messages
