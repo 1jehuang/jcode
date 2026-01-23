@@ -868,6 +868,27 @@ impl App {
     /// Commands: "message:<text>", "reload", "state", "quit"
     fn handle_debug_command(&mut self, cmd: &str) -> String {
         let cmd = cmd.trim();
+        if cmd == "frame" {
+            return self.handle_debug_command("screen-json");
+        }
+        if cmd == "frame-normalized" {
+            return self.handle_debug_command("screen-json-normalized");
+        }
+        if cmd == "enable" || cmd == "debug-enable" {
+            super::visual_debug::enable();
+            return "Visual debugging enabled.".to_string();
+        }
+        if cmd == "disable" || cmd == "debug-disable" {
+            super::visual_debug::disable();
+            return "Visual debugging disabled.".to_string();
+        }
+        if cmd == "status" {
+            let enabled = super::visual_debug::is_enabled();
+            return serde_json::json!({
+                "visual_debug_enabled": enabled
+            })
+            .to_string();
+        }
         if cmd.starts_with("message:") {
             let msg = cmd.strip_prefix("message:").unwrap_or("");
             // Inject the message as if user typed it
@@ -1114,6 +1135,9 @@ impl App {
                  - screen - dump visual debug frames\n\
                  - screen-json - dump latest visual frame JSON\n\
                  - screen-json-normalized - dump normalized frame (for diffs)\n\
+                 - frame - alias for screen-json\n\
+                 - frame-normalized - alias for screen-json-normalized\n\
+                 - enable/disable/status - control visual debug capture\n\
                  - wait - check if processing\n\
                  - wait:<ms> - block until idle or timeout\n\
                  - scroll:<up|down|top|bottom> - control scroll\n\
@@ -2272,6 +2296,16 @@ impl App {
                                 continue 'outer;
                             }
                             Some(server_event) => {
+                                if let crate::protocol::ServerEvent::ClientDebugRequest {
+                                    id,
+                                    command,
+                                } = server_event
+                                {
+                                    let output =
+                                        self.handle_debug_command_remote(&command, &mut remote).await;
+                                    let _ = remote.send_client_debug_response(id, output).await;
+                                    continue;
+                                }
                                 let at_safe_point = self.handle_server_event(server_event, &mut remote);
 
                                 // Process pending interleave or queued messages
