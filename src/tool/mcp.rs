@@ -270,6 +270,8 @@ impl McpManagementTool {
 mod tests {
     use super::*;
     use crate::tool::Tool;
+    use std::fs;
+    use std::path::PathBuf;
 
     fn create_test_tool() -> McpManagementTool {
         let manager = Arc::new(RwLock::new(McpManager::new()));
@@ -281,6 +283,56 @@ mod tests {
             session_id: "test-session".to_string(),
             message_id: "test-message".to_string(),
             tool_call_id: "test-tool-call".to_string(),
+        }
+    }
+
+    struct LocalMcpConfigGuard {
+        path: PathBuf,
+        backup: Option<String>,
+        created_dir: bool,
+    }
+
+    impl LocalMcpConfigGuard {
+        fn new(content: &str) -> std::io::Result<Self> {
+            let path = PathBuf::from(".claude/mcp.json");
+            let dir = path
+                .parent()
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "missing parent"))?;
+            let created_dir = if !dir.exists() {
+                fs::create_dir_all(dir)?;
+                true
+            } else {
+                false
+            };
+            let backup = if path.exists() {
+                Some(fs::read_to_string(&path)?)
+            } else {
+                None
+            };
+            fs::write(&path, content)?;
+            Ok(Self {
+                path,
+                backup,
+                created_dir,
+            })
+        }
+    }
+
+    impl Drop for LocalMcpConfigGuard {
+        fn drop(&mut self) {
+            match &self.backup {
+                Some(content) => {
+                    let _ = fs::write(&self.path, content);
+                }
+                None => {
+                    let _ = fs::remove_file(&self.path);
+                    if self.created_dir {
+                        if let Some(dir) = self.path.parent() {
+                            let _ = fs::remove_dir(dir);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -361,6 +413,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_reload_empty_config() {
+        let _guard = LocalMcpConfigGuard::new("{\"servers\":{}}")
+            .expect("create temporary .claude/mcp.json");
         let tool = create_test_tool();
         let ctx = create_test_context();
         let input = json!({"action": "reload"});
