@@ -340,6 +340,24 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Queue a soft interrupt message to be injected at the next safe point
+    /// This doesn't cancel anything - the message is naturally incorporated
+    pub async fn soft_interrupt(&mut self, content: String, urgent: bool) -> Result<()> {
+        let request = Request::SoftInterrupt {
+            id: self.next_request_id,
+            content,
+            urgent,
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
+    /// Send a response for a client debug request
+    pub async fn send_client_debug_response(&mut self, id: u64, output: String) -> Result<()> {
+        self.send_request(Request::ClientDebugResponse { id, output })
+            .await
+    }
+
     /// Read the next event from the server (returns None on disconnect)
     pub async fn next_event(&mut self) -> Option<ServerEvent> {
         self.line_buffer.clear();

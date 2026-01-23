@@ -824,8 +824,18 @@ async fn handle_client(
             // Handle client debug commands from debug socket
             debug_cmd = debug_cmd_rx.recv() => {
                 if let Some((request_id, command)) = debug_cmd {
-                    let response = execute_client_debug_command(&command);
-                    let _ = client_debug_response_tx.send((request_id, response));
+                    if client_event_tx
+                        .send(ServerEvent::ClientDebugRequest {
+                            id: request_id,
+                            command,
+                        })
+                        .is_err()
+                    {
+                        let _ = client_debug_response_tx.send((
+                            request_id,
+                            "No TUI client connected".to_string(),
+                        ));
+                    }
                 }
                 continue;
             }
@@ -1084,9 +1094,19 @@ async fn handle_client(
 
                 // Spawn reload process with progress streaming
                 let progress_tx = client_event_tx.clone();
+                let provider_arg = provider_cli_arg(provider.name());
+                let model_arg = normalize_model_arg(provider.model());
+                let socket_arg = socket_path().to_string_lossy().to_string();
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    if let Err(e) = do_server_reload_with_progress(progress_tx.clone()).await {
+                    if let Err(e) = do_server_reload_with_progress(
+                        progress_tx.clone(),
+                        provider_arg,
+                        model_arg,
+                        socket_arg,
+                    )
+                    .await
+                    {
                         let _ = progress_tx.send(ServerEvent::ReloadProgress {
                             step: "error".to_string(),
                             message: format!("Reload failed: {}", e),
@@ -1557,11 +1577,14 @@ async fn handle_client(
             }
 
             // These are handled via channels, not direct requests from TUI
-            Request::ClientDebugCommand { id, .. } | Request::ClientDebugResponse { id, .. } => {
+            Request::ClientDebugCommand { id, .. } => {
                 let _ = client_event_tx.send(ServerEvent::Error {
                     id,
-                    message: "ClientDebugCommand/Response are for internal use only".to_string(),
+                    message: "ClientDebugCommand is for internal use only".to_string(),
                 });
+            }
+            Request::ClientDebugResponse { id, output } => {
+                let _ = client_debug_response_tx.send((id, output));
             }
         }
     }
@@ -2554,6 +2577,9 @@ fn do_server_reload() -> Result<()> {
 /// This just restarts with the existing binary - no rebuild
 async fn do_server_reload_with_progress(
     tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
+    provider_arg: Option<String>,
+    model_arg: Option<String>,
+    socket_arg: String,
 ) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
@@ -2662,11 +2688,37 @@ async fn do_server_reload_with_progress(
 
     crate::logging::info(&format!("Exec'ing into binary: {:?}", exe));
 
-    // Exec into new binary with serve command
-    let err = ProcessCommand::new(&exe).arg("serve").exec();
+    // Exec into new binary with serve command (preserve args)
+    let mut cmd = ProcessCommand::new(&exe);
+    cmd.arg("serve").arg("--socket").arg(socket_arg);
+    if let Some(provider) = provider_arg {
+        cmd.arg("--provider").arg(provider);
+    }
+    if let Some(model) = model_arg {
+        cmd.arg("--model").arg(model);
+    }
+    let err = cmd.exec();
 
     // exec() only returns on error
     Err(anyhow::anyhow!("Failed to exec: {}", err))
+}
+
+fn provider_cli_arg(provider_name: &str) -> Option<String> {
+    let lowered = provider_name.trim().to_lowercase();
+    match lowered.as_str() {
+        "openai" => Some("openai".to_string()),
+        "claude" => Some("claude".to_string()),
+        _ => None,
+    }
+}
+
+fn normalize_model_arg(model: String) -> Option<String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unknown") {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// Monitor for selfdev signal files and exit with appropriate codes
