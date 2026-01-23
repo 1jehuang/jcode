@@ -1,10 +1,9 @@
 //! Mermaid diagram rendering for terminal display
 //!
-//! Renders mermaid diagrams to PNG images, then displays them
-//! using the terminal's graphics protocol (Kitty, Sixel) or
-//! falls back to ASCII representation.
+//! Renders mermaid diagrams to PNG images, then displays them using
+//! ratatui-image which supports Kitty, Sixel, iTerm2, and halfblock protocols.
+//! The protocol is auto-detected based on terminal capabilities.
 
-use crate::tui::image::{display_image, ImageDisplayParams, ImageProtocol};
 use mermaid_rs_renderer::{
     config::{LayoutConfig, RenderConfig},
     layout::compute_layout,
@@ -13,14 +12,41 @@ use mermaid_rs_renderer::{
     theme::Theme,
 };
 use ratatui::prelude::*;
+use ratatui_image::{
+    picker::{Picker, ProtocolType},
+    protocol::StatefulProtocol,
+    Resize, StatefulImage,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash as _, Hasher};
 use std::path::PathBuf;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, OnceLock};
+
+/// Global picker for terminal capability detection
+/// Initialized once on first use
+static PICKER: OnceLock<Option<Picker>> = OnceLock::new();
 
 /// Cache for rendered mermaid diagrams
-static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> = LazyLock::new(|| Mutex::new(MermaidCache::new()));
+static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> =
+    LazyLock::new(|| Mutex::new(MermaidCache::new()));
+
+/// Image state cache - holds StatefulProtocol for each rendered image
+static IMAGE_STATE: LazyLock<Mutex<HashMap<u64, StatefulProtocol>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Initialize the global picker by querying terminal capabilities.
+/// Should be called early in app startup, after entering alternate screen.
+pub fn init_picker() {
+    PICKER.get_or_init(|| {
+        Picker::from_query_stdio().ok()
+    });
+}
+
+/// Get the current protocol type (for debugging/display)
+pub fn protocol_type() -> Option<ProtocolType> {
+    PICKER.get().and_then(|p| p.map(|p| p.protocol_type()))
+}
 
 /// Mermaid rendering cache
 struct MermaidCache {
@@ -67,13 +93,14 @@ impl MermaidCache {
 
 /// Result of attempting to render a mermaid diagram
 pub enum RenderResult {
-    /// Successfully rendered to image
+    /// Successfully rendered to image - includes content hash for state lookup
     Image {
+        hash: u64,
         path: PathBuf,
         width: u32,
         height: u32,
     },
-    /// ASCII fallback (no graphics support)
+    /// ASCII fallback (parsing info only)
     Ascii(AsciiDiagram),
     /// Error during rendering
     Error(String),
@@ -92,14 +119,8 @@ pub fn is_mermaid_lang(lang: &str) -> bool {
     lang_lower == "mermaid" || lang_lower.starts_with("mermaid")
 }
 
-/// Render a mermaid code block
+/// Render a mermaid code block to PNG (cached)
 pub fn render_mermaid(content: &str) -> RenderResult {
-    // Check if graphics are supported
-    let protocol = ImageProtocol::detect();
-    if !protocol.is_supported() {
-        return render_ascii_fallback(content);
-    }
-
     // Calculate content hash for caching
     let hash = hash_content(content);
 
@@ -109,6 +130,7 @@ pub fn render_mermaid(content: &str) -> RenderResult {
         if let Some(cached) = cache.get(hash) {
             if cached.path.exists() {
                 return RenderResult::Image {
+                    hash,
                     path: cached.path.clone(),
                     width: cached.width,
                     height: cached.height,
@@ -165,98 +187,182 @@ pub fn render_mermaid(content: &str) -> RenderResult {
         );
     }
 
+    // Pre-create the StatefulProtocol for this image
+    if let Some(Some(picker)) = PICKER.get() {
+        if let Ok(img) = image::open(&png_path) {
+            let protocol = picker.new_resize_protocol(img);
+            let mut state = IMAGE_STATE.lock().unwrap();
+            state.insert(hash, protocol);
+        }
+    }
+
     RenderResult::Image {
+        hash,
         path: png_path,
         width,
         height,
     }
 }
 
-/// Create ASCII fallback representation
-fn render_ascii_fallback(content: &str) -> RenderResult {
-    match parse_mermaid(content) {
-        Ok(parsed) => {
-            let kind = match parsed.graph.kind {
-                mermaid_rs_renderer::ir::DiagramKind::Flowchart => "flowchart",
-                mermaid_rs_renderer::ir::DiagramKind::Class => "classDiagram",
-                mermaid_rs_renderer::ir::DiagramKind::State => "stateDiagram",
-                mermaid_rs_renderer::ir::DiagramKind::Sequence => "sequenceDiagram",
-            };
-            let node_count = parsed.graph.nodes.len();
-            let edge_count = parsed.graph.edges.len();
-
-            RenderResult::Ascii(AsciiDiagram {
-                kind: kind.to_string(),
-                node_count,
-                edge_count,
-            })
+/// Render an image at the given area using ratatui-image
+/// Returns the number of rows used
+pub fn render_image_widget(
+    hash: u64,
+    area: Rect,
+    buf: &mut Buffer,
+) -> u16 {
+    // First try to render from existing state
+    {
+        let mut state = IMAGE_STATE.lock().unwrap();
+        if let Some(protocol) = state.get_mut(&hash) {
+            let widget = StatefulImage::default().resize(Resize::Fit(None));
+            widget.render(area, buf, protocol);
+            return area.height;
         }
-        Err(e) => RenderResult::Error(format!("Parse error: {}", e)),
     }
-}
 
-/// Terminal-friendly theme (works on dark backgrounds)
-fn terminal_theme() -> Theme {
-    Theme {
-        background: "#1e1e2e".to_string(),      // Dark background (Catppuccin Mocha)
-        primary_color: "#313244".to_string(),   // Node fill
-        primary_text_color: "#cdd6f4".to_string(), // Text
-        primary_border_color: "#585b70".to_string(), // Node border
-        line_color: "#7f849c".to_string(),      // Edge color
-        secondary_color: "#45475a".to_string(),
-        tertiary_color: "#313244".to_string(),
-        edge_label_background: "#1e1e2e".to_string(),
-        cluster_background: "#181825".to_string(),
-        cluster_border: "#45475a".to_string(),
-        font_family: "monospace".to_string(),
-        font_size: 13.0,
-    }
-}
+    // No state available, try to load from cache
+    let cached_path = {
+        let cache = RENDER_CACHE.lock().unwrap();
+        cache.get(hash).map(|c| c.path.clone())
+    };
 
-/// Hash content for caching
-fn hash_content(content: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
+    if let Some(path) = cached_path {
+        if let Some(Some(picker)) = PICKER.get() {
+            if let Ok(img) = image::open(&path) {
+                let protocol = picker.new_resize_protocol(img);
 
-    let mut hasher = DefaultHasher::new();
-    content.hash(&mut hasher);
-    hasher.finish()
-}
+                let mut state = IMAGE_STATE.lock().unwrap();
+                state.insert(hash, protocol);
 
-/// Get PNG dimensions from file
-fn get_png_dimensions(path: &PathBuf) -> Option<(u32, u32)> {
-    let data = fs::read(path).ok()?;
-    if data.len() > 24 && &data[0..8] == b"\x89PNG\r\n\x1a\n" {
-        let width = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
-        let height = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
-        return Some((width, height));
-    }
-    None
-}
-
-/// Convert render result to displayable ratatui Lines
-pub fn result_to_lines(result: RenderResult, _max_width: Option<usize>) -> Vec<Line<'static>> {
-    match result {
-        RenderResult::Image { path, .. } => {
-            // Display image using terminal protocol
-            let params = ImageDisplayParams::from_terminal();
-            match display_image(&path, &params) {
-                Ok(true) => {
-                    // Image displayed successfully via escape codes
-                    // Return empty lines - the image was written directly to stdout
-                    vec![]
-                }
-                Ok(false) | Err(_) => {
-                    // Fallback to ASCII placeholder
-                    vec![Line::from(Span::styled(
-                        "[mermaid diagram - image display not supported]",
-                        Style::default().fg(Color::Yellow),
-                    ))]
+                if let Some(protocol) = state.get_mut(&hash) {
+                    let widget = StatefulImage::default().resize(Resize::Fit(None));
+                    widget.render(area, buf, protocol);
+                    return area.height;
                 }
             }
         }
-        RenderResult::Ascii(diagram) => ascii_to_lines(&diagram),
-        RenderResult::Error(msg) => error_to_lines(&msg),
     }
+
+    0
+}
+
+/// Estimate the height needed for an image in terminal rows
+pub fn estimate_image_height(width: u32, height: u32, max_width: u16) -> u16 {
+    if let Some(Some(picker)) = PICKER.get() {
+        let font_size = picker.font_size();
+        // Calculate how many rows the image will take
+        let img_width_cells = (width as f32 / font_size.0 as f32).ceil() as u16;
+        let img_height_cells = (height as f32 / font_size.1 as f32).ceil() as u16;
+
+        // If image is wider than max_width, scale down proportionally
+        if img_width_cells > max_width {
+            let scale = max_width as f32 / img_width_cells as f32;
+            (img_height_cells as f32 * scale).ceil() as u16
+        } else {
+            img_height_cells
+        }
+    } else {
+        // Fallback: assume ~8x16 font
+        let aspect = width as f32 / height as f32;
+        let h = (max_width as f32 / aspect / 2.0).ceil() as u16;
+        h.min(30) // Cap at reasonable height
+    }
+}
+
+/// Content that can be rendered - either text lines or an image
+#[derive(Clone)]
+pub enum MermaidContent {
+    /// Regular text lines
+    Lines(Vec<Line<'static>>),
+    /// Image to be rendered as a widget
+    Image {
+        hash: u64,
+        estimated_height: u16,
+    },
+}
+
+/// Convert render result to content that can be displayed
+pub fn result_to_content(result: RenderResult, max_width: Option<usize>) -> MermaidContent {
+    match result {
+        RenderResult::Image { hash, width, height, .. } => {
+            // Check if we have picker/protocol support
+            if PICKER.get().and_then(|p| *p).is_some() {
+                let max_w = max_width.map(|w| w as u16).unwrap_or(80);
+                let estimated_height = estimate_image_height(width, height, max_w);
+                MermaidContent::Image { hash, estimated_height }
+            } else {
+                // No image protocol support, fall back to placeholder
+                MermaidContent::Lines(image_placeholder_lines(width, height))
+            }
+        }
+        RenderResult::Ascii(diagram) => MermaidContent::Lines(ascii_to_lines(&diagram)),
+        RenderResult::Error(msg) => MermaidContent::Lines(error_to_lines(&msg)),
+    }
+}
+
+/// Convert render result to lines (legacy API, uses placeholder for images)
+pub fn result_to_lines(result: RenderResult, max_width: Option<usize>) -> Vec<Line<'static>> {
+    match result_to_content(result, max_width) {
+        MermaidContent::Lines(lines) => lines,
+        MermaidContent::Image { hash, estimated_height } => {
+            // Return placeholder lines that will be replaced by image widget
+            image_widget_placeholder(hash, estimated_height)
+        }
+    }
+}
+
+/// Create placeholder lines for an image widget
+/// These will be recognized and replaced during rendering
+fn image_widget_placeholder(hash: u64, height: u16) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::Rgb(40, 40, 40));
+
+    // First line contains the hash as a marker (invisible)
+    let mut lines = Vec::with_capacity(height as usize + 1);
+
+    // Header with hash marker
+    lines.push(Line::from(Span::styled(
+        format!("\x00MERMAID_IMAGE:{:016x}\x00", hash),
+        dim,
+    )));
+
+    // Fill remaining height with blank lines
+    for _ in 1..height {
+        lines.push(Line::from(Span::styled(" ", dim)));
+    }
+
+    lines
+}
+
+/// Check if a line is a mermaid image placeholder and extract the hash
+pub fn parse_image_placeholder(line: &Line<'_>) -> Option<u64> {
+    if line.spans.is_empty() {
+        return None;
+    }
+
+    let content = &line.spans[0].content;
+    // Prefix "\x00MERMAID_IMAGE:" is 15 bytes, then 16 hex digits, then "\x00"
+    if content.starts_with("\x00MERMAID_IMAGE:") && content.ends_with("\x00") {
+        let hex = &content[15..31]; // Extract the 16 hex digits (bytes 15-30)
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        None
+    }
+}
+
+/// Create placeholder lines for when image protocols aren't available
+fn image_placeholder_lines(width: u32, height: u32) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::Rgb(100, 100, 100));
+    let info = Style::default().fg(Color::Rgb(140, 170, 200));
+
+    vec![
+        Line::from(Span::styled("┌─ mermaid diagram ", dim)),
+        Line::from(vec![
+            Span::styled("│ ", dim),
+            Span::styled(format!("{}×{} px (image protocols not available)", width, height), info),
+        ]),
+        Line::from(Span::styled("└─", dim)),
+    ]
 }
 
 /// Convert ASCII diagram to ratatui Lines
@@ -297,10 +403,55 @@ pub fn error_to_lines(error: &str) -> Vec<Line<'static>> {
     ]
 }
 
+/// Terminal-friendly theme (works on dark backgrounds)
+fn terminal_theme() -> Theme {
+    Theme {
+        background: "#1e1e2e".to_string(),
+        primary_color: "#313244".to_string(),
+        primary_text_color: "#cdd6f4".to_string(),
+        primary_border_color: "#585b70".to_string(),
+        line_color: "#7f849c".to_string(),
+        secondary_color: "#45475a".to_string(),
+        tertiary_color: "#313244".to_string(),
+        edge_label_background: "#1e1e2e".to_string(),
+        cluster_background: "#181825".to_string(),
+        cluster_border: "#45475a".to_string(),
+        font_family: "monospace".to_string(),
+        font_size: 13.0,
+    }
+}
+
+/// Hash content for caching
+fn hash_content(content: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Get PNG dimensions from file
+fn get_png_dimensions(path: &PathBuf) -> Option<(u32, u32)> {
+    let data = fs::read(path).ok()?;
+    if data.len() > 24 && &data[0..8] == b"\x89PNG\r\n\x1a\n" {
+        let width = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
+        let height = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
+        return Some((width, height));
+    }
+    None
+}
+
 /// Clean up cached files (call on exit)
 pub fn cleanup_cache() {
     if let Ok(cache) = RENDER_CACHE.lock() {
         let _ = fs::remove_dir_all(&cache.cache_dir);
+    }
+}
+
+/// Clear image state (call when switching sessions or on memory pressure)
+pub fn clear_image_state() {
+    if let Ok(mut state) = IMAGE_STATE.lock() {
+        state.clear();
     }
 }
 
@@ -327,33 +478,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ascii_fallback() {
-        let content = "flowchart LR\nA[Start] --> B[End]";
-        let result = render_ascii_fallback(content);
-        match result {
-            RenderResult::Ascii(diagram) => {
-                assert_eq!(diagram.kind, "flowchart");
-                assert_eq!(diagram.node_count, 2);
-                assert_eq!(diagram.edge_count, 1);
-            }
-            _ => panic!("Expected ASCII result"),
-        }
-    }
+    fn test_placeholder_parsing() {
+        let hash = 0x123456789abcdef0u64;
+        let lines = image_widget_placeholder(hash, 10);
+        assert!(!lines.is_empty());
 
-    #[test]
-    fn test_invalid_mermaid() {
-        // Parser is lenient, so only truly malformed diagrams fail
-        // This tests that we handle errors gracefully when they do occur
-        let content = ""; // Empty content should fail
-        let result = render_ascii_fallback(content);
-        // Either an error or an empty diagram is acceptable
-        match result {
-            RenderResult::Error(_) => {} // Expected for empty input
-            RenderResult::Ascii(d) => {
-                // Parser may produce empty diagram
-                assert!(d.node_count == 0 || d.edge_count == 0);
-            }
-            _ => panic!("Unexpected result type"),
-        }
+        let parsed = parse_image_placeholder(&lines[0]);
+        assert_eq!(parsed, Some(hash));
     }
 }
