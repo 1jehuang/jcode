@@ -796,7 +796,8 @@ pub fn render_markdown_lazy(
                 } else {
                     // Calculate the line range this code block will occupy
                     let code_line_count = code_block_content.lines().count();
-                    let block_range = code_block_start_line..(code_block_start_line + code_line_count + 2);
+                    let block_range =
+                        code_block_start_line..(code_block_start_line + code_line_count + 2);
 
                     // Check if this block is visible
                     let is_visible = ranges_overlap(block_range.clone(), visible_range.clone());
@@ -806,18 +807,18 @@ pub fn render_markdown_lazy(
                         let highlighted =
                             highlight_code_cached(&code_block_content, code_block_lang.as_deref());
                         for hl_line in highlighted {
-                            let mut spans = vec![Span::styled("│ ", Style::default().fg(DIM_COLOR))];
+                            let mut spans =
+                                vec![Span::styled("│ ", Style::default().fg(DIM_COLOR))];
                             spans.extend(hl_line.spans);
                             lines.push(Line::from(spans));
                         }
                     } else {
                         // Use placeholder for off-screen blocks
-                        let placeholder = placeholder_code_block(
-                            &code_block_content,
-                            code_block_lang.as_deref(),
-                        );
+                        let placeholder =
+                            placeholder_code_block(&code_block_content, code_block_lang.as_deref());
                         for pl_line in placeholder {
-                            let mut spans = vec![Span::styled("│ ", Style::default().fg(DIM_COLOR))];
+                            let mut spans =
+                                vec![Span::styled("│ ", Style::default().fg(DIM_COLOR))];
                             spans.extend(pl_line.spans);
                             lines.push(Line::from(spans));
                         }
@@ -1148,7 +1149,10 @@ mod tests {
         let lines = render_markdown(md);
 
         // Should have output for all blocks
-        assert!(lines.len() >= 3, "Expected multiple lines for mixed content");
+        assert!(
+            lines.len() >= 3,
+            "Expected multiple lines for mixed content"
+        );
     }
 
     #[test]

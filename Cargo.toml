@@ -74,6 +74,8 @@ bytes = "1"
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 arboard = "3"              # Clipboard support
+ratatui-image = { version = "4", default-features = false, features = ["crossterm"] }
+image = "0.25"             # Image loading for ratatui-image
 
 # Markdown & syntax highlighting
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }

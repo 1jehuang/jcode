@@ -6,7 +6,7 @@ use super::visual_debug::{self, FrameCaptureBuilder, MessageCapture};
 use super::{DisplayMessage, ProcessingStatus, TuiState};
 use crate::message::ToolCall;
 use ratatui::{prelude::*, widgets::Paragraph};
-use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -108,9 +108,7 @@ fn header_chrome_color(base: Color, pos: f32, elapsed: f32, intensity: f32) -> C
     let shadow_center = (center + 0.5) % 1.0;
     let mut shadow_dist = (pos - shadow_center).abs();
     shadow_dist = shadow_dist.min(1.0 - shadow_dist);
-    let shadow = (1.0 - (shadow_dist / (WIDTH * 1.2)).clamp(0.0, 1.0)).powf(2.0)
-        * 0.16
-        * intensity;
+    let shadow = (1.0 - (shadow_dist / (WIDTH * 1.2)).clamp(0.0, 1.0)).powf(2.0) * 0.16 * intensity;
 
     let darkened = blend_color(base, SHADOW, shadow);
     blend_color(darkened, HIGHLIGHT, shimmer)
@@ -135,7 +133,11 @@ fn header_spans(icon: &str, session: &str, model: &str, elapsed: f32) -> Vec<Spa
     let segments = [
         (format!("{} ", icon), HEADER_ICON_COLOR, 0.00),
         ("JCode ".to_string(), HEADER_NAME_COLOR, 0.06),
-        (format!("{} ", capitalize(session)), HEADER_SESSION_COLOR, 0.12),
+        (
+            format!("{} ", capitalize(session)),
+            HEADER_SESSION_COLOR,
+            0.12,
+        ),
         ("· ".to_string(), DIM_COLOR, 0.18),
         (model.to_string(), header_animation_color(elapsed), 0.12),
     ];
@@ -1807,8 +1809,39 @@ fn draw_messages(
         visible_lines
             .extend(std::iter::repeat(Line::from("")).take(visible_height - visible_lines.len()));
     }
+
+    // Scan for mermaid image placeholders and render them separately
+    let mut image_regions: Vec<(usize, u64, u16)> = Vec::new(); // (line_idx, hash, height)
+    for (idx, line) in visible_lines.iter().enumerate() {
+        if let Some(hash) = super::mermaid::parse_image_placeholder(line) {
+            // Count consecutive placeholder lines for this image
+            let mut height = 1u16;
+            for subsequent in visible_lines.iter().skip(idx + 1) {
+                // Placeholder lines after the header are single spaces with dim styling
+                if subsequent.spans.len() == 1 && subsequent.spans[0].content.trim().is_empty() {
+                    height += 1;
+                } else {
+                    break;
+                }
+            }
+            image_regions.push((idx, hash, height));
+        }
+    }
+
+    // Render text first (images will overlay their placeholder regions)
     let paragraph = Paragraph::new(visible_lines);
     frame.render_widget(paragraph, area);
+
+    // Now render images over their placeholder regions
+    for (line_idx, hash, height) in image_regions {
+        let image_area = Rect {
+            x: area.x,
+            y: area.y + line_idx as u16,
+            width: area.width,
+            height: height.min(area.height.saturating_sub(line_idx as u16)),
+        };
+        super::mermaid::render_image_widget(hash, image_area, frame.buffer_mut());
+    }
 
     // Draw right bar for visible user lines
     let right_x = area.x + area.width.saturating_sub(1);

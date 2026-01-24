@@ -9,7 +9,6 @@
 use super::markdown::IncrementalMarkdownRenderer;
 use super::{DisplayMessage, ProcessingStatus, TuiState};
 use crate::message::ToolCall;
-use std::cell::RefCell;
 use crate::protocol::{NotificationType, Request, ServerEvent};
 use crate::server;
 use anyhow::Result;
@@ -17,6 +16,7 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use similar::TextDiff;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

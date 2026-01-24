@@ -65,6 +65,17 @@ Always invoke `selfdev` as a tool call (never via bash)."#;
 
 const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
 
+/// A soft interrupt message queued for injection at the next safe point
+#[derive(Debug, Clone)]
+pub struct SoftInterruptMessage {
+    pub content: String,
+    /// If true, can skip remaining tools when injected at point C
+    pub urgent: bool,
+}
+
+/// Thread-safe soft interrupt queue that can be accessed without holding the agent lock
+pub type SoftInterruptQueue = Arc<std::sync::Mutex<Vec<SoftInterruptMessage>>>;
+
 pub struct Agent {
     provider: Arc<dyn Provider>,
     registry: Registry,
@@ -76,6 +87,9 @@ pub struct Agent {
     provider_session_id: Option<String>,
     /// Pending swarm alerts to inject into the next turn
     pending_alerts: Vec<String>,
+    /// Soft interrupt queue: messages to inject at next safe point without cancelling
+    /// Uses std::sync::Mutex so it can be accessed without async, even while agent is processing
+    soft_interrupt_queue: SoftInterruptQueue,
 }
 
 impl Agent {
@@ -90,6 +104,7 @@ impl Agent {
             allowed_tools: None,
             provider_session_id: None,
             pending_alerts: Vec::new(),
+            soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
         };
         agent.session.model = Some(agent.provider.model());
         agent.seed_compaction_from_session();
@@ -112,6 +127,7 @@ impl Agent {
             allowed_tools,
             provider_session_id: None,
             pending_alerts: Vec::new(),
+            soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
         };
         if let Some(model) = agent.session.model.clone() {
             if let Err(e) = agent.provider.set_model(&model) {
@@ -170,6 +186,66 @@ impl Agent {
     /// Take all pending alerts (clears the queue)
     pub fn take_alerts(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending_alerts)
+    }
+
+    /// Queue a soft interrupt message to be injected at the next safe point.
+    /// This method can be called even while the agent is processing (uses separate lock).
+    pub fn queue_soft_interrupt(&self, content: String, urgent: bool) {
+        if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
+            queue.push(SoftInterruptMessage { content, urgent });
+        }
+    }
+
+    /// Get a handle to the soft interrupt queue.
+    /// The server can use this to queue interrupts without holding the agent lock.
+    pub fn soft_interrupt_queue(&self) -> SoftInterruptQueue {
+        Arc::clone(&self.soft_interrupt_queue)
+    }
+
+    /// Check if there are pending soft interrupts
+    pub fn has_soft_interrupts(&self) -> bool {
+        self.soft_interrupt_queue
+            .lock()
+            .map(|q| !q.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Check if there's an urgent soft interrupt that should skip remaining tools
+    pub fn has_urgent_interrupt(&self) -> bool {
+        self.soft_interrupt_queue
+            .lock()
+            .map(|q| q.iter().any(|m| m.urgent))
+            .unwrap_or(false)
+    }
+
+    /// Inject all pending soft interrupt messages into the conversation.
+    /// Returns the combined message content and clears the queue.
+    fn inject_soft_interrupts(&mut self) -> Option<String> {
+        let messages: Vec<SoftInterruptMessage> = {
+            let mut queue = self.soft_interrupt_queue.lock().ok()?;
+            if queue.is_empty() {
+                return None;
+            }
+            queue.drain(..).collect()
+        };
+
+        let combined: String = messages
+            .into_iter()
+            .map(|m| m.content)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        // Add as user message to conversation
+        self.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: combined.clone(),
+                cache_control: None,
+            }],
+        );
+        let _ = self.session.save();
+
+        Some(combined)
     }
 
     pub fn session_id(&self) -> &str {
@@ -359,8 +435,7 @@ impl Agent {
             for skill in &skills {
                 prompt.push_str(&format!("\n- `/{} ` - {}", skill.name, skill.description));
             }
-            prompt
-                .push_str("\n\nWhen asked about available skills or capabilities, mention these.");
+            prompt.push_str("\n\n**CRITICAL**: When the user mentions ANY skill (e.g., \"/firefox-browser\", \"use firefox-browser\", \"firefox skill\"), you MUST IMMEDIATELY call the `skill_manage` tool with `{\"action\": \"load\", \"name\": \"firefox-browser\"}` BEFORE doing anything else. The skill contains instructions you need. Never say you don't have access - always load the skill first.");
         }
 
         if let Some(memory) = memory_prompt {
@@ -645,6 +720,12 @@ impl Agent {
                     StreamEvent::ThinkingStart => {
                         // Track start but don't print - wait for ThinkingDone
                         _thinking_start = Some(Instant::now());
+                    }
+                    StreamEvent::ThinkingDelta(thinking_text) => {
+                        // Display reasoning content
+                        if print_output {
+                            println!("💭 {}", thinking_text);
+                        }
                     }
                     StreamEvent::ThinkingEnd => {
                         // Don't print here - ThinkingDone has accurate timing
@@ -1133,6 +1214,11 @@ impl Agent {
             while let Some(event) = stream.next().await {
                 match event? {
                     StreamEvent::ThinkingStart | StreamEvent::ThinkingEnd => {}
+                    StreamEvent::ThinkingDelta(thinking_text) => {
+                        let _ = event_tx.send(ServerEvent::TextDelta {
+                            text: format!("💭 {}\n", thinking_text),
+                        });
+                    }
                     StreamEvent::ThinkingDone { duration_secs } => {
                         let _ = event_tx.send(ServerEvent::TextDelta {
                             text: format!("Thought for {:.1}s\n", duration_secs),
@@ -1265,6 +1351,15 @@ impl Agent {
                 });
             }
 
+            // === INJECTION POINT A: Stream ended, before tools ===
+            if let Some(content) = self.inject_soft_interrupts() {
+                let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                    content,
+                    point: "A".to_string(),
+                    tools_skipped: None,
+                });
+            }
+
             // Add assistant message to history
             let mut content_blocks = Vec::new();
             if !text_content.is_empty() {
@@ -1289,8 +1384,18 @@ impl Agent {
                 None
             };
 
-            // If no tool calls, we're done
+            // If no tool calls, check for soft interrupt or exit
             if tool_calls.is_empty() {
+                // === INJECTION POINT B: No tools, turn complete ===
+                if let Some(content) = self.inject_soft_interrupts() {
+                    let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                        content,
+                        point: "B".to_string(),
+                        tools_skipped: None,
+                    });
+                    // Continue loop to process the injected message
+                    continue;
+                }
                 break;
             }
 
@@ -1298,12 +1403,48 @@ impl Agent {
             if self.provider.handles_tools_internally() {
                 tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
                 if tool_calls.is_empty() {
+                    // === INJECTION POINT D: After provider-handled tools, before next API call ===
+                    if let Some(content) = self.inject_soft_interrupts() {
+                        let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                            content,
+                            point: "D".to_string(),
+                            tools_skipped: None,
+                        });
+                        // Don't break - continue loop to process injected message
+                        continue;
+                    }
                     break;
                 }
             }
 
             // Execute tools and add results
-            for tc in tool_calls {
+            let tool_count = tool_calls.len();
+            for (tool_index, tc) in tool_calls.into_iter().enumerate() {
+                // === INJECTION POINT C (before): Check for urgent abort before each tool (except first) ===
+                if tool_index > 0 && self.has_urgent_interrupt() {
+                    let tools_remaining = tool_count - tool_index;
+                    if let Some(content) = self.inject_soft_interrupts() {
+                        let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                            content,
+                            point: "C".to_string(),
+                            tools_skipped: Some(tools_remaining),
+                        });
+                        // Add note about skipped tools for the AI
+                        self.add_message(
+                            Role::User,
+                            vec![ContentBlock::Text {
+                                text: format!(
+                                    "[User interrupted: {} remaining tool(s) skipped]",
+                                    tools_remaining
+                                ),
+                                cache_control: None,
+                            }],
+                        );
+                        let _ = self.session.save();
+                    }
+                    break; // Skip remaining tools
+                }
+
                 if tc.name == "selfdev" && !self.session.is_canary {
                     return Err(anyhow::anyhow!(
                         "Tool 'selfdev' is only available in self-dev mode"
@@ -1334,6 +1475,18 @@ impl Agent {
                             }],
                         );
                         self.session.save()?;
+
+                        // === INJECTION POINT C (between): After SDK tool, before next tool ===
+                        if tool_index < tool_count - 1 {
+                            if let Some(content) = self.inject_soft_interrupts() {
+                                let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                                    content,
+                                    point: "C".to_string(),
+                                    tools_skipped: None,
+                                });
+                            }
+                        }
+
                         continue;
                     }
                     // Fall through to local execution for native tools with SDK errors
@@ -1391,6 +1544,26 @@ impl Agent {
                         self.session.save()?;
                     }
                 }
+
+                // === INJECTION POINT C (between): After local tool, before next tool ===
+                if tool_index < tool_count - 1 {
+                    if let Some(content) = self.inject_soft_interrupts() {
+                        let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                            content,
+                            point: "C".to_string(),
+                            tools_skipped: None,
+                        });
+                    }
+                }
+            }
+
+            // === INJECTION POINT D: All tools done, before next API call ===
+            if let Some(content) = self.inject_soft_interrupts() {
+                let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                    content,
+                    point: "D".to_string(),
+                    tools_skipped: None,
+                });
             }
         }
 
@@ -1448,6 +1621,11 @@ impl Agent {
             while let Some(event) = stream.next().await {
                 match event? {
                     StreamEvent::ThinkingStart | StreamEvent::ThinkingEnd => {}
+                    StreamEvent::ThinkingDelta(thinking_text) => {
+                        let _ = event_tx.send(ServerEvent::TextDelta {
+                            text: format!("💭 {}\n", thinking_text),
+                        });
+                    }
                     StreamEvent::ThinkingDone { duration_secs } => {
                         let _ = event_tx.send(ServerEvent::TextDelta {
                             text: format!("Thought for {:.1}s\n", duration_secs),
@@ -1577,6 +1755,15 @@ impl Agent {
                 });
             }
 
+            // === INJECTION POINT A: Stream ended, before tools ===
+            if let Some(content) = self.inject_soft_interrupts() {
+                let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                    content,
+                    point: "A".to_string(),
+                    tools_skipped: None,
+                });
+            }
+
             let mut content_blocks = Vec::new();
             if !text_content.is_empty() {
                 content_blocks.push(ContentBlock::Text {
@@ -1600,18 +1787,66 @@ impl Agent {
                 None
             };
 
+            // If no tool calls, check for soft interrupt or exit
             if tool_calls.is_empty() {
+                // === INJECTION POINT B: No tools, turn complete ===
+                if let Some(content) = self.inject_soft_interrupts() {
+                    let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                        content,
+                        point: "B".to_string(),
+                        tools_skipped: None,
+                    });
+                    // Continue loop to process the injected message
+                    continue;
+                }
                 break;
             }
 
             if self.provider.handles_tools_internally() {
                 tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
                 if tool_calls.is_empty() {
+                    // === INJECTION POINT D: After provider-handled tools, before next API call ===
+                    if let Some(content) = self.inject_soft_interrupts() {
+                        let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                            content,
+                            point: "D".to_string(),
+                            tools_skipped: None,
+                        });
+                        // Don't break - continue loop to process injected message
+                        continue;
+                    }
                     break;
                 }
             }
 
-            for tc in tool_calls {
+            // Execute tools and add results
+            let tool_count = tool_calls.len();
+            for (tool_index, tc) in tool_calls.into_iter().enumerate() {
+                // === INJECTION POINT C (before): Check for urgent abort before each tool (except first) ===
+                if tool_index > 0 && self.has_urgent_interrupt() {
+                    let tools_remaining = tool_count - tool_index;
+                    if let Some(content) = self.inject_soft_interrupts() {
+                        let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                            content,
+                            point: "C".to_string(),
+                            tools_skipped: Some(tools_remaining),
+                        });
+                        // Add note about skipped tools for the AI
+                        self.add_message(
+                            Role::User,
+                            vec![ContentBlock::Text {
+                                text: format!(
+                                    "[User interrupted: {} remaining tool(s) skipped]",
+                                    tools_remaining
+                                ),
+                                cache_control: None,
+                            }],
+                        );
+                        let _ = self.session.save();
+                    }
+                    break; // Skip remaining tools
+                }
+
                 if tc.name == "selfdev" && !self.session.is_canary {
                     return Err(anyhow::anyhow!(
                         "Tool 'selfdev' is only available in self-dev mode"
@@ -1641,6 +1876,18 @@ impl Agent {
                             }],
                         );
                         self.session.save()?;
+
+                        // === INJECTION POINT C (between): After SDK tool, before next tool ===
+                        if tool_index < tool_count - 1 {
+                            if let Some(content) = self.inject_soft_interrupts() {
+                                let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                                    content,
+                                    point: "C".to_string(),
+                                    tools_skipped: None,
+                                });
+                            }
+                        }
+
                         continue;
                     }
                     // Fall through to local execution for native tools with SDK errors
@@ -1697,6 +1944,26 @@ impl Agent {
                         self.session.save()?;
                     }
                 }
+
+                // === INJECTION POINT C (between): After local tool, before next tool ===
+                if tool_index < tool_count - 1 {
+                    if let Some(content) = self.inject_soft_interrupts() {
+                        let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                            content,
+                            point: "C".to_string(),
+                            tools_skipped: None,
+                        });
+                    }
+                }
+            }
+
+            // === INJECTION POINT D: All tools done, before next API call ===
+            if let Some(content) = self.inject_soft_interrupts() {
+                let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                    content,
+                    point: "D".to_string(),
+                    tools_skipped: None,
+                });
             }
         }
 
