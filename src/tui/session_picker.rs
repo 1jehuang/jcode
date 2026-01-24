@@ -915,6 +915,8 @@ impl SessionPicker {
     /// Run the interactive picker, returns selected session ID or None if cancelled
     pub fn run(mut self) -> Result<Option<PickerResult>> {
         let mut terminal = ratatui::init();
+        // Initialize mermaid image picker (queries terminal for graphics protocol support)
+        super::mermaid::init_picker();
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
 
         let result = loop {

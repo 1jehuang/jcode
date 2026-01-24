@@ -38,9 +38,7 @@ static IMAGE_STATE: LazyLock<Mutex<HashMap<u64, StatefulProtocol>>> =
 /// Initialize the global picker by querying terminal capabilities.
 /// Should be called early in app startup, after entering alternate screen.
 pub fn init_picker() {
-    PICKER.get_or_init(|| {
-        Picker::from_query_stdio().ok()
-    });
+    PICKER.get_or_init(|| Picker::from_query_stdio().ok());
 }
 
 /// Get the current protocol type (for debugging/display)
@@ -206,11 +204,7 @@ pub fn render_mermaid(content: &str) -> RenderResult {
 
 /// Render an image at the given area using ratatui-image
 /// Returns the number of rows used
-pub fn render_image_widget(
-    hash: u64,
-    area: Rect,
-    buf: &mut Buffer,
-) -> u16 {
+pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer) -> u16 {
     // First try to render from existing state
     {
         let mut state = IMAGE_STATE.lock().unwrap();
@@ -276,21 +270,26 @@ pub enum MermaidContent {
     /// Regular text lines
     Lines(Vec<Line<'static>>),
     /// Image to be rendered as a widget
-    Image {
-        hash: u64,
-        estimated_height: u16,
-    },
+    Image { hash: u64, estimated_height: u16 },
 }
 
 /// Convert render result to content that can be displayed
 pub fn result_to_content(result: RenderResult, max_width: Option<usize>) -> MermaidContent {
     match result {
-        RenderResult::Image { hash, width, height, .. } => {
+        RenderResult::Image {
+            hash,
+            width,
+            height,
+            ..
+        } => {
             // Check if we have picker/protocol support
             if PICKER.get().and_then(|p| *p).is_some() {
                 let max_w = max_width.map(|w| w as u16).unwrap_or(80);
                 let estimated_height = estimate_image_height(width, height, max_w);
-                MermaidContent::Image { hash, estimated_height }
+                MermaidContent::Image {
+                    hash,
+                    estimated_height,
+                }
             } else {
                 // No image protocol support, fall back to placeholder
                 MermaidContent::Lines(image_placeholder_lines(width, height))
@@ -305,7 +304,10 @@ pub fn result_to_content(result: RenderResult, max_width: Option<usize>) -> Merm
 pub fn result_to_lines(result: RenderResult, max_width: Option<usize>) -> Vec<Line<'static>> {
     match result_to_content(result, max_width) {
         MermaidContent::Lines(lines) => lines,
-        MermaidContent::Image { hash, estimated_height } => {
+        MermaidContent::Image {
+            hash,
+            estimated_height,
+        } => {
             // Return placeholder lines that will be replaced by image widget
             image_widget_placeholder(hash, estimated_height)
         }
@@ -359,7 +361,10 @@ fn image_placeholder_lines(width: u32, height: u32) -> Vec<Line<'static>> {
         Line::from(Span::styled("┌─ mermaid diagram ", dim)),
         Line::from(vec![
             Span::styled("│ ", dim),
-            Span::styled(format!("{}×{} px (image protocols not available)", width, height), info),
+            Span::styled(
+                format!("{}×{} px (image protocols not available)", width, height),
+                info,
+            ),
         ]),
         Line::from(Span::styled("└─", dim)),
     ]

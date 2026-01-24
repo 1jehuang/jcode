@@ -1373,8 +1373,8 @@ mod tests {
     fn manager_persists_and_forgets_memories() {
         with_temp_home(|_dir| {
             let manager = MemoryManager::new();
-            let entry_project = MemoryEntry::new(MemoryCategory::Fact, "Project memory")
-                .with_embedding(vec![0.0]);
+            let entry_project =
+                MemoryEntry::new(MemoryCategory::Fact, "Project memory").with_embedding(vec![0.0]);
             let entry_global = MemoryEntry::new(MemoryCategory::Preference, "Global memory")
                 .with_embedding(vec![0.0]);
 
