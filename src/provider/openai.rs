@@ -197,7 +197,23 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
 }
 
 fn build_responses_input(messages: &[Message]) -> Vec<Value> {
+    use std::collections::HashSet;
+
+    // First pass: collect all tool call IDs from ToolUse blocks
+    let mut tool_call_ids: HashSet<String> = HashSet::new();
+    for msg in messages {
+        if let Role::Assistant = msg.role {
+            for block in &msg.content {
+                if let ContentBlock::ToolUse { id, .. } = block {
+                    tool_call_ids.insert(id.clone());
+                }
+            }
+        }
+    }
+
+    // Second pass: build items, filtering orphaned tool results
     let mut items = Vec::new();
+    let mut skipped_results = 0;
 
     for msg in messages {
         match msg.role {
@@ -216,6 +232,15 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
                             content,
                             is_error,
                         } => {
+                            // Skip orphaned tool results (no matching tool call)
+                            if !tool_call_ids.contains(tool_use_id) {
+                                skipped_results += 1;
+                                crate::logging::info(&format!(
+                                    "[openai] Skipping orphaned tool result with call_id: {}",
+                                    tool_use_id
+                                ));
+                                continue;
+                            }
                             // OpenAI expects output to be a string or array of objects, not an object
                             let output = if is_error == &Some(true) {
                                 format!("[Error] {}", content)
@@ -256,6 +281,13 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
                 }
             }
         }
+    }
+
+    if skipped_results > 0 {
+        crate::logging::info(&format!(
+            "[openai] Filtered {} orphaned tool result(s) to prevent API error",
+            skipped_results
+        ));
     }
 
     items
@@ -322,6 +354,20 @@ impl OpenAIResponsesStream {
                     if let Some(delta) = event.delta {
                         self.saw_text_delta = true;
                         return Some(StreamEvent::TextDelta(delta));
+                    }
+                }
+                "response.reasoning.delta" | "response.reasoning_summary_text.delta" => {
+                    // Reasoning/thinking delta - display as thinking content
+                    if let Some(delta) = event.delta {
+                        return Some(StreamEvent::ThinkingDelta(delta));
+                    }
+                }
+                "response.reasoning.done" | "response.output_item.added" => {
+                    // Check if this is a reasoning item starting
+                    if let Some(item) = &event.item {
+                        if item.get("type").and_then(|v| v.as_str()) == Some("reasoning") {
+                            return Some(StreamEvent::ThinkingStart);
+                        }
                     }
                 }
                 "response.output_item.done" => {
@@ -401,6 +447,32 @@ impl OpenAIResponsesStream {
                 }
                 if !text.is_empty() {
                     return Some(StreamEvent::TextDelta(text));
+                }
+            }
+            "reasoning" => {
+                // Extract reasoning summary text from the item
+                // OpenAI returns: {"type":"reasoning","summary":[{"type":"summary_text","text":"..."}]}
+                if let Some(summary_arr) = item.get("summary").and_then(|v| v.as_array()) {
+                    let mut summary_text = String::new();
+                    for summary_item in summary_arr {
+                        if summary_item.get("type").and_then(|v| v.as_str()) == Some("summary_text")
+                        {
+                            if let Some(text) = summary_item.get("text").and_then(|v| v.as_str()) {
+                                if !summary_text.is_empty() {
+                                    summary_text.push('\n');
+                                }
+                                summary_text.push_str(text);
+                            }
+                        }
+                    }
+                    if !summary_text.is_empty() {
+                        // Emit thinking events: start, content, end
+                        self.pending.push_back(StreamEvent::ThinkingStart);
+                        self.pending
+                            .push_back(StreamEvent::ThinkingDelta(summary_text));
+                        self.pending.push_back(StreamEvent::ThinkingEnd);
+                        return self.pending.pop_front();
+                    }
                 }
             }
             _ => {}

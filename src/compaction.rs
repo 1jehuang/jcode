@@ -149,7 +149,13 @@ impl CompactionManager {
         }
 
         // Calculate cutoff - keep last N turns verbatim
-        let cutoff = self.messages.len().saturating_sub(RECENT_TURNS_TO_KEEP);
+        let mut cutoff = self.messages.len().saturating_sub(RECENT_TURNS_TO_KEEP);
+        if cutoff == 0 {
+            return;
+        }
+
+        // Adjust cutoff to not split tool call/result pairs
+        cutoff = self.safe_cutoff(cutoff);
         if cutoff == 0 {
             return;
         }
@@ -164,6 +170,78 @@ impl CompactionManager {
         self.pending_task = Some(tokio::spawn(async move {
             generate_summary(provider, messages_to_summarize, existing_summary).await
         }));
+    }
+
+    /// Find a safe cutoff point that doesn't split tool call/result pairs.
+    /// Returns an adjusted cutoff that ensures all ToolResults in kept messages
+    /// have their corresponding ToolUse in the kept messages too.
+    fn safe_cutoff(&self, initial_cutoff: usize) -> usize {
+        use std::collections::HashSet;
+
+        let mut cutoff = initial_cutoff;
+
+        // Collect tool_use_ids from ToolResults in the "kept" portion (after cutoff)
+        let mut needed_tool_ids: HashSet<String> = HashSet::new();
+        for msg in &self.messages[cutoff..] {
+            for block in &msg.content {
+                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                    needed_tool_ids.insert(tool_use_id.clone());
+                }
+            }
+        }
+
+        if needed_tool_ids.is_empty() {
+            return cutoff;
+        }
+
+        // Collect tool_use_ids from ToolUse blocks in the "kept" portion
+        let mut available_tool_ids: HashSet<String> = HashSet::new();
+        for msg in &self.messages[cutoff..] {
+            for block in &msg.content {
+                if let ContentBlock::ToolUse { id, .. } = block {
+                    available_tool_ids.insert(id.clone());
+                }
+            }
+        }
+
+        // Find missing tool calls (results exist but calls don't in kept portion)
+        let missing: HashSet<_> = needed_tool_ids
+            .difference(&available_tool_ids)
+            .cloned()
+            .collect();
+
+        if missing.is_empty() {
+            return cutoff;
+        }
+
+        // Move cutoff backwards to include messages with missing tool calls
+        for (idx, msg) in self.messages[..cutoff].iter().enumerate().rev() {
+            let mut found_any = false;
+            for block in &msg.content {
+                if let ContentBlock::ToolUse { id, .. } = block {
+                    if missing.contains(id) {
+                        found_any = true;
+                    }
+                }
+            }
+            if found_any {
+                // Include this message and all after it in the kept portion
+                cutoff = idx;
+                // Recursively check if moving cutoff back created new orphans
+                return self.safe_cutoff_from(cutoff);
+            }
+        }
+
+        // If we couldn't find all tool calls, don't compact at all
+        0
+    }
+
+    /// Helper for recursive safe_cutoff calculation
+    fn safe_cutoff_from(&self, cutoff: usize) -> usize {
+        if cutoff == 0 {
+            return 0;
+        }
+        self.safe_cutoff(cutoff)
     }
 
     /// Check if background compaction is done and apply it

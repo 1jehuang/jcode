@@ -253,12 +253,7 @@ async fn apply_patch_with_diff(patch: &FilePatch) -> Result<(String, String)> {
     let mut lines: Vec<String> = old_content.lines().map(|s| s.to_string()).collect();
 
     // Find the first affected line for diff context
-    let first_line = patch
-        .hunks
-        .iter()
-        .map(|h| h.old_start)
-        .min()
-        .unwrap_or(1);
+    let first_line = patch.hunks.iter().map(|h| h.old_start).min().unwrap_or(1);
 
     // Apply hunks in reverse order to preserve line numbers
     for hunk in patch.hunks.iter().rev() {

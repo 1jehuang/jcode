@@ -126,6 +126,8 @@ pub enum StreamEvent {
     },
     /// Extended thinking started
     ThinkingStart,
+    /// Extended thinking delta (reasoning content)
+    ThinkingDelta(String),
     /// Extended thinking ended
     ThinkingEnd,
     /// Extended thinking completed with duration

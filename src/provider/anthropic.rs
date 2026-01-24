@@ -137,7 +137,11 @@ impl AnthropicProvider {
     }
 
     /// Convert our ContentBlock to Anthropic API format
-    fn format_content_blocks(&self, blocks: &[ContentBlock], is_oauth: bool) -> Vec<ApiContentBlock> {
+    fn format_content_blocks(
+        &self,
+        blocks: &[ContentBlock],
+        is_oauth: bool,
+    ) -> Vec<ApiContentBlock> {
         blocks
             .iter()
             .filter_map(|block| match block {
@@ -260,10 +264,7 @@ impl Provider for AnthropicProvider {
                         let error_str = e.to_string().to_lowercase();
                         // Check if this is a transient/retryable error
                         if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
-                            crate::logging::info(&format!(
-                                "Transient error, will retry: {}",
-                                e
-                            ));
+                            crate::logging::info(&format!("Transient error, will retry: {}", e));
                             last_error = Some(e);
                             continue;
                         }
@@ -329,7 +330,10 @@ async fn stream_response(
     request: ApiRequest,
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<()> {
-    if std::env::var("JCODE_ANTHROPIC_DEBUG").map(|v| v == "1").unwrap_or(false) {
+    if std::env::var("JCODE_ANTHROPIC_DEBUG")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         if let Ok(json) = serde_json::to_string_pretty(&request) {
             crate::logging::info(&format!("Anthropic request payload:\n{}", json));
         }
@@ -629,10 +633,7 @@ fn build_system_param(system: &str, is_oauth: bool) -> Option<ApiSystem> {
     }
 }
 
-fn format_messages_with_identity(
-    messages: Vec<ApiMessage>,
-    is_oauth: bool,
-) -> Vec<ApiMessage> {
+fn format_messages_with_identity(messages: Vec<ApiMessage>, is_oauth: bool) -> Vec<ApiMessage> {
     if !is_oauth {
         return messages;
     }

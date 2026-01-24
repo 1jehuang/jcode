@@ -34,6 +34,16 @@ pub enum Request {
     #[serde(rename = "cancel")]
     Cancel { id: u64 },
 
+    /// Soft interrupt: inject message at next safe point without cancelling
+    #[serde(rename = "soft_interrupt")]
+    SoftInterrupt {
+        id: u64,
+        content: String,
+        /// If true, can skip remaining tools at injection point C
+        #[serde(default)]
+        urgent: bool,
+    },
+
     /// Clear conversation history
     #[serde(rename = "clear")]
     Clear { id: u64 },
@@ -202,6 +212,19 @@ pub enum ServerEvent {
         cache_read_input: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_creation_input: Option<u64>,
+    },
+
+    /// Soft interrupt message was injected at a safe point
+    #[serde(rename = "soft_interrupt_injected")]
+    SoftInterruptInjected {
+        /// The injected message content
+        content: String,
+        /// Which injection point: "A" (after stream), "B" (no tools),
+        /// "C" (between tools), "D" (after all tools)
+        point: String,
+        /// Number of tools skipped (only for urgent interrupt at point C)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tools_skipped: Option<usize>,
     },
 
     /// Message/turn completed
@@ -387,6 +410,7 @@ impl Request {
         match self {
             Request::Message { id, .. } => *id,
             Request::Cancel { id } => *id,
+            Request::SoftInterrupt { id, .. } => *id,
             Request::Clear { id } => *id,
             Request::Ping { id } => *id,
             Request::GetState { id } => *id,

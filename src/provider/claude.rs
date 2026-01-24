@@ -10,20 +10,29 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
+
+/// Global mutex to serialize Claude CLI requests
+/// This prevents "ProcessTransport not ready for writing" errors
+/// that occur when multiple CLI instances run concurrently
+static CLAUDE_CLI_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 const DEFAULT_MODEL: &str = "claude-opus-4-5-20251101";
 const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 
 /// Maximum number of retries for transient errors
-const MAX_RETRIES: u32 = 3;
+const MAX_RETRIES: u32 = 5;
 
 /// Base delay for exponential backoff (in milliseconds)
 const RETRY_BASE_DELAY_MS: u64 = 1000;
+
+/// Extra delay for Claude CLI transport errors (ProcessTransport not ready)
+const TRANSPORT_ERROR_DELAY_MS: u64 = 2000;
 
 /// Available Claude models
 const AVAILABLE_MODELS: &[&str] = &["claude-opus-4-5-20251101"];
@@ -654,19 +663,36 @@ impl Provider for ClaudeProvider {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
         tokio::spawn(async move {
-            let mut last_error = None;
+            let mut last_error: Option<anyhow::Error> = None;
 
             for attempt in 0..MAX_RETRIES {
                 if attempt > 0 {
-                    // Exponential backoff: 1s, 2s, 4s
-                    let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
+                    // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                    let base_delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
+                    // Add extra delay for transport errors (from last_error if available)
+                    let extra_delay = if let Some(ref e) = last_error {
+                        let err_str = e.to_string().to_lowercase();
+                        if err_str.contains("processtransport") || err_str.contains("not ready") {
+                            TRANSPORT_ERROR_DELAY_MS
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                    let delay = base_delay + extra_delay;
                     tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                     crate::logging::info(&format!(
-                        "Retrying Claude CLI request (attempt {}/{})",
+                        "Retrying Claude CLI request (attempt {}/{}, delay {}ms)",
                         attempt + 1,
-                        MAX_RETRIES
+                        MAX_RETRIES,
+                        delay
                     ));
                 }
+
+                // Acquire the global lock to serialize Claude CLI requests
+                // This prevents "ProcessTransport not ready for writing" errors
+                let _guard = CLAUDE_CLI_LOCK.lock().await;
 
                 match run_claude_cli(
                     config.clone(),
@@ -799,7 +825,8 @@ async fn run_claude_cli(
         cmd.current_dir(dir);
     }
 
-    cmd.stdin(Stdio::piped())
+    cmd.kill_on_drop(true)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -820,9 +847,22 @@ async fn run_claude_cli(
         }
     });
 
-    stdin.write_all(payload.to_string().as_bytes()).await?;
-    stdin.write_all(b"\n").await?;
-    stdin.flush().await?;
+    async fn terminate_child(child: &mut tokio::process::Child) {
+        let _ = child.kill().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+    }
+
+    if let Err(err) = async {
+        stdin.write_all(payload.to_string().as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
+        Ok::<(), std::io::Error>(())
+    }
+    .await
+    {
+        terminate_child(&mut child).await;
+        return Err(err.into());
+    }
     drop(stdin);
 
     let stdout = child
@@ -845,27 +885,66 @@ async fn run_claude_cli(
 
     let mut reader = BufReader::new(stdout).lines();
     let mut parser = CliOutputParser::new();
+    let mut saw_output = false;
 
-    while let Some(line) = reader.next_line().await? {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<CliOutput>(line) {
-            Ok(output) => {
-                for event in parser.handle_output(output) {
-                    if tx.send(Ok(event)).await.is_err() {
-                        return Ok(());
-                    }
-                }
+    loop {
+        tokio::select! {
+            _ = tx.closed() => {
+                terminate_child(&mut child).await;
+                return Ok(());
             }
-            Err(err) => {
-                let event = StreamEvent::Error {
-                    message: format!("Failed to parse Claude CLI output: {}", err),
-                    retry_after_secs: None,
+            line = reader.next_line() => {
+                let line = match line? {
+                    Some(line) => line,
+                    None => break,
                 };
-                if tx.send(Ok(event)).await.is_err() {
-                    return Ok(());
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<CliOutput>(line) {
+                    Ok(output) => {
+                        for event in parser.handle_output(output) {
+                            if let StreamEvent::Error { message, .. } = &event {
+                                let err_lower = message.to_lowercase();
+                                if !saw_output && is_retryable_error(&err_lower) {
+                                    terminate_child(&mut child).await;
+                                    return Err(anyhow::anyhow!(message.clone()));
+                                }
+                            }
+
+                            if matches!(
+                                event,
+                                StreamEvent::TextDelta(_)
+                                    | StreamEvent::ToolUseStart { .. }
+                                    | StreamEvent::ToolInputDelta(_)
+                                    | StreamEvent::ToolUseEnd
+                                    | StreamEvent::ToolResult { .. }
+                                    | StreamEvent::MessageEnd { .. }
+                                    | StreamEvent::ThinkingStart
+                                    | StreamEvent::ThinkingDelta(_)
+                                    | StreamEvent::ThinkingEnd
+                                    | StreamEvent::ThinkingDone { .. }
+                            ) {
+                                saw_output = true;
+                            }
+
+                            if tx.send(Ok(event)).await.is_err() {
+                                terminate_child(&mut child).await;
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let event = StreamEvent::Error {
+                            message: format!("Failed to parse Claude CLI output: {}", err),
+                            retry_after_secs: None,
+                        };
+                        if tx.send(Ok(event)).await.is_err() {
+                            terminate_child(&mut child).await;
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }
