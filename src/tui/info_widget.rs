@@ -1,7 +1,8 @@
-//! InfoWidget - A floating information panel that appears in empty screen space
+//! InfoWidget - Floating information panels that appear in empty screen space
 //!
-//! This widget finds the largest empty rectangle on the right side of the
-//! visible message area and renders a compact info panel there.
+//! Supports multiple widget types with priority ordering and side preferences.
+//! In centered mode, widgets can appear on both left and right margins.
+//! In left-aligned mode, widgets only appear on the right margin.
 
 use crate::prompt::ContextInfo;
 use crate::provider::DEFAULT_CONTEXT_LIMIT;
@@ -12,7 +13,105 @@ use ratatui::{
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Instant;
+
+/// Types of info widgets that can be displayed
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WidgetKind {
+    /// Todo list with progress
+    Todos,
+    /// Token/context usage bar
+    ContextUsage,
+    /// Memory sidecar activity
+    MemoryActivity,
+    /// Subagents/sessions status
+    SwarmStatus,
+    /// Background work indicator
+    BackgroundTasks,
+    /// 5-hour/weekly subscription bars
+    UsageLimits,
+    /// Current model name
+    ModelInfo,
+}
+
+impl WidgetKind {
+    /// Priority for display (lower = higher priority)
+    pub fn priority(self) -> u8 {
+        match self {
+            WidgetKind::Todos => 1,
+            WidgetKind::ContextUsage => 2,
+            WidgetKind::MemoryActivity => 3,
+            WidgetKind::SwarmStatus => 4,
+            WidgetKind::BackgroundTasks => 5,
+            WidgetKind::UsageLimits => 6,
+            WidgetKind::ModelInfo => 7,
+        }
+    }
+
+    /// Preferred side for this widget
+    pub fn preferred_side(self) -> Side {
+        match self {
+            WidgetKind::Todos => Side::Right,
+            WidgetKind::ContextUsage => Side::Right,
+            WidgetKind::MemoryActivity => Side::Left,
+            WidgetKind::SwarmStatus => Side::Left,
+            WidgetKind::BackgroundTasks => Side::Left,
+            WidgetKind::UsageLimits => Side::Left,
+            WidgetKind::ModelInfo => Side::Left,
+        }
+    }
+
+    /// Minimum height needed for this widget
+    pub fn min_height(self) -> u16 {
+        match self {
+            WidgetKind::Todos => 3,
+            WidgetKind::ContextUsage => 2,
+            WidgetKind::MemoryActivity => 3,
+            WidgetKind::SwarmStatus => 3,
+            WidgetKind::BackgroundTasks => 2,
+            WidgetKind::UsageLimits => 3,
+            WidgetKind::ModelInfo => 2,
+        }
+    }
+
+    /// All widget kinds in priority order
+    pub fn all_by_priority() -> &'static [WidgetKind] {
+        &[
+            WidgetKind::Todos,
+            WidgetKind::ContextUsage,
+            WidgetKind::MemoryActivity,
+            WidgetKind::SwarmStatus,
+            WidgetKind::BackgroundTasks,
+            WidgetKind::UsageLimits,
+            WidgetKind::ModelInfo,
+        ]
+    }
+}
+
+/// Which side of the screen a widget is on
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+/// A placed widget with its location and type
+#[derive(Debug, Clone)]
+pub struct WidgetPlacement {
+    pub kind: WidgetKind,
+    pub rect: Rect,
+    pub side: Side,
+}
+
+/// Available margin space on one side
+#[derive(Debug, Clone)]
+pub struct MarginSpace {
+    pub side: Side,
+    /// Free width for each row (index = row from top of messages area)
+    pub widths: Vec<u16>,
+    /// X offset where this margin starts
+    pub x_offset: u16,
+}
 
 /// Swarm/subagent status for the info widget
 #[derive(Debug, Default, Clone)]
@@ -166,124 +265,353 @@ impl InfoWidgetData {
             && self.swarm_info.is_none()
             && self.background_info.is_none()
     }
+
+    /// Check if a specific widget kind has data to display
+    pub fn has_data_for(&self, kind: WidgetKind) -> bool {
+        match kind {
+            WidgetKind::Todos => !self.todos.is_empty(),
+            WidgetKind::ContextUsage => self
+                .context_info
+                .as_ref()
+                .map(|c| c.total_chars > 0)
+                .unwrap_or(false),
+            WidgetKind::MemoryActivity => self
+                .memory_info
+                .as_ref()
+                .map(|m| m.total_count > 0 || m.activity.is_some())
+                .unwrap_or(false),
+            WidgetKind::SwarmStatus => self
+                .swarm_info
+                .as_ref()
+                .map(|s| {
+                    s.subagent_status.is_some() || s.session_count > 1 || s.client_count.is_some()
+                })
+                .unwrap_or(false),
+            WidgetKind::BackgroundTasks => self
+                .background_info
+                .as_ref()
+                .map(|b| b.running_count > 0 || b.memory_agent_active)
+                .unwrap_or(false),
+            WidgetKind::UsageLimits => self
+                .usage_info
+                .as_ref()
+                .map(|u| u.available)
+                .unwrap_or(false),
+            WidgetKind::ModelInfo => self.model.is_some(),
+        }
+    }
+
+    /// Get list of widget kinds that have data, in priority order
+    pub fn available_widgets(&self) -> Vec<WidgetKind> {
+        WidgetKind::all_by_priority()
+            .iter()
+            .copied()
+            .filter(|&kind| self.has_data_for(kind))
+            .collect()
+    }
 }
 
-/// Cached layout calculation for the widget
+/// State for a single widget instance
 #[derive(Debug, Clone)]
-struct WidgetState {
-    /// Whether the widget should be visible
-    visible: bool,
-    /// Whether the user has disabled the widget
-    enabled: bool,
-    /// Calculated position and size
-    rect: Rect,
-    /// Current page index
+struct SingleWidgetState {
+    /// Current page index (for widgets with multiple pages)
     page_index: usize,
     /// Last time the page advanced
     last_page_switch: Option<Instant>,
 }
 
-impl Default for WidgetState {
+impl Default for SingleWidgetState {
     fn default() -> Self {
         Self {
-            visible: false,
-            enabled: true,
-            rect: Rect::default(),
             page_index: 0,
             last_page_switch: None,
         }
     }
 }
 
+/// Global state for all widgets
+#[derive(Debug, Clone)]
+struct WidgetsState {
+    /// Whether the user has disabled widgets
+    enabled: bool,
+    /// Per-widget state (keyed by WidgetKind)
+    widget_states: HashMap<WidgetKind, SingleWidgetState>,
+    /// Current placements (updated each frame)
+    placements: Vec<WidgetPlacement>,
+}
+
+impl Default for WidgetsState {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            widget_states: HashMap::new(),
+            placements: Vec::new(),
+        }
+    }
+}
+
 /// Global widget state (for polling across frames)
-static WIDGET_STATE: Mutex<WidgetState> = Mutex::new(WidgetState {
-    visible: false,
-    enabled: true,
-    rect: Rect {
-        x: 0,
-        y: 0,
-        width: 0,
-        height: 0,
-    },
-    page_index: 0,
-    last_page_switch: None,
-});
+static WIDGETS_STATE: Mutex<Option<WidgetsState>> = Mutex::new(None);
+
+fn get_or_init_state() -> std::sync::MutexGuard<'static, Option<WidgetsState>> {
+    let mut guard = WIDGETS_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        *guard = Some(WidgetsState::default());
+    }
+    guard
+}
 
 /// Toggle widget visibility (user preference)
 pub fn toggle_enabled() {
-    if let Ok(mut state) = WIDGET_STATE.lock() {
+    let mut guard = get_or_init_state();
+    if let Some(state) = guard.as_mut() {
         state.enabled = !state.enabled;
     }
 }
 
 /// Check if widget is enabled by user
 pub fn is_enabled() -> bool {
-    WIDGET_STATE.lock().map(|s| s.enabled).unwrap_or(true)
+    get_or_init_state()
+        .as_ref()
+        .map(|s| s.enabled)
+        .unwrap_or(true)
 }
 
+/// Margin information for layout calculation
+#[derive(Debug, Clone)]
+pub struct Margins {
+    /// Free widths on the right side for each row
+    pub right_widths: Vec<u16>,
+    /// Free widths on the left side for each row (only populated in centered mode)
+    pub left_widths: Vec<u16>,
+    /// Whether we're in centered mode
+    pub centered: bool,
+}
+
+/// Calculate widget placements for multiple widgets
+/// Returns a list of placements for widgets that fit
+pub fn calculate_placements(
+    messages_area: Rect,
+    margins: &Margins,
+    data: &InfoWidgetData,
+) -> Vec<WidgetPlacement> {
+    let mut guard = get_or_init_state();
+    let state = match guard.as_mut() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+
+    // User disabled
+    if !state.enabled {
+        state.placements.clear();
+        return Vec::new();
+    }
+
+    if messages_area.height == 0 || messages_area.width == 0 {
+        state.placements.clear();
+        return Vec::new();
+    }
+
+    // Get available widgets in priority order
+    let available = data.available_widgets();
+    if available.is_empty() {
+        state.placements.clear();
+        return Vec::new();
+    }
+
+    // Build margin spaces
+    let mut margin_spaces: Vec<MarginSpace> = Vec::new();
+
+    // Right margin is always available
+    if !margins.right_widths.is_empty() {
+        margin_spaces.push(MarginSpace {
+            side: Side::Right,
+            widths: margins.right_widths.clone(),
+            x_offset: messages_area.x + messages_area.width, // Will subtract widget width
+        });
+    }
+
+    // Left margin only in centered mode
+    if margins.centered && !margins.left_widths.is_empty() {
+        margin_spaces.push(MarginSpace {
+            side: Side::Left,
+            widths: margins.left_widths.clone(),
+            x_offset: messages_area.x,
+        });
+    }
+
+    // Find rectangles in each margin
+    let mut all_rects: Vec<(Side, u16, u16, u16, u16)> = Vec::new(); // (side, top, height, width, x)
+
+    for margin in &margin_spaces {
+        let rects = find_all_empty_rects(&margin.widths, MIN_WIDGET_WIDTH, MIN_WIDGET_HEIGHT);
+        for (top, height, width) in rects {
+            let x = match margin.side {
+                Side::Right => margin.x_offset.saturating_sub(width.min(MAX_WIDGET_WIDTH)),
+                Side::Left => margin.x_offset,
+            };
+            all_rects.push((margin.side, top, height, width.min(MAX_WIDGET_WIDTH), x));
+        }
+    }
+
+    // Sort rectangles by area (largest first) for better placement
+    all_rects.sort_by(|a, b| {
+        let area_a = a.2 as u32 * a.3 as u32;
+        let area_b = b.2 as u32 * b.3 as u32;
+        area_b.cmp(&area_a)
+    });
+
+    // Place widgets greedily by priority
+    let mut placements: Vec<WidgetPlacement> = Vec::new();
+    let mut used_rects: Vec<bool> = vec![false; all_rects.len()];
+
+    for kind in available {
+        let min_h = kind.min_height() + 2; // Add border
+        let preferred = kind.preferred_side();
+
+        // Find best rectangle for this widget
+        // Prefer: 1) correct side, 2) fits minimum height, 3) largest area
+        let mut best_idx: Option<usize> = None;
+        let mut best_score: i32 = i32::MIN;
+
+        for (idx, &(side, _top, height, width, _x)) in all_rects.iter().enumerate() {
+            if used_rects[idx] {
+                continue;
+            }
+            if height < min_h || width < MIN_WIDGET_WIDTH {
+                continue;
+            }
+
+            // Score: prefer correct side (+100), then by area
+            let mut score = (height as i32 * width as i32) / 10;
+            if side == preferred {
+                score += 100;
+            }
+            // Penalize if on wrong side but still usable
+            if side != preferred {
+                score -= 50;
+            }
+
+            if score > best_score {
+                best_score = score;
+                best_idx = Some(idx);
+            }
+        }
+
+        if let Some(idx) = best_idx {
+            let (side, top, height, width, x) = all_rects[idx];
+            used_rects[idx] = true;
+
+            // Calculate actual widget height based on content
+            let widget_height = calculate_widget_height(kind, data, width, height);
+
+            // Center vertically in available space
+            let extra_height = height.saturating_sub(widget_height);
+            let y = messages_area.y + top + (extra_height / 2);
+
+            placements.push(WidgetPlacement {
+                kind,
+                rect: Rect::new(x, y, width, widget_height),
+                side,
+            });
+        }
+    }
+
+    state.placements = placements.clone();
+    placements
+}
+
+/// Calculate the height needed for a specific widget type
+fn calculate_widget_height(kind: WidgetKind, data: &InfoWidgetData, width: u16, max_height: u16) -> u16 {
+    let inner_width = width.saturating_sub(2) as usize;
+    let border_height = 2u16;
+
+    let content_height = match kind {
+        WidgetKind::Todos => {
+            if data.todos.is_empty() {
+                return 0;
+            }
+            // Header + progress bar + up to 5 items
+            let items = data.todos.len().min(5) as u16;
+            2 + items + if data.todos.len() > 5 { 1 } else { 0 }
+        }
+        WidgetKind::ContextUsage => {
+            if data.context_info.is_none() {
+                return 0;
+            }
+            1 // Just the bar
+        }
+        WidgetKind::MemoryActivity => {
+            let Some(info) = &data.memory_info else {
+                return 0;
+            };
+            let mut h = 1u16; // Title
+            if info.activity.is_some() {
+                h += 1; // State line
+                h += info
+                    .activity
+                    .as_ref()
+                    .map(|a| a.recent_events.len().min(3) as u16)
+                    .unwrap_or(0);
+            }
+            h
+        }
+        WidgetKind::SwarmStatus => {
+            let Some(info) = &data.swarm_info else {
+                return 0;
+            };
+            let mut h = 1u16; // Stats line
+            if info.subagent_status.is_some() {
+                h += 1;
+            }
+            h += info.session_names.len().min(3) as u16;
+            h
+        }
+        WidgetKind::BackgroundTasks => {
+            if data.background_info.is_none() {
+                return 0;
+            }
+            1 // Single line
+        }
+        WidgetKind::UsageLimits => {
+            if data.usage_info.as_ref().map(|u| u.available).unwrap_or(false) {
+                2 // Two bars
+            } else {
+                0
+            }
+        }
+        WidgetKind::ModelInfo => {
+            if data.model.is_none() {
+                return 0;
+            }
+            let mut h = 1u16; // Model name
+            if data.session_count.is_some() {
+                h += 1; // Session info
+            }
+            h
+        }
+    };
+
+    let total = content_height + border_height;
+    total.min(max_height).max(kind.min_height() + border_height)
+}
+
+/// Legacy API for backwards compatibility - will be removed
 /// Calculate the widget layout based on available space
 /// Returns the Rect where the widget should be drawn, or None if it shouldn't show
+#[deprecated(note = "Use calculate_placements instead")]
 pub fn calculate_layout(
     messages_area: Rect,
     free_widths: &[u16],
     data: &InfoWidgetData,
 ) -> Option<Rect> {
-    let mut state = match WIDGET_STATE.lock() {
-        Ok(s) => s,
-        Err(_) => return None,
+    let margins = Margins {
+        right_widths: free_widths.to_vec(),
+        left_widths: Vec::new(),
+        centered: false,
     };
-
-    // User disabled
-    if !state.enabled {
-        state.visible = false;
-        return None;
-    }
-
-    // Nothing to show
-    if data.is_empty() {
-        state.visible = false;
-        return None;
-    }
-
-    if free_widths.is_empty() || messages_area.height == 0 || messages_area.width == 0 {
-        state.visible = false;
-        return None;
-    }
-
-    let best = find_largest_empty_rect(free_widths, MIN_WIDGET_WIDTH, MIN_WIDGET_HEIGHT)?;
-    let (top, height, max_width) = best;
-
-    let widget_width = max_width.min(MAX_WIDGET_WIDTH);
-    let inner_width = widget_width.saturating_sub(2) as usize;
-    let available_inner_height = height.saturating_sub(2);
-    let layout = compute_page_layout(data, inner_width, available_inner_height);
-    if layout.pages.is_empty() {
-        state.visible = false;
-        return None;
-    }
-
-    let widget_height = layout
-        .max_page_height
-        .saturating_add(2)
-        .max(MIN_WIDGET_HEIGHT)
-        .min(height);
-
-    if widget_height < MIN_WIDGET_HEIGHT || widget_width < MIN_WIDGET_WIDTH {
-        state.visible = false;
-        return None;
-    }
-
-    let x = messages_area.x + messages_area.width.saturating_sub(widget_width);
-    let extra_height = height.saturating_sub(widget_height);
-    let y = messages_area.y + top + (extra_height / 2);
-
-    let rect = Rect::new(x, y, widget_width, widget_height);
-
-    state.visible = true;
-    state.rect = rect;
-    state.page_index = state.page_index.min(layout.pages.len().saturating_sub(1));
-
-    Some(rect)
+    let placements = calculate_placements(messages_area, &margins, data);
+    placements.first().map(|p| p.rect)
 }
 
 fn find_largest_empty_rect(
@@ -291,38 +619,98 @@ fn find_largest_empty_rect(
     min_width: u16,
     min_height: u16,
 ) -> Option<(u16, u16, u16)> {
-    let mut best_area: u32 = 0;
-    let mut best: Option<(u16, u16, u16)> = None;
+    find_all_empty_rects(free_widths, min_width, min_height)
+        .into_iter()
+        .max_by_key(|&(_, h, w)| h as u32 * w as u32)
+}
 
-    for start in 0..free_widths.len() {
-        let mut min_w = free_widths[start];
-        if min_w < min_width {
-            continue;
-        }
-        for end in start..free_widths.len() {
-            min_w = min_w.min(free_widths[end]);
-            if min_w < min_width {
-                break;
+/// Find all valid empty rectangles in the margin
+/// Returns list of (top_row, height, width)
+fn find_all_empty_rects(
+    free_widths: &[u16],
+    min_width: u16,
+    min_height: u16,
+) -> Vec<(u16, u16, u16)> {
+    let mut rects: Vec<(u16, u16, u16)> = Vec::new();
+
+    if free_widths.is_empty() {
+        return rects;
+    }
+
+    // Find contiguous regions where width >= min_width
+    let mut region_start: Option<usize> = None;
+
+    for (i, &width) in free_widths.iter().enumerate() {
+        if width >= min_width {
+            if region_start.is_none() {
+                region_start = Some(i);
             }
-            let height = (end - start + 1) as u16;
-            if height < min_height {
-                continue;
-            }
-            let width = min_w.min(MAX_WIDGET_WIDTH);
-            let area = width as u32 * height as u32;
-            if area > best_area {
-                best_area = area;
-                best = Some((start as u16, height, width));
+        } else {
+            // End of region
+            if let Some(start) = region_start {
+                add_region_rects(&mut rects, free_widths, start, i, min_width, min_height);
+                region_start = None;
             }
         }
     }
 
-    best
+    // Handle region extending to end
+    if let Some(start) = region_start {
+        add_region_rects(
+            &mut rects,
+            free_widths,
+            start,
+            free_widths.len(),
+            min_width,
+            min_height,
+        );
+    }
+
+    rects
 }
 
-/// Calculate how much height the widget needs based on its content
-/// Render the widget to the frame
-pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
+/// Add rectangles from a contiguous region
+fn add_region_rects(
+    rects: &mut Vec<(u16, u16, u16)>,
+    free_widths: &[u16],
+    start: usize,
+    end: usize,
+    min_width: u16,
+    min_height: u16,
+) {
+    let region_height = end - start;
+    if region_height < min_height as usize {
+        return;
+    }
+
+    // Find the minimum width in this region
+    let min_w = free_widths[start..end]
+        .iter()
+        .copied()
+        .min()
+        .unwrap_or(0)
+        .min(MAX_WIDGET_WIDTH);
+
+    if min_w >= min_width {
+        // Add the full region as one rectangle
+        rects.push((start as u16, region_height as u16, min_w));
+
+        // If the region is tall enough, we could split it to place multiple widgets
+        // For now, we'll let the placement algorithm handle stacking
+    }
+}
+
+/// Render all placed widgets
+pub fn render_all(frame: &mut Frame, placements: &[WidgetPlacement], data: &InfoWidgetData) {
+    for placement in placements {
+        render_single_widget(frame, placement, data);
+    }
+}
+
+/// Render a single widget at its placement
+fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &InfoWidgetData) {
+    let rect = placement.rect;
+
     // Semi-transparent looking border (using dim colors)
     let block = Block::default()
         .borders(Borders::ALL)
@@ -332,52 +720,409 @@ pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    let layout = compute_page_layout(data, inner.width as usize, inner.height);
-    if layout.pages.is_empty() {
-        return;
+    let lines = render_widget_content(placement.kind, data, inner);
+    let para = Paragraph::new(lines);
+    frame.render_widget(para, inner);
+}
+
+/// Render content for a specific widget type
+fn render_widget_content(kind: WidgetKind, data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    match kind {
+        WidgetKind::Todos => render_todos_widget(data, inner),
+        WidgetKind::ContextUsage => render_context_widget(data, inner),
+        WidgetKind::MemoryActivity => render_memory_widget(data, inner),
+        WidgetKind::SwarmStatus => render_swarm_widget(data, inner),
+        WidgetKind::BackgroundTasks => render_background_widget(data, inner),
+        WidgetKind::UsageLimits => render_usage_widget(data, inner),
+        WidgetKind::ModelInfo => render_model_widget(data, inner),
+    }
+}
+
+/// Render todos widget content
+fn render_todos_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    if data.todos.is_empty() {
+        return Vec::new();
     }
 
-    let mut state = match WIDGET_STATE.lock() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    if state.page_index >= layout.pages.len() {
-        state.page_index = 0;
+    let mut lines: Vec<Line> = Vec::new();
+    let total = data.todos.len();
+    let completed: usize = data.todos.iter().filter(|t| t.status == "completed").count();
+    let in_progress: usize = data.todos.iter().filter(|t| t.status == "in_progress").count();
+
+    // Header with progress
+    lines.push(Line::from(vec![
+        Span::styled(
+            "Todos ",
+            Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
+        ),
+        Span::styled(
+            format!("{}/{}", completed, total),
+            Style::default().fg(Color::Rgb(140, 140, 150)),
+        ),
+    ]));
+
+    // Mini progress bar
+    let bar_width = inner.width.saturating_sub(2).min(20) as usize;
+    if bar_width >= 4 && total > 0 {
+        let filled = ((completed as f64 / total as f64) * bar_width as f64).round() as usize;
+        let empty = bar_width.saturating_sub(filled);
+        lines.push(Line::from(vec![
+            Span::styled("[", Style::default().fg(Color::Rgb(90, 90, 100))),
+            Span::styled(
+                "█".repeat(filled),
+                Style::default().fg(Color::Rgb(100, 180, 100)),
+            ),
+            Span::styled(
+                "░".repeat(empty),
+                Style::default().fg(Color::Rgb(50, 50, 60)),
+            ),
+            Span::styled("]", Style::default().fg(Color::Rgb(90, 90, 100))),
+        ]));
     }
 
-    if layout.pages.len() > 1 {
-        let now = Instant::now();
-        let switch = match state.last_page_switch {
-            Some(last) => now.duration_since(last) >= Duration::from_secs(PAGE_SWITCH_SECONDS),
-            None => true,
+    // Sort todos: in_progress first, then pending, then completed
+    let mut sorted_todos: Vec<&crate::todo::TodoItem> = data.todos.iter().collect();
+    sorted_todos.sort_by(|a, b| {
+        let order = |s: &str| match s {
+            "in_progress" => 0,
+            "pending" => 1,
+            "completed" => 2,
+            "cancelled" => 3,
+            _ => 4,
         };
-        if switch {
-            state.page_index = (state.page_index + 1) % layout.pages.len();
-            state.last_page_switch = Some(now);
-        }
-    } else {
-        state.last_page_switch = None;
+        order(&a.status).cmp(&order(&b.status))
+    });
+
+    // Render todos (limit based on available height)
+    let available_lines = inner.height.saturating_sub(2) as usize; // Account for header + bar
+    for todo in sorted_todos.iter().take(available_lines.min(5)) {
+        let (icon, status_color) = match todo.status.as_str() {
+            "completed" => ("✓", Color::Rgb(100, 180, 100)),
+            "in_progress" => ("▶", Color::Rgb(255, 200, 100)),
+            "cancelled" => ("✗", Color::Rgb(120, 80, 80)),
+            _ => ("○", Color::Rgb(120, 120, 130)),
+        };
+
+        let max_len = inner.width.saturating_sub(3) as usize;
+        let content = truncate_smart(&todo.content, max_len);
+
+        let text_color = if todo.status == "completed" {
+            Color::Rgb(100, 100, 110)
+        } else if todo.status == "in_progress" {
+            Color::Rgb(200, 200, 210)
+        } else {
+            Color::Rgb(160, 160, 170)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", icon), Style::default().fg(status_color)),
+            Span::styled(content, Style::default().fg(text_color)),
+        ]));
     }
 
-    let page = layout.pages[state.page_index];
-    let mut lines = render_page(page.kind, data, inner);
+    // Show count of remaining items
+    let shown = available_lines.min(5).min(sorted_todos.len());
+    if data.todos.len() > shown {
+        let remaining = data.todos.len() - shown;
+        lines.push(Line::from(vec![Span::styled(
+            format!("  +{} more", remaining),
+            Style::default().fg(Color::Rgb(100, 100, 110)),
+        )]));
+    }
 
-    if layout.show_dots {
-        let content_height = inner.height.saturating_sub(1) as usize;
-        if lines.len() > content_height {
-            lines.truncate(content_height);
-        } else if lines.len() < content_height {
-            lines.extend(std::iter::repeat(Line::from("")).take(content_height - lines.len()));
+    lines
+}
+
+/// Render context usage widget
+fn render_context_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    let Some(info) = &data.context_info else {
+        return Vec::new();
+    };
+    if info.total_chars == 0 {
+        return Vec::new();
+    }
+
+    let used_tokens = info.estimated_tokens();
+    let limit_tokens = data.context_limit.unwrap_or(DEFAULT_CONTEXT_LIMIT).max(1);
+    let used_pct = ((used_tokens as f64 / limit_tokens as f64) * 100.0)
+        .round()
+        .clamp(0.0, 100.0) as u8;
+    let left_pct = 100u8.saturating_sub(used_pct);
+
+    vec![render_labeled_bar("Context", used_pct, left_pct, None, inner.width)]
+}
+
+/// Render memory activity widget
+fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    let Some(info) = &data.memory_info else {
+        return Vec::new();
+    };
+    if info.total_count == 0 && info.activity.is_none() {
+        return Vec::new();
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Title with count
+    lines.push(Line::from(vec![
+        Span::styled("🧠 ", Style::default().fg(Color::Rgb(200, 150, 255))),
+        Span::styled(
+            format!("{} memories", info.total_count),
+            Style::default().fg(Color::Rgb(180, 180, 190)),
+        ),
+    ]));
+
+    // Activity state if active
+    if let Some(activity) = &info.activity {
+        let state_line = match &activity.state {
+            MemoryState::Idle => Line::from(vec![
+                Span::styled("○ ", Style::default().fg(Color::Rgb(100, 100, 110))),
+                Span::styled("Idle", Style::default().fg(Color::Rgb(120, 120, 130))),
+            ]),
+            MemoryState::Embedding => Line::from(vec![
+                Span::styled("🔍 ", Style::default().fg(Color::Rgb(255, 200, 100))),
+                Span::styled("Searching...", Style::default().fg(Color::Rgb(180, 180, 190))),
+            ]),
+            MemoryState::SidecarChecking { count } => Line::from(vec![
+                Span::styled("⚡ ", Style::default().fg(Color::Rgb(255, 200, 100))),
+                Span::styled(
+                    format!("Checking {}", count),
+                    Style::default().fg(Color::Rgb(180, 180, 190)),
+                ),
+            ]),
+            MemoryState::FoundRelevant { count } => Line::from(vec![
+                Span::styled("✓ ", Style::default().fg(Color::Rgb(100, 200, 100))),
+                Span::styled(
+                    format!("{} relevant", count),
+                    Style::default().fg(Color::Rgb(180, 180, 190)),
+                ),
+            ]),
+        };
+        lines.push(state_line);
+
+        // Recent events (limit to 3)
+        let max_events = (inner.height.saturating_sub(2) as usize).min(3);
+        for event in activity.recent_events.iter().take(max_events) {
+            let (icon, text, color) = format_memory_event(event, inner.width.saturating_sub(4) as usize);
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", icon), Style::default().fg(color)),
+                Span::styled(text, Style::default().fg(Color::Rgb(140, 140, 150))),
+            ]));
         }
-        lines.push(render_pagination_dots(
-            layout.pages.len(),
-            state.page_index,
-            inner.width,
+    }
+
+    lines
+}
+
+fn format_memory_event(event: &MemoryEvent, max_width: usize) -> (&'static str, String, Color) {
+    match &event.kind {
+        MemoryEventKind::EmbeddingStarted => ("🔍", "Embedding...".to_string(), Color::Rgb(140, 180, 255)),
+        MemoryEventKind::EmbeddingComplete { latency_ms, hits } => (
+            "→",
+            format!("{} hits ({}ms)", hits, latency_ms),
+            Color::Rgb(140, 180, 255),
+        ),
+        MemoryEventKind::SidecarStarted => ("⚡", "Verifying".to_string(), Color::Rgb(255, 200, 100)),
+        MemoryEventKind::SidecarRelevant { memory_preview } => {
+            let preview = truncate_smart(memory_preview, max_width.saturating_sub(2));
+            ("✓", preview, Color::Rgb(100, 200, 100))
+        }
+        MemoryEventKind::SidecarNotRelevant => ("✗", "Not relevant".to_string(), Color::Rgb(150, 150, 160)),
+        MemoryEventKind::SidecarComplete { latency_ms } => ("⏱", format!("{}ms", latency_ms), Color::Rgb(140, 140, 150)),
+        MemoryEventKind::MemorySurfaced { memory_preview } => {
+            let preview = truncate_smart(memory_preview, max_width.saturating_sub(2));
+            ("★", preview, Color::Rgb(255, 220, 100))
+        }
+        MemoryEventKind::Error { message } => {
+            let msg = truncate_smart(message, max_width.saturating_sub(2));
+            ("!", msg, Color::Rgb(255, 100, 100))
+        }
+    }
+}
+
+/// Render swarm status widget
+fn render_swarm_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    let Some(info) = &data.swarm_info else {
+        return Vec::new();
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Stats line
+    let mut stats_parts: Vec<Span> = vec![Span::styled(
+        "🐝 ",
+        Style::default().fg(Color::Rgb(255, 200, 100)),
+    )];
+
+    if info.session_count > 0 {
+        stats_parts.push(Span::styled(
+            format!("{}s", info.session_count),
+            Style::default().fg(Color::Rgb(160, 160, 170)),
+        ));
+    }
+    if let Some(clients) = info.client_count {
+        if info.session_count > 0 {
+            stats_parts.push(Span::styled(" · ", Style::default().fg(Color::Rgb(100, 100, 110))));
+        }
+        stats_parts.push(Span::styled(
+            format!("{}c", clients),
+            Style::default().fg(Color::Rgb(160, 160, 170)),
+        ));
+    }
+    lines.push(Line::from(stats_parts));
+
+    // Active subagent status
+    if let Some(status) = &info.subagent_status {
+        lines.push(Line::from(vec![
+            Span::styled("▶ ", Style::default().fg(Color::Rgb(255, 200, 100))),
+            Span::styled(
+                truncate_smart(status, inner.width.saturating_sub(4) as usize),
+                Style::default().fg(Color::Rgb(200, 200, 210)),
+            ),
+        ]));
+    }
+
+    // Session names (limit based on height)
+    let max_names = inner.height.saturating_sub(lines.len() as u16) as usize;
+    let max_name_len = inner.width.saturating_sub(4) as usize;
+    for name in info.session_names.iter().take(max_names.min(3)) {
+        lines.push(Line::from(vec![
+            Span::styled("  · ", Style::default().fg(Color::Rgb(100, 100, 110))),
+            Span::styled(
+                truncate_smart(name, max_name_len),
+                Style::default().fg(Color::Rgb(140, 140, 150)),
+            ),
+        ]));
+    }
+
+    lines
+}
+
+/// Render background tasks widget
+fn render_background_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    let Some(info) = &data.background_info else {
+        return Vec::new();
+    };
+    if info.running_count == 0 && !info.memory_agent_active {
+        return Vec::new();
+    }
+
+    let mut spans: Vec<Span> = vec![Span::styled(
+        "⏳ ",
+        Style::default().fg(Color::Rgb(180, 140, 255)),
+    )];
+
+    let mut parts: Vec<String> = Vec::new();
+    if info.memory_agent_active {
+        parts.push(format!("mem:{}", info.memory_agent_turns));
+    }
+    if info.running_count > 0 {
+        if info.running_tasks.is_empty() {
+            parts.push(format!("bg:{}", info.running_count));
+        } else {
+            let task_str = info.running_tasks.join(",");
+            if task_str.len() > 15 {
+                parts.push(format!("bg:{}+", info.running_count));
+            } else {
+                parts.push(format!("bg:{}", task_str));
+            }
+        }
+    }
+
+    spans.push(Span::styled(
+        parts.join(" "),
+        Style::default().fg(Color::Rgb(160, 160, 170)),
+    ));
+
+    vec![Line::from(spans)]
+}
+
+/// Render usage limits widget
+fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    let Some(info) = &data.usage_info else {
+        return Vec::new();
+    };
+    if !info.available {
+        return Vec::new();
+    }
+
+    let five_hr_used = (info.five_hour * 100.0).round().clamp(0.0, 100.0) as u8;
+    let seven_day_used = (info.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
+    let five_hr_left = 100u8.saturating_sub(five_hr_used);
+    let seven_day_left = 100u8.saturating_sub(seven_day_used);
+
+    vec![
+        render_labeled_bar("5-hour", five_hr_used, five_hr_left, None, inner.width),
+        render_labeled_bar("Weekly", seven_day_used, seven_day_left, None, inner.width),
+    ]
+}
+
+/// Render model info widget
+fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    let Some(model) = &data.model else {
+        return Vec::new();
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    let short_name = shorten_model_name(model);
+    let max_len = inner.width.saturating_sub(2) as usize;
+
+    let mut spans = vec![
+        Span::styled("⚡ ", Style::default().fg(Color::Rgb(140, 180, 255))),
+        Span::styled(
+            truncate_smart(&short_name, max_len.saturating_sub(2)),
+            Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
+        ),
+    ];
+
+    if let Some(effort) = &data.reasoning_effort {
+        let effort_short = match effort.as_str() {
+            "xhigh" => "xhi",
+            "high" => "hi",
+            "medium" => "med",
+            "low" => "lo",
+            "none" => "∅",
+            other => other,
+        };
+        spans.push(Span::styled(" ", Style::default()));
+        spans.push(Span::styled(
+            format!("({})", effort_short),
+            Style::default().fg(Color::Rgb(255, 200, 100)),
         ));
     }
 
-    let para = Paragraph::new(lines);
-    frame.render_widget(para, inner);
+    lines.push(Line::from(spans));
+
+    // Session info if available
+    if let Some(sessions) = data.session_count {
+        lines.push(Line::from(vec![Span::styled(
+            format!("{} session{}", sessions, if sessions == 1 { "" } else { "s" }),
+            Style::default().fg(Color::Rgb(140, 140, 150)),
+        )]));
+    }
+
+    lines
+}
+
+/// Legacy render function - kept for backwards compatibility
+/// Renders the first available widget at the given rect
+#[deprecated(note = "Use render_all instead")]
+#[allow(deprecated)]
+pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
+    // Just render as the first available widget type
+    let available = data.available_widgets();
+    if available.is_empty() {
+        return;
+    }
+
+    // Create a temporary placement for the first widget
+    let placement = WidgetPlacement {
+        kind: available[0],
+        rect,
+        side: Side::Right,
+    };
+    render_single_widget(frame, &placement, data);
 }
 
 const MAX_CONTEXT_LINES: usize = 5;
@@ -581,7 +1326,7 @@ fn compact_background_height(data: &InfoWidgetData) -> u16 {
 fn compact_usage_height(data: &InfoWidgetData) -> u16 {
     if let Some(info) = &data.usage_info {
         if info.available {
-            return 1;
+            return 2; // Two lines: 5-hour and Weekly bars
         }
     }
     0
@@ -739,7 +1484,7 @@ fn render_sections(
     // Usage info (subscription limits)
     if let Some(info) = &data.usage_info {
         if info.available {
-            lines.extend(render_usage_compact(info));
+            lines.extend(render_usage_compact(info, inner.width));
         }
     }
 
@@ -1320,45 +2065,79 @@ fn render_background_compact(info: &BackgroundInfo) -> Vec<Line<'static>> {
     vec![Line::from(spans)]
 }
 
-fn render_usage_compact(info: &UsageInfo) -> Vec<Line<'static>> {
+fn render_usage_compact(info: &UsageInfo, width: u16) -> Vec<Line<'static>> {
     if !info.available {
         return Vec::new();
     }
 
-    // Format like Claude Code: "Session 42% · Week 16%"
-    let five_hr_pct = (info.five_hour * 100.0).round() as u8;
-    let seven_day_pct = (info.seven_day * 100.0).round() as u8;
+    let five_hr_used = (info.five_hour * 100.0).round().clamp(0.0, 100.0) as u8;
+    let seven_day_used = (info.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
+    let five_hr_left = 100u8.saturating_sub(five_hr_used);
+    let seven_day_left = 100u8.saturating_sub(seven_day_used);
 
-    // Color code based on usage level
-    let five_hr_color = if five_hr_pct >= 80 {
-        Color::Rgb(255, 100, 100) // Red for high usage
-    } else if five_hr_pct >= 50 {
-        Color::Rgb(255, 200, 100) // Yellow for medium
+    vec![
+        render_labeled_bar("5-hour", five_hr_used, five_hr_left, None, width),
+        render_labeled_bar("Weekly", seven_day_used, seven_day_left, None, width),
+    ]
+}
+
+/// Render a labeled progress bar with color-coded status
+/// Shows "X% left" or a reset time if depleted
+fn render_labeled_bar(
+    label: &str,
+    used_pct: u8,
+    left_pct: u8,
+    reset_time: Option<&str>,
+    width: u16,
+) -> Line<'static> {
+    // Color based on remaining percentage
+    let color = if left_pct == 0 {
+        Color::Rgb(255, 100, 100) // Red - depleted
+    } else if left_pct < 20 {
+        Color::Rgb(255, 100, 100) // Red - critical
+    } else if left_pct <= 50 {
+        Color::Rgb(255, 200, 100) // Yellow - getting low
     } else {
-        Color::Rgb(100, 200, 100) // Green for low
+        Color::Rgb(100, 200, 100) // Green - plenty left
     };
 
-    let seven_day_color = if seven_day_pct >= 80 {
-        Color::Rgb(255, 100, 100)
-    } else if seven_day_pct >= 50 {
-        Color::Rgb(255, 200, 100)
+    // Calculate bar width: total width - label - space - suffix
+    // Label is max 7 chars ("Context" or "5-hour " or "Weekly ")
+    // Suffix is " XX% left" (10 chars) or " resets Xh" (10 chars)
+    let label_width = 7;
+    let suffix_width = 10;
+    let bar_width = width
+        .saturating_sub(label_width + 1 + suffix_width)
+        .min(12)
+        .max(4) as usize;
+
+    // Build the bar
+    let filled = ((used_pct as f32 / 100.0) * bar_width as f32).round() as usize;
+    let empty = bar_width.saturating_sub(filled);
+
+    let bar_filled = "█".repeat(filled);
+    let bar_empty = "░".repeat(empty);
+
+    // Build suffix
+    let suffix = if left_pct == 0 {
+        if let Some(reset) = reset_time {
+            format!(" resets {}", reset)
+        } else {
+            " 0% left".to_string()
+        }
     } else {
-        Color::Rgb(100, 200, 100)
+        format!(" {}% left", left_pct)
     };
 
-    vec![Line::from(vec![
-        Span::styled("5h ", Style::default().fg(Color::Rgb(140, 140, 150))),
-        Span::styled(
-            format!("{}%", five_hr_pct),
-            Style::default().fg(five_hr_color),
-        ),
-        Span::styled(" · ", Style::default().fg(Color::Rgb(100, 100, 110))),
-        Span::styled("7d ", Style::default().fg(Color::Rgb(140, 140, 150))),
-        Span::styled(
-            format!("{}%", seven_day_pct),
-            Style::default().fg(seven_day_color),
-        ),
-    ])]
+    // Pad label to fixed width
+    let padded_label = format!("{:<7}", label);
+
+    Line::from(vec![
+        Span::styled(padded_label, Style::default().fg(Color::Rgb(140, 140, 150))),
+        Span::styled(bar_filled, Style::default().fg(color)),
+        Span::styled(bar_empty, Style::default().fg(Color::Rgb(50, 50, 60))),
+        Span::styled(suffix, Style::default().fg(color)),
+    ])
 }
 
 fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
@@ -1529,28 +2308,12 @@ fn render_context_compact(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'stati
 
     let used_tokens = info.estimated_tokens();
     let limit_tokens = data.context_limit.unwrap_or(DEFAULT_CONTEXT_LIMIT).max(1);
-    vec![render_usage_line(
-        used_tokens,
-        limit_tokens,
-        inner.width as usize,
-    )]
-}
-
-fn render_usage_line(used_tokens: usize, limit_tokens: usize, max_width: usize) -> Line<'static> {
-    let used_str = format_token_k(used_tokens);
-    let limit_str = format_token_k(limit_tokens);
-    let pct = ((used_tokens as f64 / limit_tokens as f64) * 100.0)
+    let used_pct = ((used_tokens as f64 / limit_tokens as f64) * 100.0)
         .round()
-        .min(100.0) as usize;
-    let mut text = format!("Ctx {}/{}", used_str, limit_str);
-    if max_width >= text.len() + 5 {
-        text.push(' ');
-        text.push_str(&format!("{}%", pct));
-    }
-    Line::from(Span::styled(
-        text,
-        Style::default().fg(Color::Rgb(160, 160, 170)),
-    ))
+        .clamp(0.0, 100.0) as u8;
+    let left_pct = 100u8.saturating_sub(used_pct);
+
+    vec![render_labeled_bar("Context", used_pct, left_pct, None, inner.width)]
 }
 
 fn render_usage_bar(used_tokens: usize, limit_tokens: usize, width: u16) -> Line<'static> {
