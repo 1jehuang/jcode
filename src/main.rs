@@ -74,6 +74,28 @@ fn install_panic_hook() {
     }));
 }
 
+#[cfg(unix)]
+fn signal_name(sig: i32) -> &'static str {
+    match sig {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        6 => "SIGABRT",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => "unknown",
+    }
+}
+
+#[cfg(not(unix))]
+fn signal_name(_sig: i32) -> &'static str {
+    "unknown"
+}
+
 #[derive(Debug, Clone, ValueEnum)]
 enum ProviderChoice {
     Claude,
@@ -1839,8 +1861,30 @@ async fn run_server_manager(
             break;
         }
 
-        let exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
-        logging::info(&format!("Server exited with code {}", exit_code));
+        let (exit_code, signal) = status
+            .map(|s| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    (s.code().unwrap_or(-1), s.signal())
+                }
+                #[cfg(not(unix))]
+                {
+                    (s.code().unwrap_or(-1), None)
+                }
+            })
+            .unwrap_or((-1, None));
+        if let Some(sig) = signal {
+            logging::info(&format!("Server killed by signal {} ({})", sig, signal_name(sig)));
+        } else {
+            logging::info(&format!("Server exited with code {}", exit_code));
+        }
+
+        // SIGTERM (15) is a normal graceful shutdown signal, not a crash
+        if signal == Some(15) {
+            logging::info("Server terminated gracefully via SIGTERM");
+            break;
+        }
 
         if exit_code == EXIT_DONE {
             // Clean exit
