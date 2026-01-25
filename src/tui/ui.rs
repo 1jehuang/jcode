@@ -29,37 +29,59 @@ const HEADER_SESSION_COLOR: Color = Color::Rgb(255, 255, 255); // White for sess
 // Spinner frames for animated status
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// Duration of the startup header animation in seconds
+/// Duration of the startup fade-in animation in seconds
 const HEADER_ANIM_DURATION: f32 = 1.5;
 
-/// Calculate smooth animated color for the header.
-/// Uses a gentle shimmer effect that pulses through colors uniformly.
-fn header_animation_color(elapsed: f32) -> Color {
-    if elapsed >= HEADER_ANIM_DURATION {
-        return ACCENT_COLOR;
-    }
+/// Speed of the continuous chroma wave (lower = slower)
+const CHROMA_SPEED: f32 = 0.15;
 
-    // Smooth easing function (ease-out cubic)
-    let progress = elapsed / HEADER_ANIM_DURATION;
-    let eased = 1.0 - (1.0 - progress).powi(3);
+/// Convert HSL to RGB (h in 0-360, s and l in 0-1)
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h_prime = h / 60.0;
+    let x = c * (1.0 - (h_prime % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
 
-    // Color journey: cyan -> purple (accent)
-    // Start bright cyan, smoothly transition to accent purple
-    let start = (100.0, 220.0, 255.0); // Bright cyan
-    let end = (186.0, 139.0, 255.0); // Accent purple
+    let (r1, g1, b1) = match h_prime as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
 
-    // Add a subtle pulse/shimmer during transition
-    let pulse = (elapsed * 8.0).sin() * 0.15 * (1.0 - eased);
-
-    let r = start.0 + (end.0 - start.0) * eased + pulse * 50.0;
-    let g = start.1 + (end.1 - start.1) * eased - pulse * 30.0;
-    let b = start.2 + (end.2 - start.2) * eased;
-
-    Color::Rgb(
-        r.clamp(0.0, 255.0) as u8,
-        g.clamp(0.0, 255.0) as u8,
-        b.clamp(0.0, 255.0) as u8,
+    (
+        ((r1 + m) * 255.0).clamp(0.0, 255.0) as u8,
+        ((g1 + m) * 255.0).clamp(0.0, 255.0) as u8,
+        ((b1 + m) * 255.0).clamp(0.0, 255.0) as u8,
     )
+}
+
+/// Chroma color based on position and time - creates flowing rainbow wave
+fn chroma_color(pos: f32, elapsed: f32, saturation: f32, lightness: f32) -> Color {
+    // Hue shifts over time and varies by position
+    // pos: 0.0-1.0 position in the text
+    // Creates a wave that flows across the text
+    let hue = ((pos * 60.0) + (elapsed * CHROMA_SPEED * 360.0)) % 360.0;
+    let (r, g, b) = hsl_to_rgb(hue, saturation, lightness);
+    Color::Rgb(r, g, b)
+}
+
+/// Calculate chroma color with fade-in from dim during startup
+fn header_chroma_color(pos: f32, elapsed: f32) -> Color {
+    let fade = ((elapsed / HEADER_ANIM_DURATION).clamp(0.0, 1.0)).powf(0.5);
+
+    // During fade-in, transition from dim gray to full chroma
+    let saturation = 0.75 * fade;
+    let lightness = 0.3 + 0.35 * fade; // Start darker (0.3), end bright (0.65)
+
+    chroma_color(pos, elapsed, saturation, lightness)
+}
+
+/// Calculate smooth animated color for the header (single color, no position)
+fn header_animation_color(elapsed: f32) -> Color {
+    header_chroma_color(0.5, elapsed)
 }
 
 fn header_fade_t(elapsed: f32, offset: f32) -> f32 {
@@ -114,6 +136,17 @@ fn header_chrome_color(base: Color, pos: f32, elapsed: f32, intensity: f32) -> C
     blend_color(darkened, HIGHLIGHT, shimmer)
 }
 
+/// Set alignment on a line only if it doesn't already have one set.
+/// This allows markdown rendering to mark code blocks as left-aligned while
+/// other content inherits the default alignment (e.g., centered mode).
+fn align_if_unset(line: Line<'static>, align: Alignment) -> Line<'static> {
+    if line.alignment.is_some() {
+        line
+    } else {
+        line.alignment(align)
+    }
+}
+
 /// Extract semantic version from full version string (e.g., "v0.1.0-dev (abc123)" -> "v0.1.0")
 fn semver() -> &'static str {
     static SEMVER: OnceLock<String> = OnceLock::new();
@@ -126,6 +159,34 @@ fn semver() -> &'static str {
             full.trim_end_matches("-dev").to_string()
         }
     })
+}
+
+/// Create a modern pill-style badge: ⟨ label ⟩
+fn pill_badge(label: &str, color: Color) -> Vec<Span<'static>> {
+    vec![
+        Span::styled("  ", Style::default()),
+        Span::styled("⟨ ", Style::default().fg(color)),
+        Span::styled(label.to_string(), Style::default().fg(color)),
+        Span::styled(" ⟩", Style::default().fg(color)),
+    ]
+}
+
+/// Create a combined status badge with multiple colored items: ⟨item1·item2·item3⟩
+fn multi_status_badge(items: &[(&str, Color)]) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        Span::styled(" ", Style::default()),
+        Span::styled("⟨", Style::default().fg(DIM_COLOR)),
+    ];
+
+    for (i, (label, color)) in items.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("·", Style::default().fg(DIM_COLOR)));
+        }
+        spans.push(Span::styled(label.to_string(), Style::default().fg(*color)));
+    }
+
+    spans.push(Span::styled("⟩", Style::default().fg(DIM_COLOR)));
+    spans
 }
 
 /// Create multi-color spans for the header line
@@ -633,25 +694,11 @@ fn animated_tool_color(elapsed: f32) -> Color {
     Color::Rgb(r, g, b)
 }
 
-/// Get how long ago the binary was built (from compile time, not file mtime)
-fn binary_age() -> Option<String> {
-    // Use git date from build time instead of file mtime
-    // This is more accurate and survives selfdev reloads
-    let git_date = env!("JCODE_GIT_DATE");
-    if git_date.is_empty() {
-        return None;
-    }
-
-    // Parse git date (format: "2024-01-15 14:30:00 -0800")
-    let date = chrono::DateTime::parse_from_str(git_date, "%Y-%m-%d %H:%M:%S %z").ok()?;
-    let elapsed = chrono::Utc::now().signed_duration_since(date);
-    let secs = elapsed.num_seconds();
-
+/// Format seconds as a human-readable age string
+fn format_age(secs: i64) -> String {
     if secs < 0 {
-        return Some("future?".to_string());
-    }
-
-    let age_str = if secs < 60 {
+        "future?".to_string()
+    } else if secs < 60 {
         "just now".to_string()
     } else if secs < 3600 {
         format!("{}m ago", secs / 60)
@@ -659,9 +706,39 @@ fn binary_age() -> Option<String> {
         format!("{}h ago", secs / 3600)
     } else {
         format!("{}d ago", secs / 86400)
-    };
+    }
+}
 
-    Some(age_str)
+/// Get how long ago the binary was built and when the code was committed
+/// Shows both if they differ significantly, otherwise just the build time
+fn binary_age() -> Option<String> {
+    let build_time = env!("JCODE_BUILD_TIME");
+    let git_date = env!("JCODE_GIT_DATE");
+
+    let now = chrono::Utc::now();
+
+    // Parse build time
+    let build_date = chrono::DateTime::parse_from_str(build_time, "%Y-%m-%d %H:%M:%S %z").ok()?;
+    let build_secs = now.signed_duration_since(build_date).num_seconds();
+
+    // Parse git commit date
+    let git_commit_date =
+        chrono::DateTime::parse_from_str(git_date, "%Y-%m-%d %H:%M:%S %z").ok();
+    let git_secs = git_commit_date.map(|d| now.signed_duration_since(d).num_seconds());
+
+    let build_age = format_age(build_secs);
+
+    // If git date is available and differs significantly (>5 min), show both
+    if let Some(git_secs) = git_secs {
+        let diff = (git_secs - build_secs).abs();
+        if diff > 300 {
+            // More than 5 minutes difference
+            let git_age = format_age(git_secs);
+            return Some(format!("{}, code {}", build_age, git_age));
+        }
+    }
+
+    Some(build_age)
 }
 
 /// Shorten model name for display (e.g., "claude-opus-4-5-20251101" -> "claude4.5opus")
@@ -793,25 +870,6 @@ fn message_cache() -> &'static Mutex<MessageCacheState> {
 
 const MESSAGE_CACHE_LIMIT: usize = 512;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct StreamingCacheKey {
-    width: u16,
-    prefix_blank: bool,
-}
-
-#[derive(Default)]
-struct StreamingCacheState {
-    key: Option<StreamingCacheKey>,
-    text: String,
-    wrapped_lines: Vec<Line<'static>>,
-}
-
-static STREAMING_CACHE: OnceLock<Mutex<StreamingCacheState>> = OnceLock::new();
-
-fn streaming_cache() -> &'static Mutex<StreamingCacheState> {
-    STREAMING_CACHE.get_or_init(|| Mutex::new(StreamingCacheState::default()))
-}
-
 #[derive(Default)]
 struct RenderProfile {
     frames: u64,
@@ -908,8 +966,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     // Use packed layout when content fits, scrolling layout otherwise
     let use_packed = content_height + fixed_height <= available_height;
 
-    // Both layouts use same structure: messages, status, queued, input
-    // This keeps chunk indices consistent
+    // Layout: messages (includes header), status, queued, input
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if use_packed {
@@ -982,7 +1039,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     }
 
     let draw_start = Instant::now();
-    let visible_free_widths = draw_messages(frame, app, chunks[0], &prepared);
+    let margins = draw_messages(frame, app, chunks[0], &prepared);
     let draw_elapsed = draw_start.elapsed();
     draw_status(frame, app, chunks[1]);
     if queued_height > 0 {
@@ -996,14 +1053,11 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         &mut debug_capture,
     );
 
-    // Draw info widget overlay (if there's space and content)
+    // Draw info widget overlays (if there's space and content)
     let widget_data = app.info_widget_data();
     if !widget_data.is_empty() {
-        if let Some(widget_rect) =
-            info_widget::calculate_layout(chunks[0], &visible_free_widths, &widget_data)
-        {
-            info_widget::render(frame, widget_rect, &widget_data);
-        }
+        let placements = info_widget::calculate_placements(chunks[0], &margins, &widget_data);
+        info_widget::render_all(frame, &placements, &widget_data);
     }
 
     // Record the frame capture if enabled
@@ -1017,8 +1071,11 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
 }
 
 fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
-    let header_lines = build_header_lines(app, width);
-    let header_prepared = wrap_lines(header_lines, &[], width);
+    // Build the top header (chroma animated name/model/badges)
+    let mut all_header_lines = build_persistent_header(app, width);
+    // Add the rest of the header (model ID, changelog, MCPs, etc.)
+    all_header_lines.extend(build_header_lines(app, width));
+    let header_prepared = wrap_lines(all_header_lines, &[], width);
 
     let body_prepared = prepare_body_cached(app, width);
     let has_streaming = app.is_processing() && !app.streaming_text().is_empty();
@@ -1048,103 +1105,134 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
     }
 }
 
-fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line> = Vec::new();
+/// Build chroma-colored text (each character gets a different hue in the rainbow wave)
+fn chroma_spans(text: &str, elapsed: f32, offset: f32, bold: bool) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len().max(1) as f32;
 
-    // Header - always visible
-    let _provider = app.provider_name();
+    chars
+        .into_iter()
+        .enumerate()
+        .map(|(i, ch)| {
+            let pos = offset + (i as f32 / len) * 0.3; // Spread across 0.3 of the spectrum
+            let color = header_chroma_color(pos, elapsed);
+            let mut style = Style::default().fg(color);
+            if bold {
+                style = style.add_modifier(ratatui::style::Modifier::BOLD);
+            }
+            Span::styled(ch.to_string(), style)
+        })
+        .collect()
+}
+
+/// Build the top header (chroma animated)
+/// Line 1: Status badges (client, dev, updates)
+/// Line 2: Session name with icon (e.g., "🦋 Moth")
+/// Line 3: Model name (e.g., "Claude 4.5 Opus")
+/// Line 4: Version and build info
+fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let model = app.provider_model();
     let anim_elapsed = app.animation_elapsed();
-
-    // Line 1: Full agent name (icon jcode-session-model) + Mode indicators
-    let mut mode_parts: Vec<Span> = Vec::new();
-
-    // Build full agent name: jcode-{session}-{model}
     let session_name = app.session_display_name().unwrap_or_default();
     let short_model = shorten_model_name(&model);
     let icon = crate::id::session_icon(&session_name);
-
-    if !session_name.is_empty() {
-        // Full agent name with animated color during startup
-        // Format: "JCode Fox · Claude 4.5 Opus"
-        let nice_model = format_model_name(&short_model);
-        mode_parts.extend(header_spans(
-            &icon,
-            &session_name,
-            &nice_model,
-            anim_elapsed,
-        ));
+    let nice_model = format_model_name(&short_model);
+    let build_info = binary_age().unwrap_or_else(|| "unknown".to_string());
+    let centered = app.centered_mode();
+    let align = if centered {
+        ratatui::layout::Alignment::Center
     } else {
-        mode_parts.push(Span::styled(
-            format!("JCode {}", semver()),
-            Style::default().fg(DIM_COLOR),
-        ));
-    }
+        ratatui::layout::Alignment::Left
+    };
 
-    // Add mode badges
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Line 1: Status badges (chroma colored)
     let is_canary = app.is_canary();
     let is_remote = app.is_remote_mode();
+    let server_update = app.server_update_available() == Some(true);
+    let client_update = app.client_update_available();
+    let _ = width; // Reserved for future use
 
-    if is_canary && is_remote {
-        // Combined badge when both modes are active
-        mode_parts.push(Span::styled(" ", Style::default()));
-        mode_parts.push(Span::styled(
-            " CLIENT / SELF-DEV ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Rgb(255, 170, 50)), // Orange-amber blend
-        ));
-    } else if is_canary {
-        mode_parts.push(Span::styled(" ", Style::default()));
-        mode_parts.push(Span::styled(
-            " SELF-DEV ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Rgb(255, 193, 7)), // Amber badge
-        ));
-    } else if is_remote {
-        mode_parts.push(Span::styled(" ", Style::default()));
-        mode_parts.push(Span::styled(
-            " CLIENT ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Rgb(100, 149, 237)), // Cornflower blue badge
-        ));
+    let mut status_items: Vec<&str> = Vec::new();
+    if is_remote {
+        status_items.push("client");
+    }
+    if is_canary {
+        status_items.push("dev");
+    }
+    if server_update {
+        status_items.push("srv↑");
+    }
+    if client_update {
+        status_items.push("cli↑");
     }
 
-    // Add update badges
-    if let Some(true) = app.server_update_available() {
-        mode_parts.push(Span::styled(" ", Style::default()));
-        mode_parts.push(Span::styled(
-            " SERVER UPDATE ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Rgb(255, 180, 80)), // Amber
-        ));
-    }
-    if app.client_update_available() {
-        mode_parts.push(Span::styled(" ", Style::default()));
-        mode_parts.push(Span::styled(
-            " CLIENT UPDATE ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Rgb(110, 200, 120)), // Soft green
-        ));
+    if !status_items.is_empty() {
+        let badge_text = format!("⟨{}⟩", status_items.join("·"));
+        let badge_spans = chroma_spans(&badge_text, anim_elapsed, 0.0, false);
+        lines.push(Line::from(badge_spans).alignment(align));
+    } else if centered {
+        lines.push(Line::from("")); // Empty line if no badges (only in centered mode)
     }
 
-    lines.push(Line::from(mode_parts));
+    // Line 2: "JCode <icon> <SessionName>" (chroma)
+    if !session_name.is_empty() {
+        let full_name = format!("JCode {} {}", icon, capitalize(&session_name));
+        let name_spans = chroma_spans(&full_name, anim_elapsed, 0.15, true);
+        lines.push(Line::from(name_spans).alignment(align));
+    } else {
+        let jcode_spans = chroma_spans("JCode", anim_elapsed, 0.15, true);
+        lines.push(Line::from(jcode_spans).alignment(align));
+    }
 
-    // Line 2: Model ID, version, and build age (dimmed) + how to switch models
-    let build_info = binary_age().unwrap_or_else(|| "unknown".to_string());
-    lines.push(Line::from(Span::styled(
-        format!(
-            "{} · {} · built {} · /model to switch",
-            model,
-            semver(),
-            build_info
-        ),
-        Style::default().fg(DIM_COLOR),
-    )));
+    // Line 3: Model name (chroma)
+    let model_spans = chroma_spans(&nice_model, anim_elapsed, 0.4, false);
+    lines.push(Line::from(model_spans).alignment(align));
+
+    // Line 4: Version and build info (dim, no chroma)
+    let version_text = format!("{} · built {}", semver(), build_info);
+    let version_line = Line::from(Span::styled(version_text, Style::default().fg(DIM_COLOR)))
+        .alignment(align);
+    lines.push(version_line);
+
+    lines
+}
+
+/// Badge without leading space (for centered display)
+fn multi_status_badge_no_leading_space(items: &[(&str, Color)]) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled("⟨", Style::default().fg(DIM_COLOR))];
+
+    for (i, (label, color)) in items.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("·", Style::default().fg(DIM_COLOR)));
+        }
+        spans.push(Span::styled(label.to_string(), Style::default().fg(*color)));
+    }
+
+    spans.push(Span::styled("⟩", Style::default().fg(DIM_COLOR)));
+    spans
+}
+
+fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = Vec::new();
+    let centered = app.centered_mode();
+    let align = if centered {
+        ratatui::layout::Alignment::Center
+    } else {
+        ratatui::layout::Alignment::Left
+    };
+
+    let model = app.provider_model();
+
+    // Line: Full model ID (dimmed) + hint to switch
+    lines.push(
+        Line::from(Span::styled(
+            format!("{} · /model to switch", model),
+            Style::default().fg(DIM_COLOR),
+        ))
+        .alignment(align),
+    );
 
     // Line 3+: Recent changes in a box (from git log, embedded at build time)
     let changelog = env!("JCODE_CHANGELOG");
@@ -1159,16 +1247,19 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
 
             let mut content: Vec<Line> = Vec::new();
             for line in changelog_lines.iter().take(display_lines) {
-                content.push(Line::from(Span::styled(
-                    line.to_string(),
-                    Style::default().fg(DIM_COLOR),
-                )));
+                content.push(
+                    Line::from(Span::styled(line.to_string(), Style::default().fg(DIM_COLOR)))
+                        .alignment(align),
+                );
             }
             if has_more {
-                content.push(Line::from(Span::styled(
-                    format!("…{} more", changelog_lines.len() - MAX_LINES),
-                    Style::default().fg(DIM_COLOR),
-                )));
+                content.push(
+                    Line::from(Span::styled(
+                        format!("…{} more", changelog_lines.len() - MAX_LINES),
+                        Style::default().fg(DIM_COLOR),
+                    ))
+                    .alignment(align),
+                );
             }
 
             let boxed = render_rounded_box(
@@ -1177,33 +1268,41 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
                 available_width,
                 Style::default().fg(DIM_COLOR),
             );
-            lines.extend(boxed);
+            for line in boxed {
+                lines.push(line.alignment(align));
+            }
         }
     }
 
     // Line 4: MCPs (if any)
     let mcps = app.mcp_servers();
     if !mcps.is_empty() {
-        lines.push(Line::from(Span::styled(
-            format!("mcp: {}", mcps.join(", ")),
-            Style::default().fg(DIM_COLOR),
-        )));
+        lines.push(
+            Line::from(Span::styled(
+                format!("mcp: {}", mcps.join(", ")),
+                Style::default().fg(DIM_COLOR),
+            ))
+            .alignment(align),
+        );
     }
 
     // Line 4: Skills (if any)
     let skills = app.available_skills();
     if !skills.is_empty() {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "skills: {}",
-                skills
-                    .iter()
-                    .map(|s| format!("/{}", s))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
-            Style::default().fg(DIM_COLOR),
-        )));
+        lines.push(
+            Line::from(Span::styled(
+                format!(
+                    "skills: {}",
+                    skills
+                        .iter()
+                        .map(|s| format!("/{}", s))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+                Style::default().fg(DIM_COLOR),
+            ))
+            .alignment(align),
+        );
     }
 
     // Line 5: Server stats (if running as server with clients)
@@ -1221,10 +1320,13 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
         if session_count > 1 {
             parts.push(format!("{} sessions", session_count));
         }
-        lines.push(Line::from(Span::styled(
-            format!("server: {}", parts.join(", ")),
-            Style::default().fg(DIM_COLOR),
-        )));
+        lines.push(
+            Line::from(Span::styled(
+                format!("server: {}", parts.join(", ")),
+                Style::default().fg(DIM_COLOR),
+            ))
+            .alignment(align),
+        );
     }
 
     // Context window info (at the end of header)
@@ -1242,7 +1344,9 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
                 width as usize,
                 Style::default().fg(DIM_COLOR),
             );
-            lines.extend(boxed);
+            for line in boxed {
+                lines.push(line.alignment(align));
+            }
         }
     }
 
@@ -1285,123 +1389,39 @@ fn prepare_streaming_cached(
         };
     }
 
-    let key = StreamingCacheKey {
-        width,
-        prefix_blank,
+    // Use incremental markdown rendering for streaming text
+    // This is efficient because render_streaming_markdown uses internal caching
+    let content_width = width.saturating_sub(4) as usize;
+    let md_lines = app.render_streaming_markdown(content_width);
+
+    // Apply alignment based on centered mode
+    let centered = app.centered_mode();
+    let align = if centered {
+        ratatui::layout::Alignment::Center
+    } else {
+        ratatui::layout::Alignment::Left
     };
-    let mut cache = streaming_cache().lock().unwrap();
 
-    if cache.key.as_ref() == Some(&key) && cache.text == streaming {
-        return PreparedMessages {
-            wrapped_lines: cache.wrapped_lines.clone(),
-            wrapped_user_indices: Vec::new(),
-        };
-    }
-
-    if cache.key.as_ref() == Some(&key) {
-        // Streaming text only ever appends; extend cached lines incrementally.
-        if let Some(append) = streaming.strip_prefix(&cache.text) {
-            if !append.is_empty() {
-                append_plain_text_lines(
-                    &mut cache.wrapped_lines,
-                    width as usize,
-                    append,
-                    prefix_blank,
-                    Style::default().fg(AI_TEXT),
-                );
-                cache.text = streaming.to_string();
-                return PreparedMessages {
-                    wrapped_lines: cache.wrapped_lines.clone(),
-                    wrapped_user_indices: Vec::new(),
-                };
-            }
-        }
-    }
-
-    let prepared = prepare_streaming_plain(streaming, width, prefix_blank);
-    cache.key = Some(key);
-    cache.text = streaming.to_string();
-    cache.wrapped_lines = prepared.wrapped_lines.clone();
-    prepared
-}
-
-fn prepare_streaming_plain(streaming: &str, width: u16, prefix_blank: bool) -> PreparedMessages {
     let mut lines: Vec<Line<'static>> = Vec::new();
     if prefix_blank {
         lines.push(Line::from(""));
     }
-    append_plain_text_lines(
-        &mut lines,
-        width as usize,
-        streaming,
-        prefix_blank,
-        Style::default().fg(AI_TEXT),
-    );
+    for line in md_lines {
+        lines.push(align_if_unset(line, align));
+    }
+
     wrap_lines(lines, &[], width)
-}
-
-fn append_plain_text_lines(
-    lines: &mut Vec<Line<'static>>,
-    width: usize,
-    text: &str,
-    prefix_blank: bool,
-    style: Style,
-) {
-    if lines.is_empty() {
-        if prefix_blank {
-            lines.push(Line::from(""));
-        }
-        lines.push(plain_line_with_style("", style));
-    } else if prefix_blank && lines.len() == 1 && line_text(&lines[0]).is_empty() {
-        lines.push(plain_line_with_style("", style));
-    }
-
-    let mut parts = text.split('\n');
-    if let Some(first) = parts.next() {
-        append_to_current_line(lines, width, first, style);
-    }
-    for part in parts {
-        lines.push(plain_line_with_style("", style));
-        append_to_current_line(lines, width, part, style);
-    }
-}
-
-fn append_to_current_line(lines: &mut Vec<Line<'static>>, width: usize, text: &str, style: Style) {
-    if text.is_empty() {
-        return;
-    }
-    if lines.is_empty() {
-        lines.push(plain_line_with_style("", style));
-    }
-    let last_idx = lines.len().saturating_sub(1);
-    let last_text = line_text(&lines[last_idx]);
-    let combined = format!("{}{}", last_text, text);
-    let wrapped = markdown::wrap_line(plain_line_with_style(combined, style), width);
-    if !wrapped.is_empty() {
-        lines[last_idx] = wrapped[0].clone();
-        if wrapped.len() > 1 {
-            lines.extend(wrapped.into_iter().skip(1));
-        }
-    }
-}
-
-fn line_text(line: &Line<'static>) -> String {
-    if line.spans.is_empty() {
-        return String::new();
-    }
-    line.spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect::<String>()
-}
-
-fn plain_line_with_style(text: impl Into<String>, style: Style) -> Line<'static> {
-    Line::from(Span::styled(text.into(), style))
 }
 
 fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> PreparedMessages {
     let mut lines: Vec<Line> = Vec::new();
     let mut user_line_indices: Vec<usize> = Vec::new();
+    let centered = app.centered_mode();
+    let align = if centered {
+        ratatui::layout::Alignment::Center
+    } else {
+        ratatui::layout::Alignment::Left
+    };
 
     let mut prompt_num = 0usize;
     // Count total user prompts and pending messages for rainbow coloring
@@ -1430,14 +1450,17 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 let distance = total_prompts + pending_count + 1 - prompt_num;
                 let num_color = rainbow_prompt_color(distance);
                 // User messages: rainbow number, blue caret, bright text
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{}", prompt_num), Style::default().fg(num_color)),
-                    Span::styled("› ", Style::default().fg(USER_COLOR)),
-                    Span::styled(msg.content.clone(), Style::default().fg(USER_TEXT)),
-                ]));
+                lines.push(
+                    Line::from(vec![
+                        Span::styled(format!("{}", prompt_num), Style::default().fg(num_color)),
+                        Span::styled("› ", Style::default().fg(USER_COLOR)),
+                        Span::styled(msg.content.clone(), Style::default().fg(USER_TEXT)),
+                    ])
+                    .alignment(align),
+                );
             }
             "assistant" => {
-                // AI messages: render markdown flush left
+                // AI messages: render markdown
                 // Pass width for table rendering (leave some margin)
                 let content_width = width.saturating_sub(4);
                 let cached = get_cached_message_lines(
@@ -1446,39 +1469,55 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                     app.show_diffs(),
                     render_assistant_message,
                 );
-                lines.extend(cached);
+                for line in cached {
+                    lines.push(align_if_unset(line, align));
+                }
             }
             "meta" => {
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(msg.content.clone(), Style::default().fg(DIM_COLOR)),
-                ]));
+                lines.push(
+                    Line::from(vec![
+                        Span::raw(if centered { "" } else { "  " }),
+                        Span::styled(msg.content.clone(), Style::default().fg(DIM_COLOR)),
+                    ])
+                    .alignment(align),
+                );
             }
             "tool" => {
                 let cached =
                     get_cached_message_lines(msg, width, app.show_diffs(), render_tool_message);
-                lines.extend(cached);
+                for line in cached {
+                    lines.push(align_if_unset(line, align));
+                }
             }
             "system" => {
-                lines.push(Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(
-                        msg.content.clone(),
-                        Style::default().fg(ACCENT_COLOR).italic(),
-                    ),
-                ]));
+                lines.push(
+                    Line::from(vec![
+                        Span::styled(if centered { "" } else { "  " }, Style::default()),
+                        Span::styled(
+                            msg.content.clone(),
+                            Style::default().fg(ACCENT_COLOR).italic(),
+                        ),
+                    ])
+                    .alignment(align),
+                );
             }
             "usage" => {
-                lines.push(Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(msg.content.clone(), Style::default().fg(DIM_COLOR)),
-                ]));
+                lines.push(
+                    Line::from(vec![
+                        Span::styled(if centered { "" } else { "  " }, Style::default()),
+                        Span::styled(msg.content.clone(), Style::default().fg(DIM_COLOR)),
+                    ])
+                    .alignment(align),
+                );
             }
             "error" => {
-                lines.push(Line::from(vec![
-                    Span::styled("  ✗ ", Style::default().fg(Color::Red)),
-                    Span::styled(msg.content.clone(), Style::default().fg(Color::Red)),
-                ]));
+                lines.push(
+                    Line::from(vec![
+                        Span::styled(if centered { "✗ " } else { "  ✗ " }, Style::default().fg(Color::Red)),
+                        Span::styled(msg.content.clone(), Style::default().fg(Color::Red)),
+                    ])
+                    .alignment(align),
+                );
             }
             _ => {}
         }
@@ -1493,7 +1532,9 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
             // Use incremental markdown rendering for better streaming performance
             let content_width = width.saturating_sub(4) as usize;
             let md_lines = app.render_streaming_markdown(content_width);
-            lines.extend(md_lines);
+            for line in md_lines {
+                lines.push(align_if_unset(line, align));
+            }
         }
         // Tool calls are now shown inline in display_messages
     }
@@ -1741,12 +1782,13 @@ fn hash_display_message(msg: &DisplayMessage) -> u64 {
     hasher.finish()
 }
 
-fn compute_visible_free_widths(
+fn compute_visible_margins(
     lines: &[Line],
     user_line_indices: &[usize],
     scroll: usize,
     area: Rect,
-) -> Vec<u16> {
+    centered: bool,
+) -> info_widget::Margins {
     let visible_height = area.height as usize;
     let mut mask = vec![false; lines.len()];
     for &idx in user_line_indices {
@@ -1755,22 +1797,48 @@ fn compute_visible_free_widths(
         }
     }
 
-    let mut widths = Vec::with_capacity(visible_height);
+    let mut right_widths = Vec::with_capacity(visible_height);
+    let mut left_widths = Vec::with_capacity(visible_height);
+
     for row in 0..visible_height {
         let line_idx = scroll + row;
-        let free = if line_idx < lines.len() {
+        if line_idx < lines.len() {
             let mut used = lines[line_idx].width().min(area.width as usize) as u16;
             if mask[line_idx] && area.width > 0 {
+                // User lines have a bar on the right, so add 1 to used width
                 used = used.saturating_add(1).min(area.width);
             }
-            area.width.saturating_sub(used)
+
+            if centered {
+                // In centered mode, content is centered, so margins are equal
+                let total_margin = area.width.saturating_sub(used);
+                let left_margin = total_margin / 2;
+                let right_margin = total_margin.saturating_sub(left_margin);
+                left_widths.push(left_margin);
+                right_widths.push(right_margin);
+            } else {
+                // Left-aligned: all free space is on the right
+                left_widths.push(0);
+                right_widths.push(area.width.saturating_sub(used));
+            }
         } else {
-            area.width
-        };
-        widths.push(free);
+            // Empty lines - full width available
+            if centered {
+                let half = area.width / 2;
+                left_widths.push(half);
+                right_widths.push(area.width.saturating_sub(half));
+            } else {
+                left_widths.push(0);
+                right_widths.push(area.width);
+            }
+        }
     }
 
-    widths
+    info_widget::Margins {
+        right_widths,
+        left_widths,
+        centered,
+    }
 }
 
 fn draw_messages(
@@ -1778,7 +1846,7 @@ fn draw_messages(
     app: &dyn TuiState,
     area: Rect,
     prepared: &PreparedMessages,
-) -> Vec<u16> {
+) -> info_widget::Margins {
     let wrapped_lines = &prepared.wrapped_lines;
     let wrapped_user_indices = &prepared.wrapped_user_indices;
 
@@ -1796,8 +1864,13 @@ fn draw_messages(
         max_scroll
     };
 
-    let visible_free_widths =
-        compute_visible_free_widths(wrapped_lines, wrapped_user_indices, scroll, area);
+    let margins = compute_visible_margins(
+        wrapped_lines,
+        wrapped_user_indices,
+        scroll,
+        area,
+        app.centered_mode(),
+    );
 
     let visible_end = (scroll + visible_height).min(wrapped_lines.len());
     let mut visible_lines = if scroll < visible_end {
@@ -1892,7 +1965,7 @@ fn draw_messages(
         frame.render_widget(indicator_widget, indicator_area);
     }
 
-    visible_free_widths
+    margins
 }
 
 fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
@@ -2080,7 +2153,12 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         }
     };
 
-    let paragraph = Paragraph::new(line);
+    let aligned_line = if app.centered_mode() {
+        line.alignment(ratatui::layout::Alignment::Center)
+    } else {
+        line
+    };
+    let paragraph = Paragraph::new(aligned_line);
     frame.render_widget(paragraph, area);
 }
 
@@ -2336,13 +2414,40 @@ fn draw_input(
         }
     }
 
-    let paragraph = Paragraph::new(lines);
+    let centered = app.centered_mode();
+    let paragraph = if centered {
+        Paragraph::new(lines.iter().map(|l| l.clone().alignment(ratatui::layout::Alignment::Center)).collect::<Vec<_>>())
+    } else {
+        Paragraph::new(lines.clone())
+    };
     frame.render_widget(paragraph, area);
 
     // Calculate cursor screen position
     let cursor_screen_line = cursor_line.saturating_sub(scroll_offset) + suggestions_offset;
     let cursor_y = area.y + (cursor_screen_line as u16).min(area.height.saturating_sub(1));
-    let cursor_x = area.x + prompt_len as u16 + cursor_col as u16;
+
+    // For centered mode, calculate the offset to center the line
+    let cursor_x = if centered {
+        // Get the actual line width from the rendered line (not the full input)
+        let actual_line_width = lines
+            .get(cursor_screen_line)
+            .map(|l| l.width())
+            .unwrap_or(prompt_len);
+        // Center offset = (area_width - line_width) / 2
+        let center_offset = (area.width as usize).saturating_sub(actual_line_width) / 2;
+        // For continuation lines, cursor_col is already relative to content start
+        // For first line, we need to account for prompt
+        let cursor_offset = if cursor_line == 0 {
+            prompt_len + cursor_col
+        } else {
+            // Continuation lines have indent padding, cursor_col is relative to content
+            let indent_len = prompt_len; // Same indent as prompt length
+            indent_len + cursor_col
+        };
+        area.x + center_offset as u16 + cursor_offset as u16
+    } else {
+        area.x + prompt_len as u16 + cursor_col as u16
+    };
 
     frame.set_cursor_position(Position::new(cursor_x, cursor_y));
 
