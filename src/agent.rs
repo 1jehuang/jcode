@@ -18,51 +18,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{broadcast, mpsc};
 
-const SYSTEM_PROMPT: &str = r#"You are jcode, an independent AI coding agent powered by Claude (the model). When asked who you are, identify yourself as jcode.
-
-You have access to tools for file operations and shell commands.
-
-## Available Tools
-- bash: Execute shell commands
-- read: Read file contents
-- write: Create or overwrite files
-- edit: Edit files by replacing text
-- glob: Find files by pattern
-- grep: Search file contents with regex
-- ls: List directory contents
-
-## Guidelines
-1. Use tools to explore and modify the codebase
-2. Read files before editing to understand current state
-3. Use glob/grep to find relevant files
-4. Prefer edit over write for existing files
-5. Keep responses concise and action-focused
-6. Execute commands to verify changes work
-
-When you need to make changes, use the tools directly. Don't just describe what to do."#;
-
-const SELFDEV_PROMPT: &str = r#"
-## Self-Development Mode
-
-You are working on the jcode codebase itself. You have the `selfdev` tool available:
-
-- `selfdev { action: "reload" }` - Restart with already-built binary (use after `cargo build --release`)
-- `selfdev { action: "status" }` - Check build versions and crash history
-- `selfdev { action: "promote" }` - Mark current build as stable for other sessions
-- `selfdev { action: "rollback" }` - Switch back to stable build
-
-**Workflow:**
-1. Make code changes using edit/write tools
-2. Run `cargo build --release` to build
-3. Use `selfdev { action: "reload" }` to restart with the new binary
-4. The session continues automatically in the new build
-5. If the build crashes, you'll wake up in the stable version with crash context
-6. Once satisfied, use `selfdev { action: "promote" }` to make it stable
-
-Use this to iterate quickly on jcode features and fixes.
-
-Always invoke `selfdev` as a tool call (never via bash)."#;
-
 const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
 
 /// A soft interrupt message queued for injection at the next safe point
@@ -170,12 +125,23 @@ impl Agent {
                     manager.maybe_start_compaction(self.provider.clone());
                     let messages = manager.messages_for_api();
                     let event = manager.take_compaction_event();
+                    logging::info(&format!(
+                        "messages_for_provider (compaction): returning {} messages",
+                        messages.len()
+                    ));
                     return (messages, event);
                 }
-                Err(_) => {}
+                Err(_) => {
+                    logging::info("messages_for_provider: compaction lock failed, using session");
+                }
             };
         }
-        (self.session.messages_for_provider(), None)
+        let messages = self.session.messages_for_provider();
+        logging::info(&format!(
+            "messages_for_provider (session): returning {} messages",
+            messages.len()
+        ));
+        (messages, None)
     }
 
     /// Add a swarm alert to be injected into the next turn
@@ -417,39 +383,40 @@ impl Agent {
         let _ = self.session.save();
     }
 
-    /// Build the system prompt, including skill, memory, and self-dev context
+    /// Build the system prompt, including skill, memory, self-dev context, and CLAUDE.md files
     fn build_system_prompt(&self, memory_prompt: Option<&str>) -> String {
-        let mut prompt = SYSTEM_PROMPT.to_string();
+        // Get skill prompt if active
+        let skill_prompt = self
+            .active_skill
+            .as_ref()
+            .and_then(|name| self.skills.get(name).map(|s| s.get_prompt().to_string()));
 
-        // Add self-dev context if in canary mode
-        if self.session.is_canary {
-            prompt.push_str(SELFDEV_PROMPT);
-        }
+        // Build list of available skills for prompt
+        let available_skills: Vec<crate::prompt::SkillInfo> = self
+            .skills
+            .list()
+            .iter()
+            .map(|s| crate::prompt::SkillInfo {
+                name: s.name.clone(),
+                description: s.description.clone(),
+            })
+            .collect();
 
-        // Add available skills list
-        let skills: Vec<_> = self.skills.list();
-        if !skills.is_empty() {
-            prompt.push_str(
-                "\n\n# Available Skills\n\nThe user can invoke these skills with `/skillname`:\n",
-            );
-            for skill in &skills {
-                prompt.push_str(&format!("\n- `/{} ` - {}", skill.name, skill.description));
-            }
-            prompt.push_str("\n\n**CRITICAL**: When the user mentions ANY skill (e.g., \"/firefox-browser\", \"use firefox-browser\", \"firefox skill\"), you MUST IMMEDIATELY call the `skill_manage` tool with `{\"action\": \"load\", \"name\": \"firefox-browser\"}` BEFORE doing anything else. The skill contains instructions you need. Never say you don't have access - always load the skill first.");
-        }
+        // Get working directory from session for context loading
+        let working_dir = self
+            .session
+            .working_dir
+            .as_ref()
+            .map(|s| std::path::PathBuf::from(s));
 
-        if let Some(memory) = memory_prompt {
-            prompt.push_str("\n\n");
-            prompt.push_str(memory);
-        }
-
-        // Add active skill prompt
-        if let Some(ref skill_name) = self.active_skill {
-            if let Some(skill) = self.skills.get(skill_name) {
-                prompt.push_str("\n\n");
-                prompt.push_str(&skill.get_prompt());
-            }
-        }
+        // Use the full prompt builder which loads CLAUDE.md from the session's working directory
+        let (prompt, _context_info) = crate::prompt::build_system_prompt_full(
+            skill_prompt.as_deref(),
+            &available_skills,
+            self.session.is_canary,
+            memory_prompt,
+            working_dir.as_deref(),
+        );
 
         prompt
     }
@@ -537,6 +504,11 @@ impl Agent {
     /// Restore a session by ID (loads from disk)
     pub fn restore_session(&mut self, session_id: &str) -> Result<()> {
         let session = Session::load(session_id)?;
+        logging::info(&format!(
+            "Restoring session '{}' with {} messages",
+            session_id,
+            session.messages.len()
+        ));
         self.session = session;
         self.active_skill = None;
         // Don't restore provider_session_id - it's not valid across process restarts
@@ -553,6 +525,10 @@ impl Agent {
         }
         self.session.mark_active();
         self.seed_compaction_from_session();
+        logging::info(&format!(
+            "Session restored: {} messages in session",
+            self.session.messages.len()
+        ));
         Ok(())
     }
 
