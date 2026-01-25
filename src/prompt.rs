@@ -137,6 +137,17 @@ pub fn build_system_prompt_with_context_and_memory(
     is_selfdev: bool,
     memory_prompt: Option<&str>,
 ) -> (String, ContextInfo) {
+    build_system_prompt_full(skill_prompt, available_skills, is_selfdev, memory_prompt, None)
+}
+
+/// Build the full system prompt with working directory support for loading context files
+pub fn build_system_prompt_full(
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+    memory_prompt: Option<&str>,
+    working_dir: Option<&Path>,
+) -> (String, ContextInfo) {
     let mut parts = vec![DEFAULT_SYSTEM_PROMPT.to_string()];
     let mut info = ContextInfo::default();
 
@@ -155,8 +166,8 @@ pub fn build_system_prompt_with_context_and_memory(
         parts.push(selfdev_prompt);
     }
 
-    // Add AGENTS.md and CLAUDE.md instructions with tracking
-    let (md_content, md_info) = load_claude_md_files_with_info();
+    // Add AGENTS.md and CLAUDE.md instructions with tracking (from working_dir or cwd)
+    let (md_content, md_info) = load_claude_md_files_from_dir(working_dir);
     if let Some(content) = md_content {
         parts.push(content);
     }
@@ -331,6 +342,11 @@ fn load_claude_md_files() -> Option<String> {
 
 /// Load AGENTS.md and CLAUDE.md files with tracking info
 fn load_claude_md_files_with_info() -> (Option<String>, ContextInfo) {
+    load_claude_md_files_from_dir(None)
+}
+
+/// Load AGENTS.md and CLAUDE.md files from a specific working directory
+pub fn load_claude_md_files_from_dir(working_dir: Option<&Path>) -> (Option<String>, ContextInfo) {
     let mut contents = vec![];
     let mut info = ContextInfo::default();
 
@@ -347,17 +363,18 @@ fn load_claude_md_files_with_info() -> (Option<String>, ContextInfo) {
         }
     };
 
-    // Project-level files (current directory)
+    // Project-level files (from specified working directory or current directory)
     // AGENTS.md first (generic), then CLAUDE.md (Claude-specific)
+    let project_dir = working_dir.unwrap_or(Path::new("."));
     if let Some((content, size)) =
-        load_file(Path::new("AGENTS.md"), "Project Instructions (AGENTS.md)")
+        load_file(&project_dir.join("AGENTS.md"), "Project Instructions (AGENTS.md)")
     {
         info.has_project_agents_md = true;
         info.project_agents_md_chars = size;
         contents.push(content);
     }
     if let Some((content, size)) =
-        load_file(Path::new("CLAUDE.md"), "Project Instructions (CLAUDE.md)")
+        load_file(&project_dir.join("CLAUDE.md"), "Project Instructions (CLAUDE.md)")
     {
         info.has_project_claude_md = true;
         info.project_claude_md_chars = size;
