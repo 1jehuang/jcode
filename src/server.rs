@@ -522,6 +522,16 @@ impl Server {
             monitor_selfdev_signals().await;
         });
 
+        // Log when we receive SIGTERM for debugging
+        #[cfg(unix)]
+        tokio::spawn(async {
+            use tokio::signal::unix::{signal, SignalKind};
+            if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+                sigterm.recv().await;
+                crate::logging::info("Server received SIGTERM, shutting down gracefully");
+            }
+        });
+
         // Spawn the bus monitor for swarm coordination
         let monitor_file_touches = Arc::clone(&self.file_touches);
         let monitor_swarm_members = Arc::clone(&self.swarm_members);
@@ -737,7 +747,7 @@ async fn handle_client(
 
     // Create a new session for this client
     let mut new_agent = Agent::new(Arc::clone(&provider), registry.clone());
-    let client_session_id = new_agent.session_id().to_string();
+    let mut client_session_id = new_agent.session_id().to_string();
     let friendly_name = new_agent.session_short_name().map(|s| s.to_string());
 
     {
@@ -805,10 +815,9 @@ async fn handle_client(
         }
     });
 
-    // Send initial session ID to client
-    let _ = client_event_tx.send(ServerEvent::SessionId {
-        session_id: client_session_id.clone(),
-    });
+    // Note: Don't send initial SessionId here - it's sent by the Subscribe handler
+    // Sending it via the channel causes race conditions where it can arrive after
+    // other events (like History) that are written directly to the socket.
 
     // Set up client debug command channel
     // This client becomes the "active" debug client that receives client: commands
@@ -1002,16 +1011,45 @@ async fn handle_client(
 
             Request::Subscribe {
                 id,
-                working_dir,
+                working_dir: subscribe_working_dir,
                 selfdev,
             } => {
+                // Update session working directory from client's cwd
+                if let Some(ref dir) = subscribe_working_dir {
+                    let mut agent_guard = agent.lock().await;
+                    agent_guard.set_working_dir(dir);
+                    drop(agent_guard);
+
+                    // Update swarm member's working directory
+                    let new_path = PathBuf::from(dir);
+                    let mut members = swarm_members.write().await;
+                    if let Some(member) = members.get_mut(&client_session_id) {
+                        // Remove from old swarm
+                        if let Some(ref old_cwd) = member.working_dir {
+                            let mut swarms = swarms_by_cwd.write().await;
+                            if let Some(swarm) = swarms.get_mut(old_cwd) {
+                                swarm.remove(&client_session_id);
+                                if swarm.is_empty() {
+                                    swarms.remove(old_cwd);
+                                }
+                            }
+                            // Add to new swarm
+                            swarms
+                                .entry(new_path.clone())
+                                .or_insert_with(HashSet::new)
+                                .insert(client_session_id.clone());
+                        }
+                        member.working_dir = Some(new_path);
+                    }
+                }
+
                 let mut should_selfdev = client_selfdev;
                 if matches!(selfdev, Some(true)) {
                     should_selfdev = true;
                 }
 
                 if !should_selfdev {
-                    if let Some(ref dir) = working_dir {
+                    if let Some(ref dir) = subscribe_working_dir {
                         let path = PathBuf::from(dir);
                         if is_jcode_repo_or_parent(&path) {
                             should_selfdev = true;
@@ -1029,12 +1067,9 @@ async fn handle_client(
                     registry.register_selfdev_tools().await;
                 }
 
-                // Send this client's session ID
-                let json = encode_event(&ServerEvent::SessionId {
-                    session_id: client_session_id.clone(),
-                });
-                let mut w = writer.lock().await;
-                w.write_all(json.as_bytes()).await?;
+                // Note: Don't send SessionId here - it's included in the History response
+                // from GetHistory. Sending it here causes race conditions when ResumeSession
+                // is also called, as client_session_id may not yet be updated.
                 let _ = client_event_tx.send(ServerEvent::Done { id });
             }
 
@@ -1140,6 +1175,9 @@ async fn handle_client(
 
                 match result {
                     Ok(()) => {
+                        // Update client_session_id to match the restored session
+                        client_session_id = session_id.clone();
+
                         // Send updated history to client
                         let (messages, is_canary, provider_name, provider_model, available_models) = {
                             let agent_guard = agent.lock().await;

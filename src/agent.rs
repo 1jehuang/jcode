@@ -99,12 +99,20 @@ impl Agent {
     }
 
     fn seed_compaction_from_session(&mut self) {
+        logging::info(&format!(
+            "seed_compaction_from_session: session has {} messages",
+            self.session.messages.len()
+        ));
         let compaction = self.registry.compaction();
         let mut manager = compaction.try_write().expect("compaction lock");
         manager.reset();
         for msg in &self.session.messages {
             manager.add_message(msg.to_message());
         }
+        logging::info(&format!(
+            "seed_compaction_from_session: seeded compaction with {} messages",
+            self.session.messages.len()
+        ));
     }
 
     fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {
@@ -126,8 +134,9 @@ impl Agent {
                     let messages = manager.messages_for_api();
                     let event = manager.take_compaction_event();
                     logging::info(&format!(
-                        "messages_for_provider (compaction): returning {} messages",
-                        messages.len()
+                        "messages_for_provider (compaction): returning {} messages, roles: {:?}",
+                        messages.len(),
+                        messages.iter().map(|m| format!("{:?}", m.role)).collect::<Vec<_>>()
                     ));
                     return (messages, event);
                 }
@@ -138,8 +147,9 @@ impl Agent {
         }
         let messages = self.session.messages_for_provider();
         logging::info(&format!(
-            "messages_for_provider (session): returning {} messages",
-            messages.len()
+            "messages_for_provider (session): returning {} messages, roles: {:?}",
+            messages.len(),
+            messages.iter().map(|m| format!("{:?}", m.role)).collect::<Vec<_>>()
         ));
         (messages, None)
     }
@@ -265,6 +275,17 @@ impl Agent {
     /// Get the short/friendly name for this session (e.g., "fox")
     pub fn session_short_name(&self) -> Option<&str> {
         self.session.short_name.as_deref()
+    }
+
+    /// Set the working directory for this session
+    pub fn set_working_dir(&mut self, dir: &str) {
+        self.session.working_dir = Some(dir.to_string());
+        let _ = self.session.save();
+    }
+
+    /// Get the working directory for this session
+    pub fn working_dir(&self) -> Option<&str> {
+        self.session.working_dir.as_deref()
     }
 
     /// Run a single turn with the given user message
@@ -505,14 +526,15 @@ impl Agent {
     pub fn restore_session(&mut self, session_id: &str) -> Result<()> {
         let session = Session::load(session_id)?;
         logging::info(&format!(
-            "Restoring session '{}' with {} messages",
+            "Restoring session '{}' with {} messages, provider_session_id: {:?}",
             session_id,
-            session.messages.len()
+            session.messages.len(),
+            session.provider_session_id
         ));
+        // Restore provider_session_id for Claude CLI session resume
+        self.provider_session_id = session.provider_session_id.clone();
         self.session = session;
         self.active_skill = None;
-        // Don't restore provider_session_id - it's not valid across process restarts
-        self.provider_session_id = None;
         if let Some(model) = self.session.model.clone() {
             if let Err(e) = self.provider.set_model(&model) {
                 logging::error(&format!(
@@ -524,6 +546,11 @@ impl Agent {
             self.session.model = Some(self.provider.model());
         }
         self.session.mark_active();
+        logging::info(&format!(
+            "restore_session: loaded session {} with {} messages, calling seed_compaction",
+            session_id,
+            self.session.messages.len()
+        ));
         self.seed_compaction_from_session();
         logging::info(&format!(
             "Session restored: {} messages in session",
@@ -642,11 +669,26 @@ impl Agent {
             let tools = self.tool_definitions().await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_prompt = self.build_memory_prompt_nonblocking(&messages);
-            let system_prompt = self.build_system_prompt(memory_prompt.as_deref());
+            // Don't pass memory to system prompt - inject as message instead for better caching
+            let system_prompt = self.build_system_prompt(None);
+
+            // Inject memory as a user message at the end (preserves cache prefix)
+            let mut messages_with_memory = messages;
+            if let Some(ref memory) = memory_prompt {
+                logging::info(&format!(
+                    "Memory injected as message ({} chars)",
+                    memory.len()
+                ));
+                let memory_msg = format!(
+                    "<system-reminder>\n{}\n</system-reminder>",
+                    memory
+                );
+                messages_with_memory.push(Message::user(&memory_msg));
+            }
 
             logging::info(&format!(
                 "API call starting: {} messages, {} tools",
-                messages.len(),
+                messages_with_memory.len(),
                 tools.len()
             ));
             let api_start = Instant::now();
@@ -660,7 +702,7 @@ impl Agent {
             let mut stream = self
                 .provider
                 .complete(
-                    &messages,
+                    &messages_with_memory,
                     &tools,
                     &system_prompt,
                     self.provider_session_id.as_deref(),
@@ -823,7 +865,8 @@ impl Agent {
                         if trace {
                             eprintln!("[trace] session_id {}", sid);
                         }
-                        self.provider_session_id = Some(sid);
+                        self.provider_session_id = Some(sid.clone());
+                        self.session.provider_session_id = Some(sid);
                         // We've received session_id, can exit the loop now
                         if saw_message_end {
                             break;
@@ -1161,12 +1204,25 @@ impl Agent {
             let tools = self.tool_definitions().await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_prompt = self.build_memory_prompt_nonblocking(&messages);
-            let system_prompt = self.build_system_prompt(memory_prompt.as_deref());
+            // Don't pass memory to system prompt - inject as message instead for better caching
+            let system_prompt = self.build_system_prompt(None);
+
+            // Inject memory as a user message at the end (preserves cache prefix)
+            let mut messages_with_memory = messages;
+            if let Some(ref memory) = memory_prompt {
+                let memory_count = memory.matches("\n-").count().max(1);
+                let _ = event_tx.send(ServerEvent::MemoryInjected { count: memory_count });
+                let memory_msg = format!(
+                    "<system-reminder>\n{}\n</system-reminder>",
+                    memory
+                );
+                messages_with_memory.push(Message::user(&memory_msg));
+            }
 
             let mut stream = self
                 .provider
                 .complete(
-                    &messages,
+                    &messages_with_memory,
                     &tools,
                     &system_prompt,
                     self.provider_session_id.as_deref(),
@@ -1284,6 +1340,7 @@ impl Agent {
                     StreamEvent::MessageEnd { .. } => {}
                     StreamEvent::SessionId(sid) => {
                         self.provider_session_id = Some(sid.clone());
+                        self.session.provider_session_id = Some(sid.clone());
                         let _ = event_tx.send(ServerEvent::SessionId { session_id: sid });
                     }
                     StreamEvent::Compaction { .. } => {}
@@ -1395,9 +1452,20 @@ impl Agent {
 
             // Execute tools and add results
             let tool_count = tool_calls.len();
-            for (tool_index, tc) in tool_calls.into_iter().enumerate() {
+            for tool_index in 0..tool_count {
                 // === INJECTION POINT C (before): Check for urgent abort before each tool (except first) ===
                 if tool_index > 0 && self.has_urgent_interrupt() {
+                    // Add tool_results for all remaining skipped tools to maintain valid history
+                    for skipped_tc in &tool_calls[tool_index..] {
+                        self.add_message(
+                            Role::User,
+                            vec![ContentBlock::ToolResult {
+                                tool_use_id: skipped_tc.id.clone(),
+                                content: "[Skipped: user interrupted]".to_string(),
+                                is_error: Some(true),
+                            }],
+                        );
+                    }
                     let tools_remaining = tool_count - tool_index;
                     if let Some(content) = self.inject_soft_interrupts() {
                         let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
@@ -1416,10 +1484,11 @@ impl Agent {
                                 cache_control: None,
                             }],
                         );
-                        let _ = self.session.save();
                     }
+                    let _ = self.session.save();
                     break; // Skip remaining tools
                 }
+                let tc = &tool_calls[tool_index];
 
                 if tc.name == "selfdev" && !self.session.is_canary {
                     return Err(anyhow::anyhow!(
@@ -1445,7 +1514,7 @@ impl Agent {
                         self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id,
+                                tool_use_id: tc.id.clone(),
                                 content: sdk_content,
                                 is_error: if sdk_is_error { Some(true) } else { None },
                             }],
@@ -1493,7 +1562,7 @@ impl Agent {
                         self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id,
+                                tool_use_id: tc.id.clone(),
                                 content: output.output,
                                 is_error: None,
                             }],
@@ -1512,7 +1581,7 @@ impl Agent {
                         self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id,
+                                tool_use_id: tc.id.clone(),
                                 content: error_msg,
                                 is_error: Some(true),
                             }],
@@ -1569,12 +1638,25 @@ impl Agent {
             let tools = self.tool_definitions().await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_prompt = self.build_memory_prompt_nonblocking(&messages);
-            let system_prompt = self.build_system_prompt(memory_prompt.as_deref());
+            // Don't pass memory to system prompt - inject as message instead for better caching
+            let system_prompt = self.build_system_prompt(None);
+
+            // Inject memory as a user message at the end (preserves cache prefix)
+            let mut messages_with_memory = messages;
+            if let Some(ref memory) = memory_prompt {
+                let memory_count = memory.matches("\n-").count().max(1);
+                let _ = event_tx.send(ServerEvent::MemoryInjected { count: memory_count });
+                let memory_msg = format!(
+                    "<system-reminder>\n{}\n</system-reminder>",
+                    memory
+                );
+                messages_with_memory.push(Message::user(&memory_msg));
+            }
 
             let mut stream = self
                 .provider
                 .complete(
-                    &messages,
+                    &messages_with_memory,
                     &tools,
                     &system_prompt,
                     self.provider_session_id.as_deref(),
@@ -1689,6 +1771,7 @@ impl Agent {
                     StreamEvent::MessageEnd { .. } => {}
                     StreamEvent::SessionId(sid) => {
                         self.provider_session_id = Some(sid.clone());
+                        self.session.provider_session_id = Some(sid.clone());
                         let _ = event_tx.send(ServerEvent::SessionId { session_id: sid });
                     }
                     StreamEvent::Compaction { .. } => {}
@@ -1797,9 +1880,20 @@ impl Agent {
 
             // Execute tools and add results
             let tool_count = tool_calls.len();
-            for (tool_index, tc) in tool_calls.into_iter().enumerate() {
+            for tool_index in 0..tool_count {
                 // === INJECTION POINT C (before): Check for urgent abort before each tool (except first) ===
                 if tool_index > 0 && self.has_urgent_interrupt() {
+                    // Add tool_results for all remaining skipped tools to maintain valid history
+                    for skipped_tc in &tool_calls[tool_index..] {
+                        self.add_message(
+                            Role::User,
+                            vec![ContentBlock::ToolResult {
+                                tool_use_id: skipped_tc.id.clone(),
+                                content: "[Skipped: user interrupted]".to_string(),
+                                is_error: Some(true),
+                            }],
+                        );
+                    }
                     let tools_remaining = tool_count - tool_index;
                     if let Some(content) = self.inject_soft_interrupts() {
                         let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
@@ -1818,10 +1912,11 @@ impl Agent {
                                 cache_control: None,
                             }],
                         );
-                        let _ = self.session.save();
                     }
+                    let _ = self.session.save();
                     break; // Skip remaining tools
                 }
+                let tc = &tool_calls[tool_index];
 
                 if tc.name == "selfdev" && !self.session.is_canary {
                     return Err(anyhow::anyhow!(
@@ -1846,7 +1941,7 @@ impl Agent {
                         self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id,
+                                tool_use_id: tc.id.clone(),
                                 content: sdk_content,
                                 is_error: if sdk_is_error { Some(true) } else { None },
                             }],
@@ -1893,7 +1988,7 @@ impl Agent {
                         self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id,
+                                tool_use_id: tc.id.clone(),
                                 content: output.output,
                                 is_error: None,
                             }],
@@ -1912,7 +2007,7 @@ impl Agent {
                         self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id,
+                                tool_use_id: tc.id.clone(),
                                 content: error_msg,
                                 is_error: Some(true),
                             }],
