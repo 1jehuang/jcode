@@ -139,9 +139,22 @@ pub struct BackgroundInfo {
     pub memory_agent_turns: usize,
 }
 
+/// Which provider the usage info is for
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UsageProvider {
+    #[default]
+    None,
+    /// Anthropic/Claude OAuth
+    Anthropic,
+    /// OpenAI/Codex OAuth
+    OpenAI,
+}
+
 /// Subscription usage info for the info widget
 #[derive(Debug, Default, Clone)]
 pub struct UsageInfo {
+    /// Which provider this usage is for
+    pub provider: UsageProvider,
     /// Five-hour window utilization (0.0-1.0)
     pub five_hour: f32,
     /// Seven-day window utilization (0.0-1.0)

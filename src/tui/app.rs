@@ -6817,15 +6817,24 @@ impl super::TuiState for App {
             }
         };
 
-        // Gather subscription usage info
+        // Gather subscription usage info (only for OAuth providers)
         let usage_info = {
-            let usage = crate::usage::get_sync();
-            if usage.fetched_at.is_some() {
-                Some(super::info_widget::UsageInfo {
-                    five_hour: usage.five_hour,
-                    seven_day: usage.seven_day,
-                    available: true,
-                })
+            // Check if current provider uses OAuth (Anthropic OAuth or OpenAI Codex)
+            let provider_name = self.provider.name().to_lowercase();
+            let is_oauth_provider = provider_name.contains("anthropic") || provider_name.contains("claude");
+
+            if is_oauth_provider {
+                let usage = crate::usage::get_sync();
+                if usage.fetched_at.is_some() {
+                    Some(super::info_widget::UsageInfo {
+                        provider: super::info_widget::UsageProvider::Anthropic,
+                        five_hour: usage.five_hour,
+                        seven_day: usage.seven_day,
+                        available: true,
+                    })
+                } else {
+                    None
+                }
             } else {
                 None
             }
