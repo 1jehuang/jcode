@@ -448,22 +448,31 @@ async fn discover_links(manager: &MemoryManager, memory_ids: &[String]) -> Resul
 fn boost_memory_confidence(manager: &MemoryManager, memory_id: &str, amount: f32) -> Result<()> {
     // Load project graph first
     let mut graph = manager.load_project_graph()?;
-    if let Some(entry) = graph.get_memory_mut(memory_id) {
-        // Boost access count and touch timestamp
-        entry.access_count += 1;
-        entry.updated_at = chrono::Utc::now();
-        // Note: We don't have a confidence field in MemoryEntry yet,
-        // so we use access_count as a proxy for confidence
-        manager.save_project_graph(&graph)?;
+    if graph.get_memory(memory_id).is_some() {
+        if let Some(entry) = graph.get_memory_mut(memory_id) {
+            entry.boost_confidence(amount);
+            let conf = entry.confidence;
+            manager.save_project_graph(&graph)?;
+            crate::logging::info(&format!(
+                "Boosted confidence for {} to {:.2}",
+                memory_id, conf
+            ));
+        }
         return Ok(());
     }
 
     // Try global
     let mut graph = manager.load_global_graph()?;
-    if let Some(entry) = graph.get_memory_mut(memory_id) {
-        entry.access_count += 1;
-        entry.updated_at = chrono::Utc::now();
-        manager.save_global_graph(&graph)?;
+    if graph.get_memory(memory_id).is_some() {
+        if let Some(entry) = graph.get_memory_mut(memory_id) {
+            entry.boost_confidence(amount);
+            let conf = entry.confidence;
+            manager.save_global_graph(&graph)?;
+            crate::logging::info(&format!(
+                "Boosted confidence for {} to {:.2}",
+                memory_id, conf
+            ));
+        }
         return Ok(());
     }
 
@@ -471,18 +480,38 @@ fn boost_memory_confidence(manager: &MemoryManager, memory_id: &str, amount: f32
 }
 
 /// Decay a memory's confidence score
-fn decay_memory_confidence(manager: &MemoryManager, memory_id: &str, _amount: f32) -> Result<()> {
-    // For now, we don't have a confidence field to decay
-    // The scoring function already handles recency decay via updated_at
-    // In the future, we could add a confidence field and decay it here
+fn decay_memory_confidence(manager: &MemoryManager, memory_id: &str, amount: f32) -> Result<()> {
+    // Load project graph first
+    let mut graph = manager.load_project_graph()?;
+    if graph.get_memory(memory_id).is_some() {
+        if let Some(entry) = graph.get_memory_mut(memory_id) {
+            entry.decay_confidence(amount);
+            let conf = entry.confidence;
+            manager.save_project_graph(&graph)?;
+            crate::logging::info(&format!(
+                "Decayed confidence for {} to {:.2}",
+                memory_id, conf
+            ));
+        }
+        return Ok(());
+    }
 
-    // Just log that we would decay
-    crate::logging::info(&format!(
-        "Would decay confidence for memory {} (not implemented yet)",
-        memory_id
-    ));
+    // Try global
+    let mut graph = manager.load_global_graph()?;
+    if graph.get_memory(memory_id).is_some() {
+        if let Some(entry) = graph.get_memory_mut(memory_id) {
+            entry.decay_confidence(amount);
+            let conf = entry.confidence;
+            manager.save_global_graph(&graph)?;
+            crate::logging::info(&format!(
+                "Decayed confidence for {} to {:.2}",
+                memory_id, conf
+            ));
+        }
+        return Ok(());
+    }
 
-    Ok(())
+    Err(anyhow::anyhow!("Memory not found: {}", memory_id))
 }
 
 /// Result from session search
