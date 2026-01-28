@@ -1136,19 +1136,11 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
         )]));
     }
 
-    // Debug: show widget availability
-    let available = data.available_widgets();
-    let available_names: Vec<&str> = available.iter().map(|k| match k {
-        WidgetKind::Todos => "T",
-        WidgetKind::ContextUsage => "C",
-        WidgetKind::MemoryActivity => "M",
-        WidgetKind::SwarmStatus => "S",
-        WidgetKind::BackgroundTasks => "B",
-        WidgetKind::UsageLimits => "U",
-        WidgetKind::ModelInfo => "I",
-    }).collect();
+    // Debug: show widget count (available / total possible)
+    let available = data.available_widgets().len();
+    let total = WidgetKind::all_by_priority().len();
     lines.push(Line::from(vec![Span::styled(
-        format!("widgets: {}", available_names.join("")),
+        format!("{}/{} widgets", available, total),
         Style::default().fg(Color::Rgb(100, 100, 110)),
     )]));
 
