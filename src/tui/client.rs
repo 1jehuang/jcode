@@ -222,17 +222,35 @@ impl ClientApp {
                     // Reconnecting after disconnect
                     reconnect_attempts += 1;
                     if reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
+                        // Build disconnect message with session resume hint
+                        let session_name = self.session_id.as_ref().and_then(|id| {
+                            crate::id::extract_session_name(id)
+                        });
+
+                        let error_reason = format!("Connection error: {}", e);
+                        let resume_hint = if let Some(name) = session_name {
+                            format!(
+                                "\n\nTo resume this session later:\n  jcode --resume {}",
+                                name
+                            )
+                        } else {
+                            String::new()
+                        };
+
                         self.push_display_message(DisplayMessage {
                             role: "error".to_string(),
-                            content: "Failed to reconnect after 30 seconds. Press Ctrl+C to quit."
-                                .to_string(),
+                            content: format!(
+                                "Failed to reconnect after 30 seconds.\n\nReason: {}{}\n\nPress Ctrl+C to quit. You can still scroll with Alt+K/J.",
+                                error_reason, resume_hint
+                            ),
                             tool_calls: Vec::new(),
                             duration_secs: None,
                             title: None,
                             tool_data: None,
                         });
                         terminal.draw(|frame| super::ui::draw(frame, &self))?;
-                        // Wait for quit
+
+                        // Allow scrolling while waiting for quit
                         loop {
                             if let Some(Ok(Event::Key(key))) = event_stream.next().await {
                                 if key.kind == KeyEventKind::Press {
@@ -240,6 +258,42 @@ impl ClientApp {
                                         && key.modifiers.contains(KeyModifiers::CONTROL)
                                     {
                                         break 'outer;
+                                    }
+                                    // Handle scroll keys (Alt+K/J/U/D) in disconnected state
+                                    if key.modifiers.contains(KeyModifiers::ALT) {
+                                        let max_estimate = self.display_messages.len() * 100
+                                            + self.streaming_text.len();
+                                        match key.code {
+                                            KeyCode::Char('k') => {
+                                                // Scroll up one line
+                                                self.scroll_offset =
+                                                    (self.scroll_offset + 1).min(max_estimate);
+                                                terminal
+                                                    .draw(|frame| super::ui::draw(frame, &self))?;
+                                            }
+                                            KeyCode::Char('j') => {
+                                                // Scroll down one line
+                                                self.scroll_offset =
+                                                    self.scroll_offset.saturating_sub(1);
+                                                terminal
+                                                    .draw(|frame| super::ui::draw(frame, &self))?;
+                                            }
+                                            KeyCode::Char('u') => {
+                                                // Scroll up half page (10 lines)
+                                                self.scroll_offset =
+                                                    (self.scroll_offset + 10).min(max_estimate);
+                                                terminal
+                                                    .draw(|frame| super::ui::draw(frame, &self))?;
+                                            }
+                                            KeyCode::Char('d') => {
+                                                // Scroll down half page (10 lines)
+                                                self.scroll_offset =
+                                                    self.scroll_offset.saturating_sub(10);
+                                                terminal
+                                                    .draw(|frame| super::ui::draw(frame, &self))?;
+                                            }
+                                            _ => {}
+                                        }
                                     }
                                 }
                             }

@@ -6,7 +6,7 @@
 use crate::id::session_icon;
 use crate::message::{ContentBlock, Role};
 use crate::registry::{self, ServerInfo};
-use crate::session::{Session, SessionStatus};
+use crate::session::{self, CrashedSessionsInfo, Session, SessionStatus};
 use crate::storage;
 use crate::tui::markdown;
 use anyhow::Result;
@@ -343,6 +343,8 @@ pub struct SessionPicker {
     auto_scroll_preview: bool,
     /// Number of running servers
     server_count: usize,
+    /// Crashed sessions pending batch restore
+    crashed_sessions: Option<CrashedSessionsInfo>,
 }
 
 impl SessionPicker {
@@ -355,6 +357,10 @@ impl SessionPicker {
         if !sessions.is_empty() {
             list_state.select(Some(0));
         }
+
+        // Check for crashed sessions
+        let crashed_sessions = session::detect_crashed_sessions().ok().flatten();
+
         Self {
             items,
             sessions,
@@ -363,6 +369,7 @@ impl SessionPicker {
             scroll_offset: 0,
             auto_scroll_preview: true,
             server_count: 0,
+            crashed_sessions,
         }
     }
 
@@ -416,6 +423,9 @@ impl SessionPicker {
             list_state.select(Some(idx));
         }
 
+        // Check for crashed sessions
+        let crashed_sessions = session::detect_crashed_sessions().ok().flatten();
+
         Self {
             items,
             sessions: all_sessions,
@@ -424,6 +434,7 @@ impl SessionPicker {
             scroll_offset: 0,
             auto_scroll_preview: true,
             server_count,
+            crashed_sessions,
         }
     }
 
@@ -671,7 +682,7 @@ impl SessionPicker {
             })
             .collect();
 
-        // Title with server count
+        // Title with server count and help
         let title = if self.server_count > 0 {
             format!(
                 " {} servers · {} sessions (↑↓ nav, Enter select, Esc quit) ",
@@ -680,7 +691,7 @@ impl SessionPicker {
             )
         } else {
             format!(
-                " {} sessions (↑↓ navigate, Enter select, R restore crash, Esc quit) ",
+                " {} sessions (↑↓ navigate, Enter select, Esc quit) ",
                 self.sessions.len()
             )
         };
@@ -907,11 +918,95 @@ impl SessionPicker {
         frame.render_widget(paragraph, area);
     }
 
+    fn render_crash_banner(&self, frame: &mut Frame, area: Rect) {
+        const CRASH_BG: Color = Color::Rgb(60, 30, 30);
+        const CRASH_FG: Color = Color::Rgb(255, 140, 140);
+        const CRASH_ICON: Color = Color::Rgb(255, 100, 100);
+        const DIM: Color = Color::Rgb(180, 140, 140);
+
+        let Some(info) = &self.crashed_sessions else {
+            return;
+        };
+
+        let count = info.session_ids.len();
+        let names: String = info
+            .display_names
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let names_display = if count > 3 {
+            format!("{} (+{} more)", names, count - 3)
+        } else {
+            names
+        };
+
+        let ago = format_time_ago(info.most_recent_crash);
+
+        let line = Line::from(vec![
+            Span::styled(" 💥 ", Style::default().fg(CRASH_ICON).bg(CRASH_BG)),
+            Span::styled(
+                format!("{} crashed session{}", count, if count == 1 { "" } else { "s" }),
+                Style::default()
+                    .fg(CRASH_FG)
+                    .bg(CRASH_BG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" ({}) ", names_display),
+                Style::default().fg(DIM).bg(CRASH_BG),
+            ),
+            Span::styled(
+                format!("{} ", ago),
+                Style::default().fg(DIM).bg(CRASH_BG),
+            ),
+            Span::styled(
+                "— Press ",
+                Style::default().fg(DIM).bg(CRASH_BG),
+            ),
+            Span::styled(
+                "B",
+                Style::default()
+                    .fg(Color::White)
+                    .bg(CRASH_BG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " to batch restore ",
+                Style::default().fg(DIM).bg(CRASH_BG),
+            ),
+        ]);
+
+        // Fill the rest of the line with background
+        let paragraph = Paragraph::new(line).style(Style::default().bg(CRASH_BG));
+        frame.render_widget(paragraph, area);
+    }
+
     pub fn render(&mut self, frame: &mut Frame) {
+        let has_banner = self.crashed_sessions.is_some();
+
+        // If there's a crash banner, split vertically first
+        let (banner_area, main_area) = if has_banner {
+            let vertical = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(10)])
+                .split(frame.area());
+            (Some(vertical[0]), vertical[1])
+        } else {
+            (None, frame.area())
+        };
+
+        // Render banner if present
+        if let Some(area) = banner_area {
+            self.render_crash_banner(frame, area);
+        }
+
+        // Split main area horizontally for list and preview
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-            .split(frame.area());
+            .split(main_area);
 
         self.render_session_list(frame, chunks[0]);
         self.render_preview(frame, chunks[1]);
@@ -942,8 +1037,11 @@ impl SessionPicker {
                                 .selected_session()
                                 .map(|s| PickerResult::Selected(s.id.clone())));
                         }
-                        KeyCode::Char('R') => {
-                            break Ok(Some(PickerResult::RestoreAllCrashed));
+                        KeyCode::Char('R') | KeyCode::Char('B') | KeyCode::Char('b') => {
+                            // Only allow batch restore if there are crashed sessions
+                            if self.crashed_sessions.is_some() {
+                                break Ok(Some(PickerResult::RestoreAllCrashed));
+                            }
                         }
                         KeyCode::Down => {
                             if key.modifiers.contains(KeyModifiers::SHIFT) {
