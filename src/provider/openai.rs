@@ -13,7 +13,8 @@ use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
+use tokio_stream::wrappers::ReceiverStream;
 
 const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
 const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
@@ -21,6 +22,12 @@ const RESPONSES_PATH: &str = "responses";
 const DEFAULT_MODEL: &str = "gpt-5.2-codex";
 const ORIGINATOR: &str = "codex_cli_rs";
 const CHATGPT_INSTRUCTIONS: &str = include_str!("../prompts/gpt-5.1-codex-max_prompt.md");
+
+/// Maximum number of retries for transient errors
+const MAX_RETRIES: u32 = 3;
+
+/// Base delay for exponential backoff (in milliseconds)
+const RETRY_BASE_DELAY_MS: u64 = 1000;
 
 /// Available OpenAI/Codex models
 const AVAILABLE_MODELS: &[&str] = &["gpt-5.2-codex"];
@@ -583,56 +590,66 @@ impl Provider for OpenAIProvider {
             }
         }
 
-        let access_token = self.get_access_token().await?;
-        let response = self.send_request(&request, &access_token).await?;
+        // Create channel for streaming events
+        let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
-        if !response.status().is_success() {
-            let status = response.status();
-            // Extract retry-after header before consuming response
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok());
+        // Clone what we need for the async task
+        let client = self.client.clone();
+        let credentials = Arc::clone(&self.credentials);
 
-            let body = response.text().await.unwrap_or_default();
-            if should_refresh_token(status, &body) {
-                let refreshed_token = self.refresh_access_token().await?;
-                let retry = self.send_request(&request, &refreshed_token).await?;
-                if !retry.status().is_success() {
-                    let retry_status = retry.status();
-                    let retry_after = retry
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok());
-                    let retry_body = retry.text().await.unwrap_or_default();
-                    let msg = if status == StatusCode::TOO_MANY_REQUESTS {
-                        let wait_info = retry_after
-                            .map(|s| format!(" (retry after {}s)", s))
-                            .unwrap_or_default();
-                        format!("Rate limited{}: {}", wait_info, retry_body)
-                    } else {
-                        format!("OpenAI API error {}: {}", retry_status, retry_body)
-                    };
-                    anyhow::bail!("{}", msg);
+        // Spawn task to handle streaming with retry logic
+        tokio::spawn(async move {
+            let mut last_error = None;
+
+            for attempt in 0..MAX_RETRIES {
+                if attempt > 0 {
+                    // Exponential backoff: 1s, 2s, 4s
+                    let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    crate::logging::info(&format!(
+                        "Retrying OpenAI API request (attempt {}/{})",
+                        attempt + 1,
+                        MAX_RETRIES
+                    ));
                 }
-                let stream = OpenAIResponsesStream::new(retry.bytes_stream());
-                return Ok(Box::pin(stream));
-            }
-            let msg = if status == StatusCode::TOO_MANY_REQUESTS {
-                let wait_info = retry_after
-                    .map(|s| format!(" (retry after {}s)", s))
-                    .unwrap_or_default();
-                format!("Rate limited{}: {}", wait_info, body)
-            } else {
-                format!("OpenAI API error {}: {}", status, body)
-            };
-            anyhow::bail!("{}", msg);
-        }
 
-        let stream = OpenAIResponsesStream::new(response.bytes_stream());
-        Ok(Box::pin(stream))
+                match stream_response(
+                    client.clone(),
+                    Arc::clone(&credentials),
+                    request.clone(),
+                    tx.clone(),
+                )
+                .await
+                {
+                    Ok(()) => return, // Success
+                    Err(e) => {
+                        let error_str = e.to_string().to_lowercase();
+                        // Check if this is a transient/retryable error
+                        if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                            crate::logging::info(&format!("Transient error, will retry: {}", e));
+                            last_error = Some(e);
+                            continue;
+                        }
+                        // Non-retryable or final attempt
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                }
+            }
+
+            // All retries exhausted
+            if let Some(e) = last_error {
+                let _ = tx
+                    .send(Err(anyhow::anyhow!(
+                        "Failed after {} retries: {}",
+                        MAX_RETRIES,
+                        e
+                    )))
+                    .await;
+            }
+        });
+
+        Ok(Box::pin(ReceiverStream::new(rx)))
     }
 
     fn name(&self) -> &str {
@@ -690,6 +707,127 @@ impl Provider for OpenAIProvider {
     }
 }
 
+/// Stream the response from OpenAI API
+async fn stream_response(
+    client: Client,
+    credentials: Arc<RwLock<CodexCredentials>>,
+    request: Value,
+    tx: mpsc::Sender<Result<StreamEvent>>,
+) -> Result<()> {
+    // Get access token (with potential refresh)
+    let access_token = {
+        let tokens = credentials.read().await;
+        if tokens.access_token.is_empty() {
+            anyhow::bail!("OpenAI access token is empty");
+        }
+
+        // Check if token needs refresh
+        if let Some(expires_at) = tokens.expires_at {
+            let now = chrono::Utc::now().timestamp_millis();
+            if expires_at < now + 300_000 && !tokens.refresh_token.is_empty() {
+                drop(tokens);
+                // Refresh token
+                let mut tokens = credentials.write().await;
+                let refreshed = oauth::refresh_openai_tokens(&tokens.refresh_token).await?;
+                let id_token = refreshed
+                    .id_token
+                    .clone()
+                    .or_else(|| tokens.id_token.clone());
+                let account_id = tokens.account_id.clone();
+
+                *tokens = CodexCredentials {
+                    access_token: refreshed.access_token.clone(),
+                    refresh_token: refreshed.refresh_token,
+                    id_token,
+                    account_id,
+                    expires_at: Some(refreshed.expires_at),
+                };
+                refreshed.access_token
+            } else {
+                tokens.access_token.clone()
+            }
+        } else {
+            tokens.access_token.clone()
+        }
+    };
+
+    let creds = credentials.read().await;
+    let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
+    let url = if is_chatgpt_mode {
+        format!("{}/{}", CHATGPT_API_BASE.trim_end_matches('/'), RESPONSES_PATH)
+    } else {
+        format!("{}/{}", OPENAI_API_BASE.trim_end_matches('/'), RESPONSES_PATH)
+    };
+
+    let mut builder = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Content-Type", "application/json");
+
+    if is_chatgpt_mode {
+        builder = builder.header("originator", ORIGINATOR);
+        if let Some(account_id) = creds.account_id.as_ref() {
+            builder = builder.header("chatgpt-account-id", account_id);
+        }
+    }
+    drop(creds);
+
+    let response = builder
+        .json(&request)
+        .send()
+        .await
+        .context("Failed to send request to OpenAI API")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok());
+
+        let body = response.text().await.unwrap_or_default();
+
+        // Check if we need to refresh token
+        if should_refresh_token(status, &body) {
+            // Token refresh needed - this is a retryable error
+            anyhow::bail!("Token refresh needed: {}", body);
+        }
+
+        // For rate limits, include retry info in the error
+        let msg = if status == StatusCode::TOO_MANY_REQUESTS {
+            let wait_info = retry_after
+                .map(|s| format!(" (retry after {}s)", s))
+                .unwrap_or_default();
+            format!("Rate limited{}: {}", wait_info, body)
+        } else {
+            format!("OpenAI API error {}: {}", status, body)
+        };
+        anyhow::bail!("{}", msg);
+    }
+
+    // Stream the response
+    let mut stream = OpenAIResponsesStream::new(response.bytes_stream());
+
+    use futures::StreamExt;
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(event) => {
+                if tx.send(Ok(event)).await.is_err() {
+                    // Receiver dropped, stop streaming
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(Err(e)).await;
+                return Ok(());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn should_refresh_token(status: StatusCode, body: &str) -> bool {
     if status == StatusCode::UNAUTHORIZED {
         return true;
@@ -728,6 +866,27 @@ fn extract_error_with_retry(response: &Option<Value>) -> (String, Option<u64>) {
         .or_else(|| resp.get("retry_after").and_then(|v| v.as_u64()));
 
     (message, retry_after)
+}
+
+/// Check if an error is transient and should be retried
+fn is_retryable_error(error_str: &str) -> bool {
+    // Network/connection errors
+    error_str.contains("connection reset")
+        || error_str.contains("connection closed")
+        || error_str.contains("connection refused")
+        || error_str.contains("broken pipe")
+        || error_str.contains("timed out")
+        || error_str.contains("timeout")
+        // Stream/decode errors
+        || error_str.contains("error decoding")
+        || error_str.contains("error reading")
+        || error_str.contains("unexpected eof")
+        || error_str.contains("incomplete message")
+        // Server errors (5xx)
+        || error_str.contains("502 bad gateway")
+        || error_str.contains("503 service unavailable")
+        || error_str.contains("504 gateway timeout")
+        || error_str.contains("overloaded")
 }
 
 #[cfg(test)]
