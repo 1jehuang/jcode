@@ -202,14 +202,14 @@ impl ScrollKeys {
 pub fn load_scroll_keys() -> ScrollKeys {
     let cfg = config();
 
-    // Default to Alt+K/J for scroll - more terminal compatible than Ctrl+Shift
+    // Default to Ctrl+K/J for scroll (vim-style), Alt+U/D for page scroll
     let default_up = KeyBinding {
         code: KeyCode::Char('k'),
-        modifiers: KeyModifiers::ALT,
+        modifiers: KeyModifiers::CONTROL,
     };
     let default_down = KeyBinding {
         code: KeyCode::Char('j'),
-        modifiers: KeyModifiers::ALT,
+        modifiers: KeyModifiers::CONTROL,
     };
     let default_page_up = KeyBinding {
         code: KeyCode::Char('u'),
@@ -220,8 +220,8 @@ pub fn load_scroll_keys() -> ScrollKeys {
         modifiers: KeyModifiers::ALT,
     };
 
-    let (up, up_label) = parse_or_default(&cfg.keybindings.scroll_up, default_up, "Alt+K");
-    let (down, down_label) = parse_or_default(&cfg.keybindings.scroll_down, default_down, "Alt+J");
+    let (up, up_label) = parse_or_default(&cfg.keybindings.scroll_up, default_up, "Ctrl+K");
+    let (down, down_label) = parse_or_default(&cfg.keybindings.scroll_down, default_down, "Ctrl+J");
     let (page_up, page_up_label) =
         parse_or_default(&cfg.keybindings.scroll_page_up, default_page_up, "Alt+U");
     let (page_down, page_down_label) = parse_or_default(

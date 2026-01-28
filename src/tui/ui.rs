@@ -1666,7 +1666,6 @@ fn render_assistant_message(
 }
 
 fn render_tool_message(msg: &DisplayMessage, width: u16, show_diffs: bool) -> Vec<Line<'static>> {
-    let _ = width;
     let mut lines: Vec<Line<'static>> = Vec::new();
     let Some(ref tc) = msg.tool_data else {
         return lines;
@@ -1753,6 +1752,33 @@ fn render_tool_message(msg: &DisplayMessage, width: u16, show_diffs: bool) -> Ve
                 (result, true)
             };
 
+        // Calculate max line width for centering (like code blocks)
+        let max_content_width = display_lines
+            .iter()
+            .map(|l| l.prefix.chars().count() + l.content.chars().count())
+            .max()
+            .unwrap_or(0);
+        let header_width = 5; // "┌─ " + some label space
+        let block_width = header_width.max(max_content_width + 2).max(10); // +2 for "│ " prefix
+
+        // Calculate padding to center the block
+        let max_width = width as usize;
+        let padding = if block_width < max_width {
+            (max_width - block_width) / 2
+        } else {
+            0
+        };
+        let pad_str: String = " ".repeat(padding);
+
+        // Add diff block header
+        lines.push(
+            Line::from(Span::styled(
+                format!("{}┌─ diff", pad_str),
+                Style::default().fg(DIM_COLOR),
+            ))
+            .left_aligned(),
+        );
+
         let mut shown_truncation = false;
         let half_point = if truncated {
             MAX_DIFF_LINES / 2
@@ -1764,10 +1790,13 @@ fn render_tool_message(msg: &DisplayMessage, width: u16, show_diffs: bool) -> Ve
             // Show truncation marker at the midpoint
             if truncated && !shown_truncation && i >= half_point {
                 let skipped = total_changes - MAX_DIFF_LINES;
-                lines.push(Line::from(Span::styled(
-                    format!("... {} more changes ...", skipped),
-                    Style::default().fg(DIM_COLOR),
-                )));
+                lines.push(
+                    Line::from(Span::styled(
+                        format!("{}│ ... {} more changes ...", pad_str, skipped),
+                        Style::default().fg(DIM_COLOR),
+                    ))
+                    .left_aligned(),
+                );
                 shown_truncation = true;
             }
 
@@ -1778,10 +1807,11 @@ fn render_tool_message(msg: &DisplayMessage, width: u16, show_diffs: bool) -> Ve
             };
 
             // Build the line with syntax-highlighted content
-            let mut spans: Vec<Span<'static>> = vec![Span::styled(
-                line.prefix.clone(),
-                Style::default().fg(base_color),
-            )];
+            // Start with padding and box border
+            let mut spans: Vec<Span<'static>> = vec![
+                Span::styled(format!("{}│ ", pad_str), Style::default().fg(DIM_COLOR)),
+                Span::styled(line.prefix.clone(), Style::default().fg(base_color)),
+            ];
 
             // Apply syntax highlighting to content
             if !line.content.is_empty() {
@@ -1792,16 +1822,18 @@ fn render_tool_message(msg: &DisplayMessage, width: u16, show_diffs: bool) -> Ve
                 }
             }
 
-            lines.push(Line::from(spans));
+            lines.push(Line::from(spans).left_aligned());
         }
 
-        // Show summary if there were changes
-        if total_changes > 0 && truncated {
-            lines.push(Line::from(Span::styled(
-                format!("(+{} -{} total)", additions, deletions),
-                Style::default().fg(DIM_COLOR),
-            )));
-        }
+        // Add diff block footer
+        let footer = if total_changes > 0 && truncated {
+            format!("{}└─ (+{} -{} total)", pad_str, additions, deletions)
+        } else {
+            format!("{}└─", pad_str)
+        };
+        lines.push(
+            Line::from(Span::styled(footer, Style::default().fg(DIM_COLOR))).left_aligned(),
+        );
     }
 
     lines
