@@ -483,7 +483,109 @@ impl MemoryEntry {
 }
 ```
 
-### 7. Scope Levels
+### 7. Post-Retrieval Maintenance
+
+After serving memories to the main agent, the memory agent has valuable context it can use for background maintenance. This "opportunistic maintenance" happens asynchronously without blocking.
+
+```mermaid
+graph LR
+    subgraph "Retrieval Phase"
+        R1[Context Embedding]
+        R2[Similarity Search]
+        R3[Cascade BFS]
+        R4[Haiku Verify]
+        R5[Serve to Agent]
+    end
+
+    subgraph "Maintenance Phase (Background)"
+        M1[Link Discovery]
+        M2[Cluster Update]
+        M3[Confidence Boost]
+        M4[Gap Detection]
+    end
+
+    R5 --> M1
+    R5 --> M2
+    R5 --> M3
+    R5 --> M4
+
+    style M1 fill:#1f6feb
+    style M2 fill:#1f6feb
+    style M3 fill:#1f6feb
+    style M4 fill:#1f6feb
+```
+
+**Available Context:**
+- Current context embedding
+- All memories that were retrieved (initial hits + BFS expansion)
+- Which memories passed Haiku verification (actually relevant)
+- Which were rejected (retrieved but not relevant)
+- Co-occurrence patterns (memories that appear together)
+
+**Maintenance Tasks:**
+
+| Task | Trigger | Action |
+|------|---------|--------|
+| **Link Discovery** | 2+ memories verified relevant | Create/strengthen `RelatesTo` edges between co-relevant memories |
+| **Cluster Refinement** | Retrieved memories span clusters | Update cluster centroids, consider merging nearby clusters |
+| **Confidence Boost** | Memory verified relevant | Increment access count, boost confidence |
+| **Confidence Decay** | Memory retrieved but rejected | Slightly decay confidence (may be stale) |
+| **Gap Detection** | Context has no relevant memories | Log potential memory gap for later extraction |
+| **Tag Inference** | Multiple memories share context | Infer common tag from context if none exists |
+
+**Implementation:**
+
+```rust
+impl MemoryAgent {
+    /// Called after serving memories, runs maintenance in background
+    async fn post_retrieval_maintenance(&self, ctx: RetrievalContext) {
+        // Don't block - spawn maintenance tasks
+        tokio::spawn(async move {
+            // 1. Strengthen links between co-relevant memories
+            if ctx.verified_memories.len() >= 2 {
+                self.discover_links(&ctx.verified_memories, &ctx.embedding).await;
+            }
+
+            // 2. Boost confidence for verified memories
+            for mem_id in &ctx.verified_memories {
+                self.boost_confidence(mem_id).await;
+            }
+
+            // 3. Decay confidence for rejected memories
+            for mem_id in &ctx.rejected_memories {
+                self.decay_confidence(mem_id, 0.02).await;  // Gentle decay
+            }
+
+            // 4. Detect gaps (context had no relevant memories)
+            if ctx.verified_memories.is_empty() && ctx.initial_hits > 0 {
+                self.log_memory_gap(&ctx.embedding, &ctx.context_snippet).await;
+            }
+
+            // 5. Periodic cluster update (every N retrievals)
+            if self.retrieval_count.fetch_add(1, Ordering::Relaxed) % 50 == 0 {
+                self.update_clusters().await;
+            }
+        });
+    }
+}
+```
+
+**Gap Detection for Future Learning:**
+
+When retrieval finds no relevant memories but the context seems important, log it:
+
+```rust
+struct MemoryGap {
+    context_embedding: Vec<f32>,
+    context_snippet: String,
+    timestamp: DateTime<Utc>,
+    session_id: String,
+}
+```
+
+These gaps can be reviewed during end-of-session extraction to create new memories for topics the system didn't know about.
+
+### 8. Scope Levels
 
 Memories exist at different scopes:
 
@@ -653,7 +755,14 @@ memory { action: "tag", id: "...", tags: ["new", "tags"] }
 - [ ] Semantic link edges (RelatesTo, Supersedes, Contradicts)
 - [ ] Cascade retrieval algorithm
 
-### Phase 5: Advanced Features 📋
+### Phase 5: Post-Retrieval Maintenance 📋
+- [ ] Link discovery (co-relevant memories)
+- [ ] Confidence boost/decay on retrieval
+- [ ] Gap detection for missing knowledge
+- [ ] Periodic cluster refinement
+- [ ] Tag inference from context
+
+### Phase 6: Advanced Features 📋
 - [ ] Confidence decay system
 - [ ] Negative memories and trigger patterns
 - [ ] Procedural memory support
@@ -661,7 +770,7 @@ memory { action: "tag", id: "...", tags: ["new", "tags"] }
 - [ ] Feedback loops (strengthen/weaken)
 - [ ] Temporal awareness
 
-### Phase 6: Full Integration 📋
+### Phase 7: Full Integration 📋
 - [ ] End-of-session extraction
 - [ ] Consolidation on write
 - [ ] User control UI/CLI
