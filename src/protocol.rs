@@ -227,6 +227,13 @@ pub enum ServerEvent {
         tools_skipped: Option<usize>,
     },
 
+    /// Relevant memory was injected into the conversation
+    #[serde(rename = "memory_injected")]
+    MemoryInjected {
+        /// Number of memories injected
+        count: usize,
+    },
+
     /// Message/turn completed
     #[serde(rename = "done")]
     Done { id: u64 },
