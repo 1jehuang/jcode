@@ -218,6 +218,61 @@ enum Command {
         #[arg(short, long)]
         wait: bool,
     },
+
+    /// Memory management commands
+    #[command(subcommand)]
+    Memory(MemoryCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum MemoryCommand {
+    /// List all stored memories
+    List {
+        /// Filter by scope (project, global, all)
+        #[arg(short, long, default_value = "all")]
+        scope: String,
+
+        /// Filter by tag
+        #[arg(short, long)]
+        tag: Option<String>,
+    },
+
+    /// Search memories by query
+    Search {
+        /// Search query
+        query: String,
+
+        /// Use semantic search (embedding-based) instead of keyword
+        #[arg(short, long)]
+        semantic: bool,
+    },
+
+    /// Export memories to a JSON file
+    Export {
+        /// Output file path
+        output: String,
+
+        /// Export scope (project, global, all)
+        #[arg(short, long, default_value = "all")]
+        scope: String,
+    },
+
+    /// Import memories from a JSON file
+    Import {
+        /// Input file path
+        input: String,
+
+        /// Import scope (project, global)
+        #[arg(short, long, default_value = "project")]
+        scope: String,
+
+        /// Overwrite existing memories with same ID
+        #[arg(long)]
+        overwrite: bool,
+    },
+
+    /// Show memory statistics
+    Stats,
 }
 
 #[tokio::main]
@@ -360,6 +415,9 @@ async fn run_main(mut args: Args) -> Result<()> {
             wait,
         }) => {
             run_debug_command(&command, &arg, session, socket, wait).await?;
+        }
+        Some(Command::Memory(subcmd)) => {
+            run_memory_command(subcmd)?;
         }
         None => {
             // Auto-detect jcode repo and enable self-dev mode
@@ -849,6 +907,213 @@ async fn run_debug_command(
         _ => {
             // Print raw response
             println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+    }
+
+    Ok(())
+}
+
+/// Run memory management commands
+fn run_memory_command(cmd: MemoryCommand) -> Result<()> {
+    use memory::{MemoryEntry, MemoryManager};
+
+    let manager = MemoryManager::new();
+
+    match cmd {
+        MemoryCommand::List { scope, tag } => {
+            let mut all_memories: Vec<MemoryEntry> = Vec::new();
+
+            // Load based on scope
+            if scope == "all" || scope == "project" {
+                if let Ok(graph) = manager.load_project_graph() {
+                    all_memories.extend(graph.all_memories().cloned());
+                }
+            }
+            if scope == "all" || scope == "global" {
+                if let Ok(graph) = manager.load_global_graph() {
+                    all_memories.extend(graph.all_memories().cloned());
+                }
+            }
+
+            // Filter by tag if specified
+            if let Some(tag_filter) = tag {
+                all_memories.retain(|m| m.tags.contains(&tag_filter));
+            }
+
+            // Sort by updated_at descending
+            all_memories.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+            if all_memories.is_empty() {
+                println!("No memories found.");
+            } else {
+                println!("Found {} memories:\n", all_memories.len());
+                for entry in &all_memories {
+                    let tags_str = if entry.tags.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{}]", entry.tags.join(", "))
+                    };
+                    let conf = entry.effective_confidence();
+                    println!(
+                        "- [{}] {}{}\n  id: {} (conf: {:.0}%, accessed: {}x)",
+                        entry.category, entry.content, tags_str, entry.id,
+                        conf * 100.0, entry.access_count
+                    );
+                    println!();
+                }
+            }
+        }
+
+        MemoryCommand::Search { query, semantic } => {
+            if semantic {
+                // Semantic search using embeddings
+                match manager.find_similar(&query, 0.3, 20) {
+                    Ok(results) => {
+                        if results.is_empty() {
+                            println!("No memories found matching '{}'", query);
+                        } else {
+                            println!("Found {} memories matching '{}' (semantic):\n", results.len(), query);
+                            for (entry, score) in results {
+                                let tags_str = if entry.tags.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" [{}]", entry.tags.join(", "))
+                                };
+                                println!(
+                                    "- [{}] {}{}\n  id: {} (score: {:.0}%)",
+                                    entry.category, entry.content, tags_str, entry.id,
+                                    score * 100.0
+                                );
+                                println!();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Search failed: {}", e);
+                    }
+                }
+            } else {
+                // Keyword search
+                match manager.search(&query) {
+                    Ok(results) => {
+                        if results.is_empty() {
+                            println!("No memories found matching '{}'", query);
+                        } else {
+                            println!("Found {} memories matching '{}' (keyword):\n", results.len(), query);
+                            for entry in results {
+                                let tags_str = if entry.tags.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" [{}]", entry.tags.join(", "))
+                                };
+                                println!(
+                                    "- [{}] {}{}\n  id: {}",
+                                    entry.category, entry.content, tags_str, entry.id
+                                );
+                                println!();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Search failed: {}", e);
+                    }
+                }
+            }
+        }
+
+        MemoryCommand::Export { output, scope } => {
+            let mut all_memories: Vec<MemoryEntry> = Vec::new();
+
+            if scope == "all" || scope == "project" {
+                if let Ok(graph) = manager.load_project_graph() {
+                    all_memories.extend(graph.all_memories().cloned());
+                }
+            }
+            if scope == "all" || scope == "global" {
+                if let Ok(graph) = manager.load_global_graph() {
+                    all_memories.extend(graph.all_memories().cloned());
+                }
+            }
+
+            let json = serde_json::to_string_pretty(&all_memories)?;
+            std::fs::write(&output, json)?;
+            println!("Exported {} memories to {}", all_memories.len(), output);
+        }
+
+        MemoryCommand::Import { input, scope, overwrite } => {
+            let content = std::fs::read_to_string(&input)?;
+            let memories: Vec<MemoryEntry> = serde_json::from_str(&content)?;
+
+            let mut imported = 0;
+            let mut skipped = 0;
+
+            for entry in memories {
+                let result = if scope == "global" {
+                    if !overwrite {
+                        // Check if exists
+                        if let Ok(graph) = manager.load_global_graph() {
+                            if graph.get_memory(&entry.id).is_some() {
+                                skipped += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    manager.remember_global(entry)
+                } else {
+                    if !overwrite {
+                        if let Ok(graph) = manager.load_project_graph() {
+                            if graph.get_memory(&entry.id).is_some() {
+                                skipped += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    manager.remember_project(entry)
+                };
+
+                if result.is_ok() {
+                    imported += 1;
+                }
+            }
+
+            println!("Imported {} memories ({} skipped)", imported, skipped);
+        }
+
+        MemoryCommand::Stats => {
+            let mut project_count = 0;
+            let mut global_count = 0;
+            let mut total_tags = std::collections::HashSet::new();
+            let mut categories: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+            if let Ok(graph) = manager.load_project_graph() {
+                project_count = graph.memory_count();
+                for entry in graph.all_memories() {
+                    for tag in &entry.tags {
+                        total_tags.insert(tag.clone());
+                    }
+                    *categories.entry(entry.category.to_string()).or_default() += 1;
+                }
+            }
+
+            if let Ok(graph) = manager.load_global_graph() {
+                global_count = graph.memory_count();
+                for entry in graph.all_memories() {
+                    for tag in &entry.tags {
+                        total_tags.insert(tag.clone());
+                    }
+                    *categories.entry(entry.category.to_string()).or_default() += 1;
+                }
+            }
+
+            println!("Memory Statistics:");
+            println!("  Project memories: {}", project_count);
+            println!("  Global memories:  {}", global_count);
+            println!("  Total:            {}", project_count + global_count);
+            println!("  Unique tags:      {}", total_tags.len());
+            println!("\nBy category:");
+            for (cat, count) in &categories {
+                println!("  {}: {}", cat, count);
+            }
         }
     }
 

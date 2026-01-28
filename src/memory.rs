@@ -177,6 +177,13 @@ pub struct MemoryEntry {
     /// Embedding vector for similarity search (384 dimensions for MiniLM)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding: Option<Vec<f32>>,
+    /// Confidence score (0.0-1.0) - decays over time, boosted by use
+    #[serde(default = "default_confidence")]
+    pub confidence: f32,
+}
+
+fn default_confidence() -> f32 {
+    1.0
 }
 
 fn default_active() -> bool {
@@ -200,7 +207,44 @@ impl MemoryEntry {
             active: true,
             superseded_by: None,
             embedding: None,
+            confidence: 1.0,
         }
+    }
+
+    /// Get effective confidence after time-based decay
+    /// Half-life varies by category:
+    /// - Correction: 365 days (user corrections are high value)
+    /// - Preference: 90 days (preferences may evolve)
+    /// - Fact: 30 days (codebase facts can become stale)
+    /// - Entity: 60 days (entities change moderately)
+    pub fn effective_confidence(&self) -> f32 {
+        let age_days = (Utc::now() - self.created_at).num_days() as f32;
+        let half_life = match self.category {
+            MemoryCategory::Correction => 365.0,
+            MemoryCategory::Preference => 90.0,
+            MemoryCategory::Fact => 30.0,
+            MemoryCategory::Entity => 60.0,
+            MemoryCategory::Custom(_) => 45.0, // Default for custom categories
+        };
+
+        // Exponential decay: confidence * e^(-age/half_life * ln(2))
+        // Also boost slightly for access count
+        let decay = (-age_days / half_life * 0.693).exp();
+        let access_boost = 1.0 + 0.1 * (self.access_count as f32 + 1.0).ln();
+
+        (self.confidence * decay * access_boost).min(1.0)
+    }
+
+    /// Boost confidence (called when memory was useful)
+    pub fn boost_confidence(&mut self, amount: f32) {
+        self.confidence = (self.confidence + amount).min(1.0);
+        self.access_count += 1;
+        self.updated_at = Utc::now();
+    }
+
+    /// Decay confidence (called when memory was retrieved but not relevant)
+    pub fn decay_confidence(&mut self, amount: f32) {
+        self.confidence = (self.confidence - amount).max(0.0);
     }
 
     pub fn with_tags(mut self, tags: Vec<String>) -> Self {

@@ -725,26 +725,26 @@ memory { action: "tag", id: "...", tags: ["new", "tags"] }
 - [x] Semantic link edges (RelatesTo)
 - [x] Cascade retrieval algorithm with BFS traversal
 
-### Phase 5: Post-Retrieval Maintenance 📋
-- [ ] Link discovery (co-relevant memories)
-- [ ] Confidence boost/decay on retrieval
-- [ ] Gap detection for missing knowledge
+### Phase 5: Post-Retrieval Maintenance ✅
+- [x] Link discovery (co-relevant memories)
+- [x] Confidence boost/decay on retrieval
+- [x] Gap detection for missing knowledge
 - [ ] Periodic cluster refinement
 - [ ] Tag inference from context
 
-### Phase 6: Advanced Features 📋
-- [ ] Confidence decay system
+### Phase 6: Advanced Features ✅
+- [x] Confidence decay system (time-based with category-specific half-lives)
 - [ ] Negative memories and trigger patterns
 - [ ] Procedural memory support
 - [ ] Provenance tracking
-- [ ] Feedback loops (strengthen/weaken)
+- [x] Feedback loops (boost on use, decay on rejection)
 - [ ] Temporal awareness
 
-### Phase 7: Full Integration 📋
-- [ ] End-of-session extraction
+### Phase 7: Full Integration ✅
+- [x] End-of-session extraction
 - [ ] Consolidation on write
-- [ ] User control UI/CLI
-- [ ] Memory export/import
+- [x] User control CLI (`jcode memory` commands)
+- [x] Memory export/import
 
 ### Phase 8: Memory Consolidation (Sleep-Like Processing) 📋
 - [ ] Background consolidation daemon

@@ -203,6 +203,11 @@ impl MemoryGraph {
         }
     }
 
+    /// Get the number of memories in the graph
+    pub fn memory_count(&self) -> usize {
+        self.memories.len()
+    }
+
     // ==================== Memory Operations ====================
 
     /// Add a memory entry to the graph
