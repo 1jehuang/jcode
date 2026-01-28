@@ -287,6 +287,14 @@ impl TuiState for BenchState {
         // For benchmarks, just use the standard markdown renderer
         jcode::tui::markdown::render_markdown_with_width(&self.streaming_text, Some(width))
     }
+
+    fn centered_mode(&self) -> bool {
+        false
+    }
+
+    fn auth_status(&self) -> jcode::auth::AuthStatus {
+        jcode::auth::AuthStatus::default()
+    }
 }
 
 fn make_text(len: usize) -> String {

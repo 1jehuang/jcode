@@ -2247,8 +2247,27 @@ fn format_cache_status(
     cache_read_tokens: Option<u64>,
     cache_creation_tokens: Option<u64>,
 ) -> Option<String> {
-    let _ = (cache_read_tokens, cache_creation_tokens);
-    None
+    match (cache_read_tokens, cache_creation_tokens) {
+        (Some(read), _) if read > 0 => {
+            // Cache hit - show how many tokens were read from cache
+            let k = read / 1000;
+            if k > 0 {
+                Some(format!("⚡{}k cached", k))
+            } else {
+                Some(format!("⚡{} cached", read))
+            }
+        }
+        (_, Some(created)) if created > 0 => {
+            // Cache write - show how many tokens were cached
+            let k = created / 1000;
+            if k > 0 {
+                Some(format!("💾{}k stored", k))
+            } else {
+                Some(format!("💾{} stored", created))
+            }
+        }
+        _ => None,
+    }
 }
 
 fn send_mode_indicator(app: &dyn TuiState) -> (&'static str, Color) {
