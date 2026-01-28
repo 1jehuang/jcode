@@ -2163,10 +2163,34 @@ impl App {
                     }
                     reconnect_attempts += 1;
                     if reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
-                        self.push_display_message(DisplayMessage::error(
-                            "Failed to reconnect after 30 seconds. Press Ctrl+C to quit.",
-                        ));
+                        // Build disconnect message with session resume hint
+                        let session_name = self
+                            .remote_session_id
+                            .as_ref()
+                            .and_then(|id| crate::id::extract_session_name(id))
+                            .or_else(|| {
+                                self.resume_session_id
+                                    .as_ref()
+                                    .and_then(|id| crate::id::extract_session_name(id))
+                            });
+
+                        let error_reason = format!("Connection error: {}", e);
+                        let resume_hint = if let Some(name) = session_name {
+                            format!(
+                                "\n\nTo resume this session later:\n  jcode --resume {}",
+                                name
+                            )
+                        } else {
+                            String::new()
+                        };
+
+                        self.push_display_message(DisplayMessage::error(&format!(
+                            "Failed to reconnect after 30 seconds.\n\nReason: {}{}\n\nPress Ctrl+C to quit. You can still scroll with Alt+K/J.",
+                            error_reason, resume_hint
+                        )));
                         terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
+
+                        // Allow scrolling while waiting for quit
                         loop {
                             if let Some(Ok(Event::Key(key))) = event_stream.next().await {
                                 if key.kind == KeyEventKind::Press {
@@ -2174,6 +2198,21 @@ impl App {
                                         && key.modifiers.contains(KeyModifiers::CONTROL)
                                     {
                                         break 'outer;
+                                    }
+                                    // Handle scroll keys in disconnected state
+                                    if let Some(amount) =
+                                        self.scroll_keys.scroll_amount(key.code.clone(), key.modifiers)
+                                    {
+                                        let max_estimate =
+                                            self.display_messages.len() * 100 + self.streaming_text.len();
+                                        if amount < 0 {
+                                            self.scroll_offset =
+                                                (self.scroll_offset + (-amount) as usize).min(max_estimate);
+                                        } else {
+                                            self.scroll_offset =
+                                                self.scroll_offset.saturating_sub(amount as usize);
+                                        }
+                                        terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
                                     }
                                 }
                             }
@@ -5745,6 +5784,11 @@ impl App {
         if self.is_remote || self.messages.len() < 4 {
             return;
         }
+
+        crate::logging::info(&format!(
+            "Extracting memories from {} messages",
+            self.messages.len()
+        ));
 
         // Build transcript from messages
         let mut transcript = String::new();
