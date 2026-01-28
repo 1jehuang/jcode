@@ -423,6 +423,14 @@ fn terminal_theme() -> Theme {
         cluster_border: "#45475a".to_string(),
         font_family: "monospace".to_string(),
         font_size: 13.0,
+        // Sequence diagram colors (dark theme)
+        sequence_actor_fill: "#313244".to_string(),
+        sequence_actor_border: "#585b70".to_string(),
+        sequence_actor_line: "#7f849c".to_string(),
+        sequence_note_fill: "#45475a".to_string(),
+        sequence_note_border: "#585b70".to_string(),
+        sequence_activation_fill: "#313244".to_string(),
+        sequence_activation_border: "#7f849c".to_string(),
     }
 }
 

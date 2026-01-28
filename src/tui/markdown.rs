@@ -293,12 +293,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.to_string()),
                     _ => None,
                 };
-                // Add code block start indicator
-                let lang_label = code_block_lang.as_deref().unwrap_or("");
-                lines.push(Line::from(Span::styled(
-                    format!("┌─ {} ", lang_label),
-                    Style::default().fg(DIM_COLOR),
-                )));
+                // Don't add header here - we'll add it at the end when we know the block width
                 code_block_content.clear();
             }
             Event::End(TagEnd::CodeBlock) => {
@@ -309,9 +304,6 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     .unwrap_or(false);
 
                 if is_mermaid {
-                    // Remove the "┌─ mermaid" line we added at the start
-                    lines.pop();
-
                     // Render mermaid diagram
                     let result = mermaid::render_mermaid(&code_block_content);
                     let mermaid_lines = mermaid::result_to_lines(result, max_width);
@@ -320,17 +312,52 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     // Render code block with syntax highlighting (cached)
                     let highlighted =
                         highlight_code_cached(&code_block_content, code_block_lang.as_deref());
-                    for hl_line in highlighted {
-                        // Add left border to code lines
-                        let mut spans = vec![Span::styled("│ ", Style::default().fg(DIM_COLOR))];
-                        spans.extend(hl_line.spans);
-                        lines.push(Line::from(spans));
-                    }
-                    // Add code block end indicator
+
+                    // Calculate the max width of code lines for centering
+                    let lang_label = code_block_lang.as_deref().unwrap_or("");
+                    let header_width = 3 + lang_label.len(); // "┌─ " + lang
+                    let code_widths: Vec<usize> = highlighted
+                        .iter()
+                        .map(|l| 2 + l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>()) // "│ " + content
+                        .collect();
+                    let max_code_width = code_widths.iter().copied().max().unwrap_or(0);
+                    let block_width = header_width.max(max_code_width).max(2); // at least "└─"
+
+                    // Calculate padding to center the block
+                    let padding = if let Some(mw) = max_width {
+                        if block_width < mw {
+                            (mw - block_width) / 2
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                    let pad_str: String = " ".repeat(padding);
+
+                    // Add header with padding
                     lines.push(Line::from(Span::styled(
-                        "└─",
+                        format!("{}┌─ {} ", pad_str, lang_label),
                         Style::default().fg(DIM_COLOR),
-                    )));
+                    )).left_aligned());
+
+                    // Add code lines with padding
+                    for hl_line in highlighted {
+                        let mut spans = vec![
+                            Span::styled(format!("{}│ ", pad_str), Style::default().fg(DIM_COLOR))
+                        ];
+                        spans.extend(hl_line.spans);
+                        lines.push(Line::from(spans).left_aligned());
+                    }
+
+                    // Add footer with padding
+                    lines.push(
+                        Line::from(Span::styled(
+                            format!("{}└─", pad_str),
+                            Style::default().fg(DIM_COLOR),
+                        ))
+                        .left_aligned(),
+                    );
                 }
                 in_code_block = false;
                 code_block_lang = None;
@@ -338,11 +365,15 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
             }
 
             Event::Code(code) => {
-                // Inline code with subtle background
-                current_spans.push(Span::styled(
-                    format!("`{}`", code),
-                    Style::default().fg(CODE_FG).bg(CODE_BG),
-                ));
+                // Inline code - handle differently in tables vs regular text
+                if in_table {
+                    current_cell.push_str(&code);
+                } else {
+                    current_spans.push(Span::styled(
+                        code.to_string(),
+                        Style::default().fg(CODE_FG).bg(CODE_BG),
+                    ));
+                }
             }
 
             Event::Text(text) => {
@@ -775,11 +806,7 @@ pub fn render_markdown_lazy(
                     CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.to_string()),
                     _ => None,
                 };
-                let lang_label = code_block_lang.as_deref().unwrap_or("");
-                lines.push(Line::from(Span::styled(
-                    format!("┌─ {} ", lang_label),
-                    Style::default().fg(DIM_COLOR),
-                )));
+                // Don't add header here - we'll add it at the end when we know the block width
                 code_block_content.clear();
             }
             Event::End(TagEnd::CodeBlock) => {
@@ -789,7 +816,6 @@ pub fn render_markdown_lazy(
                     .unwrap_or(false);
 
                 if is_mermaid {
-                    lines.pop(); // Remove the header line
                     let result = mermaid::render_mermaid(&code_block_content);
                     let mermaid_lines = mermaid::result_to_lines(result, max_width);
                     lines.extend(mermaid_lines);
@@ -802,31 +828,70 @@ pub fn render_markdown_lazy(
                     // Check if this block is visible
                     let is_visible = ranges_overlap(block_range.clone(), visible_range.clone());
 
-                    if is_visible {
-                        // Highlight the code block
-                        let highlighted =
-                            highlight_code_cached(&code_block_content, code_block_lang.as_deref());
-                        for hl_line in highlighted {
-                            let mut spans =
-                                vec![Span::styled("│ ", Style::default().fg(DIM_COLOR))];
+                    // Calculate centering padding
+                    let lang_label = code_block_lang.as_deref().unwrap_or("");
+                    let header_width = 3 + lang_label.len();
+
+                    let (highlighted, code_widths) = if is_visible {
+                        let hl = highlight_code_cached(&code_block_content, code_block_lang.as_deref());
+                        let widths: Vec<usize> = hl
+                            .iter()
+                            .map(|l| 2 + l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>())
+                            .collect();
+                        (Some(hl), widths)
+                    } else {
+                        // Estimate widths from raw content for placeholder
+                        let widths: Vec<usize> = code_block_content.lines().map(|l| 2 + l.chars().count()).collect();
+                        (None, widths)
+                    };
+
+                    let max_code_width = code_widths.iter().copied().max().unwrap_or(0);
+                    let block_width = header_width.max(max_code_width).max(2);
+
+                    let padding = if let Some(mw) = max_width {
+                        if block_width < mw {
+                            (mw - block_width) / 2
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                    let pad_str: String = " ".repeat(padding);
+
+                    // Add header with padding
+                    lines.push(Line::from(Span::styled(
+                        format!("{}┌─ {} ", pad_str, lang_label),
+                        Style::default().fg(DIM_COLOR),
+                    )).left_aligned());
+
+                    if let Some(hl_lines) = highlighted {
+                        // Render highlighted code
+                        for hl_line in hl_lines {
+                            let mut spans = vec![
+                                Span::styled(format!("{}│ ", pad_str), Style::default().fg(DIM_COLOR))
+                            ];
                             spans.extend(hl_line.spans);
-                            lines.push(Line::from(spans));
+                            lines.push(Line::from(spans).left_aligned());
                         }
                     } else {
                         // Use placeholder for off-screen blocks
                         let placeholder =
                             placeholder_code_block(&code_block_content, code_block_lang.as_deref());
                         for pl_line in placeholder {
-                            let mut spans =
-                                vec![Span::styled("│ ", Style::default().fg(DIM_COLOR))];
+                            let mut spans = vec![
+                                Span::styled(format!("{}│ ", pad_str), Style::default().fg(DIM_COLOR))
+                            ];
                             spans.extend(pl_line.spans);
-                            lines.push(Line::from(spans));
+                            lines.push(Line::from(spans).left_aligned());
                         }
                     }
+
+                    // Add footer with padding
                     lines.push(Line::from(Span::styled(
-                        "└─",
+                        format!("{}└─", pad_str),
                         Style::default().fg(DIM_COLOR),
-                    )));
+                    )).left_aligned());
                 }
                 in_code_block = false;
                 code_block_lang = None;
@@ -834,10 +899,15 @@ pub fn render_markdown_lazy(
             }
 
             Event::Code(code) => {
-                current_spans.push(Span::styled(
-                    format!("`{}`", code),
-                    Style::default().fg(CODE_FG).bg(CODE_BG),
-                ));
+                // Inline code - handle differently in tables vs regular text
+                if in_table {
+                    current_cell.push_str(&code);
+                } else {
+                    current_spans.push(Span::styled(
+                        code.to_string(),
+                        Style::default().fg(CODE_FG).bg(CODE_BG),
+                    ));
+                }
             }
 
             Event::Text(text) => {
@@ -953,6 +1023,9 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
         return vec![line];
     }
 
+    // Preserve the original alignment
+    let alignment = line.alignment;
+
     let mut result: Vec<Line<'static>> = Vec::new();
     let mut current_spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len());
     let mut current_width = 0;
@@ -988,7 +1061,11 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
 
             // If adding this chunk would exceed width, start new line
             if current_width + chunk_width > width && current_width > 0 {
-                result.push(Line::from(std::mem::take(&mut current_spans)));
+                let mut new_line = Line::from(std::mem::take(&mut current_spans));
+                if let Some(align) = alignment {
+                    new_line = new_line.alignment(align);
+                }
+                result.push(new_line);
                 current_width = 0;
             }
 
@@ -1005,7 +1082,11 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
                     pos += take;
 
                     if current_width >= width && pos < chars.len() {
-                        result.push(Line::from(std::mem::take(&mut current_spans)));
+                        let mut new_line = Line::from(std::mem::take(&mut current_spans));
+                        if let Some(align) = alignment {
+                            new_line = new_line.alignment(align);
+                        }
+                        result.push(new_line);
                         current_width = 0;
                     }
                 }
@@ -1018,11 +1099,19 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
 
     // Don't forget the last line
     if !current_spans.is_empty() {
-        result.push(Line::from(current_spans));
+        let mut new_line = Line::from(current_spans);
+        if let Some(align) = alignment {
+            new_line = new_line.alignment(align);
+        }
+        result.push(new_line);
     }
 
     if result.is_empty() {
-        result.push(Line::from(""));
+        let mut empty_line = Line::from("");
+        if let Some(align) = alignment {
+            empty_line = empty_line.alignment(align);
+        }
+        result.push(empty_line);
     }
 
     result

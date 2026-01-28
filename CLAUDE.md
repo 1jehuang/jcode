@@ -55,15 +55,89 @@ Logs are written to `~/.jcode/logs/` (daily files like `jcode-YYYY-MM-DD.log`).
 - `scripts/install_release.sh` installs a versioned binary and atomically flips the `~/.local/bin/jcode` symlink.
 - Ensure `~/.local/bin` is **before** `~/.cargo/bin` in `PATH` so the symlinked release is used.
 
-## Environment Setup
+## Authentication
 
-The Claude provider uses the Claude Code CLI (no Python SDK required). Optional overrides:
+jcode supports multiple providers and authentication methods:
+
+### Option 1: OAuth via Claude Subscription (Recommended)
+
+Uses your Claude Pro/Max subscription - no API key needed, included in subscription cost.
+
+**Setup:**
+1. Install Claude Code CLI: `npm install -g @anthropic-ai/claude-code`
+2. Login: `claude login`
+3. Credentials are stored in `~/.claude/.credentials.json`
+
+jcode automatically detects and uses these credentials. Token refresh is handled automatically.
+
+**How it works:**
+- jcode reads the OAuth token from `~/.claude/.credentials.json`
+- Sends requests to `api.anthropic.com/v1/messages?beta=true`
+- Includes required headers: `anthropic-beta: oauth-2025-04-20,claude-code-20250219`
+- System prompt must include Claude Code identity (handled automatically)
+
+### Option 2: Direct API Key
+
+Pay-per-token via Anthropic Console.
 
 ```bash
-export JCODE_CLAUDE_CLI_PATH=~/.local/bin/claude
-export JCODE_CLAUDE_CLI_MODEL=claude-opus-4-5-20251101
-export JCODE_CLAUDE_CLI_PERMISSION_MODE=bypassPermissions
-export JCODE_CLAUDE_CLI_PARTIAL=1
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+If `ANTHROPIC_API_KEY` is set, it takes priority over OAuth.
+
+### Prompt Caching
+
+Both auth methods support prompt caching. The system prompt is cached for 5 minutes, reducing costs on subsequent turns. Token usage shows:
+- `cache_write`: Tokens cached on first request
+- `cache_read`: Tokens read from cache (90% cheaper)
+
+### Legacy: Claude CLI Provider
+
+To use Claude Code CLI as a subprocess (legacy mode):
+
+```bash
+export JCODE_USE_CLAUDE_CLI=1
+```
+
+This shells out to `claude` binary instead of calling the API directly.
+
+### Option 3: OpenRouter (200+ Models)
+
+Access 200+ models from various providers (Anthropic, OpenAI, Google, Meta, etc.) via OpenRouter.
+
+**Setup:**
+1. Get an API key from https://openrouter.ai/
+2. Set the environment variable:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-v1-...
+```
+
+**Usage:**
+- Models use `provider/model` format (e.g., `anthropic/claude-sonnet-4`, `openai/gpt-4o`)
+- Switch models with `/model anthropic/claude-sonnet-4`
+- Available models are fetched dynamically from OpenRouter API
+
+**Features:**
+- Unified API for multiple providers
+- Pay-per-token pricing
+- Automatic provider routing and fallbacks
+
+## Environment Variables
+
+```bash
+# Authentication
+export ANTHROPIC_API_KEY=sk-ant-...     # Direct API key (overrides OAuth)
+export OPENROUTER_API_KEY=sk-or-v1-...  # OpenRouter API key
+export JCODE_USE_CLAUDE_CLI=1           # Use Claude CLI subprocess (legacy)
+
+# Model selection
+export JCODE_ANTHROPIC_MODEL=claude-opus-4-5-20251101
+export JCODE_OPENROUTER_MODEL=anthropic/claude-sonnet-4  # Default OpenRouter model
+
+# Debugging
+export JCODE_ANTHROPIC_DEBUG=1          # Log API request payloads
 ```
 
 ## Key Files

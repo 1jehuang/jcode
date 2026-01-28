@@ -1,0 +1,21 @@
+{
+  "theme": "base",
+  "themeVariables": {
+    "fontFamily": "Inter, Segoe UI, system-ui, -apple-system, sans-serif",
+    "fontSize": "13px",
+    "primaryColor": "#F6F8FC",
+    "primaryTextColor": "#1C2430",
+    "primaryBorderColor": "#C7D2E5",
+    "lineColor": "#7A8AA6",
+    "secondaryColor": "#EEF2F8",
+    "tertiaryColor": "#FFFFFF",
+    "edgeLabelBackground": "#FFFFFF",
+    "clusterBkg": "#F7FAFF",
+    "clusterBorder": "#D7E0F0"
+  },
+  "flowchart": {
+    "curve": "basis",
+    "nodeSpacing": 50,
+    "rankSpacing": 70
+  }
+}

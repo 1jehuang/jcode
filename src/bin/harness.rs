@@ -42,6 +42,14 @@ impl Provider for NoopProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(NoopProvider)
     }
+
+    fn available_models_display(&self) -> Vec<String> {
+        vec![]
+    }
+
+    async fn prefetch_models(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 struct ToolCase {
