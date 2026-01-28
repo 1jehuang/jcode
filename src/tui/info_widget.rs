@@ -53,7 +53,7 @@ impl WidgetKind {
         match self {
             WidgetKind::Todos => Side::Right,
             WidgetKind::ContextUsage => Side::Right,
-            WidgetKind::MemoryActivity => Side::Left,
+            WidgetKind::MemoryActivity => Side::Right,
             WidgetKind::SwarmStatus => Side::Left,
             WidgetKind::BackgroundTasks => Side::Left,
             WidgetKind::UsageLimits => Side::Left,
@@ -1135,6 +1135,22 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
             Style::default().fg(Color::Rgb(140, 140, 150)),
         )]));
     }
+
+    // Debug: show widget availability
+    let available = data.available_widgets();
+    let available_names: Vec<&str> = available.iter().map(|k| match k {
+        WidgetKind::Todos => "T",
+        WidgetKind::ContextUsage => "C",
+        WidgetKind::MemoryActivity => "M",
+        WidgetKind::SwarmStatus => "S",
+        WidgetKind::BackgroundTasks => "B",
+        WidgetKind::UsageLimits => "U",
+        WidgetKind::ModelInfo => "I",
+    }).collect();
+    lines.push(Line::from(vec![Span::styled(
+        format!("widgets: {}", available_names.join("")),
+        Style::default().fg(Color::Rgb(100, 100, 110)),
+    )]));
 
     lines
 }
