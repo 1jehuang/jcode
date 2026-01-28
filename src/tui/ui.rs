@@ -240,6 +240,10 @@ fn capitalize(s: &str) -> String {
 
 /// Format model name nicely (e.g., "claude4.5opus" -> "Claude 4.5 Opus")
 fn format_model_name(short: &str) -> String {
+    // Handle OpenRouter models (format: provider/model)
+    if short.contains('/') {
+        return format!("OpenRouter: {}", short);
+    }
     if short.contains("opus") {
         if short.contains("4.5") {
             return "Claude 4.5 Opus".to_string();
@@ -277,6 +281,56 @@ fn format_gpt_name(short: &str) -> String {
     }
 
     format!("GPT-{}", rest)
+}
+
+/// Build the auth status line with colored dots for each provider
+fn build_auth_status_line(auth: &crate::auth::AuthStatus) -> Line<'static> {
+    use crate::auth::AuthState;
+
+    const GREEN: Color = Color::Rgb(100, 200, 100);  // Available
+    const YELLOW: Color = Color::Rgb(255, 200, 100); // Expired (may work)
+    const GRAY: Color = Color::Rgb(80, 80, 80);      // Not configured
+
+    fn dot_color(state: AuthState) -> Color {
+        match state {
+            AuthState::Available => GREEN,
+            AuthState::Expired => YELLOW,
+            AuthState::NotConfigured => GRAY,
+        }
+    }
+
+    fn dot_char(state: AuthState) -> &'static str {
+        match state {
+            AuthState::Available => "●",
+            AuthState::Expired => "◐",
+            AuthState::NotConfigured => "○",
+        }
+    }
+
+    let mut spans = Vec::new();
+
+    // Claude OAuth
+    spans.push(Span::styled(
+        dot_char(auth.claude_oauth),
+        Style::default().fg(dot_color(auth.claude_oauth)),
+    ));
+    spans.push(Span::styled(" claude ", Style::default().fg(DIM_COLOR)));
+
+    // Anthropic API key
+    spans.push(Span::styled(
+        dot_char(auth.anthropic_api_key),
+        Style::default().fg(dot_color(auth.anthropic_api_key)),
+    ));
+    spans.push(Span::styled(" api-key ", Style::default().fg(DIM_COLOR)));
+
+    // OpenRouter
+    spans.push(Span::styled(
+        dot_char(auth.openrouter_api_key),
+        Style::default().fg(dot_color(auth.openrouter_api_key)),
+    ));
+    spans.push(Span::styled(" openrouter", Style::default().fg(DIM_COLOR)));
+
+    Line::from(spans)
 }
 
 /// Render context window as vertical list with smart grouping
@@ -743,6 +797,11 @@ fn binary_age() -> Option<String> {
 
 /// Shorten model name for display (e.g., "claude-opus-4-5-20251101" -> "claude4.5opus")
 fn shorten_model_name(model: &str) -> String {
+    // Handle OpenRouter models (format: provider/model-name)
+    // Keep the full identifier for display
+    if model.contains('/') {
+        return model.to_string();
+    }
     // Handle common Claude model patterns
     if model.contains("opus") {
         if model.contains("4-5") || model.contains("4.5") {
@@ -1233,6 +1292,13 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
         ))
         .alignment(align),
     );
+
+    // Line: Auth status indicators (colored dots for each provider)
+    let auth = app.auth_status();
+    let auth_line = build_auth_status_line(&auth);
+    if !auth_line.spans.is_empty() {
+        lines.push(auth_line.alignment(align));
+    }
 
     // Line 3+: Recent changes in a box (from git log, embedded at build time)
     let changelog = env!("JCODE_CHANGELOG");

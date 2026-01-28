@@ -655,6 +655,11 @@ impl ClientApp {
                 });
                 self.status_notice = Some(("Notification received".to_string(), Instant::now()));
             }
+            ServerEvent::MemoryInjected { count } => {
+                let plural = if count == 1 { "memory" } else { "memories" };
+                self.status_notice =
+                    Some((format!("🧠 {} {} injected", count, plural), Instant::now()));
+            }
             _ => {}
         }
     }
@@ -693,7 +698,7 @@ impl ClientApp {
                 }
             }
             KeyCode::Enter => {
-                if !self.input.is_empty() && !self.is_processing {
+                if !self.input.is_empty() {
                     let input = std::mem::take(&mut self.input);
                     self.cursor_pos = 0;
 
@@ -709,27 +714,49 @@ impl ClientApp {
                         return Ok(());
                     }
 
-                    // Add user message to display
-                    self.push_display_message(DisplayMessage {
-                        role: "user".to_string(),
-                        content: input.clone(),
-                        tool_calls: Vec::new(),
-                        duration_secs: None,
-                        title: None,
-                        tool_data: None,
-                    });
+                    if self.is_processing {
+                        // Queue as soft interrupt - message will be injected at next safe point
+                        self.push_display_message(DisplayMessage {
+                            role: "user".to_string(),
+                            content: format!("⏳ {}", input),
+                            tool_calls: Vec::new(),
+                            duration_secs: None,
+                            title: Some("(pending injection)".to_string()),
+                            tool_data: None,
+                        });
 
-                    // Send to server
-                    let request = Request::Message {
-                        id: self.next_request_id,
-                        content: input,
-                    };
-                    self.next_request_id += 1;
-                    let json = serde_json::to_string(&request)? + "\n";
-                    let mut w = writer.lock().await;
-                    w.write_all(json.as_bytes()).await?;
+                        let request = Request::SoftInterrupt {
+                            id: self.next_request_id,
+                            content: input,
+                            urgent: false,
+                        };
+                        self.next_request_id += 1;
+                        let json = serde_json::to_string(&request)? + "\n";
+                        let mut w = writer.lock().await;
+                        w.write_all(json.as_bytes()).await?;
+                    } else {
+                        // Add user message to display
+                        self.push_display_message(DisplayMessage {
+                            role: "user".to_string(),
+                            content: input.clone(),
+                            tool_calls: Vec::new(),
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
+                        });
 
-                    self.is_processing = true;
+                        // Send to server
+                        let request = Request::Message {
+                            id: self.next_request_id,
+                            content: input,
+                        };
+                        self.next_request_id += 1;
+                        let json = serde_json::to_string(&request)? + "\n";
+                        let mut w = writer.lock().await;
+                        w.write_all(json.as_bytes()).await?;
+
+                        self.is_processing = true;
+                    }
                 }
             }
             KeyCode::Esc => {
@@ -954,5 +981,13 @@ impl TuiState for ClientApp {
         let mut renderer = self.streaming_md_renderer.borrow_mut();
         renderer.set_width(Some(width));
         renderer.update(&self.streaming_text)
+    }
+
+    fn centered_mode(&self) -> bool {
+        false // Deprecated client doesn't support centered mode
+    }
+
+    fn auth_status(&self) -> crate::auth::AuthStatus {
+        crate::auth::AuthStatus::check()
     }
 }

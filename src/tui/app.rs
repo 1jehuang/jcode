@@ -403,6 +403,8 @@ pub struct App {
     requested_exit_code: Option<i32>,
     // Show diffs for edit/write tool outputs (toggle with Alt+D)
     show_diffs: bool,
+    // Center all content (from config)
+    centered: bool,
     // Keybindings for model switching
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for scrolling
@@ -471,6 +473,13 @@ impl App {
         let display = config().display.clone();
         let context_limit = crate::provider::context_limit_for_model(&provider.model())
             .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT) as u64;
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let provider_clone = Arc::clone(&provider);
+            handle.spawn(async move {
+                let _ = provider_clone.prefetch_models().await;
+            });
+        }
 
         // Pre-compute context info so it shows on startup
         let available_skills: Vec<crate::prompt::SkillInfo> = skills
@@ -551,6 +560,7 @@ impl App {
             resume_session_id: None,
             requested_exit_code: None,
             show_diffs: display.show_diffs,
+            centered: display.centered,
             model_switch_keys: super::keybind::load_model_switch_keys(),
             scroll_keys: super::keybind::load_scroll_keys(),
             status_notice: None,
@@ -891,12 +901,32 @@ impl App {
         }
         if cmd.starts_with("message:") {
             let msg = cmd.strip_prefix("message:").unwrap_or("");
-            // Inject the message as if user typed it
+            // Inject the message respecting queue mode (like keyboard Enter)
             self.input = msg.to_string();
-            self.submit_input();
-            self.debug_trace
-                .record("message", format!("submitted:{}", msg));
-            format!("OK: queued message '{}'", msg)
+            match self.send_action(false) {
+                SendAction::Submit => {
+                    self.submit_input();
+                    self.debug_trace
+                        .record("message", format!("submitted:{}", msg));
+                    format!("OK: submitted message '{}'", msg)
+                }
+                SendAction::Queue => {
+                    self.queue_message();
+                    self.debug_trace
+                        .record("message", format!("queued:{}", msg));
+                    format!("OK: queued message '{}' (will send after current turn)", msg)
+                }
+                SendAction::Interleave => {
+                    let expanded = self.expand_paste_placeholders(&self.input.clone());
+                    self.pasted_contents.clear();
+                    self.input.clear();
+                    self.cursor_pos = 0;
+                    self.interleave_message = Some(expanded);
+                    self.debug_trace
+                        .record("message", format!("interleave:{}", msg));
+                    format!("OK: interleave message '{}' (injecting now)", msg)
+                }
+            }
         } else if cmd == "reload" {
             // Trigger reload
             self.input = "/reload".to_string();
@@ -2104,10 +2134,27 @@ impl App {
         const MAX_RECONNECT_ATTEMPTS: u32 = 30;
 
         'outer: loop {
-            // Connect to server
-            let mut remote = match RemoteConnection::connect().await {
+            // Determine which session to resume
+            let session_to_resume = if reconnect_attempts == 0 {
+                // First connect: use --resume argument if provided
+                self.resume_session_id.take()
+            } else {
+                // Reconnecting after server reload: restore the session we had before
+                self.remote_session_id.clone()
+            };
+
+            // Connect to server (with optional session resume)
+            let mut remote = match RemoteConnection::connect_with_session(
+                session_to_resume.as_deref(),
+            )
+            .await
+            {
                 Ok(r) => r,
                 Err(e) => {
+                    // Put session back if connect failed (for retry)
+                    if reconnect_attempts == 0 && session_to_resume.is_some() {
+                        self.resume_session_id = session_to_resume;
+                    }
                     if reconnect_attempts == 0 {
                         return Err(anyhow::anyhow!(
                             "Failed to connect to server. Is `jcode serve` running? Error: {}",
@@ -2228,34 +2275,7 @@ impl App {
                 }
             }
 
-            // Resume session: on first connect use CLI arg, on reconnect use previous session
-            let resume_from_arg = reconnect_attempts == 0 && self.resume_session_id.is_some();
-            let session_to_resume = if reconnect_attempts == 0 {
-                // First connect: use --resume argument if provided
-                self.resume_session_id.take()
-            } else {
-                // Reconnecting after server reload: restore the session we had before
-                self.remote_session_id.clone()
-            };
-
-            if let Some(session_id) = session_to_resume {
-                let exists_on_disk = crate::session::session_exists(&session_id);
-                if !exists_on_disk {
-                    if resume_from_arg {
-                        self.push_display_message(DisplayMessage::error(format!(
-                            "Failed to resume session: {} (not found)",
-                            session_id
-                        )));
-                    }
-                } else if let Err(e) = remote.resume_session(&session_id).await {
-                    self.push_display_message(DisplayMessage::error(format!(
-                        "Failed to resume session: {}",
-                        e
-                    )));
-                }
-            }
-
-            // Reset reconnect counter after handling both reconnection message and session resume
+            // Reset reconnect counter after handling reconnection
             reconnect_attempts = 0;
 
             // Main event loop
@@ -2304,9 +2324,10 @@ impl App {
                                     let output =
                                         self.handle_debug_command_remote(&command, &mut remote).await;
                                     let _ = remote.send_client_debug_response(id, output).await;
-                                    continue;
+                                    // Fall through to process queued messages (don't continue)
+                                } else {
+                                    let _at_safe_point = self.handle_server_event(server_event, &mut remote);
                                 }
-                                let at_safe_point = self.handle_server_event(server_event, &mut remote);
 
                                 // Process pending interleave or queued messages
                                 // If processing: only interleave via soft interrupt
@@ -2752,6 +2773,12 @@ impl App {
                 }
                 false
             }
+            ServerEvent::MemoryInjected { count } => {
+                // Show notice that memory was injected
+                let plural = if count == 1 { "memory" } else { "memories" };
+                self.set_status_notice(format!("🧠 {} relevant {} injected", count, plural));
+                false
+            }
             _ => false,
         }
     }
@@ -2918,8 +2945,23 @@ impl App {
                         self.queued_messages.push(expanded);
                     }
                     SendAction::Interleave => {
-                        self.interleave_message = Some(expanded);
-                        self.set_status_notice("⏭ Sending now (interleave)");
+                        // Show in UI immediately for feedback
+                        self.push_display_message(DisplayMessage {
+                            role: "user".to_string(),
+                            content: format!("⏳ {}", raw_input),
+                            tool_calls: vec![],
+                            duration_secs: None,
+                            title: Some("(pending injection)".to_string()),
+                            tool_data: None,
+                        });
+                        // Send soft interrupt immediately
+                        if let Err(e) = remote.soft_interrupt(expanded, false).await {
+                            self.push_display_message(DisplayMessage::error(format!(
+                                "Failed to queue soft interrupt: {}", e
+                            )));
+                        } else {
+                            self.set_status_notice("⏭ Queued for injection");
+                        }
                     }
                 }
             }
@@ -3126,8 +3168,23 @@ impl App {
                             self.queued_messages.push(expanded);
                         }
                         SendAction::Interleave => {
-                            self.interleave_message = Some(expanded);
-                            self.set_status_notice("⏭ Sending now (interleave)");
+                            // Show in UI immediately for feedback
+                            self.push_display_message(DisplayMessage {
+                                role: "user".to_string(),
+                                content: format!("⏳ {}", raw_input),
+                                tool_calls: vec![],
+                                duration_secs: None,
+                                title: Some("(pending injection)".to_string()),
+                                tool_data: None,
+                            });
+                            // Send soft interrupt immediately
+                            if let Err(e) = remote.soft_interrupt(expanded, false).await {
+                                self.push_display_message(DisplayMessage::error(format!(
+                                    "Failed to queue soft interrupt: {}", e
+                                )));
+                            } else {
+                                self.set_status_notice("⏭ Queued for injection");
+                            }
                         }
                     }
                 }
@@ -3973,19 +4030,23 @@ impl App {
         // Handle /model command
         if trimmed == "/model" || trimmed == "/models" {
             // List available models
-            let models = self.provider.available_models();
+            let models = self.provider.available_models_display();
             let current = self.provider.model();
-            let model_list = models
-                .iter()
-                .map(|m| {
-                    if *m == current {
-                        format!("  • **{}** (current)", m)
-                    } else {
-                        format!("  • {}", m)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let model_list = if models.is_empty() {
+                format!("  • {} (current)", current)
+            } else {
+                models
+                    .iter()
+                    .map(|m| {
+                        if m == &current {
+                            format!("  • **{}** (current)", m)
+                        } else {
+                            format!("  • {}", m)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
 
             self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
@@ -5861,11 +5922,7 @@ impl App {
         let models: Vec<String> = if self.is_remote {
             self.remote_available_models.clone()
         } else {
-            self.provider
-                .available_models()
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
+            self.provider.available_models_display()
         };
 
         // If input is exactly "/model", show all model options for cycling
@@ -6795,6 +6852,14 @@ impl super::TuiState for App {
         renderer.set_width(Some(width));
         renderer.update(&self.streaming_text)
     }
+
+    fn centered_mode(&self) -> bool {
+        self.centered
+    }
+
+    fn auth_status(&self) -> crate::auth::AuthStatus {
+        crate::auth::AuthStatus::check()
+    }
 }
 
 #[cfg(test)]
@@ -7169,6 +7234,84 @@ mod tests {
     }
 
     #[test]
+    fn test_multiple_queued_messages() {
+        let mut app = create_test_app();
+        app.is_processing = true;
+
+        // Queue first message
+        for c in "first".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        app.handle_key(KeyCode::Enter, KeyModifiers::SHIFT).unwrap();
+
+        // Queue second message
+        for c in "second".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        app.handle_key(KeyCode::Enter, KeyModifiers::SHIFT).unwrap();
+
+        // Queue third message
+        for c in "third".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        app.handle_key(KeyCode::Enter, KeyModifiers::SHIFT).unwrap();
+
+        assert_eq!(app.queued_count(), 3);
+        assert_eq!(app.queued_messages()[0], "first");
+        assert_eq!(app.queued_messages()[1], "second");
+        assert_eq!(app.queued_messages()[2], "third");
+        assert!(app.input().is_empty());
+    }
+
+    #[test]
+    fn test_queue_message_combines_on_send() {
+        let mut app = create_test_app();
+
+        // Queue two messages directly
+        app.queued_messages.push("message one".to_string());
+        app.queued_messages.push("message two".to_string());
+
+        // Take and combine (simulating what process_queued_messages does)
+        let combined = std::mem::take(&mut app.queued_messages).join("\n\n");
+
+        assert_eq!(combined, "message one\n\nmessage two");
+        assert!(app.queued_messages.is_empty());
+    }
+
+    #[test]
+    fn test_interleave_message_separate_from_queue() {
+        let mut app = create_test_app();
+        app.is_processing = true;
+        app.queue_mode = false; // Default mode: Enter=interleave, Shift+Enter=queue
+
+        // Type and submit via Enter (should interleave, not queue)
+        for c in "urgent".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+
+        // Should be in interleave_message, not queued
+        assert_eq!(app.interleave_message.as_deref(), Some("urgent"));
+        assert_eq!(app.queued_count(), 0);
+
+        // Now queue one
+        for c in "later".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        app.handle_key(KeyCode::Enter, KeyModifiers::SHIFT).unwrap();
+
+        // Interleave unchanged, one message queued
+        assert_eq!(app.interleave_message.as_deref(), Some("urgent"));
+        assert_eq!(app.queued_count(), 1);
+        assert_eq!(app.queued_messages()[0], "later");
+    }
+
+    #[test]
     fn test_handle_paste_single_line() {
         let mut app = create_test_app();
 
@@ -7368,5 +7511,37 @@ mod tests {
         if created {
             let _ = std::fs::remove_file(&exe);
         }
+    }
+
+    #[test]
+    fn test_debug_command_message_respects_queue_mode() {
+        let mut app = create_test_app();
+
+        // Test 1: When not processing, should submit directly
+        app.is_processing = false;
+        let result = app.handle_debug_command("message:hello");
+        assert!(result.starts_with("OK: submitted message"), "Expected submitted, got: {}", result);
+        // The message should be processed (added to messages and pending_turn set)
+        assert!(app.pending_turn);
+        assert_eq!(app.messages.len(), 1);
+
+        // Reset for next test
+        app.pending_turn = false;
+        app.messages.clear();
+
+        // Test 2: When processing with queue_mode=true, should queue
+        app.is_processing = true;
+        app.queue_mode = true;
+        let result = app.handle_debug_command("message:queued_msg");
+        assert!(result.contains("queued"), "Expected queued, got: {}", result);
+        assert_eq!(app.queued_count(), 1);
+        assert_eq!(app.queued_messages()[0], "queued_msg");
+
+        // Test 3: When processing with queue_mode=false, should interleave
+        app.queued_messages.clear();
+        app.queue_mode = false;
+        let result = app.handle_debug_command("message:interleave_msg");
+        assert!(result.contains("interleave"), "Expected interleave, got: {}", result);
+        assert_eq!(app.interleave_message.as_deref(), Some("interleave_msg"));
     }
 }
