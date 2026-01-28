@@ -265,6 +265,10 @@ impl Agent {
         self.provider.available_models()
     }
 
+    pub fn available_models_display(&self) -> Vec<String> {
+        self.provider.available_models_display()
+    }
+
     pub fn set_model(&mut self, model: &str) -> Result<()> {
         self.provider.set_model(model)?;
         self.session.model = Some(self.provider.model());

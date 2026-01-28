@@ -1,0 +1,15 @@
+flowchart TD
+    U["User"] --> A["Agent (parent session)"]
+    A -->|"tool call: task"| T["Task Tool"]
+    T -->|"create/resume Session\nfilter tools"| S["Subagent Session"]
+    S --> B["Agent (subagent)"]
+    B -->|"run_once_capture"| P["Provider"]
+    P -->|"tool calls"| R["Registry / Tools"]
+    R -->|"ToolUpdated / SubagentStatus"| Bus["Bus"]
+    Bus --> T
+    T -->|"output + <task_metadata>"| A
+
+    A -->|"communicate tool"| C["Communicate Tool"]
+    C -->|"Unix socket"| Server["Server (swarm)"]
+    Server -->|"share/read/message/list"| Others["Other Agents (same cwd)"]
+    Server -->|"notifications"| A

@@ -309,26 +309,35 @@ fn build_auth_status_line(auth: &crate::auth::AuthStatus) -> Line<'static> {
 
     let mut spans = Vec::new();
 
-    // Claude OAuth
+    // Anthropic (with auth method hint)
     spans.push(Span::styled(
-        dot_char(auth.claude_oauth),
-        Style::default().fg(dot_color(auth.claude_oauth)),
+        dot_char(auth.anthropic.state),
+        Style::default().fg(dot_color(auth.anthropic.state)),
     ));
-    spans.push(Span::styled(" claude ", Style::default().fg(DIM_COLOR)));
-
-    // Anthropic API key
-    spans.push(Span::styled(
-        dot_char(auth.anthropic_api_key),
-        Style::default().fg(dot_color(auth.anthropic_api_key)),
-    ));
-    spans.push(Span::styled(" api-key ", Style::default().fg(DIM_COLOR)));
+    let anthropic_label = if auth.anthropic.has_oauth && auth.anthropic.has_api_key {
+        " anthropic(oauth+key) "
+    } else if auth.anthropic.has_oauth {
+        " anthropic(oauth) "
+    } else if auth.anthropic.has_api_key {
+        " anthropic(key) "
+    } else {
+        " anthropic "
+    };
+    spans.push(Span::styled(anthropic_label, Style::default().fg(DIM_COLOR)));
 
     // OpenRouter
     spans.push(Span::styled(
-        dot_char(auth.openrouter_api_key),
-        Style::default().fg(dot_color(auth.openrouter_api_key)),
+        dot_char(auth.openrouter),
+        Style::default().fg(dot_color(auth.openrouter)),
     ));
-    spans.push(Span::styled(" openrouter", Style::default().fg(DIM_COLOR)));
+    spans.push(Span::styled(" openrouter ", Style::default().fg(DIM_COLOR)));
+
+    // OpenAI
+    spans.push(Span::styled(
+        dot_char(auth.openai),
+        Style::default().fg(dot_color(auth.openai)),
+    ));
+    spans.push(Span::styled(" openai", Style::default().fg(DIM_COLOR)));
 
     Line::from(spans)
 }

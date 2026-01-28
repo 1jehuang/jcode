@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod claude;
 pub mod openai;
+pub mod openrouter;
 
 use crate::auth;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
@@ -47,6 +48,19 @@ pub trait Provider: Send + Sync {
     /// List available models for this provider
     fn available_models(&self) -> Vec<&'static str> {
         vec![]
+    }
+
+    /// List available models for display/autocomplete (may be dynamic).
+    fn available_models_display(&self) -> Vec<String> {
+        self.available_models()
+            .iter()
+            .map(|m| (*m).to_string())
+            .collect()
+    }
+
+    /// Prefetch any dynamic model lists (default: no-op).
+    async fn prefetch_models(&self) -> Result<()> {
+        Ok(())
     }
 
     /// Get the reasoning effort level (if applicable, e.g., OpenAI)
@@ -141,6 +155,9 @@ pub fn provider_for_model(model: &str) -> Option<&'static str> {
         Some("claude")
     } else if ALL_OPENAI_MODELS.contains(&model) {
         Some("openai")
+    } else if model.contains('/') {
+        // OpenRouter uses provider/model format (e.g., "anthropic/claude-sonnet-4")
+        Some("openrouter")
     } else {
         None
     }
@@ -153,17 +170,21 @@ pub struct MultiProvider {
     /// Direct Anthropic API provider (no Python dependency)
     anthropic: Option<anthropic::AnthropicProvider>,
     openai: Option<openai::OpenAIProvider>,
+    /// OpenRouter API provider (200+ models from various providers)
+    openrouter: Option<openrouter::OpenRouterProvider>,
     active: RwLock<ActiveProvider>,
     has_claude_creds: bool,
     has_openai_creds: bool,
-    /// Use direct API instead of Claude Code CLI for Claude models
-    use_direct_api: bool,
+    has_openrouter_creds: bool,
+    /// Use Claude CLI instead of direct API (legacy mode)
+    use_claude_cli: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum ActiveProvider {
     Claude,
     OpenAI,
+    OpenRouter,
 }
 
 impl MultiProvider {
@@ -171,23 +192,26 @@ impl MultiProvider {
     pub fn new() -> Self {
         let has_claude_creds = auth::claude::load_credentials().is_ok();
         let has_openai_creds = auth::codex::load_credentials().is_ok();
+        let has_openrouter_creds = openrouter::OpenRouterProvider::has_credentials();
 
-        // Check if we should use direct API instead of Claude Code CLI
-        // Set JCODE_USE_DIRECT_API=1 to use direct Anthropic API
-        let use_direct_api = std::env::var("JCODE_USE_DIRECT_API")
+        // Check if we should use Claude CLI instead of direct API
+        // Set JCODE_USE_CLAUDE_CLI=1 to use Claude Code CLI (legacy mode)
+        // Default is now direct Anthropic API for simpler session management
+        let use_claude_cli = std::env::var("JCODE_USE_CLAUDE_CLI")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
         // Initialize providers based on available credentials
-        let claude = if has_claude_creds && !use_direct_api {
+        // Claude CLI provider (legacy - shells out to `claude` binary)
+        let claude = if has_claude_creds && use_claude_cli {
+            crate::logging::info("Using Claude CLI provider (JCODE_USE_CLAUDE_CLI=1)");
             Some(claude::ClaudeProvider::new())
         } else {
             None
         };
 
-        // Direct Anthropic API provider (bypasses Claude Code CLI)
-        let anthropic = if has_claude_creds && use_direct_api {
-            crate::logging::info("Using direct Anthropic API (JCODE_USE_DIRECT_API=1)");
+        // Direct Anthropic API provider (default - no subprocess, jcode owns all state)
+        let anthropic = if has_claude_creds && !use_claude_cli {
             Some(anthropic::AnthropicProvider::new())
         } else {
             None
@@ -201,11 +225,26 @@ impl MultiProvider {
             None
         };
 
-        // Default to Claude if available, otherwise OpenAI
+        // OpenRouter provider (access 200+ models via OPENROUTER_API_KEY)
+        let openrouter = if has_openrouter_creds {
+            match openrouter::OpenRouterProvider::new() {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    crate::logging::info(&format!("Failed to initialize OpenRouter: {}", e));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Default to Claude if available, otherwise OpenAI, then OpenRouter
         let active = if claude.is_some() || anthropic.is_some() {
             ActiveProvider::Claude
         } else if openai.is_some() {
             ActiveProvider::OpenAI
+        } else if openrouter.is_some() {
+            ActiveProvider::OpenRouter
         } else {
             // No credentials - default to Claude (will fail on use)
             ActiveProvider::Claude
@@ -215,10 +254,12 @@ impl MultiProvider {
             claude,
             anthropic,
             openai,
+            openrouter,
             active: RwLock::new(active),
             has_claude_creds,
             has_openai_creds,
-            use_direct_api,
+            has_openrouter_creds,
+            use_claude_cli,
         }
     }
 
@@ -277,6 +318,15 @@ impl Provider for MultiProvider {
                     Err(anyhow::anyhow!("OpenAI credentials not available. Run `jcode login --provider openai` to log in."))
                 }
             }
+            ActiveProvider::OpenRouter => {
+                if let Some(ref openrouter) = self.openrouter {
+                    openrouter
+                        .complete(messages, tools, system, resume_session_id)
+                        .await
+                } else {
+                    Err(anyhow::anyhow!("OpenRouter credentials not available. Set OPENROUTER_API_KEY environment variable."))
+                }
+            }
         }
     }
 
@@ -284,6 +334,7 @@ impl Provider for MultiProvider {
         match self.active_provider() {
             ActiveProvider::Claude => "Claude",
             ActiveProvider::OpenAI => "OpenAI",
+            ActiveProvider::OpenRouter => "OpenRouter",
         }
     }
 
@@ -304,6 +355,11 @@ impl Provider for MultiProvider {
                 .as_ref()
                 .map(|o| o.model())
                 .unwrap_or_else(|| "gpt-5.2-codex".to_string()),
+            ActiveProvider::OpenRouter => self
+                .openrouter
+                .as_ref()
+                .map(|o| o.model())
+                .unwrap_or_else(|| "anthropic/claude-sonnet-4".to_string()),
         }
     }
 
@@ -340,6 +396,19 @@ impl Provider for MultiProvider {
             } else {
                 Ok(())
             }
+        } else if target_provider == Some("openrouter") {
+            if self.openrouter.is_none() {
+                return Err(anyhow::anyhow!(
+                    "OpenRouter credentials not available. Set OPENROUTER_API_KEY environment variable."
+                ));
+            }
+            // Switch active provider to OpenRouter
+            *self.active.write().unwrap() = ActiveProvider::OpenRouter;
+            if let Some(ref openrouter) = self.openrouter {
+                openrouter.set_model(model)
+            } else {
+                Ok(())
+            }
         } else {
             // Unknown model - try current provider
             match self.active_provider() {
@@ -359,6 +428,13 @@ impl Provider for MultiProvider {
                         Err(anyhow::anyhow!("Unknown model: {}", model))
                     }
                 }
+                ActiveProvider::OpenRouter => {
+                    if let Some(ref openrouter) = self.openrouter {
+                        openrouter.set_model(model)
+                    } else {
+                        Err(anyhow::anyhow!("Unknown model: {}", model))
+                    }
+                }
             }
         }
     }
@@ -368,6 +444,23 @@ impl Provider for MultiProvider {
         models.extend_from_slice(ALL_CLAUDE_MODELS);
         models.extend_from_slice(ALL_OPENAI_MODELS);
         models
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        let mut models = Vec::new();
+        models.extend(ALL_CLAUDE_MODELS.iter().map(|m| (*m).to_string()));
+        models.extend(ALL_OPENAI_MODELS.iter().map(|m| (*m).to_string()));
+        if let Some(ref openrouter) = self.openrouter {
+            models.extend(openrouter.available_models_display());
+        }
+        models
+    }
+
+    async fn prefetch_models(&self) -> Result<()> {
+        if let Some(ref openrouter) = self.openrouter {
+            openrouter.prefetch_models().await?;
+        }
+        Ok(())
     }
 
     fn handles_tools_internally(&self) -> bool {
@@ -388,6 +481,7 @@ impl Provider for MultiProvider {
                 .as_ref()
                 .map(|o| o.handles_tools_internally())
                 .unwrap_or(false),
+            ActiveProvider::OpenRouter => false, // jcode executes tools
         }
     }
 
@@ -395,6 +489,7 @@ impl Provider for MultiProvider {
         match self.active_provider() {
             ActiveProvider::Claude => None,
             ActiveProvider::OpenAI => self.openai.as_ref().and_then(|o| o.reasoning_effort()),
+            ActiveProvider::OpenRouter => None,
         }
     }
 
@@ -416,13 +511,32 @@ impl Provider for MultiProvider {
                 .as_ref()
                 .map(|o| o.supports_compaction())
                 .unwrap_or(false),
+            ActiveProvider::OpenRouter => self
+                .openrouter
+                .as_ref()
+                .map(|o| o.supports_compaction())
+                .unwrap_or(false),
         }
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
         let current_model = self.model();
-        let prefer_openai = self.active_provider() == ActiveProvider::OpenAI;
-        let provider = MultiProvider::with_preference(prefer_openai);
+        let active = self.active_provider();
+        let provider = MultiProvider::new();
+        // Set the active provider based on what was active before
+        match active {
+            ActiveProvider::Claude => {}  // Default
+            ActiveProvider::OpenAI => {
+                if provider.openai.is_some() {
+                    *provider.active.write().unwrap() = ActiveProvider::OpenAI;
+                }
+            }
+            ActiveProvider::OpenRouter => {
+                if provider.openrouter.is_some() {
+                    *provider.active.write().unwrap() = ActiveProvider::OpenRouter;
+                }
+            }
+        }
         let _ = provider.set_model(&current_model);
         Arc::new(provider)
     }
@@ -438,6 +552,36 @@ impl Provider for MultiProvider {
                 }
             }
             ActiveProvider::OpenAI => None,
+            ActiveProvider::OpenRouter => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_provider_for_model_claude() {
+        assert_eq!(provider_for_model("claude-opus-4-5-20251101"), Some("claude"));
+    }
+
+    #[test]
+    fn test_provider_for_model_openai() {
+        assert_eq!(provider_for_model("gpt-5.2-codex"), Some("openai"));
+    }
+
+    #[test]
+    fn test_provider_for_model_openrouter() {
+        // OpenRouter uses provider/model format
+        assert_eq!(provider_for_model("anthropic/claude-sonnet-4"), Some("openrouter"));
+        assert_eq!(provider_for_model("openai/gpt-4o"), Some("openrouter"));
+        assert_eq!(provider_for_model("google/gemini-2.0-flash"), Some("openrouter"));
+        assert_eq!(provider_for_model("meta-llama/llama-3.1-405b"), Some("openrouter"));
+    }
+
+    #[test]
+    fn test_provider_for_model_unknown() {
+        assert_eq!(provider_for_model("unknown-model"), None);
     }
 }

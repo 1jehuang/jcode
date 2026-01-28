@@ -155,6 +155,11 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
 
                     let status = session.status.clone();
 
+                    // Skip sessions with no messages
+                    if session.messages.is_empty() {
+                        continue;
+                    }
+
                     sessions.push(SessionInfo {
                         id: stem.to_string(),
                         short_name,

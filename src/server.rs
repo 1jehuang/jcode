@@ -1074,6 +1074,7 @@ async fn handle_client(
             }
 
             Request::GetHistory { id } => {
+                let _ = provider.prefetch_models().await;
                 let (messages, is_canary, provider_name, provider_model, available_models) = {
                     let agent_guard = agent.lock().await;
                     (
@@ -1081,7 +1082,7 @@ async fn handle_client(
                         agent_guard.is_canary(),
                         agent_guard.provider_name(),
                         agent_guard.provider_model(),
-                        agent_guard.available_models(),
+                        agent_guard.available_models_display(),
                     )
                 };
 
@@ -1099,7 +1100,7 @@ async fn handle_client(
                     messages,
                     provider_name: Some(provider_name),
                     provider_model: Some(provider_model),
-                    available_models: available_models.iter().map(|m| (*m).to_string()).collect(),
+                    available_models,
                     mcp_servers: Vec::new(),
                     skills: Vec::new(),
                     total_tokens: None,
@@ -1179,6 +1180,7 @@ async fn handle_client(
                         client_session_id = session_id.clone();
 
                         // Send updated history to client
+                        let _ = provider.prefetch_models().await;
                         let (messages, is_canary, provider_name, provider_model, available_models) = {
                             let agent_guard = agent.lock().await;
                             (
@@ -1186,7 +1188,7 @@ async fn handle_client(
                                 agent_guard.is_canary(),
                                 agent_guard.provider_name(),
                                 agent_guard.provider_model(),
-                                agent_guard.available_models(),
+                                agent_guard.available_models_display(),
                             )
                         };
 
@@ -1203,10 +1205,7 @@ async fn handle_client(
                             messages,
                             provider_name: Some(provider_name),
                             provider_model: Some(provider_model),
-                            available_models: available_models
-                                .iter()
-                                .map(|m| (*m).to_string())
-                                .collect(),
+                            available_models,
                             mcp_servers: Vec::new(),
                             skills: Vec::new(),
                             total_tokens: None,

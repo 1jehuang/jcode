@@ -55,9 +55,13 @@ fn main() {
         format!("v0.1.{} ({})", build_number, git_hash)
     };
 
+    // Get actual build timestamp
+    let build_time = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S %z").to_string();
+
     // Set environment variables for compilation
     println!("cargo:rustc-env=JCODE_GIT_HASH={}", git_hash);
     println!("cargo:rustc-env=JCODE_GIT_DATE={}", git_date);
+    println!("cargo:rustc-env=JCODE_BUILD_TIME={}", build_time);
     println!("cargo:rustc-env=JCODE_VERSION={}", version);
     println!("cargo:rustc-env=JCODE_BUILD_NUMBER={}", build_number);
     println!("cargo:rustc-env=JCODE_CHANGELOG={}", changelog);

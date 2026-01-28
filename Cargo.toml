@@ -84,11 +84,12 @@ pulldown-cmark = "0.12"
 # PDF parsing
 pdf-extract = "0.8"
 
-# Mermaid diagram rendering
-mermaid-rs-renderer = { path = "../mermaid-rs-renderer" }
+# Mermaid diagram rendering (use stable commit, not local WIP)
+mermaid-rs-renderer = { git = "https://github.com/1jehuang/mermaid-rs-renderer.git", rev = "67a8e1b" }
 
 [dev-dependencies]
 async-stream = "0.3"
 
 [build-dependencies]
 dirs = "5"
+chrono = "0.4"

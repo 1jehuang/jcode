@@ -72,6 +72,8 @@ pub struct DisplayConfig {
     pub mouse_capture: bool,
     /// Enable debug socket for external control (default: false)
     pub debug_socket: bool,
+    /// Center all content (default: false)
+    pub centered: bool,
 }
 
 impl Default for DisplayConfig {
@@ -81,6 +83,7 @@ impl Default for DisplayConfig {
             queue_mode: false,
             mouse_capture: false,
             debug_socket: false,
+            centered: true,
         }
     }
 }

@@ -1,0 +1,19 @@
+flowchart LR
+  subgraph Subagent["Subagent Flow"]
+    U["User"] --> A["Agent (parent session)"]
+    A -->|"task tool"| T["Task tool"]
+    T -->|"create/resume session<br/>filter tools"| S["Subagent session"]
+    S --> B["Agent (subagent)"]
+    B -->|"run_once_capture"| P["Provider"]
+    P -->|"tool calls"| R["Registry / Tools"]
+    R -->|"ToolUpdated<br/>SubagentStatus"| Bus["Bus"]
+    Bus --> T
+    T -->|"output + metadata"| A
+  end
+
+  subgraph Swarm["Swarm / Communicate"]
+    A -->|"communicate tool"| C["Communicate tool"]
+    C -->|"Unix socket"| Server["Server (swarm)"]
+    Server -->|"share/read/message/list"| Others["Other agents (same cwd)"]
+    Server -->|"notifications"| A
+  end

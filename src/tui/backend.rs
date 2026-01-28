@@ -237,6 +237,11 @@ pub struct RemoteConnection {
 impl RemoteConnection {
     /// Connect to the server
     pub async fn connect() -> Result<Self> {
+        Self::connect_with_session(None).await
+    }
+
+    /// Connect to the server and optionally resume a specific session
+    pub async fn connect_with_session(resume_session: Option<&str>) -> Result<Self> {
         let stream = UnixStream::connect(server::socket_path()).await?;
         let (reader, writer) = stream.into_split();
 
@@ -265,7 +270,20 @@ impl RemoteConnection {
         .await?;
         conn.next_request_id += 1;
 
-        // Request history
+        // If resuming a session, send ResumeSession BEFORE GetHistory
+        // This ensures the server loads the correct session before sending history
+        if let Some(session_id) = resume_session {
+            if crate::session::session_exists(session_id) {
+                conn.send_request(Request::ResumeSession {
+                    id: conn.next_request_id,
+                    session_id: session_id.to_string(),
+                })
+                .await?;
+                conn.next_request_id += 1;
+            }
+        }
+
+        // Request history (will be for the resumed session if we sent ResumeSession)
         conn.send_request(Request::GetHistory {
             id: conn.next_request_id,
         })
