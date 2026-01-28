@@ -140,9 +140,9 @@ The memory system uses three complementary organization methods:
 ```mermaid
 graph TB
     subgraph "Explicit: Tags"
-        T1["#rust"]
-        T2["#auth-system"]
-        T3["#user-preference"]
+        T1["rust"]
+        T2["auth-system"]
+        T3["user-preference"]
     end
 
     subgraph "Automatic: Clusters"
@@ -232,10 +232,10 @@ sequenceDiagram
     S->>S: Find top-k similar memories
     S->>G: Initial hits (seed nodes)
 
-    loop BFS Traversal (depth ≤ 2)
-        G->>G: Follow HasTag edges → find co-tagged memories
-        G->>G: Follow InCluster edges → find cluster siblings
-        G->>G: Follow RelatesTo edges → find linked memories
+    loop BFS Traversal depth 2
+        G->>G: Follow HasTag edges
+        G->>G: Follow InCluster edges
+        G->>G: Follow RelatesTo edges
     end
 
     G->>H: Candidate memories
@@ -615,75 +615,45 @@ graph TB
 
 ## Async Processing Pipeline
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           MEMORY AGENT ARCHITECTURE                         │
-└─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+    participant MA as Main Agent<br/>TUI App
+    participant CH as mpsc Channel
+    participant MEM as Memory Agent<br/>Background Task
+    participant EMB as Embedder
+    participant GR as Graph Store
+    participant HC as Haiku Sidecar
 
-┌─────────────────────┐                              ┌─────────────────────────┐
-│     MAIN AGENT      │                              │     MEMORY AGENT        │
-│     (TUI App)       │                              │   (Background Task)     │
-├─────────────────────┤                              ├─────────────────────────┤
-│                     │      mpsc channel            │                         │
-│  build_memory_      │  ┌─────────────────────┐     │  Persistent State:      │
-│  prompt_nonblocking │  │   ContextUpdate     │     │  ├─ last_context_emb    │
-│         │           │  │   {messages, ts}    │     │  ├─ surfaced_memories   │
-│         ▼           │  └─────────────────────┘     │  └─ turn_count          │
-│  ┌──────────────┐   │            │                 │                         │
-│  │ take_pending │   │            │ try_send()      │                         │
-│  │ _memory()    │◄──┼────────────┼─────────────────┼──┐                      │
-│  └──────────────┘   │            │ (non-blocking)  │  │                      │
-│         │           │            ▼                 │  │                      │
-│         │           │  ┌─────────────────────┐     │  │                      │
-│         ▼           │  │  update_context_    │     │  │  set_pending_        │
-│  Return to LLM      │  │  sync()             │─────┼──┼─►memory()            │
-│  system prompt      │  └─────────────────────┘     │  │                      │
-│                     │                              │  │                      │
-└─────────────────────┘                              │  │                      │
-                                                     │  │                      │
-                         ┌───────────────────────────┼──┘                      │
-                         │                           │                         │
-                         ▼                           │                         │
-              ┌──────────────────────┐               │                         │
-              │   PROCESSING LOOP    │               │                         │
-              └──────────────────────┘               │                         │
-                         │                           │                         │
-         ┌───────────────┼───────────────┐           │                         │
-         ▼               ▼               ▼           │                         │
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐    │                         │
-│  1. EMBED   │  │ 2. CASCADE  │  │ 3. SIDECAR  │    │                         │
-│   CONTEXT   │  │  RETRIEVE   │  │   CHECK     │    │                         │
-├─────────────┤  ├─────────────┤  ├─────────────┤    │                         │
-│ all-MiniLM  │  │ similarity  │  │ Haiku LLM   │    │                         │
-│ -L6-v2      │  │ + BFS graph │  │ relevance   │    │                         │
-│ (local)     │  │ traversal   │  │ check       │    │                         │
-│ ~30ms       │  │             │  │             │    │                         │
-└─────────────┘  └─────────────┘  └─────────────┘    │                         │
-         │               │               │           │                         │
-         └───────────────┴───────────────┘           │                         │
-                         │                           │                         │
-                         ▼                           │                         │
-              ┌──────────────────────┐               │                         │
-              │  TOPIC CHANGE        │               │                         │
-              │  DETECTION           │               │                         │
-              ├──────────────────────┤               │                         │
-              │ Compare embedding    │               │                         │
-              │ to last_context_emb  │               │                         │
-              │ If sim < 0.3:        │               │                         │
-              │   clear surfaced set │               │                         │
-              └──────────────────────┘               │                         │
-                         │                           │                         │
-                         ▼                           │                         │
-              ┌──────────────────────┐               │                         │
-              │  FILTER & STORE      │───────────────┘                         │
-              ├──────────────────────┤                                         │
-              │ Skip already         │                                         │
-              │ surfaced memories    │                                         │
-              │ Store in             │                                         │
-              │ PENDING_MEMORY       │                                         │
-              └──────────────────────┘                                         │
-                                                                               │
-└──────────────────────────────────────────────────────────────────────────────┘
+    Note over MA,MEM: Turn N
+
+    MA->>MA: build_memory_prompt()
+    MA->>MA: take_pending_memory()
+    Note right of MA: Returns Turn N-1 results
+
+    MA->>CH: try_send(ContextUpdate)
+    Note right of CH: Non-blocking
+
+    MA->>MA: Continue with LLM call
+
+    CH->>MEM: update_context_sync()
+
+    MEM->>EMB: Embed context
+    EMB-->>MEM: Context embedding
+
+    MEM->>GR: Similarity search
+    GR-->>MEM: Initial hits
+
+    MEM->>GR: BFS traversal
+    GR-->>MEM: Related memories
+
+    MEM->>HC: Verify relevance
+    HC-->>MEM: Filtered results
+
+    MEM->>MEM: Topic change detection
+    Note right of MEM: Clear surfaced if sim < 0.3
+
+    MEM->>MEM: set_pending_memory()
+    Note right of MEM: Available at Turn N+1
 ```
 
 **Key Points:**
