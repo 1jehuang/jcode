@@ -46,6 +46,12 @@ struct MemoryInput {
     /// For related action: traversal depth (default: 2)
     #[serde(default)]
     depth: Option<usize>,
+    /// For recall action: max results (default: 10)
+    #[serde(default)]
+    limit: Option<usize>,
+    /// For recall action: retrieval mode
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 #[async_trait]
@@ -55,7 +61,7 @@ impl Tool for MemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Store and recall information across sessions. Use this to remember important facts about the codebase, user preferences, or lessons learned."
+        "Store and recall information across sessions. Use this to remember important facts about the codebase, user preferences, or lessons learned. IMPORTANT: When the user asks 'do you remember X?' or 'what do you know about X?', use recall with a query to search your memories."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -65,7 +71,7 @@ impl Tool for MemoryTool {
                 "action": {
                     "type": "string",
                     "enum": ["remember", "recall", "search", "list", "forget", "tag", "link", "related"],
-                    "description": "Action: remember (store), recall (get context), search, list, forget, tag (add tags), link (connect memories), related (find connected)"
+                    "description": "Action: remember (store), recall (retrieve memories - use query for semantic search), search (keyword), list, forget, tag, link, related"
                 },
                 "content": { "type": "string", "description": "For remember: what to store" },
                 "category": {
@@ -73,14 +79,16 @@ impl Tool for MemoryTool {
                     "enum": ["fact", "preference", "entity", "correction"],
                     "description": "Category of memory"
                 },
-                "query": { "type": "string", "description": "For search: search term" },
+                "query": { "type": "string", "description": "For recall/search: what to look for. For recall, enables semantic search with graph traversal" },
                 "id": { "type": "string", "description": "For forget/tag/related: memory ID" },
-                "tags": { "type": "array", "items": { "type": "string" }, "description": "For remember/tag: tags to apply" },
-                "scope": { "type": "string", "enum": ["project", "global"] },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "For remember/tag/recall: tags to apply or filter by" },
+                "scope": { "type": "string", "enum": ["project", "global", "all"], "description": "Memory scope (default: project for remember, all for recall)" },
                 "from_id": { "type": "string", "description": "For link: source memory ID" },
                 "to_id": { "type": "string", "description": "For link: target memory ID" },
                 "weight": { "type": "number", "description": "For link: relationship strength (0.0-1.0, default 0.5)" },
-                "depth": { "type": "integer", "description": "For related: traversal depth (default 2)" }
+                "depth": { "type": "integer", "description": "For related: traversal depth (default 2)" },
+                "limit": { "type": "integer", "description": "For recall: max results (default 10)" },
+                "mode": { "type": "string", "enum": ["recent", "semantic", "cascade"], "description": "For recall: recent (by time), semantic (embedding similarity), cascade (semantic + graph traversal, default when query provided)" }
             },
             "required": ["action"]
         })
@@ -112,10 +120,57 @@ impl Tool for MemoryTool {
                     category, scope, content, id
                 )))
             }
-            "recall" => match self.manager.get_prompt_memories(10) {
-                Some(memories) => Ok(ToolOutput::new(format!("Memories:\n{}", memories))),
-                None => Ok(ToolOutput::new("No memories stored yet.")),
-            },
+            "recall" => {
+                let limit = input.limit.unwrap_or(10);
+                let mode = input.mode.as_deref().unwrap_or_else(|| {
+                    if input.query.is_some() { "cascade" } else { "recent" }
+                });
+
+                match mode {
+                    "recent" => {
+                        // Original behavior: most recent memories
+                        match self.manager.get_prompt_memories(limit) {
+                            Some(memories) => Ok(ToolOutput::new(format!("Recent memories:\n{}", memories))),
+                            None => Ok(ToolOutput::new("No memories stored yet.")),
+                        }
+                    }
+                    "semantic" | "cascade" => {
+                        // Semantic search with optional cascade
+                        let query = match &input.query {
+                            Some(q) => q.clone(),
+                            None => return Err(anyhow::anyhow!("query required for semantic/cascade mode")),
+                        };
+
+                        let results = if mode == "cascade" {
+                            self.manager.find_similar_with_cascade(&query, 0.3, limit)?
+                        } else {
+                            self.manager.find_similar(&query, 0.3, limit)?
+                        };
+
+                        if results.is_empty() {
+                            Ok(ToolOutput::new(format!(
+                                "No memories found matching '{}'. Try recall without query to see recent memories.",
+                                query
+                            )))
+                        } else {
+                            let mut out = format!("Found {} relevant memories for '{}':\n\n", results.len(), query);
+                            for (entry, score) in results {
+                                let tags_str = if entry.tags.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" [{}]", entry.tags.join(", "))
+                                };
+                                out.push_str(&format!(
+                                    "- [{}] {}{}\n  id: {} (relevance: {:.0}%)\n\n",
+                                    entry.category, entry.content, tags_str, entry.id, score * 100.0
+                                ));
+                            }
+                            Ok(ToolOutput::new(out))
+                        }
+                    }
+                    other => Err(anyhow::anyhow!("Unknown mode: {}. Use recent, semantic, or cascade", other)),
+                }
+            }
             "search" => {
                 let query = input
                     .query

@@ -112,10 +112,27 @@ def run_tests(client, providers):
         ok, output = client.send('tool:memory {"action":"list"}', session_id)
         check(ok and provider in output, "List shows our memory")
 
-        # Test 3: Memory search
-        log("\n  --- Memory Search ---")
+        # Test 3: Memory search (keyword)
+        log("\n  --- Memory Search (keyword) ---")
         ok, output = client.send(f'tool:memory {{"action":"search","query":"{provider} testing"}}', session_id)
         check(ok, f"Search for '{provider} testing'")
+
+        # Test 3b: Enhanced recall with query (semantic search)
+        log("\n  --- Enhanced Recall (semantic) ---")
+        ok, output = client.send(
+            f'tool:memory {{"action":"recall","query":"testing preferences","mode":"cascade"}}',
+            session_id)
+        result = json.loads(output) if output.startswith('{') else {'output': output}
+        found_semantic = "relevant" in result.get('output', output).lower() or "memories" in result.get('output', output).lower()
+        check(ok and found_semantic, "Semantic recall with cascade")
+        if ok:
+            log(f"       {result.get('output', output)[:150]}...")
+
+        # Test 3c: Recall recent (no query)
+        log("\n  --- Recall Recent ---")
+        ok, output = client.send('tool:memory {"action":"recall","limit":5}', session_id)
+        result = json.loads(output) if output.startswith('{') else {'output': output}
+        check(ok and "memories" in result.get('output', output).lower(), "Recall recent memories")
 
         # Test 4: Memory tag (using correct 'id' field)
         log("\n  --- Memory Tag ---")
