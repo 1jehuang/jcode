@@ -6825,16 +6825,14 @@ impl super::TuiState for App {
 
             if is_oauth_provider {
                 let usage = crate::usage::get_sync();
-                if usage.fetched_at.is_some() {
-                    Some(super::info_widget::UsageInfo {
-                        provider: super::info_widget::UsageProvider::Anthropic,
-                        five_hour: usage.five_hour,
-                        seven_day: usage.seven_day,
-                        available: true,
-                    })
-                } else {
-                    None
-                }
+                // Show widget for OAuth providers even if data is still loading
+                // (will show 0% until first fetch completes, then updates)
+                Some(super::info_widget::UsageInfo {
+                    provider: super::info_widget::UsageProvider::Anthropic,
+                    five_hour: usage.five_hour,
+                    seven_day: usage.seven_day,
+                    available: true,
+                })
             } else {
                 None
             }
