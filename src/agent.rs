@@ -483,6 +483,14 @@ impl Agent {
         }
     }
 
+    /// Mark this session as a debug/test session
+    pub fn set_debug(&mut self, is_debug: bool) {
+        self.session.set_debug(is_debug);
+        if let Err(err) = self.session.save() {
+            logging::error(&format!("Failed to persist debug session state: {}", err));
+        }
+    }
+
     async fn tool_definitions(&self) -> Vec<ToolDefinition> {
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;

@@ -35,6 +35,7 @@ pub struct SessionInfo {
     pub last_message_time: chrono::DateTime<chrono::Utc>,
     pub working_dir: Option<String>,
     pub is_canary: bool,
+    pub is_debug: bool,
     pub status: SessionStatus,
     pub estimated_tokens: usize,
     pub messages_preview: Vec<PreviewMessage>,
@@ -172,6 +173,7 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
                         last_message_time: session.updated_at,
                         working_dir: session.working_dir,
                         is_canary: session.is_canary,
+                        is_debug: session.is_debug,
                         status,
                         estimated_tokens,
                         messages_preview,
@@ -528,6 +530,7 @@ impl SessionPicker {
         };
 
         let canary_marker = if session.is_canary { " 🔬" } else { "" };
+        let debug_marker = if session.is_debug { " 🧪" } else { "" };
 
         // Status indicator with color
         let (status_icon, status_color) = match &session.status {
@@ -549,6 +552,7 @@ impl SessionPicker {
             ),
             Span::styled(session.short_name.clone(), name_style),
             Span::styled(canary_marker, Style::default().fg(Color::Rgb(255, 193, 7))),
+            Span::styled(debug_marker, Style::default().fg(Color::Rgb(180, 180, 180))),
             Span::styled(
                 format!(" {}", status_icon),
                 Style::default().fg(status_color),
