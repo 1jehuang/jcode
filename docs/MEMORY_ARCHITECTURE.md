@@ -718,12 +718,12 @@ memory { action: "tag", id: "...", tags: ["new", "tags"] }
 - [x] Topic change detection
 - [x] Surfaced memory tracking
 
-### Phase 4: Graph-Based Architecture 🚧
-- [ ] Migrate to petgraph data structure
-- [ ] Tag nodes and HasTag edges
+### Phase 4: Graph-Based Architecture ✅
+- [x] HashMap-based graph structure (simpler than petgraph for JSON serialization)
+- [x] Tag nodes and HasTag edges
 - [ ] Cluster discovery and InCluster edges
-- [ ] Semantic link edges (RelatesTo, Supersedes, Contradicts)
-- [ ] Cascade retrieval algorithm
+- [x] Semantic link edges (RelatesTo)
+- [x] Cascade retrieval algorithm with BFS traversal
 
 ### Phase 5: Post-Retrieval Maintenance 📋
 - [ ] Link discovery (co-relevant memories)
@@ -746,6 +746,15 @@ memory { action: "tag", id: "...", tags: ["new", "tags"] }
 - [ ] User control UI/CLI
 - [ ] Memory export/import
 
+### Phase 8: Memory Consolidation (Sleep-Like Processing) 📋
+- [ ] Background consolidation daemon
+- [ ] Similarity-based memory merging
+- [ ] Redundancy detection and deduplication
+- [ ] Contradiction resolution
+- [ ] Cluster reorganization
+- [ ] Weak memory pruning
+- [ ] Knowledge graph optimization
+
 ---
 
 ## Privacy & Security
@@ -767,6 +776,72 @@ Before storing any memory, scan for:
 - CLI for viewing/editing/deleting
 - Option to disable memory entirely
 - Export/import for backup
+
+---
+
+## Future: Memory Consolidation (Sleep-Like Processing)
+
+> **Status:** TODO - Design pending
+
+Similar to how humans consolidate memories during sleep, jcode can run background consolidation to optimize the memory graph:
+
+### Concept
+
+```mermaid
+graph LR
+    subgraph "Active Use"
+        A[Raw Memories]
+        B[Redundant Facts]
+        C[Weak Links]
+        D[Scattered Tags]
+    end
+
+    subgraph "Consolidation"
+        E[Merge Similar]
+        F[Detect Contradictions]
+        G[Prune Weak]
+        H[Reorganize Clusters]
+    end
+
+    subgraph "Optimized"
+        I[Unified Facts]
+        J[Resolved Conflicts]
+        K[Strong Connections]
+        L[Clean Taxonomy]
+    end
+
+    A --> E --> I
+    B --> E
+    B --> F --> J
+    C --> G --> K
+    D --> H --> L
+```
+
+### Potential Features
+
+| Feature | Description |
+|---------|-------------|
+| **Similarity Merge** | Combine memories with >0.95 embedding similarity |
+| **Redundancy Detection** | Find memories that express the same fact differently |
+| **Contradiction Resolution** | Surface conflicting memories for user decision |
+| **Weak Pruning** | Remove memories with low confidence + low access |
+| **Cluster Optimization** | Re-run clustering, merge small clusters |
+| **Link Strengthening** | Increase weights on frequently co-accessed pairs |
+| **Tag Cleanup** | Merge similar tags, remove orphans |
+
+### Architecture Options (TBD)
+
+1. **Periodic daemon** - Run consolidation every N hours
+2. **On-idle trigger** - Run when no active sessions for M minutes
+3. **Capacity-based** - Run when memory count exceeds threshold
+4. **Manual command** - User-triggered via `/consolidate`
+
+### Open Questions for Consolidation
+
+- How to handle user confirmation for destructive merges?
+- Should consolidation be reversible?
+- What's the right frequency/trigger?
+- How to balance between "perfect organization" and "keep everything"?
 
 ---
 
