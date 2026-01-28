@@ -89,6 +89,10 @@ pub trait TuiState {
     /// Render streaming text using incremental markdown renderer
     /// This is more efficient than re-rendering on every frame
     fn render_streaming_markdown(&self, width: usize) -> Vec<Line<'static>>;
+    /// Whether centered mode is enabled
+    fn centered_mode(&self) -> bool;
+    /// Authentication status for all supported providers
+    fn auth_status(&self) -> crate::auth::AuthStatus;
 }
 
 pub(crate) fn subscribe_metadata() -> (Option<String>, Option<bool>) {
