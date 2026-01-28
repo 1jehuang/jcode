@@ -20,6 +20,19 @@ use crate::memory::{self, MemoryEntry, MemoryManager};
 use crate::sidecar::HaikuSidecar;
 use crate::tui::info_widget::{MemoryEventKind, MemoryState};
 
+/// Context from a retrieval operation for post-retrieval maintenance
+#[derive(Debug, Clone)]
+struct RetrievalContext {
+    /// Embedding of the query context
+    embedding: Vec<f32>,
+    /// Memory IDs that were verified as relevant by Haiku
+    verified_ids: Vec<String>,
+    /// Memory IDs that were retrieved but rejected by Haiku
+    rejected_ids: Vec<String>,
+    /// Brief snippet of the context for gap logging
+    context_snippet: String,
+}
+
 /// Channel capacity for context updates
 const CONTEXT_CHANNEL_CAPACITY: usize = 16;
 
@@ -228,24 +241,44 @@ impl MemoryAgent {
         });
         memory::add_event(MemoryEventKind::SidecarStarted);
 
+        // Collect candidate IDs for tracking
+        let candidate_ids: Vec<String> = new_candidates.iter().map(|(e, _)| e.id.clone()).collect();
+
         let relevant = self.evaluate_candidates(&context, new_candidates).await?;
 
-        if relevant.is_empty() {
-            memory::set_state(MemoryState::Idle);
-            return Ok(());
-        }
+        // Build retrieval context for maintenance
+        let verified_ids: Vec<String> = relevant.iter().map(|e| e.id.clone()).collect();
+        let rejected_ids: Vec<String> = candidate_ids
+            .iter()
+            .filter(|id| !verified_ids.contains(id))
+            .cloned()
+            .collect();
+
+        let retrieval_ctx = RetrievalContext {
+            embedding: context_embedding,
+            verified_ids: verified_ids.clone(),
+            rejected_ids,
+            context_snippet: context[..context.len().min(200)].to_string(),
+        };
 
         // Step 4: Format and store for main agent
-        let mut prompt = String::from("# Relevant Memory\n\n");
-        for entry in &relevant {
-            prompt.push_str(&format!("- {}\n", entry.content));
-            self.surfaced_memories.insert(entry.id.clone());
+        if !relevant.is_empty() {
+            let mut prompt = String::from("# Relevant Memory\n\n");
+            for entry in &relevant {
+                prompt.push_str(&format!("- {}\n", entry.content));
+                self.surfaced_memories.insert(entry.id.clone());
+            }
+
+            memory::set_pending_memory(prompt, relevant.len());
+            memory::set_state(MemoryState::FoundRelevant {
+                count: relevant.len(),
+            });
+        } else {
+            memory::set_state(MemoryState::Idle);
         }
 
-        memory::set_pending_memory(prompt, relevant.len());
-        memory::set_state(MemoryState::FoundRelevant {
-            count: relevant.len(),
-        });
+        // Step 5: Post-retrieval maintenance (runs in background)
+        self.post_retrieval_maintenance(retrieval_ctx).await;
 
         Ok(())
     }
@@ -343,6 +376,113 @@ impl MemoryAgent {
             Ok(None)
         }
     }
+
+    /// Post-retrieval maintenance tasks
+    ///
+    /// After serving memories, we can use the retrieval context to:
+    /// 1. Create links between co-relevant memories
+    /// 2. Boost confidence for verified memories
+    /// 3. Decay confidence for rejected memories
+    /// 4. Log memory gaps for future learning
+    async fn post_retrieval_maintenance(&self, ctx: RetrievalContext) {
+        // Run maintenance in background - don't block retrieval flow
+        let memory_manager = self.memory_manager.clone();
+
+        tokio::spawn(async move {
+            // 1. Link discovery: Create RelatesTo edges between co-relevant memories
+            if ctx.verified_ids.len() >= 2 {
+                if let Err(e) = discover_links(&memory_manager, &ctx.verified_ids).await {
+                    crate::logging::info(&format!("Link discovery failed: {}", e));
+                }
+            }
+
+            // 2. Boost confidence for verified memories (they were actually useful)
+            for id in &ctx.verified_ids {
+                if let Err(e) = boost_memory_confidence(&memory_manager, id, 0.05) {
+                    crate::logging::info(&format!("Confidence boost failed for {}: {}", id, e));
+                }
+            }
+
+            // 3. Gentle decay for rejected memories (may be stale)
+            for id in &ctx.rejected_ids {
+                if let Err(e) = decay_memory_confidence(&memory_manager, id, 0.02) {
+                    crate::logging::info(&format!("Confidence decay failed for {}: {}", id, e));
+                }
+            }
+
+            // 4. Gap detection: Log when we had no relevant memories
+            if ctx.verified_ids.is_empty() && !ctx.rejected_ids.is_empty() {
+                crate::logging::info(&format!(
+                    "Memory gap detected: {} candidates retrieved but none relevant. Context: {}...",
+                    ctx.rejected_ids.len(),
+                    &ctx.context_snippet[..ctx.context_snippet.len().min(100)]
+                ));
+            }
+        });
+    }
+}
+
+/// Discover links between co-relevant memories
+async fn discover_links(manager: &MemoryManager, memory_ids: &[String]) -> Result<()> {
+    // For each pair of co-relevant memories, create a RelatesTo link
+    // Use a moderate weight since we're inferring the relationship
+    const LINK_WEIGHT: f32 = 0.6;
+
+    for i in 0..memory_ids.len() {
+        for j in (i + 1)..memory_ids.len() {
+            let from = &memory_ids[i];
+            let to = &memory_ids[j];
+
+            // Try to link (may fail if memories are in different stores)
+            if let Err(e) = manager.link_memories(from, to, LINK_WEIGHT) {
+                // This is expected for cross-store memories, just log at debug level
+                crate::logging::info(&format!("Could not link {} -> {}: {}", from, to, e));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Boost a memory's confidence score
+fn boost_memory_confidence(manager: &MemoryManager, memory_id: &str, amount: f32) -> Result<()> {
+    // Load project graph first
+    let mut graph = manager.load_project_graph()?;
+    if let Some(entry) = graph.get_memory_mut(memory_id) {
+        // Boost access count and touch timestamp
+        entry.access_count += 1;
+        entry.updated_at = chrono::Utc::now();
+        // Note: We don't have a confidence field in MemoryEntry yet,
+        // so we use access_count as a proxy for confidence
+        manager.save_project_graph(&graph)?;
+        return Ok(());
+    }
+
+    // Try global
+    let mut graph = manager.load_global_graph()?;
+    if let Some(entry) = graph.get_memory_mut(memory_id) {
+        entry.access_count += 1;
+        entry.updated_at = chrono::Utc::now();
+        manager.save_global_graph(&graph)?;
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!("Memory not found: {}", memory_id))
+}
+
+/// Decay a memory's confidence score
+fn decay_memory_confidence(manager: &MemoryManager, memory_id: &str, _amount: f32) -> Result<()> {
+    // For now, we don't have a confidence field to decay
+    // The scoring function already handles recency decay via updated_at
+    // In the future, we could add a confidence field and decay it here
+
+    // Just log that we would decay
+    crate::logging::info(&format!(
+        "Would decay confidence for memory {} (not implemented yet)",
+        memory_id
+    ));
+
+    Ok(())
 }
 
 /// Result from session search

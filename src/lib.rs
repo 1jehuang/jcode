@@ -12,6 +12,7 @@ pub mod logging;
 pub mod mcp;
 pub mod memory;
 pub mod memory_agent;
+pub mod memory_graph;
 pub mod message;
 pub mod prompt;
 pub mod protocol;

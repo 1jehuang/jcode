@@ -6,6 +6,7 @@
 //!
 //! Integrates with the Haiku sidecar for relevance verification and extraction.
 
+use crate::memory_graph::{EdgeKind, MemoryGraph, GRAPH_VERSION};
 use crate::sidecar::HaikuSidecar;
 use crate::storage;
 use crate::tui::info_widget::{MemoryActivity, MemoryEvent, MemoryEventKind, MemoryState};
@@ -591,6 +592,7 @@ fn memory_score(entry: &MemoryEntry) -> f64 {
     score
 }
 
+#[derive(Clone)]
 pub struct MemoryManager {
     project_dir: Option<PathBuf>,
 }
@@ -1209,6 +1211,238 @@ impl MemoryManager {
             format_entries_for_prompt(&relevant, MEMORY_RELEVANCE_MAX_RESULTS)
                 .map(|entries| format!("# Memory\n\n{}", entries)),
         )
+    }
+
+    // ==================== Graph-Based Operations ====================
+
+    /// Load project memories as a MemoryGraph with automatic migration
+    pub fn load_project_graph(&self) -> Result<MemoryGraph> {
+        match self.project_memory_path()? {
+            Some(path) if path.exists() => {
+                // Try loading as MemoryGraph first
+                if let Ok(graph) = storage::read_json::<MemoryGraph>(&path) {
+                    if graph.graph_version == GRAPH_VERSION {
+                        return Ok(graph);
+                    }
+                }
+
+                // Fall back to legacy MemoryStore and migrate
+                let store: MemoryStore = storage::read_json(&path)?;
+                let graph = MemoryGraph::from_legacy_store(store);
+
+                // Save migrated format (create backup first)
+                let backup_path = path.with_extension("json.bak");
+                if !backup_path.exists() {
+                    let _ = std::fs::copy(&path, &backup_path);
+                }
+                storage::write_json(&path, &graph)?;
+
+                crate::logging::info(&format!(
+                    "Migrated memory store to graph format: {}",
+                    path.display()
+                ));
+                Ok(graph)
+            }
+            _ => Ok(MemoryGraph::new()),
+        }
+    }
+
+    /// Load global memories as a MemoryGraph with automatic migration
+    pub fn load_global_graph(&self) -> Result<MemoryGraph> {
+        let path = self.global_memory_path()?;
+        if path.exists() {
+            // Try loading as MemoryGraph first
+            if let Ok(graph) = storage::read_json::<MemoryGraph>(&path) {
+                if graph.graph_version == GRAPH_VERSION {
+                    return Ok(graph);
+                }
+            }
+
+            // Fall back to legacy MemoryStore and migrate
+            let store: MemoryStore = storage::read_json(&path)?;
+            let graph = MemoryGraph::from_legacy_store(store);
+
+            // Save migrated format (create backup first)
+            let backup_path = path.with_extension("json.bak");
+            if !backup_path.exists() {
+                let _ = std::fs::copy(&path, &backup_path);
+            }
+            storage::write_json(&path, &graph)?;
+
+            crate::logging::info(&format!(
+                "Migrated global memory store to graph format: {}",
+                path.display()
+            ));
+            Ok(graph)
+        } else {
+            Ok(MemoryGraph::new())
+        }
+    }
+
+    /// Save project memories as a MemoryGraph
+    pub fn save_project_graph(&self, graph: &MemoryGraph) -> Result<()> {
+        if let Some(path) = self.project_memory_path()? {
+            storage::write_json(&path, graph)?;
+        }
+        Ok(())
+    }
+
+    /// Save global memories as a MemoryGraph
+    pub fn save_global_graph(&self, graph: &MemoryGraph) -> Result<()> {
+        let path = self.global_memory_path()?;
+        storage::write_json(&path, graph)
+    }
+
+    /// Add a tag to a memory
+    pub fn tag_memory(&self, memory_id: &str, tag: &str) -> Result<()> {
+        // Try project first
+        let mut graph = self.load_project_graph()?;
+        if graph.memories.contains_key(memory_id) {
+            graph.tag_memory(memory_id, tag);
+            return self.save_project_graph(&graph);
+        }
+
+        // Try global
+        let mut graph = self.load_global_graph()?;
+        if graph.memories.contains_key(memory_id) {
+            graph.tag_memory(memory_id, tag);
+            return self.save_global_graph(&graph);
+        }
+
+        Err(anyhow::anyhow!("Memory not found: {}", memory_id))
+    }
+
+    /// Link two memories with a RelatesTo edge
+    pub fn link_memories(&self, from_id: &str, to_id: &str, weight: f32) -> Result<()> {
+        // Try project first
+        let mut graph = self.load_project_graph()?;
+        if graph.memories.contains_key(from_id) && graph.memories.contains_key(to_id) {
+            graph.link_memories(from_id, to_id, weight);
+            return self.save_project_graph(&graph);
+        }
+
+        // Try global
+        let mut graph = self.load_global_graph()?;
+        if graph.memories.contains_key(from_id) && graph.memories.contains_key(to_id) {
+            graph.link_memories(from_id, to_id, weight);
+            return self.save_global_graph(&graph);
+        }
+
+        // Cross-store links not supported for now
+        Err(anyhow::anyhow!(
+            "Both memories must be in the same store (project or global)"
+        ))
+    }
+
+    /// Get memories related to a given memory via graph traversal
+    pub fn get_related(&self, memory_id: &str, depth: usize) -> Result<Vec<MemoryEntry>> {
+        // Find which store contains the memory
+        let (mut graph, is_project) = {
+            let project_graph = self.load_project_graph()?;
+            if project_graph.memories.contains_key(memory_id) {
+                (project_graph, true)
+            } else {
+                let global_graph = self.load_global_graph()?;
+                if global_graph.memories.contains_key(memory_id) {
+                    (global_graph, false)
+                } else {
+                    return Err(anyhow::anyhow!("Memory not found: {}", memory_id));
+                }
+            }
+        };
+
+        // Use cascade retrieval to find related memories
+        let results = graph.cascade_retrieve(&[memory_id.to_string()], &[1.0], depth, 20);
+
+        // Collect memory entries (excluding the seed)
+        let entries: Vec<MemoryEntry> = results
+            .into_iter()
+            .filter(|(id, _)| id != memory_id)
+            .filter_map(|(id, _)| graph.get_memory(&id).cloned())
+            .collect();
+
+        Ok(entries)
+    }
+
+    /// Find similar memories with cascade retrieval through the graph
+    ///
+    /// This extends the basic embedding search by also traversing through
+    /// tags to find related memories that might not have direct embedding similarity.
+    pub fn find_similar_with_cascade(
+        &self,
+        text: &str,
+        threshold: f32,
+        limit: usize,
+    ) -> Result<Vec<(MemoryEntry, f32)>> {
+        // First, do basic embedding search
+        let embedding_hits = self.find_similar(text, threshold, limit)?;
+
+        if embedding_hits.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Get seed IDs and scores
+        let seed_ids: Vec<String> = embedding_hits.iter().map(|(e, _)| e.id.clone()).collect();
+        let seed_scores: Vec<f32> = embedding_hits.iter().map(|(_, s)| *s).collect();
+
+        // Load graphs and perform cascade retrieval
+        let mut project_graph = self.load_project_graph()?;
+        let mut global_graph = self.load_global_graph()?;
+
+        // Cascade through project graph
+        let project_cascade = project_graph.cascade_retrieve(&seed_ids, &seed_scores, 2, limit * 2);
+
+        // Cascade through global graph
+        let global_cascade = global_graph.cascade_retrieve(&seed_ids, &seed_scores, 2, limit * 2);
+
+        // Merge results, keeping highest score for each memory
+        let mut merged: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+
+        for (id, score) in embedding_hits.iter() {
+            merged.insert(id.id.clone(), *score);
+        }
+        for (id, score) in project_cascade {
+            let existing = merged.get(&id).copied().unwrap_or(0.0);
+            if score > existing {
+                merged.insert(id, score);
+            }
+        }
+        for (id, score) in global_cascade {
+            let existing = merged.get(&id).copied().unwrap_or(0.0);
+            if score > existing {
+                merged.insert(id, score);
+            }
+        }
+
+        // Look up entries and sort by score
+        let mut results: Vec<(MemoryEntry, f32)> = merged
+            .into_iter()
+            .filter_map(|(id, score)| {
+                project_graph
+                    .get_memory(&id)
+                    .or_else(|| global_graph.get_memory(&id))
+                    .cloned()
+                    .map(|entry| (entry, score))
+            })
+            .collect();
+
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(limit);
+
+        Ok(results)
+    }
+
+    /// Get graph statistics for display
+    pub fn graph_stats(&self) -> Result<(usize, usize, usize, usize)> {
+        let project = self.load_project_graph()?;
+        let global = self.load_global_graph()?;
+
+        let memories = project.memories.len() + global.memories.len();
+        let tags = project.tags.len() + global.tags.len();
+        let edges = project.edge_count() + global.edge_count();
+        let clusters = project.clusters.len() + global.clusters.len();
+
+        Ok((memories, tags, edges, clusters))
     }
 }
 
