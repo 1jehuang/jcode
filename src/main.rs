@@ -12,6 +12,7 @@ mod logging;
 mod mcp;
 mod memory;
 mod memory_agent;
+mod memory_graph;
 mod message;
 mod prompt;
 mod protocol;

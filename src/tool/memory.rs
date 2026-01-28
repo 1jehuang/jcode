@@ -34,6 +34,18 @@ struct MemoryInput {
     tags: Option<Vec<String>>,
     #[serde(default)]
     scope: Option<String>,
+    /// For link action: source memory ID
+    #[serde(default)]
+    from_id: Option<String>,
+    /// For link action: target memory ID
+    #[serde(default)]
+    to_id: Option<String>,
+    /// For link action: relationship weight (0.0-1.0)
+    #[serde(default)]
+    weight: Option<f32>,
+    /// For related action: traversal depth (default: 2)
+    #[serde(default)]
+    depth: Option<usize>,
 }
 
 #[async_trait]
@@ -52,8 +64,8 @@ impl Tool for MemoryTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["remember", "recall", "search", "list", "forget"],
-                    "description": "Action: remember (store), recall (get context), search, list, forget"
+                    "enum": ["remember", "recall", "search", "list", "forget", "tag", "link", "related"],
+                    "description": "Action: remember (store), recall (get context), search, list, forget, tag (add tags), link (connect memories), related (find connected)"
                 },
                 "content": { "type": "string", "description": "For remember: what to store" },
                 "category": {
@@ -62,9 +74,13 @@ impl Tool for MemoryTool {
                     "description": "Category of memory"
                 },
                 "query": { "type": "string", "description": "For search: search term" },
-                "id": { "type": "string", "description": "For forget: memory ID" },
-                "tags": { "type": "array", "items": { "type": "string" } },
-                "scope": { "type": "string", "enum": ["project", "global"] }
+                "id": { "type": "string", "description": "For forget/tag/related: memory ID" },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "For remember/tag: tags to apply" },
+                "scope": { "type": "string", "enum": ["project", "global"] },
+                "from_id": { "type": "string", "description": "For link: source memory ID" },
+                "to_id": { "type": "string", "description": "For link: target memory ID" },
+                "weight": { "type": "number", "description": "For link: relationship strength (0.0-1.0, default 0.5)" },
+                "depth": { "type": "integer", "description": "For related: traversal depth (default 2)" }
             },
             "required": ["action"]
         })
@@ -139,6 +155,76 @@ impl Tool for MemoryTool {
                     Ok(ToolOutput::new(format!("Forgot: {}", id)))
                 } else {
                     Ok(ToolOutput::new(format!("Not found: {}", id)))
+                }
+            }
+            "tag" => {
+                let id = input.id.ok_or_else(|| anyhow::anyhow!("id required"))?;
+                let tags = input.tags.ok_or_else(|| anyhow::anyhow!("tags required"))?;
+
+                if tags.is_empty() {
+                    return Err(anyhow::anyhow!("At least one tag required"));
+                }
+
+                for tag in &tags {
+                    self.manager.tag_memory(&id, tag)?;
+                }
+
+                Ok(ToolOutput::new(format!(
+                    "Tagged memory {} with: {}",
+                    id,
+                    tags.join(", ")
+                )))
+            }
+            "link" => {
+                let from_id = input
+                    .from_id
+                    .ok_or_else(|| anyhow::anyhow!("from_id required"))?;
+                let to_id = input
+                    .to_id
+                    .ok_or_else(|| anyhow::anyhow!("to_id required"))?;
+                let weight = input.weight.unwrap_or(0.5);
+
+                if weight < 0.0 || weight > 1.0 {
+                    return Err(anyhow::anyhow!("weight must be between 0.0 and 1.0"));
+                }
+
+                self.manager.link_memories(&from_id, &to_id, weight)?;
+
+                Ok(ToolOutput::new(format!(
+                    "Linked {} -> {} (weight: {:.2})",
+                    from_id, to_id, weight
+                )))
+            }
+            "related" => {
+                let id = input.id.ok_or_else(|| anyhow::anyhow!("id required"))?;
+                let depth = input.depth.unwrap_or(2);
+
+                let related = self.manager.get_related(&id, depth)?;
+
+                if related.is_empty() {
+                    Ok(ToolOutput::new(format!(
+                        "No related memories found for {}",
+                        id
+                    )))
+                } else {
+                    let mut out = format!(
+                        "Found {} memories related to {} (depth {}):\n\n",
+                        related.len(),
+                        id,
+                        depth
+                    );
+                    for entry in related {
+                        let tags_str = if entry.tags.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" [{}]", entry.tags.join(", "))
+                        };
+                        out.push_str(&format!(
+                            "- [{}] {}{}\n  id: {}\n\n",
+                            entry.category, entry.content, tags_str, entry.id
+                        ));
+                    }
+                    Ok(ToolOutput::new(out))
                 }
             }
             other => Err(anyhow::anyhow!("Unknown action: {}", other)),
