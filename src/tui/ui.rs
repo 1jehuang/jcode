@@ -1404,26 +1404,26 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
         );
     }
 
-    // Context window info (at the end of header)
-    let context_info = app.context_info();
-    if context_info.total_chars > 0 {
-        let context_width = width.saturating_sub(4) as usize;
-        let context_limit = app
-            .context_limit()
-            .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT);
-        let context_lines = render_context_bar(&context_info, context_width, context_limit);
-        if !context_lines.is_empty() {
-            let boxed = render_rounded_box(
-                "Context",
-                context_lines,
-                width as usize,
-                Style::default().fg(DIM_COLOR),
-            );
-            for line in boxed {
-                lines.push(line.alignment(align));
-            }
-        }
-    }
+    // Context window info (at the end of header) - DISABLED
+    // let context_info = app.context_info();
+    // if context_info.total_chars > 0 {
+    //     let context_width = width.saturating_sub(4) as usize;
+    //     let context_limit = app
+    //         .context_limit()
+    //         .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT);
+    //     let context_lines = render_context_bar(&context_info, context_width, context_limit);
+    //     if !context_lines.is_empty() {
+    //         let boxed = render_rounded_box(
+    //             "Context",
+    //             context_lines,
+    //             width as usize,
+    //             Style::default().fg(DIM_COLOR),
+    //         );
+    //         for line in boxed {
+    //             lines.push(line.alignment(align));
+    //         }
+    //     }
+    // }
 
     // Blank line after header
     lines.push(Line::from(""));
