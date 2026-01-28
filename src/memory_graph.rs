@@ -835,4 +835,42 @@ mod tests {
         let edges_total: usize = graph.edges.values().map(|v| v.len()).sum();
         assert_eq!(edges_total, 3); // 2 edges for M1, 1 for M2
     }
+
+    #[test]
+    fn test_graph_serialization_roundtrip() {
+        let mut graph = MemoryGraph::new();
+
+        // Add a memory with tags
+        let entry = make_test_memory("Test memory").with_tags(vec!["rust".into()]);
+        let id = graph.add_memory(entry);
+
+        // Manually add a tag edge to verify serialization
+        graph.tag_memory(&id, "extra");
+
+        // Serialize
+        let json = serde_json::to_string_pretty(&graph).expect("serialize");
+        eprintln!("Serialized graph:\n{}", json);
+
+        // Check edges appear in JSON
+        assert!(
+            json.contains("\"edges\""),
+            "JSON should contain edges key"
+        );
+        assert!(
+            json.contains("tag:rust") || json.contains("tag:extra"),
+            "JSON should contain tag references"
+        );
+
+        // Deserialize
+        let parsed: MemoryGraph = serde_json::from_str(&json).expect("deserialize");
+
+        // Verify
+        assert_eq!(parsed.memories.len(), 1);
+        assert_eq!(parsed.tags.len(), 2); // rust and extra
+        assert_eq!(
+            parsed.edge_count(),
+            graph.edge_count(),
+            "Edge count should match after roundtrip"
+        );
+    }
 }

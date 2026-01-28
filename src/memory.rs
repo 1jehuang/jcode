@@ -873,16 +873,19 @@ impl MemoryManager {
     }
 
     pub fn forget(&self, id: &str) -> Result<bool> {
-        let mut project = self.load_project()?;
-        if project.remove(id).is_some() {
-            self.save_project(&project)?;
+        // Try graph-based removal first (new format)
+        let mut project_graph = self.load_project_graph()?;
+        if project_graph.remove_memory(id).is_some() {
+            self.save_project_graph(&project_graph)?;
             return Ok(true);
         }
-        let mut global = self.load_global()?;
-        if global.remove(id).is_some() {
-            self.save_global(&global)?;
+
+        let mut global_graph = self.load_global_graph()?;
+        if global_graph.remove_memory(id).is_some() {
+            self.save_global_graph(&global_graph)?;
             return Ok(true);
         }
+
         Ok(false)
     }
 
@@ -1631,6 +1634,44 @@ mod tests {
 
             assert!(!manager.forget(&project_id).expect("forget missing"));
             assert!(manager.forget(&global_id).expect("forget global"));
+        });
+    }
+
+    #[test]
+    fn graph_based_memory_operations() {
+        with_temp_home(|_home| {
+            let manager = MemoryManager::new();
+
+            // Create two memories
+            let entry1 = MemoryEntry::new(MemoryCategory::Fact, "Rust is a systems language");
+            let entry2 = MemoryEntry::new(MemoryCategory::Fact, "Cargo is Rust's package manager");
+
+            let id1 = manager.remember_project(entry1).expect("remember 1");
+            let id2 = manager.remember_project(entry2).expect("remember 2");
+
+            // Test tagging
+            manager.tag_memory(&id1, "rust").expect("tag memory");
+            manager.tag_memory(&id1, "language").expect("tag memory 2");
+            manager.tag_memory(&id2, "rust").expect("tag memory 3");
+
+            // Check graph stats (memories, tags, edges, clusters)
+            let (mems, tags, edges, _clusters) = manager.graph_stats().expect("stats");
+            assert_eq!(mems, 2, "expected 2 memories");
+            assert_eq!(tags, 2, "expected 2 tags: rust and language");
+            assert!(edges >= 3, "expected at least 3 edges, got {}", edges);
+
+            // Test linking
+            manager.link_memories(&id1, &id2, 0.8).expect("link");
+
+            // Test get_related
+            let related = manager.get_related(&id1, 2).expect("get related");
+            assert!(!related.is_empty());
+            // Should find id2 through the RelatesTo edge
+            assert!(related.iter().any(|e| e.id == id2));
+
+            // Clean up
+            manager.forget(&id1).expect("forget 1");
+            manager.forget(&id2).expect("forget 2");
         });
     }
 }
