@@ -2185,7 +2185,7 @@ impl App {
                         };
 
                         self.push_display_message(DisplayMessage::error(&format!(
-                            "Failed to reconnect after 30 seconds.\n\nReason: {}{}\n\nPress Ctrl+C to quit. You can still scroll with Alt+K/J.",
+                            "Failed to reconnect after 30 seconds.\n\nReason: {}{}\n\nPress Ctrl+C to quit. You can still scroll with Ctrl+K/J.",
                             error_reason, resume_hint
                         )));
                         terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
@@ -2863,7 +2863,7 @@ impl App {
             }
         }
 
-        // Handle configurable scroll keys (default: Alt+K/J/U/D)
+        // Handle configurable scroll keys (default: Ctrl+K/J, Alt+U/D for page)
         if let Some(amount) = self.scroll_keys.scroll_amount(code.clone(), modifiers) {
             let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
             if amount < 0 {
@@ -3364,7 +3364,7 @@ impl App {
             }
         }
 
-        // Handle configurable scroll keys (default: Alt+K/J/U/D)
+        // Handle configurable scroll keys (default: Ctrl+K/J, Alt+U/D for page)
         if let Some(amount) = self.scroll_keys.scroll_amount(code.clone(), modifiers) {
             let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
             if amount < 0 {
@@ -3416,24 +3416,6 @@ impl App {
                     // Ctrl+U: kill to beginning of line
                     self.input.drain(..self.cursor_pos);
                     self.cursor_pos = 0;
-                    return Ok(());
-                }
-                KeyCode::Char('k') => {
-                    if self.input.is_empty() {
-                        // Ctrl+K with empty input: scroll up to previous prompt
-                        self.scroll_to_prev_prompt();
-                    } else {
-                        // Ctrl+K: kill to end of line
-                        self.input.truncate(self.cursor_pos);
-                    }
-                    return Ok(());
-                }
-                KeyCode::Char('j') => {
-                    if self.input.is_empty() {
-                        // Ctrl+J with empty input: scroll down to next prompt
-                        self.scroll_to_next_prompt();
-                    }
-                    // Note: Ctrl+J with text is ignored (traditionally newline)
                     return Ok(());
                 }
                 KeyCode::Char('a') => {
@@ -3737,7 +3719,6 @@ impl App {
                      • `Ctrl+Tab` / `Ctrl+T` - Toggle queue mode (wait vs immediate send)\n\
                      • `Ctrl+Up` - Retrieve queued message for editing\n\
                      • `Ctrl+U` - Clear input line\n\
-                     • `Ctrl+K` - Kill to end of line\n\
                      {}\n\
                      {}",
                     remote_reload_help,
@@ -5859,6 +5840,7 @@ impl App {
                         strength: 1,
                         source: Some(self.session.id.clone()),
                         embedding: None, // Will be generated when stored
+                        confidence: 1.0,
                     };
 
                     // Store memory
