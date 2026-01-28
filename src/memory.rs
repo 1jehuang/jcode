@@ -663,9 +663,9 @@ impl MemoryManager {
         // Generate embedding for new memory (non-blocking - if it fails, we store without embedding)
         entry.ensure_embedding();
 
-        let mut store = self.load_project()?;
-        let id = store.add(entry);
-        self.save_project(&store)?;
+        let mut graph = self.load_project_graph()?;
+        let id = graph.add_memory(entry);
+        self.save_project_graph(&graph)?;
         Ok(id)
     }
 
@@ -674,9 +674,9 @@ impl MemoryManager {
         // Generate embedding for new memory
         entry.ensure_embedding();
 
-        let mut store = self.load_global()?;
-        let id = store.add(entry);
-        self.save_global(&store)?;
+        let mut graph = self.load_global_graph()?;
+        let id = graph.add_memory(entry);
+        self.save_global_graph(&graph)?;
         Ok(id)
     }
 
@@ -702,11 +702,11 @@ impl MemoryManager {
 
         // Collect all memories with embeddings
         let mut all_memories: Vec<MemoryEntry> = Vec::new();
-        if let Ok(project) = self.load_project() {
-            all_memories.extend(project.entries.into_iter().filter(|e| e.active));
+        if let Ok(project) = self.load_project_graph() {
+            all_memories.extend(project.active_memories().cloned());
         }
-        if let Ok(global) = self.load_global() {
-            all_memories.extend(global.entries.into_iter().filter(|e| e.active));
+        if let Ok(global) = self.load_global_graph() {
+            all_memories.extend(global.active_memories().cloned());
         }
 
         // Filter to memories with embeddings and compute similarity
@@ -734,9 +734,9 @@ impl MemoryManager {
         let mut failed = 0;
 
         // Process project memories
-        if let Ok(mut store) = self.load_project() {
+        if let Ok(mut graph) = self.load_project_graph() {
             let mut changed = false;
-            for entry in &mut store.entries {
+            for entry in graph.memories.values_mut() {
                 if entry.embedding.is_none() {
                     if entry.ensure_embedding() {
                         generated += 1;
@@ -747,14 +747,14 @@ impl MemoryManager {
                 }
             }
             if changed {
-                self.save_project(&store)?;
+                self.save_project_graph(&graph)?;
             }
         }
 
         // Process global memories
-        if let Ok(mut store) = self.load_global() {
+        if let Ok(mut graph) = self.load_global_graph() {
             let mut changed = false;
-            for entry in &mut store.entries {
+            for entry in graph.memories.values_mut() {
                 if entry.embedding.is_none() {
                     if entry.ensure_embedding() {
                         generated += 1;
@@ -765,7 +765,7 @@ impl MemoryManager {
                 }
             }
             if changed {
-                self.save_global(&store)?;
+                self.save_global_graph(&graph)?;
             }
         }
 
@@ -779,42 +779,52 @@ impl MemoryManager {
 
         let id_set: std::collections::HashSet<&str> = ids.iter().map(|id| id.as_str()).collect();
 
-        let mut project = self.load_project()?;
+        let mut project = self.load_project_graph()?;
         let mut project_changed = false;
-        for entry in &mut project.entries {
+        for entry in project.memories.values_mut() {
             if id_set.contains(entry.id.as_str()) {
                 entry.touch();
                 project_changed = true;
             }
         }
         if project_changed {
-            self.save_project(&project)?;
+            self.save_project_graph(&project)?;
         }
 
-        let mut global = self.load_global()?;
+        let mut global = self.load_global_graph()?;
         let mut global_changed = false;
-        for entry in &mut global.entries {
+        for entry in global.memories.values_mut() {
             if id_set.contains(entry.id.as_str()) {
                 entry.touch();
                 global_changed = true;
             }
         }
         if global_changed {
-            self.save_global(&global)?;
+            self.save_global_graph(&global)?;
         }
 
         Ok(())
     }
 
     pub fn get_prompt_memories(&self, limit: usize) -> Option<String> {
-        let mut combined = MemoryStore::new();
-        if let Ok(project) = self.load_project() {
-            combined.entries.extend(project.entries);
+        let mut all_entries: Vec<MemoryEntry> = Vec::new();
+        if let Ok(project) = self.load_project_graph() {
+            all_entries.extend(project.all_memories().cloned());
         }
-        if let Ok(global) = self.load_global() {
-            combined.entries.extend(global.entries);
+        if let Ok(global) = self.load_global_graph() {
+            all_entries.extend(global.all_memories().cloned());
         }
-        combined.format_for_prompt(limit)
+
+        if all_entries.is_empty() {
+            return None;
+        }
+
+        // Sort by updated_at descending and limit
+        all_entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        all_entries.truncate(limit);
+
+        // Format as prompt
+        format_entries_for_prompt(&all_entries, limit)
     }
 
     pub async fn relevant_prompt_for_messages(
@@ -851,23 +861,43 @@ impl MemoryManager {
 
     pub fn search(&self, query: &str) -> Result<Vec<MemoryEntry>> {
         let mut results = Vec::new();
-        if let Ok(project) = self.load_project() {
-            results.extend(project.search(query).into_iter().cloned());
+        let query_lower = query.to_lowercase();
+
+        // Search in project graph
+        if let Ok(project) = self.load_project_graph() {
+            for memory in project.all_memories() {
+                if memory.content.to_lowercase().contains(&query_lower)
+                    || memory.tags.iter().any(|t| t.to_lowercase().contains(&query_lower))
+                {
+                    results.push(memory.clone());
+                }
+            }
         }
-        if let Ok(global) = self.load_global() {
-            results.extend(global.search(query).into_iter().cloned());
+
+        // Search in global graph
+        if let Ok(global) = self.load_global_graph() {
+            for memory in global.all_memories() {
+                if memory.content.to_lowercase().contains(&query_lower)
+                    || memory.tags.iter().any(|t| t.to_lowercase().contains(&query_lower))
+                {
+                    results.push(memory.clone());
+                }
+            }
         }
+
         Ok(results)
     }
 
     pub fn list_all(&self) -> Result<Vec<MemoryEntry>> {
         let mut all = Vec::new();
-        if let Ok(project) = self.load_project() {
-            all.extend(project.entries);
+
+        if let Ok(project) = self.load_project_graph() {
+            all.extend(project.all_memories().cloned());
         }
-        if let Ok(global) = self.load_global() {
-            all.extend(global.entries);
+        if let Ok(global) = self.load_global_graph() {
+            all.extend(global.all_memories().cloned());
         }
+
         all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(all)
     }
