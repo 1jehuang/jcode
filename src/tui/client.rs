@@ -53,6 +53,9 @@ pub struct ClientApp {
     streaming_output_tokens: u64,
     streaming_cache_read_tokens: Option<u64>,
     streaming_cache_creation_tokens: Option<u64>,
+    total_input_tokens: u64,
+    total_output_tokens: u64,
+    total_cost: f32,
     processing_started: Option<Instant>,
     last_activity: Option<Instant>,
 
@@ -116,6 +119,9 @@ impl ClientApp {
             streaming_output_tokens: 0,
             streaming_cache_read_tokens: None,
             streaming_cache_creation_tokens: None,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cost: 0.0,
             processing_started: None,
             last_activity: None,
 
@@ -240,7 +246,7 @@ impl ClientApp {
                         self.push_display_message(DisplayMessage {
                             role: "error".to_string(),
                             content: format!(
-                                "Failed to reconnect after 30 seconds.\n\nReason: {}{}\n\nPress Ctrl+C to quit. You can still scroll with Alt+K/J.",
+                                "Failed to reconnect after 30 seconds.\n\nReason: {}{}\n\nPress Ctrl+C to quit. You can still scroll with Ctrl+K/J.",
                                 error_reason, resume_hint
                             ),
                             tool_calls: Vec::new(),
@@ -259,10 +265,10 @@ impl ClientApp {
                                     {
                                         break 'outer;
                                     }
-                                    // Handle scroll keys (Alt+K/J/U/D) in disconnected state
-                                    if key.modifiers.contains(KeyModifiers::ALT) {
-                                        let max_estimate = self.display_messages.len() * 100
-                                            + self.streaming_text.len();
+                                    // Handle scroll keys (Ctrl+K/J, Alt+U/D) in disconnected state
+                                    let max_estimate = self.display_messages.len() * 100
+                                        + self.streaming_text.len();
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) {
                                         match key.code {
                                             KeyCode::Char('k') => {
                                                 // Scroll up one line
@@ -278,6 +284,10 @@ impl ClientApp {
                                                 terminal
                                                     .draw(|frame| super::ui::draw(frame, &self))?;
                                             }
+                                            _ => {}
+                                        }
+                                    } else if key.modifiers.contains(KeyModifiers::ALT) {
+                                        match key.code {
                                             KeyCode::Char('u') => {
                                                 // Scroll up half page (10 lines)
                                                 self.scroll_offset =
@@ -537,6 +547,13 @@ impl ClientApp {
                         tool_data: None,
                     });
                 }
+                // Accumulate turn tokens into session totals
+                self.total_input_tokens += self.streaming_input_tokens;
+                self.total_output_tokens += self.streaming_output_tokens;
+
+                // Calculate cost for API-key providers
+                self.update_cost();
+
                 self.is_processing = false;
                 // Clear any leftover diff tracking state
                 self.pending_diffs.clear();
@@ -921,6 +938,11 @@ impl TuiState for ClientApp {
         self.streaming_tool_calls.clone()
     }
 
+    fn update_cost(&mut self) {
+        // Client doesn't track total cost - server calculates it
+        // Client just accumulates tokens
+    }
+
     fn elapsed(&self) -> Option<Duration> {
         self.processing_started.map(|t| t.elapsed())
     }
@@ -1027,8 +1049,28 @@ impl TuiState for ClientApp {
     }
 
     fn info_widget_data(&self) -> super::info_widget::InfoWidgetData {
-        // Deprecated client - return empty widget data
-        super::info_widget::InfoWidgetData::default()
+        // Client shows token costs for API-key providers
+        let provider_name = self.provider_name.to_lowercase();
+        let is_api_key_provider = provider_name.contains("openrouter")
+            || provider_name.contains("anthropic")
+            || provider_name.contains("openai");
+
+        if is_api_key_provider && (self.total_input_tokens > 0 || self.total_output_tokens > 0) {
+            super::info_widget::InfoWidgetData {
+                usage_info: Some(super::info_widget::UsageInfo {
+                    provider: super::info_widget::UsageProvider::CostBased,
+                    five_hour: 0.0,
+                    seven_day: 0.0,
+                    total_cost: self.total_cost,
+                    input_tokens: self.total_input_tokens,
+                    output_tokens: self.total_output_tokens,
+                    available: true,
+                }),
+                ..Default::default()
+            }
+        } else {
+            super::info_widget::InfoWidgetData::default()
+        }
     }
 
     fn render_streaming_markdown(&self, width: usize) -> Vec<ratatui::text::Line<'static>> {
