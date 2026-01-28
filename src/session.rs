@@ -530,6 +530,95 @@ pub fn recover_crashed_sessions() -> Result<Vec<String>> {
     Ok(new_ids)
 }
 
+/// Info about crashed sessions pending batch restore
+#[derive(Debug, Clone)]
+pub struct CrashedSessionsInfo {
+    /// Session IDs that crashed
+    pub session_ids: Vec<String>,
+    /// Display names of crashed sessions
+    pub display_names: Vec<String>,
+    /// When the most recent crash occurred
+    pub most_recent_crash: DateTime<Utc>,
+}
+
+/// Detect crashed sessions that can be batch restored.
+/// Returns info about crashed sessions within the crash window (60 seconds),
+/// excluding any that have already been recovered.
+pub fn detect_crashed_sessions() -> Result<Option<CrashedSessionsInfo>> {
+    let sessions_dir = storage::jcode_dir()?.join("sessions");
+    if !sessions_dir.exists() {
+        return Ok(None);
+    }
+
+    let mut sessions: Vec<Session> = Vec::new();
+    for entry in std::fs::read_dir(&sessions_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().map(|e| e == "json").unwrap_or(false) {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if let Ok(mut session) = Session::load(stem) {
+                    // Detect if this session crashed (updates status if so)
+                    if session.detect_crash() {
+                        let _ = session.save();
+                    }
+                    sessions.push(session);
+                }
+            }
+        }
+    }
+
+    // Track existing recovery sessions to avoid showing already-recovered crashes
+    let mut recovered_parents: HashSet<String> = HashSet::new();
+    for s in &sessions {
+        if s.id.starts_with("session_recovery_") {
+            if let Some(parent) = s.parent_id.as_ref() {
+                recovered_parents.insert(parent.clone());
+            }
+        }
+    }
+
+    // Filter to crashed sessions that haven't been recovered
+    let mut crashed: Vec<Session> = sessions
+        .into_iter()
+        .filter(|s| matches!(s.status, SessionStatus::Crashed { .. }))
+        .filter(|s| !recovered_parents.contains(&s.id))
+        .collect();
+
+    if crashed.is_empty() {
+        return Ok(None);
+    }
+
+    // Apply 60-second crash window filter
+    let crash_window = Duration::seconds(60);
+    let most_recent = crashed
+        .iter()
+        .map(|s| s.last_active_at.unwrap_or(s.updated_at))
+        .max()
+        .unwrap_or_else(Utc::now);
+
+    crashed.retain(|s| {
+        let ts = s.last_active_at.unwrap_or(s.updated_at);
+        let delta = most_recent.signed_duration_since(ts);
+        delta >= Duration::zero() && delta <= crash_window
+    });
+
+    if crashed.is_empty() {
+        return Ok(None);
+    }
+
+    // Sort by most recent first
+    crashed.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+    let session_ids: Vec<String> = crashed.iter().map(|s| s.id.clone()).collect();
+    let display_names: Vec<String> = crashed.iter().map(|s| s.display_name().to_string()).collect();
+
+    Ok(Some(CrashedSessionsInfo {
+        session_ids,
+        display_names,
+        most_recent_crash: most_recent,
+    }))
+}
+
 #[cfg(unix)]
 fn is_pid_running(pid: u32) -> bool {
     let result = unsafe { libc::kill(pid as i32, 0) };
@@ -589,4 +678,21 @@ pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
     // Sort by updated_at descending and return the most recent match
     matches.sort_by(|a, b| b.1.cmp(&a.1));
     Ok(matches[0].0.clone())
+}
+
+#[cfg(test)]
+mod batch_crash_tests {
+    use super::*;
+
+    #[test]
+    fn test_crashed_sessions_info_struct() {
+        let info = CrashedSessionsInfo {
+            session_ids: vec!["session_test_1".to_string(), "session_test_2".to_string()],
+            display_names: vec!["fox".to_string(), "oak".to_string()],
+            most_recent_crash: Utc::now(),
+        };
+        assert_eq!(info.session_ids.len(), 2);
+        assert_eq!(info.display_names.len(), 2);
+        assert_eq!(info.display_names[0], "fox");
+    }
 }
