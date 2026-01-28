@@ -35,8 +35,10 @@ This repo has self-dev mode. When running `jcode` in this directory:
 **Manual testing** - After making changes, manually test the feature in a real terminal to verify it works. Use kitty to launch test instances:
 ```bash
 sock=$(ls /tmp/kitty.sock* | head -1)
-kitten @ --to unix:$sock launch --type=os-window ./target/release/jcode --standalone
+kitten @ --to unix:$sock launch --type=os-window ./target/release/jcode
 ```
+
+**Programmatic testing** - Use the debug socket for automated testing (see "Headless Testing via Debug Socket" section below).
 
 ## Commands
 
@@ -186,6 +188,12 @@ Commands can be namespaced with `server:`, `client:`, or `tester:` prefixes. Unn
 | `tool:<name> <json>` | Execute tool directly |
 | `sessions` | List all sessions |
 | `create_session` | Create headless session |
+| `create_session:<path>` | Create session with working directory |
+| `destroy_session:<id>` | Destroy a session |
+| `set_model:<model>` | Switch model (may change provider) |
+| `set_provider:<name>` | Switch provider (claude/openai/openrouter) |
+| `trigger_extraction` | Force end-of-session memory extraction |
+| `available_models` | List all available models |
 | `help` | List commands |
 
 **Client Commands** (TUI/visual debug - `client:` prefix):
@@ -248,6 +256,50 @@ result = debug_cmd('client:frame', session_id)
 result = debug_cmd('tester:spawn {"cwd":"/tmp"}', session_id)
 result = debug_cmd('tester:list', session_id)
 result = debug_cmd('tester:tester_abc123:frame', session_id)
+```
+
+### Testing with Multiple Providers
+
+Use the debug socket to test features with both Claude and OpenAI:
+
+```python
+import socket
+import json
+
+def send_cmd(sock, cmd, session_id=None, timeout=60):
+    req = {"type": "debug_command", "id": 1, "command": cmd}
+    if session_id:
+        req["session_id"] = session_id
+    sock.send((json.dumps(req) + '\n').encode())
+    sock.settimeout(timeout)
+    data = sock.recv(65536).decode()
+    resp = json.loads(data)
+    return resp.get('ok'), resp.get('output', '')
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect('/run/user/1000/jcode-debug.sock')
+
+# Create a test session
+ok, output = send_cmd(sock, "create_session:/tmp/test")
+session_id = json.loads(output)['session_id']
+
+# Test with Claude
+send_cmd(sock, "set_provider:claude", session_id)
+send_cmd(sock, "message:Remember I prefer dark mode", session_id)
+
+# Test with OpenAI
+send_cmd(sock, "set_provider:openai", session_id)
+send_cmd(sock, "message:What are my preferences?", session_id)
+
+# Test memory extraction
+send_cmd(sock, "trigger_extraction", session_id)
+
+# Check memories
+send_cmd(sock, 'tool:memory {"action":"list"}', session_id)
+
+# Cleanup
+send_cmd(sock, f"destroy_session:{session_id}")
+sock.close()
 ```
 
 ### Selfdev Tool Actions
