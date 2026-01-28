@@ -66,14 +66,52 @@ impl AuthStatus {
 
         status.anthropic = anthropic;
 
-        // Check OpenRouter API key
+        // Check OpenRouter API key (env var or config file)
         if std::env::var("OPENROUTER_API_KEY").is_ok() {
             status.openrouter = AuthState::Available;
+        } else if let Some(config_dir) = dirs::config_dir() {
+            let config_path = config_dir.join("jcode").join("openrouter.env");
+            if let Ok(content) = std::fs::read_to_string(config_path) {
+                for line in content.lines() {
+                    if let Some(key) = line.strip_prefix("OPENROUTER_API_KEY=") {
+                        let key = key.trim().trim_matches('"').trim_matches('\'');
+                        if !key.is_empty() {
+                            status.openrouter = AuthState::Available;
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
-        // Check OpenAI API key
-        if std::env::var("OPENAI_API_KEY").is_ok() {
-            status.openai = AuthState::Available;
+        // Check OpenAI (Codex OAuth or API key)
+        match codex::load_credentials() {
+            Ok(creds) => {
+                // Check if we have OAuth tokens (not just API key fallback)
+                if !creds.refresh_token.is_empty() {
+                    // Has OAuth - check expiry if available
+                    if let Some(expires_at) = creds.expires_at {
+                        let now_ms = chrono::Utc::now().timestamp_millis();
+                        if expires_at > now_ms {
+                            status.openai = AuthState::Available;
+                        } else {
+                            status.openai = AuthState::Expired;
+                        }
+                    } else {
+                        // No expiry info, assume available
+                        status.openai = AuthState::Available;
+                    }
+                } else if !creds.access_token.is_empty() {
+                    // API key fallback
+                    status.openai = AuthState::Available;
+                }
+            }
+            Err(_) => {
+                // Fall back to env var
+                if std::env::var("OPENAI_API_KEY").is_ok() {
+                    status.openai = AuthState::Available;
+                }
+            }
         }
 
         status
