@@ -1744,6 +1744,9 @@ async fn create_headless_session(
     let mut new_agent = Agent::new(Arc::clone(&provider), registry);
     let client_session_id = new_agent.session_id().to_string();
 
+    // Mark as debug/test session (created via debug socket)
+    new_agent.set_debug(true);
+
     // Enable self-dev mode if in self-dev environment or working in jcode repo
     if is_selfdev_env() {
         new_agent.set_canary("self-dev");

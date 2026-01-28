@@ -123,6 +123,9 @@ pub struct Session {
     /// Last time the session was marked active
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_active_at: Option<DateTime<Utc>>,
+    /// Whether this is a debug/test session (created via debug socket)
+    #[serde(default)]
+    pub is_debug: bool,
 }
 
 impl Session {
@@ -152,6 +155,7 @@ impl Session {
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
+            is_debug: false,
         }
     }
 
@@ -176,7 +180,13 @@ impl Session {
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
+            is_debug: false,
         }
+    }
+
+    /// Mark this session as a debug/test session
+    pub fn set_debug(&mut self, is_debug: bool) {
+        self.is_debug = is_debug;
     }
 
     /// Get the display name for this session (short memorable name if available)
