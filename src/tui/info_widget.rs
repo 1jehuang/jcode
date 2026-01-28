@@ -144,10 +144,12 @@ pub struct BackgroundInfo {
 pub enum UsageProvider {
     #[default]
     None,
-    /// Anthropic/Claude OAuth
+    /// Anthropic/Claude OAuth (shows subscription usage)
     Anthropic,
-    /// OpenAI/Codex OAuth
+    /// OpenAI/Codex OAuth (shows subscription usage)
     OpenAI,
+    /// OpenRouter/API-key providers (shows token costs)
+    CostBased,
 }
 
 /// Subscription usage info for the info widget
@@ -155,11 +157,17 @@ pub enum UsageProvider {
 pub struct UsageInfo {
     /// Which provider this usage is for
     pub provider: UsageProvider,
-    /// Five-hour window utilization (0.0-1.0)
+    /// Five-hour window utilization (0.0-1.0) - for OAuth providers
     pub five_hour: f32,
-    /// Seven-day window utilization (0.0-1.0)
+    /// Seven-day window utilization (0.0-1.0) - for OAuth providers
     pub seven_day: f32,
-    /// Whether data was successfully fetched
+    /// Total cost in USD - for API-key providers (OpenRouter, direct API key)
+    pub total_cost: f32,
+    /// Input tokens used - for cost calculation
+    pub input_tokens: u64,
+    /// Output tokens used - for cost calculation
+    pub output_tokens: u64,
+    /// Whether data was successfully fetched / available to show
     pub available: bool,
 }
 
@@ -283,11 +291,7 @@ impl InfoWidgetData {
     pub fn has_data_for(&self, kind: WidgetKind) -> bool {
         match kind {
             WidgetKind::Todos => !self.todos.is_empty(),
-            WidgetKind::ContextUsage => self
-                .context_info
-                .as_ref()
-                .map(|c| c.total_chars > 0)
-                .unwrap_or(false),
+            WidgetKind::ContextUsage => false, // Disabled
             WidgetKind::MemoryActivity => self
                 .memory_info
                 .as_ref()
@@ -1080,15 +1084,60 @@ fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
         return Vec::new();
     }
 
-    let five_hr_used = (info.five_hour * 100.0).round().clamp(0.0, 100.0) as u8;
-    let seven_day_used = (info.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
-    let five_hr_left = 100u8.saturating_sub(five_hr_used);
-    let seven_day_left = 100u8.saturating_sub(seven_day_used);
+    match info.provider {
+        UsageProvider::CostBased => {
+            // Show token costs for API-key providers (OpenRouter, direct API)
+            vec![
+                Line::from(vec![
+                    Span::styled("💰 ", Style::default().fg(Color::Rgb(140, 180, 255))),
+                    Span::styled(
+                        format!("${:.4}", info.total_cost),
+                        Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled(
+                        format!("{} in + {} out", format_tokens(info.input_tokens), format_tokens(info.output_tokens)),
+                        Style::default().fg(Color::Rgb(140, 140, 150)),
+                    ),
+                ]),
+            ]
+        }
+        _ => {
+            // Show subscription usage for OAuth providers (Anthropic, OpenAI)
+            let five_hr_used = (info.five_hour * 100.0).round().clamp(0.0, 100.0) as u8;
+            let seven_day_used = (info.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
+            let five_hr_left = 100u8.saturating_sub(five_hr_used);
+            let seven_day_left = 100u8.saturating_sub(seven_day_used);
 
-    vec![
-        render_labeled_bar("5-hour", five_hr_used, five_hr_left, None, inner.width),
-        render_labeled_bar("Weekly", seven_day_used, seven_day_left, None, inner.width),
-    ]
+            vec![
+                render_labeled_bar("5-hour", five_hr_used, five_hr_left, None, inner.width),
+                render_labeled_bar("Weekly", seven_day_used, seven_day_left, None, inner.width),
+            ]
+        }
+    }
+}
+
+/// Format token count for display
+fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}K", tokens as f64 / 1_000.0)
+    } else {
+        format!("{}", tokens)
+    }
+}
+
+/// Format cost for display
+fn format_cost(cost: f32) -> String {
+    if cost >= 10.0 {
+        format!("{:.2}", cost)
+    } else if cost >= 1.0 {
+        format!("{:.3}", cost)
+    } else {
+        format!("{:.4}", cost)
+    }
 }
 
 /// Render model info widget

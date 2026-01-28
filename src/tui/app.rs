@@ -326,6 +326,11 @@ pub struct App {
     // Total session token usage (accumulated across all turns)
     total_input_tokens: u64,
     total_output_tokens: u64,
+    // Total cost in USD (for API-key providers)
+    total_cost: f32,
+    // Cached pricing (input $/1M tokens, output $/1M tokens)
+    cached_prompt_price: Option<f32>,
+    cached_completion_price: Option<f32>,
     // Context limit tracking (for compaction warning)
     context_limit: u64,
     context_warning_shown: bool,
@@ -519,6 +524,9 @@ impl App {
             streaming_cache_creation_tokens: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_cost: 0.0,
+            cached_prompt_price: None,
+            cached_completion_price: None,
             context_limit,
             context_warning_shown: false,
             context_info,
@@ -3281,6 +3289,9 @@ impl App {
         // Accumulate turn tokens into session totals
         self.total_input_tokens += self.streaming_input_tokens;
         self.total_output_tokens += self.streaming_output_tokens;
+
+        // Calculate cost if using API-key provider (OpenRouter, direct API key)
+        self.update_cost_impl();
 
         self.is_processing = false;
         self.status = ProcessingStatus::Idle;
@@ -6433,6 +6444,36 @@ impl App {
     }
 }
 
+/// Update cost calculation based on token usage (for API-key providers)
+impl App {
+    fn update_cost_impl(&mut self) {
+        let provider_name = self.provider.name().to_lowercase();
+
+        // Only calculate cost for API-key providers
+        if !provider_name.contains("openrouter")
+            && !provider_name.contains("anthropic")
+            && !provider_name.contains("openai") {
+            return;
+        }
+
+        // For OAuth providers, cost is already tracked in subscription
+        let is_oauth = provider_name.contains("anthropic") || provider_name.contains("claude")
+            && std::env::var("ANTHROPIC_API_KEY").is_err();
+        if is_oauth {
+            return;
+        }
+
+        // Default pricing (will be cached after first turn)
+        let prompt_price = *self.cached_prompt_price.get_or_insert(15.0);  // $15/1M tokens default
+        let completion_price = *self.cached_completion_price.get_or_insert(60.0);  // $60/1M tokens default
+
+        // Calculate cost for this turn
+        let prompt_cost = (self.streaming_input_tokens as f32 * prompt_price) / 1_000_000.0;
+        let completion_cost = (self.streaming_output_tokens as f32 * completion_price) / 1_000_000.0;
+        self.total_cost += prompt_cost + completion_cost;
+    }
+}
+
 impl super::TuiState for App {
     fn display_messages(&self) -> &[DisplayMessage] {
         &self.display_messages
@@ -6503,6 +6544,10 @@ impl super::TuiState for App {
 
     fn streaming_tool_calls(&self) -> Vec<ToolCall> {
         self.streaming_tool_calls.clone()
+    }
+
+    fn update_cost(&mut self) {
+        self.update_cost_impl()
     }
 
     fn elapsed(&self) -> Option<std::time::Duration> {
@@ -6843,11 +6888,12 @@ impl super::TuiState for App {
             }
         };
 
-        // Gather subscription usage info (only for OAuth providers)
+        // Gather subscription usage info
         let usage_info = {
             // Check if current provider uses OAuth (Anthropic OAuth or OpenAI Codex)
             let provider_name = self.provider.name().to_lowercase();
             let is_oauth_provider = provider_name.contains("anthropic") || provider_name.contains("claude");
+            let is_api_key_provider = provider_name.contains("openrouter");
 
             if is_oauth_provider {
                 let usage = crate::usage::get_sync();
@@ -6857,7 +6903,22 @@ impl super::TuiState for App {
                     provider: super::info_widget::UsageProvider::Anthropic,
                     five_hour: usage.five_hour,
                     seven_day: usage.seven_day,
+                    total_cost: 0.0,
+                    input_tokens: 0,
+                    output_tokens: 0,
                     available: true,
+                })
+            } else if is_api_key_provider || self.total_input_tokens > 0 || self.total_output_tokens > 0 {
+                // Show costs for API-key providers (OpenRouter, direct API key)
+                // Also show if we have any token usage
+                Some(super::info_widget::UsageInfo {
+                    provider: super::info_widget::UsageProvider::CostBased,
+                    five_hour: 0.0,
+                    seven_day: 0.0,
+                    total_cost: self.total_cost,
+                    input_tokens: self.total_input_tokens,
+                    output_tokens: self.total_output_tokens,
+                    available: self.total_input_tokens > 0 || self.total_output_tokens > 0,
                 })
             } else {
                 None

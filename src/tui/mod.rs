@@ -93,6 +93,8 @@ pub trait TuiState {
     fn centered_mode(&self) -> bool;
     /// Authentication status for all supported providers
     fn auth_status(&self) -> crate::auth::AuthStatus;
+    /// Update cost calculation based on token usage (for API-key providers)
+    fn update_cost(&mut self);
 }
 
 pub(crate) fn subscribe_metadata() -> (Option<String>, Option<bool>) {
