@@ -441,55 +441,45 @@ pub fn calculate_placements(
     }
 
     // Find rectangles in each margin
-    let mut all_rects: Vec<(Side, u16, u16, u16, u16)> = Vec::new(); // (side, top, height, width, x)
+    // Format: (side, top, height, width, x_offset, margin_index)
+    // We store margin_index to recalculate width when shrinking rects
+    let mut all_rects: Vec<(Side, u16, u16, u16, u16, usize)> = Vec::new();
 
-    for margin in &margin_spaces {
+    for (margin_idx, margin) in margin_spaces.iter().enumerate() {
         let rects = find_all_empty_rects(&margin.widths, MIN_WIDGET_WIDTH, MIN_WIDGET_HEIGHT);
         for (top, height, width) in rects {
+            let clamped_width = width.min(MAX_WIDGET_WIDTH);
             let x = match margin.side {
-                Side::Right => margin.x_offset.saturating_sub(width.min(MAX_WIDGET_WIDTH)),
+                Side::Right => margin.x_offset.saturating_sub(clamped_width),
                 Side::Left => margin.x_offset,
             };
-            all_rects.push((margin.side, top, height, width.min(MAX_WIDGET_WIDTH), x));
+            all_rects.push((margin.side, top, height, clamped_width, x, margin_idx));
         }
     }
 
-    // Sort rectangles by area (largest first) for better placement
-    all_rects.sort_by(|a, b| {
-        let area_a = a.2 as u32 * a.3 as u32;
-        let area_b = b.2 as u32 * b.3 as u32;
-        area_b.cmp(&area_a)
-    });
-
     // Place widgets greedily by priority
+    // Rects are modified in-place: after placing a widget at top, we shrink the rect
     let mut placements: Vec<WidgetPlacement> = Vec::new();
-    let mut used_rects: Vec<bool> = vec![false; all_rects.len()];
 
     for kind in available {
         let min_h = kind.min_height() + 2; // Add border
         let preferred = kind.preferred_side();
 
         // Find best rectangle for this widget
-        // Prefer: 1) correct side, 2) fits minimum height, 3) largest area
+        // Prefer: 1) correct side, 2) smallest rect that fits (reduces waste)
         let mut best_idx: Option<usize> = None;
         let mut best_score: i32 = i32::MIN;
 
-        for (idx, &(side, _top, height, width, _x)) in all_rects.iter().enumerate() {
-            if used_rects[idx] {
-                continue;
-            }
+        for (idx, &(side, _top, height, width, _x, _margin_idx)) in all_rects.iter().enumerate() {
             if height < min_h || width < MIN_WIDGET_WIDTH {
                 continue;
             }
 
-            // Score: prefer correct side (+100), then by area
-            let mut score = (height as i32 * width as i32) / 10;
+            // Score: prefer correct side (+1000), then prefer smaller rects (less waste)
+            // Negative area so smaller = higher score
+            let mut score = -((height as i32 * width as i32) / 10);
             if side == preferred {
-                score += 100;
-            }
-            // Penalize if on wrong side but still usable
-            if side != preferred {
-                score -= 50;
+                score += 1000;
             }
 
             if score > best_score {
@@ -499,21 +489,52 @@ pub fn calculate_placements(
         }
 
         if let Some(idx) = best_idx {
-            let (side, top, height, width, x) = all_rects[idx];
-            used_rects[idx] = true;
+            let (side, top, height, width, x, margin_idx) = all_rects[idx];
 
             // Calculate actual widget height based on content
             let widget_height = calculate_widget_height(kind, data, width, height);
 
-            // Center vertically in available space
-            let extra_height = height.saturating_sub(widget_height);
-            let y = messages_area.y + top + (extra_height / 2);
+            // Place widget at top of rect
+            let y = messages_area.y + top;
 
             placements.push(WidgetPlacement {
                 kind,
                 rect: Rect::new(x, y, width, widget_height),
                 side,
             });
+
+            // Shrink the rect: move top down, reduce height, recalculate width
+            let remaining_height = height.saturating_sub(widget_height);
+            if remaining_height >= MIN_WIDGET_HEIGHT {
+                let new_top = top + widget_height;
+                all_rects[idx].1 = new_top; // new top
+                all_rects[idx].2 = remaining_height; // new height
+
+                // Recalculate width for the new row range to avoid overlapping text
+                // The new rows might have wider text than the original rows
+                let margin = &margin_spaces[margin_idx];
+                let new_end = (new_top as usize + remaining_height as usize).min(margin.widths.len());
+                if (new_top as usize) < new_end {
+                    let new_min_width = margin.widths[new_top as usize..new_end]
+                        .iter()
+                        .copied()
+                        .min()
+                        .unwrap_or(0)
+                        .min(MAX_WIDGET_WIDTH);
+                    all_rects[idx].3 = new_min_width; // new width
+                    // Recalculate x position based on new width
+                    all_rects[idx].4 = match side {
+                        Side::Right => margin.x_offset.saturating_sub(new_min_width),
+                        Side::Left => margin.x_offset,
+                    };
+                } else {
+                    // Invalid range - mark as empty
+                    all_rects[idx].2 = 0;
+                }
+            } else {
+                // Too small to reuse - mark as empty
+                all_rects[idx].2 = 0;
+            }
         }
     }
 
