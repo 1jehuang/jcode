@@ -116,24 +116,81 @@ impl AnthropicProvider {
     }
 
     /// Convert our Message type to Anthropic API format
+    /// Also repairs dangling tool_uses by injecting synthetic tool_results
     fn format_messages(&self, messages: &[Message], is_oauth: bool) -> Vec<ApiMessage> {
-        messages
-            .iter()
-            .map(|msg| {
-                let role = match msg.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                };
+        use std::collections::HashSet;
 
-                let content = self.format_content_blocks(&msg.content, is_oauth);
+        // First pass: collect all tool_use IDs and tool_result IDs
+        let mut tool_use_ids: HashSet<String> = HashSet::new();
+        let mut tool_result_ids: HashSet<String> = HashSet::new();
 
-                ApiMessage {
+        for msg in messages {
+            for block in &msg.content {
+                match block {
+                    ContentBlock::ToolUse { id, .. } => {
+                        tool_use_ids.insert(id.clone());
+                    }
+                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                        tool_result_ids.insert(tool_use_id.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Find dangling tool_uses (no matching tool_result)
+        let dangling: HashSet<_> = tool_use_ids.difference(&tool_result_ids).cloned().collect();
+        if !dangling.is_empty() {
+            crate::logging::info(&format!(
+                "[anthropic] Repairing {} dangling tool_use(s) by injecting synthetic tool_results",
+                dangling.len()
+            ));
+        }
+
+        // Second pass: build messages, injecting synthetic tool_results after assistant messages
+        // that have dangling tool_uses
+        let mut result: Vec<ApiMessage> = Vec::new();
+
+        for msg in messages {
+            let role = match msg.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            };
+
+            let content = self.format_content_blocks(&msg.content, is_oauth);
+
+            if !content.is_empty() {
+                result.push(ApiMessage {
                     role: role.to_string(),
                     content,
+                });
+            }
+
+            // If this is an assistant message with dangling tool_uses, inject synthetic results
+            if matches!(msg.role, Role::Assistant) {
+                let mut synthetic_results: Vec<ApiContentBlock> = Vec::new();
+                for block in &msg.content {
+                    if let ContentBlock::ToolUse { id, .. } = block {
+                        if dangling.contains(id) {
+                            synthetic_results.push(ApiContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: "[Session interrupted before tool execution completed]"
+                                    .to_string(),
+                                is_error: true,
+                            });
+                        }
+                    }
                 }
-            })
-            .filter(|msg| !msg.content.is_empty())
-            .collect()
+                if !synthetic_results.is_empty() {
+                    result.push(ApiMessage {
+                        role: "user".to_string(),
+                        content: synthetic_results,
+                    });
+                }
+            }
+        }
+
+        result
     }
 
     /// Convert our ContentBlock to Anthropic API format
@@ -359,7 +416,10 @@ async fn stream_response(
             .header("anthropic-beta", OAUTH_BETA_HEADERS);
     } else {
         // Direct API keys use x-api-key
-        req = req.header("x-api-key", &token);
+        // Include prompt-caching beta header for cache_control support
+        req = req
+            .header("x-api-key", &token)
+            .header("anthropic-beta", "prompt-caching-2024-07-31");
     }
 
     let response = req
@@ -380,6 +440,8 @@ async fn stream_response(
     let mut current_tool_use: Option<ToolUseAccumulator> = None;
     let mut input_tokens: Option<u64> = None;
     let mut output_tokens: Option<u64> = None;
+    let mut cache_read_input_tokens: Option<u64> = None;
+    let mut cache_creation_input_tokens: Option<u64> = None;
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.context("Error reading stream chunk")?;
@@ -393,6 +455,8 @@ async fn stream_response(
                 &mut current_tool_use,
                 &mut input_tokens,
                 &mut output_tokens,
+                &mut cache_read_input_tokens,
+                &mut cache_creation_input_tokens,
                 is_oauth,
             );
             for stream_event in events {
@@ -405,12 +469,19 @@ async fn stream_response(
 
     // Send final token usage if we have it
     if input_tokens.is_some() || output_tokens.is_some() {
+        // Log cache usage for debugging
+        if cache_read_input_tokens.is_some() || cache_creation_input_tokens.is_some() {
+            crate::logging::info(&format!(
+                "Prompt cache: read={:?} created={:?}",
+                cache_read_input_tokens, cache_creation_input_tokens
+            ));
+        }
         let _ = tx
             .send(Ok(StreamEvent::TokenUsage {
                 input_tokens,
                 output_tokens,
-                cache_read_input_tokens: None,
-                cache_creation_input_tokens: None,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
             }))
             .await;
     }
@@ -483,16 +554,21 @@ fn process_sse_event(
     current_tool_use: &mut Option<ToolUseAccumulator>,
     input_tokens: &mut Option<u64>,
     output_tokens: &mut Option<u64>,
+    cache_read_input_tokens: &mut Option<u64>,
+    cache_creation_input_tokens: &mut Option<u64>,
     is_oauth: bool,
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
     match event.event_type.as_str() {
         "message_start" => {
-            // Extract usage from message_start
+            // Extract usage from message_start (includes cache info)
             if let Ok(parsed) = serde_json::from_str::<MessageStartEvent>(&event.data) {
                 if let Some(usage) = parsed.message.usage {
                     *input_tokens = usage.input_tokens.map(|t| t as u64);
+                    *cache_read_input_tokens = usage.cache_read_input_tokens.map(|t| t as u64);
+                    *cache_creation_input_tokens =
+                        usage.cache_creation_input_tokens.map(|t| t as u64);
                 }
             }
         }
@@ -599,11 +675,26 @@ enum ApiSystem {
     Blocks(Vec<ApiSystemBlock>),
 }
 
+/// Cache control for prompt caching
+#[derive(Serialize, Clone)]
+struct CacheControlParam {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+impl CacheControlParam {
+    fn ephemeral() -> Self {
+        Self { kind: "ephemeral" }
+    }
+}
+
 #[derive(Serialize, Clone)]
 struct ApiSystemBlock {
     #[serde(rename = "type")]
     block_type: &'static str,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControlParam>,
 }
 
 fn build_system_param(system: &str, is_oauth: bool) -> Option<ApiSystem> {
@@ -612,24 +703,34 @@ fn build_system_param(system: &str, is_oauth: bool) -> Option<ApiSystem> {
         blocks.push(ApiSystemBlock {
             block_type: "text",
             text: CLAUDE_CODE_IDENTITY.to_string(),
+            cache_control: None,
         });
         blocks.push(ApiSystemBlock {
             block_type: "text",
             text: CLAUDE_CODE_JCODE_NOTICE.to_string(),
+            cache_control: None,
         });
         if !system.is_empty() {
+            // Cache the main system prompt - this is the largest block containing
+            // CLAUDE.md, memory, skills, etc. Caching saves significant tokens.
             blocks.push(ApiSystemBlock {
                 block_type: "text",
                 text: system.to_string(),
+                cache_control: Some(CacheControlParam::ephemeral()),
             });
         }
         return Some(ApiSystem::Blocks(blocks));
     }
 
+    // Non-OAuth: use block format with cache control for better caching
     if system.is_empty() {
         None
     } else {
-        Some(ApiSystem::Text(system.to_string()))
+        Some(ApiSystem::Blocks(vec![ApiSystemBlock {
+            block_type: "text",
+            text: system.to_string(),
+            cache_control: Some(CacheControlParam::ephemeral()),
+        }]))
     }
 }
 
@@ -741,6 +842,8 @@ struct MessageDeltaDelta {
 struct UsageInfo {
     input_tokens: Option<u32>,
     output_tokens: Option<u32>,
+    cache_read_input_tokens: Option<u32>,
+    cache_creation_input_tokens: Option<u32>,
 }
 
 #[cfg(test)]
@@ -760,5 +863,118 @@ mod tests {
         let provider = AnthropicProvider::new();
         let models = provider.available_models();
         assert!(models.contains(&"claude-opus-4-5-20251101"));
+    }
+
+    #[test]
+    fn test_dangling_tool_use_repair() {
+        let provider = AnthropicProvider::new();
+
+        // Create messages with a dangling tool_use (no corresponding tool_result)
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "Hello".to_string(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "Let me check".to_string(),
+                        cache_control: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tool_123".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({"command": "ls"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "tool_456".to_string(),
+                        name: "read".to_string(),
+                        input: serde_json::json!({"file_path": "/tmp/test"}),
+                    },
+                ],
+            },
+            // Missing tool_results for tool_123 and tool_456!
+        ];
+
+        let formatted = provider.format_messages(&messages, false);
+
+        // Should have 3 messages:
+        // 1. User: "Hello"
+        // 2. Assistant: text + tool_uses
+        // 3. User: synthetic tool_results for the dangling tool_uses
+        assert_eq!(formatted.len(), 3);
+
+        // Check the synthetic tool_result message
+        let synthetic_msg = &formatted[2];
+        assert_eq!(synthetic_msg.role, "user");
+        assert_eq!(synthetic_msg.content.len(), 2);
+
+        // Verify both tool_results are present
+        let mut found_ids = std::collections::HashSet::new();
+        for block in &synthetic_msg.content {
+            if let ApiContentBlock::ToolResult {
+                tool_use_id,
+                is_error,
+                content,
+            } = block
+            {
+                found_ids.insert(tool_use_id.clone());
+                assert!(is_error);
+                assert!(content.contains("interrupted"));
+            } else {
+                panic!("Expected ToolResult block");
+            }
+        }
+        assert!(found_ids.contains("tool_123"));
+        assert!(found_ids.contains("tool_456"));
+    }
+
+    #[test]
+    fn test_no_repair_when_tool_results_present() {
+        let provider = AnthropicProvider::new();
+
+        // Create messages where tool_use has a corresponding tool_result
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "Hello".to_string(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "tool_123".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "tool_123".to_string(),
+                    content: "file1.txt\nfile2.txt".to_string(),
+                    is_error: Some(false),
+                }],
+            },
+        ];
+
+        let formatted = provider.format_messages(&messages, false);
+
+        // Should have exactly 3 messages (no synthetic ones added)
+        assert_eq!(formatted.len(), 3);
+
+        // The last message should be the actual tool_result, not synthetic
+        let last_msg = &formatted[2];
+        if let ApiContentBlock::ToolResult { content, .. } = &last_msg.content[0] {
+            assert!(content.contains("file1.txt"));
+        } else {
+            panic!("Expected ToolResult block");
+        }
     }
 }
