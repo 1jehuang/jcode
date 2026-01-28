@@ -650,7 +650,99 @@ impl Agent {
             println!();
         }
 
+        // Extract memories from session before exiting
+        self.extract_session_memories().await;
+
         Ok(())
+    }
+
+    /// Extract memories from the session transcript
+    /// Returns the number of memories extracted, or 0 if none/skipped
+    pub async fn extract_session_memories(&self) -> usize {
+        // Need at least 4 messages for meaningful extraction
+        if self.session.messages.len() < 4 {
+            return 0;
+        }
+
+        logging::info(&format!(
+            "Extracting memories from {} messages",
+            self.session.messages.len()
+        ));
+
+        // Build transcript
+        let mut transcript = String::new();
+        for msg in &self.session.messages {
+            let role = match msg.role {
+                Role::User => "User",
+                Role::Assistant => "Assistant",
+            };
+            transcript.push_str(&format!("**{}:**\n", role));
+            for block in &msg.content {
+                match block {
+                    ContentBlock::Text { text, .. } => {
+                        transcript.push_str(&text);
+                        transcript.push('\n');
+                    }
+                    ContentBlock::ToolUse { name, .. } => {
+                        transcript.push_str(&format!("[Used tool: {}]\n", name));
+                    }
+                    ContentBlock::ToolResult { content, .. } => {
+                        let preview = if content.len() > 200 {
+                            format!("{}...", &content[..200])
+                        } else {
+                            content.clone()
+                        };
+                        transcript.push_str(&format!("[Result: {}]\n", preview));
+                    }
+                }
+            }
+            transcript.push('\n');
+        }
+
+        // Extract using sidecar
+        let sidecar = crate::sidecar::HaikuSidecar::new();
+        match sidecar.extract_memories(&transcript).await {
+            Ok(extracted) if !extracted.is_empty() => {
+                let manager = crate::memory::MemoryManager::new();
+                let mut stored_count = 0;
+
+                for memory in &extracted {
+                    let category = match memory.category.as_str() {
+                        "fact" => crate::memory::MemoryCategory::Fact,
+                        "preference" => crate::memory::MemoryCategory::Preference,
+                        "correction" => crate::memory::MemoryCategory::Correction,
+                        _ => crate::memory::MemoryCategory::Fact,
+                    };
+
+                    let trust = match memory.trust.as_str() {
+                        "high" => crate::memory::TrustLevel::High,
+                        "low" => crate::memory::TrustLevel::Low,
+                        _ => crate::memory::TrustLevel::Medium,
+                    };
+
+                    let entry = crate::memory::MemoryEntry::new(category, &memory.content)
+                        .with_source(&self.session.id)
+                        .with_trust(trust);
+
+                    if manager.remember_project(entry).is_ok() {
+                        stored_count += 1;
+                    }
+                }
+
+                if stored_count > 0 {
+                    logging::info(&format!(
+                        "Extracted {} memories from session",
+                        stored_count
+                    ));
+                }
+                return stored_count;
+            }
+            Ok(_) => return 0,
+            Err(e) => {
+                logging::info(&format!("Memory extraction skipped: {}", e));
+                return 0;
+            }
+        }
     }
 
     /// Run turns until no more tool calls

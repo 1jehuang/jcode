@@ -1841,8 +1841,59 @@ async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Resul
 
     if trimmed == "help" {
         return Ok(
-            "debug commands: state, history, tools, last_response, message:<text>, tool:<name> <json>, sessions, create_session, create_session:<path>, help".to_string()
+            "debug commands: state, history, tools, last_response, message:<text>, tool:<name> <json>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, help".to_string()
         );
+    }
+
+    // set_model:<model> - Switch to a different model (may change provider)
+    if trimmed.starts_with("set_model:") {
+        let model = trimmed.strip_prefix("set_model:").unwrap_or("").trim();
+        if model.is_empty() {
+            return Err(anyhow::anyhow!("set_model: requires a model name"));
+        }
+        let mut agent = agent.lock().await;
+        agent.set_model(model)?;
+        let payload = serde_json::json!({
+            "model": agent.provider_model(),
+            "provider": agent.provider_name(),
+        });
+        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
+    }
+
+    // set_provider:<name> - Switch to a provider with default model
+    if trimmed.starts_with("set_provider:") {
+        let provider = trimmed.strip_prefix("set_provider:").unwrap_or("").trim().to_lowercase();
+        let default_model = match provider.as_str() {
+            "claude" | "anthropic" => "claude-opus-4-5-20251101",
+            "openai" | "codex" => "gpt-5.2-codex",
+            "openrouter" => "anthropic/claude-sonnet-4",
+            _ => return Err(anyhow::anyhow!("Unknown provider '{}'. Use: claude, openai, openrouter", provider)),
+        };
+        let mut agent = agent.lock().await;
+        agent.set_model(default_model)?;
+        let payload = serde_json::json!({
+            "model": agent.provider_model(),
+            "provider": agent.provider_name(),
+        });
+        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
+    }
+
+    // trigger_extraction - Force end-of-session memory extraction
+    if trimmed == "trigger_extraction" {
+        let agent = agent.lock().await;
+        let count = agent.extract_session_memories().await;
+        let payload = serde_json::json!({
+            "extracted": count,
+            "message_count": agent.message_count(),
+        });
+        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
+    }
+
+    // available_models - List all available models
+    if trimmed == "available_models" {
+        let agent = agent.lock().await;
+        let models = agent.available_models_display();
+        return Ok(serde_json::to_string_pretty(&models).unwrap_or_else(|_| "[]".to_string()));
     }
 
     Err(anyhow::anyhow!("Unknown debug command '{}'", trimmed))
@@ -2049,6 +2100,18 @@ async fn handle_debug_client(
                         // Server commands (default)
                         if cmd == "create_session" || cmd.starts_with("create_session:") {
                             create_headless_session(&sessions, &session_id, &provider, cmd).await
+                        } else if cmd.starts_with("destroy_session:") {
+                            let target_id = cmd.strip_prefix("destroy_session:").unwrap_or("").trim();
+                            if target_id.is_empty() {
+                                Err(anyhow::anyhow!("destroy_session: requires a session_id"))
+                            } else {
+                                let mut sessions_guard = sessions.write().await;
+                                if sessions_guard.remove(target_id).is_some() {
+                                    Ok(format!("Session '{}' destroyed", target_id))
+                                } else {
+                                    Err(anyhow::anyhow!("Unknown session_id '{}'", target_id))
+                                }
+                            }
                         } else if cmd == "sessions" {
                             let sessions_guard = sessions.read().await;
                             let session_list: Vec<_> = sessions_guard.keys().collect();
@@ -2105,6 +2168,11 @@ SERVER COMMANDS (server: prefix or no prefix):
   sessions                 - List all sessions
   create_session           - Create headless session
   create_session:<path>    - Create session with working dir
+  destroy_session:<id>     - Destroy a session
+  set_model:<model>        - Switch model (may change provider)
+  set_provider:<name>      - Switch provider (claude/openai/openrouter)
+  trigger_extraction       - Force end-of-session memory extraction
+  available_models         - List all available models
 
 CLIENT COMMANDS (client: prefix):
   client:state             - Get TUI state
@@ -2131,7 +2199,9 @@ TESTER COMMANDS (tester: prefix):
 Examples:
   {"type":"debug_command","id":1,"command":"state"}
   {"type":"debug_command","id":2,"command":"client:frame"}
-  {"type":"debug_command","id":3,"command":"tester:list"}"#
+  {"type":"debug_command","id":3,"command":"tester:list"}
+  {"type":"debug_command","id":4,"command":"set_provider:openai","session_id":"..."}
+  {"type":"debug_command","id":5,"command":"trigger_extraction","session_id":"..."}"#
         .to_string()
 }
 
