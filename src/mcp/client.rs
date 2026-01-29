@@ -28,6 +28,11 @@ pub struct McpClient {
 impl McpClient {
     /// Connect to an MCP server
     pub async fn connect(name: String, config: &McpServerConfig) -> Result<Self> {
+        crate::logging::info(&format!(
+            "MCP: Connecting to '{}' ({} {:?})",
+            name, config.command, config.args
+        ));
+
         // Build environment
         let mut env: HashMap<String, String> = std::env::vars().collect();
         env.extend(config.env.clone());
@@ -38,12 +43,33 @@ impl McpClient {
             .envs(&env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("Failed to spawn MCP server: {}", config.command))?;
 
         let stdin = child.stdin.take().context("No stdin")?;
         let stdout = child.stdout.take().context("No stdout")?;
+        let stderr = child.stderr.take().context("No stderr")?;
+
+        // Spawn stderr reader to log errors
+        let server_name = name.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            crate::logging::warn(&format!("MCP [{}] stderr: {}", server_name, trimmed));
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
 
         // Setup channels
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
@@ -65,13 +91,17 @@ impl McpClient {
 
         // Spawn reader task
         let pending_clone = Arc::clone(&pending);
+        let reader_name = name.clone();
         let mut reader = BufReader::new(stdout);
         tokio::spawn(async move {
             let mut line = String::new();
             loop {
                 line.clear();
                 match reader.read_line(&mut line).await {
-                    Ok(0) => break, // EOF
+                    Ok(0) => {
+                        crate::logging::debug(&format!("MCP [{}]: stdout EOF", reader_name));
+                        break; // EOF
+                    }
                     Ok(_) => {
                         if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&line) {
                             if let Some(id) = response.id {
@@ -80,15 +110,27 @@ impl McpClient {
                                     let _ = tx.send(response);
                                 }
                             }
+                        } else {
+                            // Log non-JSON lines for debugging
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() {
+                                crate::logging::debug(&format!(
+                                    "MCP [{}] non-JSON output: {}",
+                                    reader_name, trimmed
+                                ));
+                            }
                         }
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        crate::logging::warn(&format!("MCP [{}] read error: {}", reader_name, e));
+                        break;
+                    }
                 }
             }
         });
 
         let mut client = Self {
-            name,
+            name: name.clone(),
             child,
             request_id: AtomicU64::new(1),
             pending,
@@ -99,10 +141,20 @@ impl McpClient {
         };
 
         // Initialize
-        client.initialize().await?;
+        client.initialize().await.with_context(|| {
+            format!("MCP server '{}' failed to initialize", name)
+        })?;
 
         // Get tools
-        client.refresh_tools().await?;
+        client.refresh_tools().await.with_context(|| {
+            format!("MCP server '{}' failed to list tools", name)
+        })?;
+
+        crate::logging::info(&format!(
+            "MCP: Connected to '{}' with {} tools",
+            name,
+            client.tools.len()
+        ));
 
         Ok(client)
     }
