@@ -238,6 +238,40 @@ impl Agent {
         self.session.messages.len()
     }
 
+    /// Build a transcript string for memory extraction
+    /// This is a standalone method so it can be called before spawning async tasks
+    pub fn build_transcript_for_extraction(&self) -> String {
+        let mut transcript = String::new();
+        for msg in &self.session.messages {
+            let role = match msg.role {
+                Role::User => "User",
+                Role::Assistant => "Assistant",
+            };
+            transcript.push_str(&format!("**{}:**\n", role));
+            for block in &msg.content {
+                match block {
+                    ContentBlock::Text { text, .. } => {
+                        transcript.push_str(text);
+                        transcript.push('\n');
+                    }
+                    ContentBlock::ToolUse { name, .. } => {
+                        transcript.push_str(&format!("[Used tool: {}]\n", name));
+                    }
+                    ContentBlock::ToolResult { content, .. } => {
+                        let preview = if content.len() > 200 {
+                            format!("{}...", &content[..200])
+                        } else {
+                            content.clone()
+                        };
+                        transcript.push_str(&format!("[Result: {}]\n", preview));
+                    }
+                }
+            }
+            transcript.push('\n');
+        }
+        transcript
+    }
+
     pub fn last_assistant_text(&self) -> Option<String> {
         self.session
             .messages

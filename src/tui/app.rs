@@ -648,21 +648,36 @@ impl App {
             .await;
 
         let manager = self.mcp_manager.read().await;
-        if !manager.config().servers.is_empty() {
+        let server_count = manager.config().servers.len();
+        if server_count > 0 {
             drop(manager);
-            let mut init_error = None;
-            {
+            
+            // Log configured servers
+            crate::logging::info(&format!("MCP: Found {} server(s) in config", server_count));
+            
+            let (successes, failures) = {
                 let manager = self.mcp_manager.write().await;
-                if let Err(e) = manager.connect_all().await {
-                    init_error = Some(format!("MCP init error: {}", e));
-                }
+                let result = manager.connect_all().await.unwrap_or((0, Vec::new()));
                 // Cache server names
                 self.mcp_server_names = manager.connected_servers().await;
+                result
+            };
+            
+            // Show connection results
+            if successes > 0 {
+                let msg = format!("MCP: Connected to {} server(s)", successes);
+                crate::logging::info(&msg);
+                self.set_status_notice(&format!("mcp: {} connected", successes));
             }
-            if let Some(msg) = init_error {
-                crate::logging::error(&msg);
-                self.push_display_message(DisplayMessage::error(msg));
-                self.set_status_notice("MCP init failed");
+            
+            if !failures.is_empty() {
+                for (name, error) in &failures {
+                    let msg = format!("MCP '{}' failed: {}", name, error);
+                    self.push_display_message(DisplayMessage::error(msg));
+                }
+                if successes == 0 {
+                    self.set_status_notice("MCP: all connections failed");
+                }
             }
 
             // Register MCP server tools

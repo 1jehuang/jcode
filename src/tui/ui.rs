@@ -1725,7 +1725,16 @@ fn render_tool_message(msg: &DisplayMessage, width: u16, show_diffs: bool) -> Ve
             .and_then(|e| e.to_str());
 
         // Collect only actual change lines (+ and -)
-        let change_lines = collect_diff_lines(&msg.content);
+        // First try parsing from content, then fall back to tool input if empty
+        let change_lines = {
+            let from_content = collect_diff_lines(&msg.content);
+            if !from_content.is_empty() {
+                from_content
+            } else {
+                // Fall back to generating diff lines from tool input
+                generate_diff_lines_from_tool_input(tc)
+            }
+        };
 
         const MAX_DIFF_LINES: usize = 12;
         let total_changes = change_lines.len();
@@ -2075,12 +2084,31 @@ fn draw_messages(
     margins
 }
 
+/// Format elapsed time in a human-readable way
+fn format_elapsed(secs: f32) -> String {
+    if secs >= 3600.0 {
+        let hours = (secs / 3600.0) as u32;
+        let mins = ((secs % 3600.0) / 60.0) as u32;
+        format!("{}h {}m", hours, mins)
+    } else if secs >= 60.0 {
+        let mins = (secs / 60.0) as u32;
+        let s = (secs % 60.0) as u32;
+        format!("{}m {}s", mins, s)
+    } else {
+        format!("{:.1}s", secs)
+    }
+}
+
 fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
-    let (input_tokens, output_tokens) = app.streaming_tokens();
-    let (cache_read_tokens, cache_creation_tokens) = app.streaming_cache_tokens();
     let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
     let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
-    let cache_status = format_cache_status(cache_read_tokens, cache_creation_tokens);
+    
+    // Check for unexpected cache miss (cache write on turn 2+)
+    let (cache_read, cache_creation) = app.streaming_cache_tokens();
+    let user_turn_count = app.display_messages().iter().filter(|m| m.role == "user").count();
+    let unexpected_cache_miss = user_turn_count > 1 
+        && cache_creation.unwrap_or(0) > 0 
+        && cache_read.unwrap_or(0) == 0;
 
     let line = if let Some(notice) = app.status_notice() {
         Line::from(vec![Span::styled(
@@ -2141,93 +2169,73 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             ProcessingStatus::Sending => Line::from(vec![
                 Span::styled(spinner, Style::default().fg(AI_COLOR)),
                 Span::styled(
-                    format!(" sending… {:.1}s", elapsed),
+                    format!(" sending… {}", format_elapsed(elapsed)),
                     Style::default().fg(DIM_COLOR),
                 ),
             ]),
             ProcessingStatus::Streaming => {
-                let tokens_str = if input_tokens > 0 || output_tokens > 0 {
-                    format!("↑{} ↓{}", input_tokens, output_tokens)
-                } else {
-                    String::new()
-                };
-                let usage_str = format_usage_line(tokens_str, cache_status.clone());
                 // Show stale indicator if no activity for >2s
-                let stale_str = match stale_secs {
-                    Some(s) if s > 2.0 => format!("(idle {:.0}s)", s),
-                    _ => String::new(),
+                let time_str = format_elapsed(elapsed);
+                let mut status_text = match stale_secs {
+                    Some(s) if s > 2.0 => format!("(idle {:.0}s) · {}", s, time_str),
+                    _ => time_str,
                 };
-                let mut status_parts = Vec::new();
-                if !usage_str.is_empty() {
-                    status_parts.push(usage_str);
+                if unexpected_cache_miss {
+                    status_text = format!("⚠ cache miss · {}", status_text);
                 }
-                if !stale_str.is_empty() {
-                    status_parts.push(stale_str);
-                }
-                let status_text = if status_parts.is_empty() {
-                    format!("{:.1}s", elapsed)
-                } else {
-                    format!("{} {:.1}s", status_parts.join(" "), elapsed)
-                };
                 Line::from(vec![
                     Span::styled(spinner, Style::default().fg(AI_COLOR)),
-                    Span::styled(format!(" {}", status_text), Style::default().fg(DIM_COLOR)),
+                    Span::styled(format!(" {}", status_text), Style::default().fg(if unexpected_cache_miss { Color::Rgb(255, 193, 7) } else { DIM_COLOR })),
                 ])
             }
             ProcessingStatus::RunningTool(ref name) => {
-                let tokens_str = if input_tokens > 0 || output_tokens > 0 {
-                    format!("↑{} ↓{}", input_tokens, output_tokens)
-                } else {
-                    String::new()
-                };
-                let usage_str = format_usage_line(tokens_str, cache_status.clone());
-                let usage_prefix = if usage_str.is_empty() {
-                    " ".to_string()
-                } else {
-                    format!(" {}", usage_str)
-                };
-                // Animated progress dots - split on both sides of the command
-                let half_width = 5;
+                // Animated progress dots - surrounds tool name only
+                let half_width = 3;
                 let progress = ((elapsed * 2.0) % 1.0) as f32; // Cycle every 0.5s
                 let filled_pos = ((progress * half_width as f32) as usize) % half_width;
-                // Left dots: animate left-to-right (towards command)
                 let left_bar: String = (0..half_width)
                     .map(|i| if i == filled_pos { '●' } else { '·' })
                     .collect();
-                // Right dots: animate right-to-left (towards command)
                 let right_bar: String = (0..half_width)
-                    .map(|i| {
-                        if i == (half_width - 1 - filled_pos) {
-                            '●'
-                        } else {
-                            '·'
-                        }
-                    })
+                    .map(|i| if i == (half_width - 1 - filled_pos) { '●' } else { '·' })
                     .collect();
-                // Use animated color for the tool name
+                
                 let anim_color = animated_tool_color(elapsed);
-                // Show subagent status if available (e.g., "calling API", "running grep")
-                let status_suffix = app
-                    .subagent_status()
-                    .map(|s| format!(" ({})", s))
-                    .unwrap_or_default();
-                // Get tool details (command, file path, etc.) from the current tool call
+                
+                // Get tool details (command, file path, etc.)
                 let tool_detail = app
                     .streaming_tool_calls()
                     .last()
                     .map(|tc| get_tool_summary(tc))
-                    .filter(|s| !s.is_empty())
-                    .map(|s| format!(" {}", s))
-                    .unwrap_or_default();
-                Line::from(vec![
+                    .filter(|s| !s.is_empty());
+                
+                // Subagent status (only for task_runner)
+                let subagent = app.subagent_status();
+                
+                // Build the line: animation · tool · animation · detail · (status) · time · ⚠ cache
+                let mut spans = vec![
                     Span::styled(left_bar, Style::default().fg(anim_color)),
-                    Span::styled(usage_prefix, Style::default().fg(DIM_COLOR)),
+                    Span::styled(" ", Style::default()),
                     Span::styled(name.to_string(), Style::default().fg(anim_color).bold()),
-                    Span::styled(status_suffix, Style::default().fg(DIM_COLOR)),
-                    Span::styled(tool_detail, Style::default().fg(DIM_COLOR)),
-                    Span::styled(format!(" {:.1}s ", elapsed), Style::default().fg(DIM_COLOR)),
+                    Span::styled(" ", Style::default()),
                     Span::styled(right_bar, Style::default().fg(anim_color)),
-                ])
+                ];
+                
+                if let Some(detail) = tool_detail {
+                    spans.push(Span::styled(format!(" · {}", detail), Style::default().fg(DIM_COLOR)));
+                }
+                
+                if let Some(status) = subagent {
+                    spans.push(Span::styled(format!(" ({})", status), Style::default().fg(DIM_COLOR)));
+                }
+                
+                spans.push(Span::styled(format!(" · {}", format_elapsed(elapsed)), Style::default().fg(DIM_COLOR)));
+                
+                if unexpected_cache_miss {
+                    spans.push(Span::styled(" · ⚠ cache miss", Style::default().fg(Color::Rgb(255, 193, 7))));
+                }
+                
+                Line::from(spans)
             }
         }
     } else {
@@ -2797,6 +2805,97 @@ fn diff_counts_from_strings(old: &str, new: &str) -> (usize, usize) {
         }
     }
     (additions, deletions)
+}
+
+/// Generate diff lines from tool input (old_string/new_string) when content doesn't have them.
+/// This is needed when the SDK executes tools and returns results in a different format.
+fn generate_diff_lines_from_tool_input(tool: &ToolCall) -> Vec<ParsedDiffLine> {
+    match tool.name.as_str() {
+        "edit" | "Edit" => {
+            let old = tool
+                .input
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new = tool
+                .input
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            generate_diff_lines_from_strings(old, new)
+        }
+        "multiedit" => {
+            let Some(edits) = tool.input.get("edits").and_then(|v| v.as_array()) else {
+                return Vec::new();
+            };
+            let mut all_lines = Vec::new();
+            for edit in edits {
+                let old = edit
+                    .get("old_string")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let new = edit
+                    .get("new_string")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                all_lines.extend(generate_diff_lines_from_strings(old, new));
+            }
+            all_lines
+        }
+        "write" => {
+            // For write, show the new content as additions
+            let content = tool
+                .input
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            generate_diff_lines_from_strings("", content)
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Generate ParsedDiffLine entries from old/new strings
+fn generate_diff_lines_from_strings(old: &str, new: &str) -> Vec<ParsedDiffLine> {
+    use similar::ChangeTag;
+
+    let diff = similar::TextDiff::from_lines(old, new);
+    let mut lines = Vec::new();
+    let mut line_num = 1usize;
+
+    for change in diff.iter_all_changes() {
+        let content = change.value().trim();
+        if content.is_empty() {
+            if change.tag() != ChangeTag::Equal {
+                line_num += 1;
+            }
+            continue;
+        }
+
+        match change.tag() {
+            ChangeTag::Delete => {
+                lines.push(ParsedDiffLine {
+                    kind: DiffLineKind::Del,
+                    prefix: format!("{}- ", line_num),
+                    content: content.to_string(),
+                });
+                line_num += 1;
+            }
+            ChangeTag::Insert => {
+                lines.push(ParsedDiffLine {
+                    kind: DiffLineKind::Add,
+                    prefix: format!("{}+ ", line_num),
+                    content: content.to_string(),
+                });
+                line_num += 1;
+            }
+            ChangeTag::Equal => {
+                line_num += 1;
+            }
+        }
+    }
+
+    lines
 }
 
 fn collect_diff_lines(content: &str) -> Vec<ParsedDiffLine> {

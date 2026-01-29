@@ -158,6 +158,15 @@ pub fn error(message: &str) {
     }
 }
 
+/// Log a warning message
+pub fn warn(message: &str) {
+    if let Ok(mut guard) = LOGGER.lock() {
+        if let Some(logger) = guard.as_mut() {
+            logger.write("WARN", message);
+        }
+    }
+}
+
 /// Log a debug message (only if JCODE_TRACE is set)
 pub fn debug(message: &str) {
     if std::env::var("JCODE_TRACE").is_ok() {
