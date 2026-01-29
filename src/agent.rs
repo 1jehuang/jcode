@@ -410,6 +410,19 @@ impl Agent {
 
     /// Build the system prompt, including skill, memory, self-dev context, and CLAUDE.md files
     fn build_system_prompt(&self, memory_prompt: Option<&str>) -> String {
+        let split = self.build_system_prompt_split(memory_prompt);
+        if split.dynamic_part.is_empty() {
+            split.static_part
+        } else if split.static_part.is_empty() {
+            split.dynamic_part
+        } else {
+            format!("{}\n\n{}", split.static_part, split.dynamic_part)
+        }
+    }
+
+    /// Build split system prompt for better caching
+    /// Returns static (cacheable) and dynamic (not cached) parts separately
+    fn build_system_prompt_split(&self, memory_prompt: Option<&str>) -> crate::prompt::SplitSystemPrompt {
         // Get skill prompt if active
         let skill_prompt = self
             .active_skill
@@ -434,8 +447,8 @@ impl Agent {
             .as_ref()
             .map(|s| std::path::PathBuf::from(s));
 
-        // Use the full prompt builder which loads CLAUDE.md from the session's working directory
-        let (prompt, _context_info) = crate::prompt::build_system_prompt_full(
+        // Use split prompt builder for better cache efficiency
+        let (split, _context_info) = crate::prompt::build_system_prompt_split(
             skill_prompt.as_deref(),
             &available_skills,
             self.session.is_canary,
@@ -443,7 +456,7 @@ impl Agent {
             working_dir.as_deref(),
         );
 
-        prompt
+        split
     }
 
     /// Non-blocking memory prompt - takes pending result and spawns check for next turn
@@ -773,8 +786,8 @@ impl Agent {
             let tools = self.tool_definitions().await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_prompt = self.build_memory_prompt_nonblocking(&messages);
-            // Don't pass memory to system prompt - inject as message instead for better caching
-            let system_prompt = self.build_system_prompt(None);
+            // Use split prompt for better caching - static content cached, dynamic not
+            let split_prompt = self.build_system_prompt_split(None);
 
             // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory = messages;
@@ -805,10 +818,11 @@ impl Agent {
 
             let mut stream = self
                 .provider
-                .complete(
+                .complete_split(
                     &messages_with_memory,
                     &tools,
-                    &system_prompt,
+                    &split_prompt.static_part,
+                    &split_prompt.dynamic_part,
                     self.provider_session_id.as_deref(),
                 )
                 .await?;
@@ -1308,8 +1322,8 @@ impl Agent {
             let tools = self.tool_definitions().await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_prompt = self.build_memory_prompt_nonblocking(&messages);
-            // Don't pass memory to system prompt - inject as message instead for better caching
-            let system_prompt = self.build_system_prompt(None);
+            // Use split prompt for better caching - static content cached, dynamic not
+            let split_prompt = self.build_system_prompt_split(None);
 
             // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory = messages;
@@ -1325,10 +1339,11 @@ impl Agent {
 
             let mut stream = self
                 .provider
-                .complete(
+                .complete_split(
                     &messages_with_memory,
                     &tools,
-                    &system_prompt,
+                    &split_prompt.static_part,
+                    &split_prompt.dynamic_part,
                     self.provider_session_id.as_deref(),
                 )
                 .await?;
@@ -1742,8 +1757,8 @@ impl Agent {
             let tools = self.tool_definitions().await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_prompt = self.build_memory_prompt_nonblocking(&messages);
-            // Don't pass memory to system prompt - inject as message instead for better caching
-            let system_prompt = self.build_system_prompt(None);
+            // Use split prompt for better caching - static content cached, dynamic not
+            let split_prompt = self.build_system_prompt_split(None);
 
             // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory = messages;
@@ -1759,10 +1774,11 @@ impl Agent {
 
             let mut stream = self
                 .provider
-                .complete(
+                .complete_split(
                     &messages_with_memory,
                     &tools,
-                    &system_prompt,
+                    &split_prompt.static_part,
+                    &split_prompt.dynamic_part,
                     self.provider_session_id.as_deref(),
                 )
                 .await?;
