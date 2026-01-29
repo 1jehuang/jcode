@@ -2886,9 +2886,11 @@ fn normalize_model_arg(model: String) -> Option<String> {
     }
 }
 
-/// Monitor for selfdev signal files and exit with appropriate codes
-/// This allows the canary wrapper to handle reload/rollback requests
+/// Monitor for selfdev signal files and exec into new binary
+/// The server directly execs into the new binary instead of exiting
 async fn monitor_selfdev_signals() {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command as ProcessCommand;
     use tokio::time::{interval, Duration};
 
     let mut check_interval = interval(Duration::from_millis(500));
@@ -2906,7 +2908,24 @@ async fn monitor_selfdev_signals() {
         if rebuild_path.exists() {
             if let Ok(_hash) = std::fs::read_to_string(&rebuild_path) {
                 let _ = std::fs::remove_file(&rebuild_path);
-                crate::logging::info("Server: reload signal received, exiting with code 42");
+                crate::logging::info("Server: reload signal received, exec'ing into canary binary");
+
+                // Get canary binary path
+                if let Ok(binary) = crate::build::canary_binary_path() {
+                    if binary.exists() {
+                        // Small delay for filesystem sync
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+
+                        // Exec into the new binary with serve mode
+                        let err = ProcessCommand::new(&binary)
+                            .arg("serve")
+                            .exec();
+
+                        // If we get here, exec failed
+                        crate::logging::error(&format!("Failed to exec into canary: {}", err));
+                    }
+                }
+                // Fallback: just exit and let something else restart us
                 std::process::exit(42);
             }
         }
@@ -2916,7 +2935,20 @@ async fn monitor_selfdev_signals() {
         if rollback_path.exists() {
             if let Ok(_hash) = std::fs::read_to_string(&rollback_path) {
                 let _ = std::fs::remove_file(&rollback_path);
-                crate::logging::info("Server: rollback signal received, exiting with code 43");
+                crate::logging::info("Server: rollback signal received, exec'ing into stable binary");
+
+                // Get stable binary path
+                if let Ok(binary) = crate::build::stable_binary_path() {
+                    if binary.exists() {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+
+                        let err = ProcessCommand::new(&binary)
+                            .arg("serve")
+                            .exec();
+
+                        crate::logging::error(&format!("Failed to exec into stable: {}", err));
+                    }
+                }
                 std::process::exit(43);
             }
         }

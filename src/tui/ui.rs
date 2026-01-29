@@ -2181,7 +2181,13 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                     _ => time_str,
                 };
                 if unexpected_cache_miss {
-                    status_text = format!("⚠ cache miss · {}", status_text);
+                    let miss_tokens = cache_creation.unwrap_or(0);
+                    let miss_str = if miss_tokens >= 1000 {
+                        format!("{}k", miss_tokens / 1000)
+                    } else {
+                        format!("{}", miss_tokens)
+                    };
+                    status_text = format!("⚠ {} cache miss · {}", miss_str, status_text);
                 }
                 Line::from(vec![
                     Span::styled(spinner, Style::default().fg(AI_COLOR)),
@@ -2232,7 +2238,13 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 spans.push(Span::styled(format!(" · {}", format_elapsed(elapsed)), Style::default().fg(DIM_COLOR)));
                 
                 if unexpected_cache_miss {
-                    spans.push(Span::styled(" · ⚠ cache miss", Style::default().fg(Color::Rgb(255, 193, 7))));
+                    let miss_tokens = cache_creation.unwrap_or(0);
+                    let miss_str = if miss_tokens >= 1000 {
+                        format!("{}k", miss_tokens / 1000)
+                    } else {
+                        format!("{}", miss_tokens)
+                    };
+                    spans.push(Span::styled(format!(" · ⚠ {} cache miss", miss_str), Style::default().fg(Color::Rgb(255, 193, 7))));
                 }
                 
                 Line::from(spans)

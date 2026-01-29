@@ -12,11 +12,14 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
-/// Default token budget (100k tokens)
-const DEFAULT_TOKEN_BUDGET: usize = 100_000;
+/// Default token budget (200k tokens - matches Claude's actual context limit)
+const DEFAULT_TOKEN_BUDGET: usize = 200_000;
 
 /// Trigger compaction at this percentage of budget
 const COMPACTION_THRESHOLD: f32 = 0.80;
+
+/// Minimum threshold for manual compaction (can compact at any time above this)
+const MANUAL_COMPACT_MIN_THRESHOLD: f32 = 0.10;
 
 /// Keep this many recent turns verbatim (not summarized)
 const RECENT_TURNS_TO_KEEP: usize = 10;
@@ -106,6 +109,16 @@ impl CompactionManager {
         self
     }
 
+    /// Update the token budget (e.g., when model changes)
+    pub fn set_budget(&mut self, budget: usize) {
+        self.token_budget = budget;
+    }
+
+    /// Get current token budget
+    pub fn token_budget(&self) -> usize {
+        self.token_budget
+    }
+
     /// Add a message to the conversation
     pub fn add_message(&mut self, message: Message) {
         self.messages.push(message.clone());
@@ -170,6 +183,59 @@ impl CompactionManager {
         self.pending_task = Some(tokio::spawn(async move {
             generate_summary(provider, messages_to_summarize, existing_summary).await
         }));
+    }
+
+    /// Force immediate compaction (for manual /compact command).
+    /// Returns Ok(()) if compaction started, Err with reason if not.
+    pub fn force_compact(&mut self, provider: Arc<dyn Provider>) -> Result<(), String> {
+        // Check if already compacting
+        if self.pending_task.is_some() {
+            return Err("Compaction already in progress".to_string());
+        }
+
+        // Need at least some messages to compact
+        if self.messages.len() <= RECENT_TURNS_TO_KEEP {
+            return Err(format!(
+                "Not enough messages to compact (need more than {}, have {})",
+                RECENT_TURNS_TO_KEEP,
+                self.messages.len()
+            ));
+        }
+
+        // Check minimum threshold
+        if self.context_usage() < MANUAL_COMPACT_MIN_THRESHOLD {
+            return Err(format!(
+                "Context usage too low ({:.1}%) - nothing to compact",
+                self.context_usage() * 100.0
+            ));
+        }
+
+        // Calculate cutoff - keep last N turns verbatim
+        let mut cutoff = self.messages.len().saturating_sub(RECENT_TURNS_TO_KEEP);
+        if cutoff == 0 {
+            return Err("No messages available to compact after keeping recent turns".to_string());
+        }
+
+        // Adjust cutoff to not split tool call/result pairs
+        cutoff = self.safe_cutoff(cutoff);
+        if cutoff == 0 {
+            return Err(
+                "Cannot compact - would split tool call/result pairs".to_string()
+            );
+        }
+
+        // Snapshot messages to summarize
+        let messages_to_summarize: Vec<Message> = self.messages[..cutoff].to_vec();
+        let existing_summary = self.active_summary.clone();
+
+        self.pending_cutoff = cutoff;
+
+        // Spawn background task
+        self.pending_task = Some(tokio::spawn(async move {
+            generate_summary(provider, messages_to_summarize, existing_summary).await
+        }));
+
+        Ok(())
     }
 
     /// Find a safe cutoff point that doesn't split tool call/result pairs.
