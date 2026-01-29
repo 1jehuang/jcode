@@ -377,6 +377,94 @@ impl Provider for AnthropicProvider {
     fn native_result_sender(&self) -> Option<NativeToolResultSender> {
         None // Direct API doesn't use native tool bridge
     }
+
+    /// Split system prompt completion for better cache efficiency
+    /// Static content is cached, dynamic content is not
+    async fn complete_split(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system_static: &str,
+        system_dynamic: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let (token, is_oauth) = self.get_access_token().await?;
+        let model = self.model.read().unwrap().clone();
+
+        // Format request
+        let api_messages = self.format_messages(messages, is_oauth);
+        let api_tools = self.format_tools(tools, is_oauth);
+
+        let request = ApiRequest {
+            model: model.clone(),
+            max_tokens: 16384,
+            system: build_system_param_split(system_static, system_dynamic, is_oauth),
+            messages: format_messages_with_identity(api_messages, is_oauth),
+            tools: if api_tools.is_empty() {
+                None
+            } else {
+                Some(api_tools)
+            },
+            stream: true,
+        };
+
+        // Create channel for streaming events
+        let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
+
+        // Clone what we need for the async task
+        let client = self.client.clone();
+
+        // Spawn task to handle streaming with retry logic
+        tokio::spawn(async move {
+            let mut last_error = None;
+
+            for attempt in 0..MAX_RETRIES {
+                if attempt > 0 {
+                    let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    crate::logging::info(&format!(
+                        "Retrying Anthropic API request (attempt {}/{})",
+                        attempt + 1,
+                        MAX_RETRIES
+                    ));
+                }
+
+                match stream_response(
+                    client.clone(),
+                    token.clone(),
+                    is_oauth,
+                    request.clone(),
+                    tx.clone(),
+                )
+                .await
+                {
+                    Ok(()) => return,
+                    Err(e) => {
+                        let error_str = e.to_string().to_lowercase();
+                        if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                            crate::logging::info(&format!("Transient error, will retry: {}", e));
+                            last_error = Some(e);
+                            continue;
+                        }
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                }
+            }
+
+            if let Some(e) = last_error {
+                let _ = tx
+                    .send(Err(anyhow::anyhow!(
+                        "Failed after {} retries: {}",
+                        MAX_RETRIES,
+                        e
+                    )))
+                    .await;
+            }
+        });
+
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
 }
 
 /// Stream the response from Anthropic API
@@ -698,6 +786,11 @@ struct ApiSystemBlock {
 }
 
 fn build_system_param(system: &str, is_oauth: bool) -> Option<ApiSystem> {
+    build_system_param_split(system, "", is_oauth)
+}
+
+/// Build system param with split static/dynamic content for better caching
+fn build_system_param_split(static_part: &str, dynamic_part: &str, is_oauth: bool) -> Option<ApiSystem> {
     if is_oauth {
         let mut blocks = Vec::new();
         blocks.push(ApiSystemBlock {
@@ -710,27 +803,48 @@ fn build_system_param(system: &str, is_oauth: bool) -> Option<ApiSystem> {
             text: CLAUDE_CODE_JCODE_NOTICE.to_string(),
             cache_control: None,
         });
-        if !system.is_empty() {
-            // Cache the main system prompt - this is the largest block containing
-            // CLAUDE.md, memory, skills, etc. Caching saves significant tokens.
+        // Static content - CACHED (CLAUDE.md, base prompt, skills)
+        if !static_part.is_empty() {
             blocks.push(ApiSystemBlock {
                 block_type: "text",
-                text: system.to_string(),
+                text: static_part.to_string(),
                 cache_control: Some(CacheControlParam::ephemeral()),
+            });
+        }
+        // Dynamic content - NOT cached (date, git status, memory)
+        if !dynamic_part.is_empty() {
+            blocks.push(ApiSystemBlock {
+                block_type: "text",
+                text: dynamic_part.to_string(),
+                cache_control: None,
             });
         }
         return Some(ApiSystem::Blocks(blocks));
     }
 
-    // Non-OAuth: use block format with cache control for better caching
-    if system.is_empty() {
+    // Non-OAuth: use block format with cache control for static part only
+    let has_static = !static_part.is_empty();
+    let has_dynamic = !dynamic_part.is_empty();
+
+    if !has_static && !has_dynamic {
         None
     } else {
-        Some(ApiSystem::Blocks(vec![ApiSystemBlock {
-            block_type: "text",
-            text: system.to_string(),
-            cache_control: Some(CacheControlParam::ephemeral()),
-        }]))
+        let mut blocks = Vec::new();
+        if has_static {
+            blocks.push(ApiSystemBlock {
+                block_type: "text",
+                text: static_part.to_string(),
+                cache_control: Some(CacheControlParam::ephemeral()),
+            });
+        }
+        if has_dynamic {
+            blocks.push(ApiSystemBlock {
+                block_type: "text",
+                text: dynamic_part.to_string(),
+                cache_control: None,
+            });
+        }
+        Some(ApiSystem::Blocks(blocks))
     }
 }
 

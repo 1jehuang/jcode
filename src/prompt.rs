@@ -6,6 +6,16 @@ use std::process::Command;
 /// Default system prompt for jcode (embedded at compile time)
 pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompt/system.txt");
 
+/// Split system prompt for efficient caching
+/// Static content is cached, dynamic content is not
+#[derive(Debug, Clone, Default)]
+pub struct SplitSystemPrompt {
+    /// Static content that should be cached (CLAUDE.md, base prompt, skills)
+    pub static_part: String,
+    /// Dynamic content that changes frequently (date, git status, memory)
+    pub dynamic_part: String,
+}
+
 /// Skill info for system prompt
 pub struct SkillInfo {
     pub name: String,
@@ -208,6 +218,131 @@ pub fn build_system_prompt_full(
     info.total_chars = prompt.len();
 
     (prompt, info)
+}
+
+/// Build system prompt split into static (cacheable) and dynamic parts
+/// This improves cache hit rate by keeping frequently-changing content separate
+pub fn build_system_prompt_split(
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+    memory_prompt: Option<&str>,
+    working_dir: Option<&Path>,
+) -> (SplitSystemPrompt, ContextInfo) {
+    let mut static_parts = vec![DEFAULT_SYSTEM_PROMPT.to_string()];
+    let mut dynamic_parts = Vec::new();
+    let mut info = ContextInfo::default();
+
+    info.system_prompt_chars = DEFAULT_SYSTEM_PROMPT.len();
+
+    // === STATIC CONTENT (cacheable) ===
+
+    // Add self-dev tools section (static, without dynamic socket path)
+    if is_selfdev {
+        let selfdev_prompt = build_selfdev_prompt_static();
+        info.selfdev_chars = selfdev_prompt.len();
+        static_parts.push(selfdev_prompt);
+    }
+
+    // Add AGENTS.md and CLAUDE.md instructions (static per project)
+    let (md_content, md_info) = load_claude_md_files_from_dir(working_dir);
+    if let Some(content) = md_content {
+        static_parts.push(content);
+    }
+    info.has_project_agents_md = md_info.has_project_agents_md;
+    info.project_agents_md_chars = md_info.project_agents_md_chars;
+    info.has_project_claude_md = md_info.has_project_claude_md;
+    info.project_claude_md_chars = md_info.project_claude_md_chars;
+    info.has_global_agents_md = md_info.has_global_agents_md;
+    info.global_agents_md_chars = md_info.global_agents_md_chars;
+    info.has_global_claude_md = md_info.has_global_claude_md;
+    info.global_claude_md_chars = md_info.global_claude_md_chars;
+
+    // Add available skills list (fairly static)
+    if !available_skills.is_empty() {
+        let mut skills_section = "# Available Skills\n\nYou have access to the following skills that the user can invoke with `/skillname`:\n".to_string();
+        for skill in available_skills {
+            skills_section.push_str(&format!("\n- `/{} ` - {}", skill.name, skill.description));
+        }
+        skills_section.push_str(
+            "\n\nWhen a user asks about available skills or capabilities, mention these skills.",
+        );
+        info.skills_chars = skills_section.len();
+        static_parts.push(skills_section);
+    }
+
+    // === DYNAMIC CONTENT (not cached) ===
+
+    // Environment context (date, cwd, git status) - changes frequently
+    if let Some(env_context) = build_env_context() {
+        info.env_context_chars = env_context.len();
+        dynamic_parts.push(env_context);
+    }
+
+    // Memory prompt (changes per conversation)
+    if let Some(memory) = memory_prompt {
+        info.memory_chars = memory.len();
+        dynamic_parts.push(memory.to_string());
+    }
+
+    // Active skill prompt (changes per skill invocation)
+    if let Some(skill) = skill_prompt {
+        dynamic_parts.push(format!("# Active Skill\n\n{}", skill));
+    }
+
+    let static_part = static_parts.join("\n\n");
+    let dynamic_part = dynamic_parts.join("\n\n");
+    info.total_chars = static_part.len() + dynamic_part.len();
+
+    (
+        SplitSystemPrompt {
+            static_part,
+            dynamic_part,
+        },
+        info,
+    )
+}
+
+/// Build self-dev tools prompt section (static version without dynamic socket path)
+fn build_selfdev_prompt_static() -> String {
+    r#"# Self-Development Mode
+
+You are running in self-dev mode, working on the jcode codebase itself. You have access to additional tools:
+
+## selfdev Tool
+
+Use this tool to manage builds and get debug socket info:
+
+```json
+{"name": "selfdev", "input": {"action": "reload"}}      // Restart with current binary
+{"name": "selfdev", "input": {"action": "status"}}      // Show build versions, debug socket path
+{"name": "selfdev", "input": {"action": "promote"}}     // Mark current as stable
+{"name": "selfdev", "input": {"action": "rollback"}}    // Switch back to stable build
+{"name": "selfdev", "input": {"action": "socket-info"}} // Debug socket connection info
+{"name": "selfdev", "input": {"action": "socket-help"}} // Debug socket command reference
+```
+
+## debug_socket Tool
+
+Use this tool to send commands to the debug socket for visual debugging, spawning test instances, or inspecting agent state:
+
+```json
+{"name": "debug_socket", "input": {"command": "client:frame"}}      // Get visual debug frame
+{"name": "debug_socket", "input": {"command": "client:enable"}}     // Enable visual debug
+{"name": "debug_socket", "input": {"command": "tester:spawn"}}      // Spawn test instance
+{"name": "debug_socket", "input": {"command": "tester:list"}}       // List active testers
+{"name": "debug_socket", "input": {"command": "state"}}             // Get agent state
+{"name": "debug_socket", "input": {"command": "help"}}              // Full command list
+```
+
+## Workflow
+
+When you make code changes to jcode:
+1. Build with `cargo build --release`
+2. Use `selfdev` with action `reload` to restart with the new binary
+3. The session continues automatically after restart
+
+For testing UI changes, use the debug_socket tool to spawn testers and capture visual debug frames."#.to_string()
 }
 
 /// Build self-dev tools prompt section

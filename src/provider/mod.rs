@@ -30,6 +30,30 @@ pub trait Provider: Send + Sync {
         resume_session_id: Option<&str>,
     ) -> Result<EventStream>;
 
+    /// Send messages with split system prompt for better caching
+    /// system_static: Static content (CLAUDE.md, base prompt) - cached
+    /// system_dynamic: Dynamic content (date, git status, memory) - not cached
+    /// Default implementation combines them and calls complete()
+    async fn complete_split(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system_static: &str,
+        system_dynamic: &str,
+        resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        // Default: combine static and dynamic parts
+        let combined = if system_dynamic.is_empty() {
+            system_static.to_string()
+        } else if system_static.is_empty() {
+            system_dynamic.to_string()
+        } else {
+            format!("{}\n\n{}", system_static, system_dynamic)
+        };
+        self.complete(messages, tools, &combined, resume_session_id)
+            .await
+    }
+
     /// Get the provider name
     fn name(&self) -> &str;
 
@@ -322,6 +346,56 @@ impl Provider for MultiProvider {
                 if let Some(ref openrouter) = self.openrouter {
                     openrouter
                         .complete(messages, tools, system, resume_session_id)
+                        .await
+                } else {
+                    Err(anyhow::anyhow!("OpenRouter credentials not available. Set OPENROUTER_API_KEY environment variable."))
+                }
+            }
+        }
+    }
+
+    /// Split system prompt completion - delegates to underlying provider for better caching
+    async fn complete_split(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system_static: &str,
+        system_dynamic: &str,
+        resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        match self.active_provider() {
+            ActiveProvider::Claude => {
+                // Prefer direct Anthropic API for best caching support
+                if let Some(ref anthropic) = self.anthropic {
+                    anthropic
+                        .complete_split(messages, tools, system_static, system_dynamic, resume_session_id)
+                        .await
+                } else if let Some(ref claude) = self.claude {
+                    // Claude CLI doesn't support split, fall back to combined
+                    claude
+                        .complete_split(messages, tools, system_static, system_dynamic, resume_session_id)
+                        .await
+                } else {
+                    Err(anyhow::anyhow!(
+                        "Claude credentials not available. Run `claude` to log in."
+                    ))
+                }
+            }
+            ActiveProvider::OpenAI => {
+                if let Some(ref openai) = self.openai {
+                    // OpenAI doesn't support split caching, use default combined
+                    openai
+                        .complete_split(messages, tools, system_static, system_dynamic, resume_session_id)
+                        .await
+                } else {
+                    Err(anyhow::anyhow!("OpenAI credentials not available. Run `jcode login --provider openai` to log in."))
+                }
+            }
+            ActiveProvider::OpenRouter => {
+                if let Some(ref openrouter) = self.openrouter {
+                    // OpenRouter doesn't support split caching, use default combined
+                    openrouter
+                        .complete_split(messages, tools, system_static, system_dynamic, resume_session_id)
                         .await
                 } else {
                     Err(anyhow::anyhow!("OpenRouter credentials not available. Set OPENROUTER_API_KEY environment variable."))
