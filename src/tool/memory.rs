@@ -17,6 +17,18 @@ impl MemoryTool {
             manager: MemoryManager::new(),
         }
     }
+
+    /// Create a memory tool in test mode (isolated storage)
+    pub fn new_test() -> Self {
+        Self {
+            manager: MemoryManager::new_test(),
+        }
+    }
+
+    /// Check if running in test mode
+    pub fn is_test_mode(&self) -> bool {
+        self.manager.is_test_mode()
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -273,6 +273,9 @@ enum MemoryCommand {
 
     /// Show memory statistics
     Stats,
+
+    /// Clear test memory storage (used by debug sessions)
+    ClearTest,
 }
 
 #[tokio::main]
@@ -1113,6 +1116,17 @@ fn run_memory_command(cmd: MemoryCommand) -> Result<()> {
             println!("\nBy category:");
             for (cat, count) in &categories {
                 println!("  {}: {}", cat, count);
+            }
+        }
+
+        MemoryCommand::ClearTest => {
+            let test_dir = storage::jcode_dir()?.join("memory").join("test");
+            if test_dir.exists() {
+                let count = std::fs::read_dir(&test_dir)?.count();
+                std::fs::remove_dir_all(&test_dir)?;
+                println!("Cleared test memory storage ({} files)", count);
+            } else {
+                println!("Test memory storage is already empty");
             }
         }
     }

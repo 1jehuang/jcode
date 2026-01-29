@@ -639,11 +639,48 @@ fn memory_score(entry: &MemoryEntry) -> f64 {
 #[derive(Clone)]
 pub struct MemoryManager {
     project_dir: Option<PathBuf>,
+    /// When true, use isolated test storage instead of real memory
+    test_mode: bool,
 }
 
 impl MemoryManager {
     pub fn new() -> Self {
-        Self { project_dir: None }
+        Self {
+            project_dir: None,
+            test_mode: false,
+        }
+    }
+
+    /// Create a memory manager in test mode (isolated storage)
+    pub fn new_test() -> Self {
+        Self {
+            project_dir: None,
+            test_mode: true,
+        }
+    }
+
+    /// Check if running in test mode
+    pub fn is_test_mode(&self) -> bool {
+        self.test_mode
+    }
+
+    /// Set test mode (for debug sessions)
+    pub fn set_test_mode(&mut self, test_mode: bool) {
+        self.test_mode = test_mode;
+    }
+
+    /// Clear all test memories (only works in test mode)
+    pub fn clear_test_storage(&self) -> Result<()> {
+        if !self.test_mode {
+            anyhow::bail!("clear_test_storage only allowed in test mode");
+        }
+
+        let test_dir = storage::jcode_dir()?.join("memory").join("test");
+        if test_dir.exists() {
+            std::fs::remove_dir_all(&test_dir)?;
+            crate::logging::info("Cleared test memory storage");
+        }
+        Ok(())
     }
 
     fn get_project_dir(&self) -> Option<PathBuf> {
@@ -653,6 +690,13 @@ impl MemoryManager {
     }
 
     fn project_memory_path(&self) -> Result<Option<PathBuf>> {
+        // In test mode, use test directory
+        if self.test_mode {
+            let test_dir = storage::jcode_dir()?.join("memory").join("test");
+            std::fs::create_dir_all(&test_dir)?;
+            return Ok(Some(test_dir.join("test_project.json")));
+        }
+
         let project_dir = match self.get_project_dir() {
             Some(d) => d,
             None => return Ok(None),
@@ -671,7 +715,13 @@ impl MemoryManager {
     }
 
     fn global_memory_path(&self) -> Result<PathBuf> {
-        Ok(storage::jcode_dir()?.join("memory").join("global.json"))
+        if self.test_mode {
+            let test_dir = storage::jcode_dir()?.join("memory").join("test");
+            std::fs::create_dir_all(&test_dir)?;
+            Ok(test_dir.join("test_global.json"))
+        } else {
+            Ok(storage::jcode_dir()?.join("memory").join("global.json"))
+        }
     }
 
     pub fn load_project(&self) -> Result<MemoryStore> {
@@ -1119,6 +1169,7 @@ impl MemoryManager {
         tokio::spawn(async move {
             let manager = MemoryManager {
                 project_dir: project_dir.or_else(|| std::env::current_dir().ok()),
+                test_mode: false, // Prefetch uses real storage
             };
 
             match manager.get_relevant_parallel(&messages).await {
