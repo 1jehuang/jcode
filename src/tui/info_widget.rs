@@ -466,8 +466,10 @@ pub fn calculate_placements(
         let rects = find_all_empty_rects(&margin.widths, MIN_WIDGET_WIDTH, MIN_WIDGET_HEIGHT);
         for (top, height, width) in rects {
             let clamped_width = width.min(MAX_WIDGET_WIDTH);
+            // Position the widget at the start of the margin (where content ends),
+            // not at the right edge minus widget width. This prevents overlap.
             let x = match margin.side {
-                Side::Right => margin.x_offset.saturating_sub(clamped_width),
+                Side::Right => margin.x_offset.saturating_sub(width),
                 Side::Left => margin.x_offset,
             };
             all_rects.push((margin.side, top, height, clamped_width, x, margin_idx));
@@ -532,16 +534,18 @@ pub fn calculate_placements(
                 let margin = &margin_spaces[margin_idx];
                 let new_end = (new_top as usize + remaining_height as usize).min(margin.widths.len());
                 if (new_top as usize) < new_end {
-                    let new_min_width = margin.widths[new_top as usize..new_end]
+                    // Get actual minimum margin width (unclamped) for positioning
+                    let actual_min_width = margin.widths[new_top as usize..new_end]
                         .iter()
                         .copied()
                         .min()
-                        .unwrap_or(0)
-                        .min(MAX_WIDGET_WIDTH);
-                    all_rects[idx].3 = new_min_width; // new width
-                    // Recalculate x position based on new width
+                        .unwrap_or(0);
+                    // Widget width is clamped to MAX_WIDGET_WIDTH
+                    let new_min_width = actual_min_width.min(MAX_WIDGET_WIDTH);
+                    all_rects[idx].3 = new_min_width; // new widget width (clamped)
+                    // Position x at the start of the margin (use actual margin width)
                     all_rects[idx].4 = match side {
-                        Side::Right => margin.x_offset.saturating_sub(new_min_width),
+                        Side::Right => margin.x_offset.saturating_sub(actual_min_width),
                         Side::Left => margin.x_offset,
                     };
                 } else {

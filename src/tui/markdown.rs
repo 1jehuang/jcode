@@ -3,6 +3,7 @@
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::prelude::*;
 use std::collections::HashMap;
+use unicode_width::UnicodeWidthStr;
 use std::hash::{Hash, Hasher};
 use std::sync::{LazyLock, Mutex};
 use syntect::easy::HighlightLines;
@@ -159,8 +160,11 @@ impl IncrementalMarkdownRenderer {
 
         // Check for code block end
         if appended.contains("```") {
-            // Find the last code block end
-            let search_start = start.saturating_sub(10); // Look back a bit
+            // Find the last code block end - ensure we land on a char boundary
+            let mut search_start = start.saturating_sub(10); // Look back a bit
+            while search_start > 0 && !full_text.is_char_boundary(search_start) {
+                search_start -= 1;
+            }
             let search_text = &full_text[search_start..];
             if let Some(pos) = search_text.rfind("\n```\n") {
                 return Some(search_start + pos + 5);
@@ -1016,7 +1020,7 @@ pub fn render_markdown_lazy(
     lines
 }
 
-/// Wrap a line of styled spans to fit within a given width
+/// Wrap a line of styled spans to fit within a given width (using unicode display width)
 /// Returns multiple lines if wrapping is needed
 pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     if width == 0 {
@@ -1028,7 +1032,7 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
 
     let mut result: Vec<Line<'static>> = Vec::new();
     let mut current_spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len());
-    let mut current_width = 0;
+    let mut current_width = 0usize;
 
     for span in line.spans {
         let style = span.style;
@@ -1057,7 +1061,8 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
             };
             remaining = rest;
 
-            let chunk_width = chunk.chars().count();
+            // Use unicode display width instead of char count
+            let chunk_width = chunk.width();
 
             // If adding this chunk would exceed width, start new line
             if current_width + chunk_width > width && current_width > 0 {
@@ -1069,26 +1074,43 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
                 current_width = 0;
             }
 
-            // Handle chunks longer than width (force break)
+            // Handle chunks longer than width (force break by grapheme/char with width tracking)
             if chunk_width > width {
-                let chars: Vec<char> = chunk.chars().collect();
-                let mut pos = 0;
-                while pos < chars.len() {
-                    let available = width.saturating_sub(current_width);
-                    let take = available.min(chars.len() - pos);
-                    let part: String = chars[pos..pos + take].iter().collect();
-                    current_spans.push(Span::styled(part, style));
-                    current_width += take;
-                    pos += take;
+                // Build up characters until we hit the width limit
+                let mut part = String::new();
+                let mut part_width = 0usize;
 
-                    if current_width >= width && pos < chars.len() {
-                        let mut new_line = Line::from(std::mem::take(&mut current_spans));
-                        if let Some(align) = alignment {
-                            new_line = new_line.alignment(align);
+                for c in chunk.chars() {
+                    let char_width = c.to_string().width();
+
+                    // Would this char overflow the available width?
+                    if current_width + part_width + char_width > width && (current_width + part_width) > 0 {
+                        // Push current part if non-empty
+                        if !part.is_empty() {
+                            current_spans.push(Span::styled(std::mem::take(&mut part), style));
+                            current_width += part_width;
+                            part_width = 0;
                         }
-                        result.push(new_line);
-                        current_width = 0;
+
+                        // Start new line if we have content
+                        if current_width > 0 {
+                            let mut new_line = Line::from(std::mem::take(&mut current_spans));
+                            if let Some(align) = alignment {
+                                new_line = new_line.alignment(align);
+                            }
+                            result.push(new_line);
+                            current_width = 0;
+                        }
                     }
+
+                    part.push(c);
+                    part_width += char_width;
+                }
+
+                // Don't forget remaining part
+                if !part.is_empty() {
+                    current_spans.push(Span::styled(part, style));
+                    current_width += part_width;
                 }
             } else {
                 current_spans.push(Span::styled(chunk, style));
