@@ -265,11 +265,14 @@ impl Registry {
         allowed_tools: Option<&HashSet<String>>,
     ) -> Vec<ToolDefinition> {
         let tools = self.tools.read().await;
-        tools
+        let mut defs: Vec<ToolDefinition> = tools
             .iter()
             .filter(|(name, _)| allowed_tools.map(|set| set.contains(*name)).unwrap_or(true))
             .map(|(_, tool)| tool.to_definition())
-            .collect()
+            .collect();
+        // Sort by name for deterministic ordering - critical for prompt cache hits
+        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs
     }
 
     pub async fn tool_names(&self) -> Vec<String> {
