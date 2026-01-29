@@ -369,3 +369,57 @@ impl Registry {
         self.compaction.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{EventStream, Provider};
+    use crate::message::{Message, ToolDefinition};
+    use async_trait::async_trait;
+
+    struct MockProvider;
+
+    #[async_trait]
+    impl Provider for MockProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            unimplemented!("Mock provider")
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(MockProvider)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_definitions_are_sorted() {
+        // Create registry with mock provider
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+        let registry = Registry::new(provider).await;
+
+        // Get definitions multiple times and verify they're always in the same order
+        let defs1 = registry.definitions(None).await;
+        let defs2 = registry.definitions(None).await;
+
+        // Should have the same order
+        assert_eq!(defs1.len(), defs2.len());
+        for (d1, d2) in defs1.iter().zip(defs2.iter()) {
+            assert_eq!(d1.name, d2.name);
+        }
+
+        // Verify they're sorted alphabetically
+        let names: Vec<&str> = defs1.iter().map(|d| d.name.as_str()).collect();
+        let mut sorted_names = names.clone();
+        sorted_names.sort();
+        assert_eq!(names, sorted_names, "Tool definitions should be sorted alphabetically");
+    }
+}

@@ -64,7 +64,6 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
     // Try Claude Code credentials first (preferred, more widely compatible)
     if let Ok(creds) = load_claude_code_credentials() {
         if creds.expires_at > now_ms {
-            crate::logging::info("Using Claude Code credentials");
             return Ok(creds);
         }
     }

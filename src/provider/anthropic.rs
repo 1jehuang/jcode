@@ -203,7 +203,7 @@ impl AnthropicProvider {
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::Text { text, .. } => {
-                    Some(ApiContentBlock::Text { text: text.clone() })
+                    Some(ApiContentBlock::Text { text: text.clone(), cache_control: None })
                 }
                 ContentBlock::ToolUse { id, name, input } => Some(ApiContentBlock::ToolUse {
                     id: id.clone(),
@@ -858,10 +858,72 @@ fn format_messages_with_identity(messages: Vec<ApiMessage>, is_oauth: bool) -> V
         role: "user".to_string(),
         content: vec![ApiContentBlock::Text {
             text: CLAUDE_CODE_IDENTITY.to_string(),
+            cache_control: None,
         }],
     });
     out.extend(messages);
+
+    // Add cache breakpoint to enable conversation caching
+    add_message_cache_breakpoint(&mut out);
+
     out
+}
+
+/// Add cache_control to messages for conversation caching.
+/// Strategy: Cache everything except the last user message.
+/// This way, on subsequent turns, the entire conversation history up to
+/// the previous assistant response is cached.
+fn add_message_cache_breakpoint(messages: &mut [ApiMessage]) {
+    crate::logging::info(&format!(
+        "Conversation caching: {} messages to process",
+        messages.len()
+    ));
+
+    if messages.len() < 3 {
+        // Need at least: identity + user + something to cache
+        crate::logging::info("Conversation caching: too few messages, skipping");
+        return;
+    }
+
+    // Find the last assistant message (second-to-last message if last is user)
+    // We want to cache up to and including the last complete exchange
+    let mut cache_index = None;
+
+    // Walk backwards to find the last assistant message before the final user message
+    for (i, msg) in messages.iter().enumerate().rev() {
+        if msg.role == "assistant" {
+            cache_index = Some(i);
+            break;
+        }
+    }
+
+    // Add cache_control to the last content block of that message
+    if let Some(idx) = cache_index {
+        if let Some(msg) = messages.get_mut(idx) {
+            // Find any Text block to add cache_control to (prefer last, but accept any)
+            let mut added_cache = false;
+            for block in msg.content.iter_mut().rev() {
+                if let ApiContentBlock::Text { cache_control, .. } = block {
+                    *cache_control = Some(CacheControlParam::ephemeral());
+                    added_cache = true;
+                    break;
+                }
+            }
+            if added_cache {
+                crate::logging::info(&format!(
+                    "Conversation caching: added cache breakpoint at message {}",
+                    idx
+                ));
+            } else {
+                crate::logging::info(&format!(
+                    "Conversation caching: no text block found in assistant message {}",
+                    idx
+                ));
+            }
+        }
+    } else {
+        crate::logging::info("Conversation caching: no assistant message found");
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -874,7 +936,11 @@ struct ApiMessage {
 #[serde(tag = "type")]
 enum ApiContentBlock {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControlParam>,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -1089,6 +1155,200 @@ mod tests {
             assert!(content.contains("file1.txt"));
         } else {
             panic!("Expected ToolResult block");
+        }
+    }
+
+    #[test]
+    fn test_cache_breakpoint_no_messages() {
+        let mut messages: Vec<ApiMessage> = vec![];
+        add_message_cache_breakpoint(&mut messages);
+        // Should not panic, just return early
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_cache_breakpoint_too_few_messages() {
+        let mut messages = vec![
+            ApiMessage {
+                role: "user".to_string(),
+                content: vec![ApiContentBlock::Text {
+                    text: "Hello".to_string(),
+                    cache_control: None,
+                }],
+            },
+            ApiMessage {
+                role: "user".to_string(),
+                content: vec![ApiContentBlock::Text {
+                    text: "World".to_string(),
+                    cache_control: None,
+                }],
+            },
+        ];
+        add_message_cache_breakpoint(&mut messages);
+        // With only 2 messages, should not add cache control
+        for msg in &messages {
+            for block in &msg.content {
+                if let ApiContentBlock::Text { cache_control, .. } = block {
+                    assert!(cache_control.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_cache_breakpoint_adds_to_assistant_message() {
+        let mut messages = vec![
+            ApiMessage {
+                role: "user".to_string(),
+                content: vec![ApiContentBlock::Text {
+                    text: "Identity".to_string(),
+                    cache_control: None,
+                }],
+            },
+            ApiMessage {
+                role: "user".to_string(),
+                content: vec![ApiContentBlock::Text {
+                    text: "Hello".to_string(),
+                    cache_control: None,
+                }],
+            },
+            ApiMessage {
+                role: "assistant".to_string(),
+                content: vec![ApiContentBlock::Text {
+                    text: "Hi there!".to_string(),
+                    cache_control: None,
+                }],
+            },
+            ApiMessage {
+                role: "user".to_string(),
+                content: vec![ApiContentBlock::Text {
+                    text: "How are you?".to_string(),
+                    cache_control: None,
+                }],
+            },
+        ];
+
+        add_message_cache_breakpoint(&mut messages);
+
+        // Assistant message (index 2) should have cache_control
+        if let ApiContentBlock::Text { cache_control, .. } = &messages[2].content[0] {
+            assert!(cache_control.is_some());
+        } else {
+            panic!("Expected Text block");
+        }
+
+        // Other messages should NOT have cache_control
+        for (i, msg) in messages.iter().enumerate() {
+            if i == 2 {
+                continue; // Skip the assistant message we just checked
+            }
+            for block in &msg.content {
+                if let ApiContentBlock::Text { cache_control, .. } = block {
+                    assert!(cache_control.is_none(), "Message {} should not have cache_control", i);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_cache_breakpoint_finds_text_in_mixed_content() {
+        // Assistant message with tool_use followed by text
+        let mut messages = vec![
+            ApiMessage {
+                role: "user".to_string(),
+                content: vec![ApiContentBlock::Text {
+                    text: "Identity".to_string(),
+                    cache_control: None,
+                }],
+            },
+            ApiMessage {
+                role: "user".to_string(),
+                content: vec![ApiContentBlock::Text {
+                    text: "Run a command".to_string(),
+                    cache_control: None,
+                }],
+            },
+            ApiMessage {
+                role: "assistant".to_string(),
+                content: vec![
+                    ApiContentBlock::Text {
+                        text: "Running command...".to_string(),
+                        cache_control: None,
+                    },
+                    ApiContentBlock::ToolUse {
+                        id: "tool_1".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({"command": "ls"}),
+                    },
+                ],
+            },
+            ApiMessage {
+                role: "user".to_string(),
+                content: vec![ApiContentBlock::Text {
+                    text: "Thanks".to_string(),
+                    cache_control: None,
+                }],
+            },
+        ];
+
+        add_message_cache_breakpoint(&mut messages);
+
+        // The Text block in the assistant message should have cache_control
+        // (we look for any text block, preferring the last one but accepting any)
+        let assistant_msg = &messages[2];
+        let has_cached_text = assistant_msg.content.iter().any(|block| {
+            matches!(block, ApiContentBlock::Text { cache_control: Some(_), .. })
+        });
+        assert!(has_cached_text, "Should have added cache_control to text block in assistant message");
+    }
+
+    #[test]
+    fn test_system_param_split_oauth() {
+        let static_content = "This is static content";
+        let dynamic_content = "This is dynamic content";
+
+        let result = build_system_param_split(static_content, dynamic_content, true);
+
+        if let Some(ApiSystem::Blocks(blocks)) = result {
+            // Should have 4 blocks: identity, notice, static (cached), dynamic (not cached)
+            assert_eq!(blocks.len(), 4);
+
+            // Block 0: identity (no cache)
+            assert!(blocks[0].cache_control.is_none());
+
+            // Block 1: notice (no cache)
+            assert!(blocks[1].cache_control.is_none());
+
+            // Block 2: static (cached)
+            assert!(blocks[2].cache_control.is_some());
+            assert!(blocks[2].text.contains("static"));
+
+            // Block 3: dynamic (not cached)
+            assert!(blocks[3].cache_control.is_none());
+            assert!(blocks[3].text.contains("dynamic"));
+        } else {
+            panic!("Expected Blocks variant");
+        }
+    }
+
+    #[test]
+    fn test_system_param_split_non_oauth() {
+        let static_content = "This is static content";
+        let dynamic_content = "This is dynamic content";
+
+        let result = build_system_param_split(static_content, dynamic_content, false);
+
+        if let Some(ApiSystem::Blocks(blocks)) = result {
+            // Should have 2 blocks: static (cached), dynamic (not cached)
+            assert_eq!(blocks.len(), 2);
+
+            // Block 0: static (cached)
+            assert!(blocks[0].cache_control.is_some());
+
+            // Block 1: dynamic (not cached)
+            assert!(blocks[1].cache_control.is_none());
+        } else {
+            panic!("Expected Blocks variant");
         }
     }
 }
