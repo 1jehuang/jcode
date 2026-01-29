@@ -508,6 +508,9 @@ impl Server {
         let main_listener = UnixListener::bind(&self.socket_path)?;
         let debug_listener = UnixListener::bind(&self.debug_socket_path)?;
 
+        // Set logging context for this server
+        crate::logging::set_server(&self.identity.name);
+
         // Log server identity
         crate::logging::info(&format!(
             "Server {} starting ({})",

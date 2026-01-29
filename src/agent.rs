@@ -228,6 +228,12 @@ impl Agent {
         &self.session.id
     }
 
+    /// Set logging context for this agent's session/provider
+    fn set_log_context(&self) {
+        logging::set_session(&self.session.id);
+        logging::set_provider_info(self.provider.name(), &self.provider.model());
+    }
+
     pub fn message_count(&self) -> usize {
         self.session.messages.len()
     }
@@ -768,6 +774,7 @@ impl Agent {
 
     /// Run turns until no more tool calls
     async fn run_turn(&mut self, print_output: bool) -> Result<String> {
+        self.set_log_context();
         let mut final_text = String::new();
         let trace = trace_enabled();
 
@@ -1304,6 +1311,7 @@ impl Agent {
 
     /// Run turns with events streamed to a broadcast channel (for server mode)
     async fn run_turn_streaming(&mut self, event_tx: broadcast::Sender<ServerEvent>) -> Result<()> {
+        self.set_log_context();
         let trace = trace_enabled();
 
         loop {
@@ -1739,6 +1747,7 @@ impl Agent {
         &mut self,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
+        self.set_log_context();
         let trace = trace_enabled();
 
         loop {

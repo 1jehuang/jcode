@@ -1,16 +1,104 @@
 //! Logging infrastructure for jcode
 //!
 //! Logs to ~/.jcode/logs/ with automatic rotation
+//!
+//! Supports thread-local context for server, session, provider, and model info.
 
 #![allow(dead_code)]
 
 use chrono::Local;
+use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 static LOGGER: Mutex<Option<Logger>> = Mutex::new(None);
+
+/// Thread-local logging context
+#[derive(Default, Clone)]
+pub struct LogContext {
+    pub server: Option<String>,
+    pub session: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
+thread_local! {
+    static LOG_CONTEXT: RefCell<LogContext> = RefCell::new(LogContext::default());
+}
+
+/// Set the logging context for the current thread
+pub fn set_context(ctx: LogContext) {
+    LOG_CONTEXT.with(|c| {
+        *c.borrow_mut() = ctx;
+    });
+}
+
+/// Update just the session in the current context
+pub fn set_session(session: &str) {
+    LOG_CONTEXT.with(|c| {
+        c.borrow_mut().session = Some(session.to_string());
+    });
+}
+
+/// Update just the server in the current context
+pub fn set_server(server: &str) {
+    LOG_CONTEXT.with(|c| {
+        c.borrow_mut().server = Some(server.to_string());
+    });
+}
+
+/// Update provider and model in the current context
+pub fn set_provider_info(provider: &str, model: &str) {
+    LOG_CONTEXT.with(|c| {
+        let mut ctx = c.borrow_mut();
+        ctx.provider = Some(provider.to_string());
+        ctx.model = Some(model.to_string());
+    });
+}
+
+/// Clear the logging context for the current thread
+pub fn clear_context() {
+    LOG_CONTEXT.with(|c| {
+        *c.borrow_mut() = LogContext::default();
+    });
+}
+
+/// Get the current context as a prefix string
+fn context_prefix() -> String {
+    LOG_CONTEXT.with(|c| {
+        let ctx = c.borrow();
+        let mut parts = Vec::new();
+
+        if let Some(ref server) = ctx.server {
+            parts.push(format!("srv:{}", server));
+        }
+        if let Some(ref session) = ctx.session {
+            // Truncate session name if too long
+            let short = if session.len() > 20 {
+                &session[..20]
+            } else {
+                session
+            };
+            parts.push(format!("ses:{}", short));
+        }
+        if let Some(ref provider) = ctx.provider {
+            parts.push(format!("prv:{}", provider));
+        }
+        if let Some(ref model) = ctx.model {
+            // Just use first part of model name
+            let short = model.split('-').next().unwrap_or(model);
+            parts.push(format!("mod:{}", short));
+        }
+
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("[{}] ", parts.join("|"))
+        }
+    })
+}
 
 pub struct Logger {
     file: File,
@@ -37,7 +125,8 @@ impl Logger {
 
     fn write(&mut self, level: &str, message: &str) {
         let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
-        let line = format!("[{}] [{}] {}\n", timestamp, level, message);
+        let ctx = context_prefix();
+        let line = format!("[{}] [{}] {}{}\n", timestamp, level, ctx, message);
         let _ = self.file.write_all(line.as_bytes());
         let _ = self.file.flush();
     }
