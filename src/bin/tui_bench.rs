@@ -283,6 +283,10 @@ impl TuiState for BenchState {
         self.info_widget.clone()
     }
 
+    fn update_cost(&mut self) {
+        // Benchmark doesn't track cost
+    }
+
     fn render_streaming_markdown(&self, width: usize) -> Vec<ratatui::text::Line<'static>> {
         // For benchmarks, just use the standard markdown renderer
         jcode::tui::markdown::render_markdown_with_width(&self.streaming_text, Some(width))

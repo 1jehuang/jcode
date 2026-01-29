@@ -91,14 +91,27 @@ struct RememberInput {
     id: Option<String>,
 }
 
-pub struct RememberTool;
+pub struct RememberTool {
+    test_mode: bool,
+}
 
 impl RememberTool {
     pub fn new() -> Self {
-        Self
+        Self { test_mode: false }
     }
 
-    fn notes_path() -> Result<PathBuf> {
+    /// Create in test mode (isolated storage)
+    pub fn new_test() -> Self {
+        Self { test_mode: true }
+    }
+
+    fn notes_path(&self) -> Result<PathBuf> {
+        if self.test_mode {
+            let test_dir = storage::jcode_dir()?.join("notes").join("test");
+            std::fs::create_dir_all(&test_dir)?;
+            return Ok(test_dir.join("test_notes.json"));
+        }
+
         let cwd = std::env::current_dir()?;
         let mut hasher = DefaultHasher::new();
         cwd.hash(&mut hasher);
@@ -160,7 +173,7 @@ impl Tool for RememberTool {
 
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: RememberInput = serde_json::from_value(input)?;
-        let path = Self::notes_path()?;
+        let path = self.notes_path()?;
         let mut notes = Notes::load(&path)?;
 
         match params.action.as_str() {

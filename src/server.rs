@@ -1740,6 +1740,9 @@ async fn create_headless_session(
     let provider = provider_template.fork();
     let registry = Registry::new(provider.clone()).await;
 
+    // Enable test mode for memory tools (isolated storage for debug sessions)
+    registry.enable_memory_test_mode().await;
+
     // Create a new agent
     let mut new_agent = Agent::new(Arc::clone(&provider), registry);
     let client_session_id = new_agent.session_id().to_string();
