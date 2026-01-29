@@ -3743,6 +3743,7 @@ impl App {
                      • `/reload` - Smart reload (client/server if newer binary exists)\n\
                      • `/rebuild` - Full rebuild (git pull + cargo build + tests){}\n\
                      • `/clear` - Clear conversation (Ctrl+L)\n\
+                     • `/compact` - Manually compact context (summarize old messages)\n\
                      • `/debug-visual` - Enable visual debugging for TUI issues\n\
                      • `/<skill>` - Activate a skill\n\n\
                      **Available skills:** {}\n\n\
@@ -3790,6 +3791,72 @@ impl App {
             session.model = Some(self.provider.model());
             self.session = session;
             self.provider_session_id = None;
+            return;
+        }
+
+        // Handle /compact command - manual context compaction
+        if trimmed == "/compact" {
+            let compaction = self.registry.compaction();
+            match compaction.try_write() {
+                Ok(mut manager) => {
+                    // Show current status
+                    let stats = manager.stats();
+                    let status_msg = format!(
+                        "**Context Status:**\n\
+                        • Messages: {} (active), {} (total history)\n\
+                        • Token estimate: ~{}k / {}k ({:.1}%)\n\
+                        • Has summary: {}\n\
+                        • Compacting: {}",
+                        stats.active_messages,
+                        stats.total_turns,
+                        stats.token_estimate / 1000,
+                        manager.token_budget() / 1000,
+                        stats.context_usage * 100.0,
+                        if stats.has_summary { "yes" } else { "no" },
+                        if stats.is_compacting { "in progress..." } else { "no" }
+                    );
+
+                    match manager.force_compact(self.provider.clone()) {
+                        Ok(()) => {
+                            self.push_display_message(DisplayMessage {
+                                role: "system".to_string(),
+                                content: format!(
+                                    "{}\n\n✓ **Compaction started** - summarizing older messages in background.\n\
+                                    The summary will be applied automatically when ready.",
+                                    status_msg
+                                ),
+                                tool_calls: vec![],
+                                duration_secs: None,
+                                title: None,
+                                tool_data: None,
+                            });
+                        }
+                        Err(reason) => {
+                            self.push_display_message(DisplayMessage {
+                                role: "system".to_string(),
+                                content: format!(
+                                    "{}\n\n⚠ **Cannot compact:** {}",
+                                    status_msg, reason
+                                ),
+                                tool_calls: vec![],
+                                duration_secs: None,
+                                title: None,
+                                tool_data: None,
+                            });
+                        }
+                    }
+                }
+                Err(_) => {
+                    self.push_display_message(DisplayMessage {
+                        role: "system".to_string(),
+                        content: "⚠ Cannot access compaction manager (lock held)".to_string(),
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                }
+            }
             return;
         }
 
@@ -4477,6 +4544,14 @@ impl App {
             .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT);
         self.context_limit = limit as u64;
         self.context_warning_shown = false;
+
+        // Also update compaction manager's budget
+        {
+            let compaction = self.registry.compaction();
+            if let Ok(mut manager) = compaction.try_write() {
+                manager.set_budget(limit);
+            };
+        }
     }
 
     fn set_status_notice(&mut self, text: impl Into<String>) {
@@ -6028,6 +6103,7 @@ impl App {
             ("/help".into(), "Show help and keyboard shortcuts"),
             ("/model".into(), "List or switch models"),
             ("/clear".into(), "Clear conversation history"),
+            ("/compact".into(), "Compact context (summarize old messages)"),
             ("/version".into(), "Show current version"),
             ("/info".into(), "Show session info and tokens"),
             ("/reload".into(), "Smart reload (if newer binary exists)"),
