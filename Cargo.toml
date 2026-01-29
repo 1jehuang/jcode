@@ -80,6 +80,7 @@ image = "0.25"             # Image loading for ratatui-image
 # Markdown & syntax highlighting
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 pulldown-cmark = "0.12"
+unicode-width = "0.2"   # Unicode character display width
 
 # PDF parsing
 pdf-extract = "0.8"
