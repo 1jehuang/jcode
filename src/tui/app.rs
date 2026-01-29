@@ -4603,16 +4603,17 @@ impl App {
             let tools = self.registry.definitions(None).await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_prompt = self.build_memory_prompt_nonblocking(&self.messages);
-            // Build system prompt with active skill
-            let system_prompt = self.build_system_prompt(memory_prompt.as_deref());
+            // Use split prompt for better caching - static content cached, dynamic not
+            let split_prompt = self.build_system_prompt_split(memory_prompt.as_deref());
 
             self.status = ProcessingStatus::Sending;
             let mut stream = self
                 .provider
-                .complete(
+                .complete_split(
                     &self.messages,
                     &tools,
-                    &system_prompt,
+                    &split_prompt.static_part,
+                    &split_prompt.dynamic_part,
                     self.provider_session_id.as_deref(),
                 )
                 .await?;
@@ -5030,7 +5031,8 @@ impl App {
             let tools = self.registry.definitions(None).await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_prompt = self.build_memory_prompt_nonblocking(&self.messages);
-            let system_prompt = self.build_system_prompt(memory_prompt.as_deref());
+            // Use split prompt for better caching - static content cached, dynamic not
+            let split_prompt = self.build_system_prompt_split(memory_prompt.as_deref());
 
             self.status = ProcessingStatus::Sending;
             terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
@@ -5046,12 +5048,15 @@ impl App {
             let provider = self.provider.clone();
             let messages_clone = self.messages.clone();
             let session_id_clone = self.provider_session_id.clone();
+            let static_part = split_prompt.static_part.clone();
+            let dynamic_part = split_prompt.dynamic_part.clone();
 
             // Make API call non-blocking - poll it in select! so we can handle input while waiting
-            let mut api_future = std::pin::pin!(provider.complete(
+            let mut api_future = std::pin::pin!(provider.complete_split(
                 &messages_clone,
                 &tools,
-                &system_prompt,
+                &static_part,
+                &dynamic_part,
                 session_id_clone.as_deref()
             ));
 
@@ -5713,6 +5718,18 @@ impl App {
     }
 
     fn build_system_prompt(&mut self, memory_prompt: Option<&str>) -> String {
+        let split = self.build_system_prompt_split(memory_prompt);
+        if split.dynamic_part.is_empty() {
+            split.static_part
+        } else if split.static_part.is_empty() {
+            split.dynamic_part
+        } else {
+            format!("{}\n\n{}", split.static_part, split.dynamic_part)
+        }
+    }
+
+    /// Build split system prompt for better caching
+    fn build_system_prompt_split(&mut self, memory_prompt: Option<&str>) -> crate::prompt::SplitSystemPrompt {
         let skill_prompt = self
             .active_skill
             .as_ref()
@@ -5726,14 +5743,15 @@ impl App {
                 description: s.description.clone(),
             })
             .collect();
-        let (prompt, context_info) = crate::prompt::build_system_prompt_with_context_and_memory(
+        let (split, context_info) = crate::prompt::build_system_prompt_split(
             skill_prompt.as_deref(),
             &available_skills,
             self.session.is_canary,
             memory_prompt,
+            None,
         );
         self.context_info = context_info;
-        prompt
+        split
     }
 
     /// Get memory prompt using async non-blocking approach
