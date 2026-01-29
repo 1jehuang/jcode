@@ -277,6 +277,26 @@ impl Registry {
         tools.keys().cloned().collect()
     }
 
+    /// Enable test mode for memory tools (isolated storage)
+    /// Called when session is marked as debug
+    pub async fn enable_memory_test_mode(&self) {
+        let mut tools = self.tools.write().await;
+
+        // Replace memory tool with test version
+        tools.insert(
+            "memory".to_string(),
+            Arc::new(memory::MemoryTool::new_test()) as Arc<dyn Tool>,
+        );
+
+        // Replace remember tool with test version
+        tools.insert(
+            "remember".to_string(),
+            Arc::new(remember::RememberTool::new_test()) as Arc<dyn Tool>,
+        );
+
+        crate::logging::info("Memory test mode enabled - using isolated storage");
+    }
+
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let tools = self.tools.read().await;

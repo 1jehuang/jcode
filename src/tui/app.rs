@@ -6457,7 +6457,7 @@ impl App {
         }
 
         // For OAuth providers, cost is already tracked in subscription
-        let is_oauth = provider_name.contains("anthropic") || provider_name.contains("claude")
+        let is_oauth = (provider_name.contains("anthropic") || provider_name.contains("claude"))
             && std::env::var("ANTHROPIC_API_KEY").is_err();
         if is_oauth {
             return;
