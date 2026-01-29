@@ -242,15 +242,25 @@ impl McpManagementTool {
         }
 
         let mut manager = self.manager.write().await;
-        manager.reload().await?;
+        let (successes, failures) = manager.reload().await?;
 
         let servers = manager.connected_servers().await;
         let all_tools = manager.all_tools().await;
 
         let mut output = format!(
-            "Reloaded MCP config. Connected servers: {}\n\n",
-            servers.len()
+            "Reloaded MCP config. Connected: {}/{}\n\n",
+            successes,
+            config.servers.len()
         );
+
+        // Show failures first
+        if !failures.is_empty() {
+            output.push_str("## Connection Failures\n");
+            for (name, error) in &failures {
+                output.push_str(&format!("  - {}: {}\n", name, error));
+            }
+            output.push('\n');
+        }
 
         for server in &servers {
             output.push_str(&format!("## {}\n", server));

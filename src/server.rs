@@ -1746,6 +1746,18 @@ async fn create_headless_session(
     // Enable test mode for memory tools (isolated storage for debug sessions)
     registry.enable_memory_test_mode().await;
 
+    // Check if this should be a selfdev session BEFORE creating agent
+    // (registry is moved into agent, so we need to register tools first)
+    let should_selfdev = is_selfdev_env()
+        || working_dir
+            .as_ref()
+            .map(|d| crate::build::is_jcode_repo(d) || is_jcode_repo_or_parent(d))
+            .unwrap_or(false);
+
+    if should_selfdev {
+        registry.register_selfdev_tools().await;
+    }
+
     // Create a new agent
     let mut new_agent = Agent::new(Arc::clone(&provider), registry);
     let client_session_id = new_agent.session_id().to_string();
@@ -1753,13 +1765,9 @@ async fn create_headless_session(
     // Mark as debug/test session (created via debug socket)
     new_agent.set_debug(true);
 
-    // Enable self-dev mode if in self-dev environment or working in jcode repo
-    if is_selfdev_env() {
+    // Enable self-dev mode if determined above
+    if should_selfdev {
         new_agent.set_canary("self-dev");
-    } else if let Some(ref dir) = working_dir {
-        if crate::build::is_jcode_repo(dir) || is_jcode_repo_or_parent(dir) {
-            new_agent.set_canary("self-dev");
-        }
     }
 
     // Set as current session if none exists
@@ -1850,7 +1858,7 @@ async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Resul
 
     if trimmed == "help" {
         return Ok(
-            "debug commands: state, history, tools, last_response, message:<text>, tool:<name> <json>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, help".to_string()
+            "debug commands: state, history, tools, last_response, message:<text>, tool:<name> <json>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
         );
     }
 
@@ -1903,6 +1911,46 @@ async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Resul
         let agent = agent.lock().await;
         let models = agent.available_models_display();
         return Ok(serde_json::to_string_pretty(&models).unwrap_or_else(|_| "[]".to_string()));
+    }
+
+    // reload - Trigger server reload with current binary (direct signal, bypasses tool system)
+    if trimmed == "reload" {
+        // Get repo directory and check for binary
+        let repo_dir = crate::build::get_repo_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository directory"))?;
+
+        let target_binary = repo_dir.join("target/release/jcode");
+        if !target_binary.exists() {
+            return Err(anyhow::anyhow!(
+                "No binary found at target/release/jcode. Run 'cargo build --release' first."
+            ));
+        }
+
+        let hash = crate::build::current_git_hash(&repo_dir)?;
+
+        // Install version and update canary symlink
+        crate::build::install_version(&repo_dir, &hash)?;
+        crate::build::update_canary_symlink(&hash)?;
+
+        // Update manifest
+        let mut manifest = crate::build::BuildManifest::load()?;
+        manifest.canary = Some(hash.clone());
+        manifest.canary_status = Some(crate::build::CanaryStatus::Testing);
+        manifest.save()?;
+
+        // Write reload info for post-restart display
+        let jcode_dir = crate::storage::jcode_dir()?;
+        let info_path = jcode_dir.join("reload-info");
+        std::fs::write(&info_path, format!("reload:{}", hash))?;
+
+        // Write signal file to trigger server restart
+        let signal_path = jcode_dir.join("rebuild-signal");
+        std::fs::write(&signal_path, &hash)?;
+
+        return Ok(format!(
+            "Reload signal written for build {}. Server will restart.",
+            hash
+        ));
     }
 
     Err(anyhow::anyhow!("Unknown debug command '{}'", trimmed))
@@ -2182,6 +2230,7 @@ SERVER COMMANDS (server: prefix or no prefix):
   set_provider:<name>      - Switch provider (claude/openai/openrouter)
   trigger_extraction       - Force end-of-session memory extraction
   available_models         - List all available models
+  reload                   - Trigger server reload with current binary
 
 CLIENT COMMANDS (client: prefix):
   client:state             - Get TUI state

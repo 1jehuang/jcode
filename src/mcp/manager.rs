@@ -33,16 +33,27 @@ impl McpManager {
     }
 
     /// Connect to all configured servers
-    pub async fn connect_all(&self) -> Result<()> {
+    /// Returns number of successful connections and list of failures
+    pub async fn connect_all(&self) -> Result<(usize, Vec<(String, String)>)> {
+        let mut successes = 0;
+        let mut failures = Vec::new();
+        
         for (name, config) in &self.config.servers {
-            if let Err(e) = self.connect(name, config).await {
-                crate::logging::error(&format!(
-                    "Failed to connect to MCP server '{}': {}",
-                    name, e
-                ));
+            match self.connect(name, config).await {
+                Ok(()) => {
+                    successes += 1;
+                }
+                Err(e) => {
+                    let error_msg = format!("{:#}", e);
+                    crate::logging::error(&format!(
+                        "Failed to connect to MCP server '{}': {}",
+                        name, error_msg
+                    ));
+                    failures.push((name.clone(), error_msg));
+                }
             }
         }
-        Ok(())
+        Ok((successes, failures))
     }
 
     /// Connect to a specific server
@@ -106,7 +117,7 @@ impl McpManager {
     }
 
     /// Reload config and reconnect to servers
-    pub async fn reload(&mut self) -> Result<()> {
+    pub async fn reload(&mut self) -> Result<(usize, Vec<(String, String)>)> {
         // Disconnect all existing
         self.disconnect_all().await;
 
