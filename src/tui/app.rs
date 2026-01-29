@@ -166,6 +166,17 @@ fn format_cache_footer(read_tokens: Option<u64>, write_tokens: Option<u64>) -> O
     None
 }
 
+/// Format token count for display (e.g., 63000 -> "63K")
+fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.0}k", tokens as f64 / 1_000.0)
+    } else {
+        format!("{}", tokens)
+    }
+}
+
 /// Current processing status
 #[derive(Clone, Default, Debug)]
 pub enum ProcessingStatus {
@@ -6141,7 +6152,8 @@ impl App {
         if self.streaming_input_tokens > 0 || self.streaming_output_tokens > 0 {
             parts.push(format!(
                 "↑{} ↓{}",
-                self.streaming_input_tokens, self.streaming_output_tokens
+                format_tokens(self.streaming_input_tokens),
+                format_tokens(self.streaming_output_tokens)
             ));
         }
         if let Some(cache) = format_cache_footer(
