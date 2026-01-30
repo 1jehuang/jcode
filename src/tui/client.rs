@@ -963,6 +963,10 @@ impl TuiState for ClientApp {
         None
     }
 
+    fn pending_soft_interrupt(&self) -> Option<&str> {
+        None // Client mode doesn't track pending soft interrupts locally
+    }
+
     fn scroll_offset(&self) -> usize {
         self.scroll_offset
     }
@@ -1109,27 +1113,44 @@ impl TuiState for ClientApp {
     }
 
     fn info_widget_data(&self) -> super::info_widget::InfoWidgetData {
-        // Client shows token costs for API-key providers
+        // Check provider type
         let provider_name = self.provider_name.to_lowercase();
-        let is_api_key_provider = provider_name.contains("openrouter")
-            || provider_name.contains("anthropic")
-            || provider_name.contains("openai");
+        let has_creds = crate::auth::claude::has_credentials();
+        // OAuth providers: Claude, or unknown/remote (default to OAuth if credentials exist)
+        let is_oauth_provider = provider_name.contains("claude")
+            || ((provider_name == "unknown" || provider_name == "remote") && has_creds);
+        let is_api_key_provider = provider_name.contains("openrouter");
 
-        if is_api_key_provider && (self.total_input_tokens > 0 || self.total_output_tokens > 0) {
-            super::info_widget::InfoWidgetData {
-                usage_info: Some(super::info_widget::UsageInfo {
-                    provider: super::info_widget::UsageProvider::CostBased,
-                    five_hour: 0.0,
-                    seven_day: 0.0,
-                    total_cost: self.total_cost,
-                    input_tokens: self.total_input_tokens,
-                    output_tokens: self.total_output_tokens,
-                    available: true,
-                }),
-                ..Default::default()
-            }
+        let usage_info = if is_oauth_provider {
+            // OAuth providers (Claude) - fetch subscription usage
+            let usage = crate::usage::get_sync();
+            Some(super::info_widget::UsageInfo {
+                provider: super::info_widget::UsageProvider::Anthropic,
+                five_hour: usage.five_hour,
+                seven_day: usage.seven_day,
+                total_cost: 0.0,
+                input_tokens: 0,
+                output_tokens: 0,
+                available: true,
+            })
+        } else if is_api_key_provider || self.total_input_tokens > 0 || self.total_output_tokens > 0 {
+            // API-key providers or if we have token counts
+            Some(super::info_widget::UsageInfo {
+                provider: super::info_widget::UsageProvider::CostBased,
+                five_hour: 0.0,
+                seven_day: 0.0,
+                total_cost: self.total_cost,
+                input_tokens: self.total_input_tokens,
+                output_tokens: self.total_output_tokens,
+                available: self.total_input_tokens > 0 || self.total_output_tokens > 0,
+            })
         } else {
-            super::info_widget::InfoWidgetData::default()
+            None
+        };
+
+        super::info_widget::InfoWidgetData {
+            usage_info,
+            ..Default::default()
         }
     }
 

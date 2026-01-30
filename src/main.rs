@@ -1691,9 +1691,15 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
     // Use target/release/jcode as the binary
     let target_binary = repo_dir.join("target/release/jcode");
 
-    // Only rebuild if explicitly requested with --build flag
-    if should_build {
-        eprintln!("Building release version...");
+    // Check if source files are newer than the binary - auto-rebuild if needed
+    let needs_rebuild = should_build || needs_rebuild_check(&repo_dir, &target_binary);
+    
+    if needs_rebuild {
+        if !should_build {
+            eprintln!("Source files changed, rebuilding...");
+        } else {
+            eprintln!("Building release version...");
+        }
 
         let build_status = ProcessCommand::new("cargo")
             .args(["build", "--release"])
@@ -1763,6 +1769,69 @@ const EXIT_ROLLBACK_REQUESTED: i32 = 43; // Agent wants to rollback to stable
 
 /// Path for self-dev shared server socket
 const SELFDEV_SOCKET: &str = "/tmp/jcode-selfdev.sock";
+
+/// Check if source files are newer than the binary (needs rebuild)
+fn needs_rebuild_check(repo_dir: &std::path::Path, binary: &std::path::Path) -> bool {
+    // If binary doesn't exist, definitely need to build
+    let binary_mtime = match std::fs::metadata(binary) {
+        Ok(m) => match m.modified() {
+            Ok(t) => t,
+            Err(_) => return true,
+        },
+        Err(_) => return true,
+    };
+
+    // Check key source directories for any file newer than the binary
+    let dirs_to_check = ["src", "Cargo.toml", "Cargo.lock", "build.rs"];
+    
+    for dir in &dirs_to_check {
+        let path = repo_dir.join(dir);
+        if path.exists() {
+            if let Some(newest) = newest_mtime(&path) {
+                if newest > binary_mtime {
+                    return true;
+                }
+            }
+        }
+    }
+    
+    false
+}
+
+/// Get the newest modification time in a path (recursively for directories)
+fn newest_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    if path.is_file() {
+        return std::fs::metadata(path).ok()?.modified().ok();
+    }
+    
+    if path.is_dir() {
+        let mut newest: Option<std::time::SystemTime> = None;
+        
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                
+                // Skip target directory and hidden files
+                let name = entry_path.file_name()?.to_str()?;
+                if name == "target" || name.starts_with('.') {
+                    continue;
+                }
+                
+                if let Some(mtime) = newest_mtime(&entry_path) {
+                    newest = Some(match newest {
+                        Some(n) if mtime > n => mtime,
+                        Some(n) => n,
+                        None => mtime,
+                    });
+                }
+            }
+        }
+        
+        return newest;
+    }
+    
+    None
+}
 
 /// Check if a server is actually responding (not just socket exists)
 async fn is_server_alive(socket_path: &str) -> bool {
