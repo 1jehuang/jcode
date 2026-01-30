@@ -147,7 +147,13 @@ pub fn render_mermaid(content: &str) -> RenderResult {
 
     // Wrap mermaid library calls in catch_unwind for defense-in-depth
     // This protects against any panics in the external library
+    // We temporarily install a no-op panic hook to suppress the default output
     let content_owned = content.to_string();
+    let prev_hook = panic::take_hook();
+    panic::set_hook(Box::new(|_| {
+        // Silently ignore panics from mermaid renderer
+    }));
+
     let render_result = panic::catch_unwind(move || -> Result<(), String> {
         // Parse mermaid
         let parsed = parse_mermaid(&content_owned).map_err(|e| format!("Parse error: {}", e))?;
@@ -173,6 +179,9 @@ pub fn render_mermaid(content: &str) -> RenderResult {
 
         Ok(())
     });
+
+    // Restore the original panic hook
+    panic::set_hook(prev_hook);
 
     // Handle the result
     match render_result {
