@@ -116,9 +116,13 @@ This means we CANNOT inject messages:
 
 | Point | Location | Timing | Use Case |
 |-------|----------|--------|----------|
-| **B** | Turn complete | No tools requested | Inject before agent loop exits |
-| **C** | Inside tool loop | Between tools (urgent only) | Urgent: "stop!" can skip remaining tools |
-| **D** | After all tools | Before next API call | Default: all results + user msg together |
+| **B** | Turn complete | No tools requested | Safe: no tool_use blocks to pair |
+| **C** | Inside tool loop | Urgent abort only | Must add stub tool_results first |
+| **D** | After all tools | Before next API call | **Default**: safest point for injection |
+
+**Important**: We do NOT inject between tools for non-urgent interrupts. Doing so would
+place user text between tool_results, which could violate API constraints. All non-urgent
+injection is deferred to Point D.
 
 ### Point B: Turn Complete (No Tools)
 

@@ -1676,16 +1676,7 @@ impl Agent {
                         );
                         self.session.save()?;
 
-                        // === INJECTION POINT C (between): After SDK tool, before next tool ===
-                        if tool_index < tool_count - 1 {
-                            if let Some(content) = self.inject_soft_interrupts() {
-                                let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
-                                    content,
-                                    point: "C".to_string(),
-                                    tools_skipped: None,
-                                });
-                            }
-                        }
+                        // NOTE: No injection here - wait for Point D after all tools
 
                         continue;
                     }
@@ -1745,19 +1736,14 @@ impl Agent {
                     }
                 }
 
-                // === INJECTION POINT C (between): After local tool, before next tool ===
-                if tool_index < tool_count - 1 {
-                    if let Some(content) = self.inject_soft_interrupts() {
-                        let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
-                            content,
-                            point: "C".to_string(),
-                            tools_skipped: None,
-                        });
-                    }
-                }
+                // NOTE: We do NOT inject between tools (non-urgent) because that would
+                // place user text between tool_results, which may violate API constraints.
+                // All non-urgent injection happens at Point D after all tools are done.
             }
 
             // === INJECTION POINT D: All tools done, before next API call ===
+            // This is the safest point for non-urgent injection since all tool_results
+            // have been added and the conversation is in a valid state.
             if let Some(content) = self.inject_soft_interrupts() {
                 let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
                     content,
@@ -2100,16 +2086,7 @@ impl Agent {
                         );
                         self.session.save()?;
 
-                        // === INJECTION POINT C (between): After SDK tool, before next tool ===
-                        if tool_index < tool_count - 1 {
-                            if let Some(content) = self.inject_soft_interrupts() {
-                                let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
-                                    content,
-                                    point: "C".to_string(),
-                                    tools_skipped: None,
-                                });
-                            }
-                        }
+                        // NOTE: No injection here - wait for Point D after all tools
 
                         continue;
                     }
@@ -2168,19 +2145,14 @@ impl Agent {
                     }
                 }
 
-                // === INJECTION POINT C (between): After local tool, before next tool ===
-                if tool_index < tool_count - 1 {
-                    if let Some(content) = self.inject_soft_interrupts() {
-                        let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
-                            content,
-                            point: "C".to_string(),
-                            tools_skipped: None,
-                        });
-                    }
-                }
+                // NOTE: We do NOT inject between tools (non-urgent) because that would
+                // place user text between tool_results, which may violate API constraints.
+                // All non-urgent injection happens at Point D after all tools are done.
             }
 
             // === INJECTION POINT D: All tools done, before next API call ===
+            // This is the safest point for non-urgent injection since all tool_results
+            // have been added and the conversation is in a valid state.
             if let Some(content) = self.inject_soft_interrupts() {
                 let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
                     content,
