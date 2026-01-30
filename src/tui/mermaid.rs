@@ -423,6 +423,7 @@ fn terminal_theme() -> Theme {
         cluster_border: "#45475a".to_string(),
         font_family: "monospace".to_string(),
         font_size: 13.0,
+        text_color: "#cdd6f4".to_string(),
         // Sequence diagram colors (dark theme)
         sequence_actor_fill: "#313244".to_string(),
         sequence_actor_border: "#585b70".to_string(),
@@ -431,6 +432,8 @@ fn terminal_theme() -> Theme {
         sequence_note_border: "#585b70".to_string(),
         sequence_activation_fill: "#313244".to_string(),
         sequence_activation_border: "#7f849c".to_string(),
+        // Use defaults from modern theme for git/pie chart fields
+        ..Theme::modern()
     }
 }
 
