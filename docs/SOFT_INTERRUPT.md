@@ -71,11 +71,13 @@ loop {
     // Stream events: TextDelta, ToolStart, ToolInput, ToolUseEnd
 
     // 2. Stream ends
+
+    // 3. Add assistant message to history
+    // (MUST happen before injection to preserve cache and conversation order)
+
     // ═══════════════════════════════════════════════
     // ✅ INJECTION POINT A: Stream ended, before tools
     // ═══════════════════════════════════════════════
-
-    // 3. Add assistant message to history
 
     // 4. Check if tool calls exist
     if tool_calls.is_empty() {

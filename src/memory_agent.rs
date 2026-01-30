@@ -88,6 +88,9 @@ enum AgentMessage {
     Reset,
 }
 
+/// Minimum turns before we consider extracting on topic change
+const MIN_TURNS_FOR_EXTRACTION: usize = 4;
+
 /// The persistent memory agent state
 pub struct MemoryAgent {
     /// Channel to receive messages
@@ -102,11 +105,17 @@ pub struct MemoryAgent {
     /// Last context embedding (for topic change detection)
     last_context_embedding: Option<Vec<f32>>,
 
+    /// Last context string (for extraction when topic changes)
+    last_context_string: Option<String>,
+
     /// IDs of memories already surfaced this "session" (avoid repetition)
     surfaced_memories: HashSet<String>,
 
     /// Conversation turn count (for deciding when to reset)
     turn_count: usize,
+
+    /// Turn count since last extraction (to avoid extracting too frequently)
+    turns_since_extraction: usize,
 }
 
 impl MemoryAgent {
@@ -117,8 +126,10 @@ impl MemoryAgent {
             sidecar: HaikuSidecar::new(),
             memory_manager: MemoryManager::new(),
             last_context_embedding: None,
+            last_context_string: None,
             surfaced_memories: HashSet::new(),
             turn_count: 0,
+            turns_since_extraction: 0,
         }
     }
 
@@ -126,8 +137,10 @@ impl MemoryAgent {
     fn reset(&mut self) {
         crate::logging::info("Memory agent reset: clearing all state");
         self.last_context_embedding = None;
+        self.last_context_string = None;
         self.surfaced_memories.clear();
         self.turn_count = 0;
+        self.turns_since_extraction = 0;
     }
 
     /// Run the memory agent loop
@@ -177,6 +190,9 @@ impl MemoryAgent {
             return Ok(());
         }
 
+        // Track turns since last extraction
+        self.turns_since_extraction += 1;
+
         // Update activity state
         memory::set_state(MemoryState::Embedding);
         memory::add_event(MemoryEventKind::EmbeddingStarted);
@@ -196,15 +212,31 @@ impl MemoryAgent {
         if let Some(ref last_emb) = self.last_context_embedding {
             let similarity = embedding::cosine_similarity(&context_embedding, last_emb);
             if similarity < TOPIC_CHANGE_THRESHOLD {
-                // Topic changed significantly - reset surfaced memories
                 crate::logging::info(&format!(
                     "Topic change detected (sim={:.2}), resetting memory agent state",
                     similarity
                 ));
+                
+                // Extract memories from the PREVIOUS topic before moving on
+                // Only if we have enough turns and haven't extracted recently
+                if self.turns_since_extraction >= MIN_TURNS_FOR_EXTRACTION {
+                    if let Some(ref prev_context) = self.last_context_string {
+                        crate::logging::info(&format!(
+                            "Triggering incremental extraction ({} turns since last)",
+                            self.turns_since_extraction
+                        ));
+                        self.extract_from_context(prev_context).await;
+                        self.turns_since_extraction = 0;
+                    }
+                }
+                
                 self.surfaced_memories.clear();
             }
         }
+        
+        // Store current context for potential future extraction
         self.last_context_embedding = Some(context_embedding.clone());
+        self.last_context_string = Some(context.clone());
 
         // Step 2: Find similar memories by embedding
         let candidates = self.memory_manager.find_similar(
@@ -375,6 +407,79 @@ impl MemoryAgent {
         } else {
             Ok(None)
         }
+    }
+
+    /// Extract memories from a context string (called on topic change)
+    /// 
+    /// This is an incremental extraction - we extract from a portion of the
+    /// conversation when the topic changes, rather than waiting for session end.
+    async fn extract_from_context(&self, context: &str) {
+        // Don't extract from very short contexts
+        if context.len() < 200 {
+            return;
+        }
+
+        // Update UI state
+        memory::set_state(MemoryState::Extracting { 
+            reason: "topic change".to_string() 
+        });
+        memory::add_event(MemoryEventKind::ExtractionStarted { 
+            reason: "topic change".to_string() 
+        });
+
+        let sidecar = self.sidecar.clone();
+        let memory_manager = self.memory_manager.clone();
+        let context_owned = context.to_string();
+
+        // Run extraction in background - don't block the main flow
+        tokio::spawn(async move {
+            match sidecar.extract_memories(&context_owned).await {
+                Ok(extracted) if !extracted.is_empty() => {
+                    let mut stored_count = 0;
+
+                    for mem in extracted {
+                        let category = match mem.category.as_str() {
+                            "fact" => memory::MemoryCategory::Fact,
+                            "preference" => memory::MemoryCategory::Preference,
+                            "correction" => memory::MemoryCategory::Correction,
+                            _ => memory::MemoryCategory::Fact,
+                        };
+
+                        let trust = match mem.trust.as_str() {
+                            "high" => memory::TrustLevel::High,
+                            "low" => memory::TrustLevel::Low,
+                            _ => memory::TrustLevel::Medium,
+                        };
+
+                        let entry = memory::MemoryEntry::new(category, &mem.content)
+                            .with_source("incremental")
+                            .with_trust(trust);
+
+                        if memory_manager.remember_project(entry).is_ok() {
+                            stored_count += 1;
+                        }
+                    }
+
+                    if stored_count > 0 {
+                        crate::logging::info(&format!(
+                            "Incremental extraction: stored {} memories on topic change",
+                            stored_count
+                        ));
+                        memory::add_event(MemoryEventKind::ExtractionComplete { count: stored_count });
+                    }
+                    memory::set_state(MemoryState::Idle);
+                }
+                Ok(_) => {
+                    // No memories extracted - that's fine
+                    memory::set_state(MemoryState::Idle);
+                }
+                Err(e) => {
+                    crate::logging::info(&format!("Incremental extraction failed: {}", e));
+                    memory::add_event(MemoryEventKind::Error { message: e.to_string() });
+                    memory::set_state(MemoryState::Idle);
+                }
+            }
+        });
     }
 
     /// Post-retrieval maintenance tasks
