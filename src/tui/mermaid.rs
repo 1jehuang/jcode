@@ -20,6 +20,7 @@ use ratatui_image::{
 use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash as _, Hasher};
+use std::panic;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex, OnceLock};
 
@@ -137,36 +138,56 @@ pub fn render_mermaid(content: &str) -> RenderResult {
         }
     }
 
-    // Parse mermaid
-    let parsed = match parse_mermaid(content) {
-        Ok(p) => p,
-        Err(e) => return RenderResult::Error(format!("Parse error: {}", e)),
-    };
-
-    // Configure theme for terminal (dark background friendly)
-    let theme = terminal_theme();
-    let layout_config = LayoutConfig::default();
-
-    // Compute layout
-    let layout = compute_layout(&parsed.graph, &theme, &layout_config);
-
-    // Render to SVG
-    let svg = render_svg(&layout, &theme, &layout_config);
-
-    // Get cache path
+    // Get cache path early (needed outside catch_unwind)
     let png_path = {
         let cache = RENDER_CACHE.lock().unwrap();
         cache.cache_path(hash)
     };
+    let png_path_clone = png_path.clone();
 
-    // Convert SVG to PNG
-    let render_config = RenderConfig {
-        background: theme.background.clone(),
-        ..Default::default()
-    };
+    // Wrap mermaid library calls in catch_unwind for defense-in-depth
+    // This protects against any panics in the external library
+    let content_owned = content.to_string();
+    let render_result = panic::catch_unwind(move || -> Result<(), String> {
+        // Parse mermaid
+        let parsed = parse_mermaid(&content_owned).map_err(|e| format!("Parse error: {}", e))?;
 
-    if let Err(e) = write_output_png(&svg, &png_path, &render_config, &theme) {
-        return RenderResult::Error(format!("Render error: {}", e));
+        // Configure theme for terminal (dark background friendly)
+        let theme = terminal_theme();
+        let layout_config = LayoutConfig::default();
+
+        // Compute layout
+        let layout = compute_layout(&parsed.graph, &theme, &layout_config);
+
+        // Render to SVG
+        let svg = render_svg(&layout, &theme, &layout_config);
+
+        // Convert SVG to PNG
+        let render_config = RenderConfig {
+            background: theme.background.clone(),
+            ..Default::default()
+        };
+
+        write_output_png(&svg, &png_path_clone, &render_config, &theme)
+            .map_err(|e| format!("Render error: {}", e))?;
+
+        Ok(())
+    });
+
+    // Handle the result
+    match render_result {
+        Ok(Ok(())) => {} // Success, continue below
+        Ok(Err(e)) => return RenderResult::Error(e),
+        Err(panic_info) => {
+            let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic in mermaid renderer".to_string()
+            };
+            return RenderResult::Error(format!("Renderer panic: {}", msg));
+        }
     }
 
     // Get dimensions
