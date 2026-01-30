@@ -259,7 +259,7 @@ impl Agent {
                     }
                     ContentBlock::ToolResult { content, .. } => {
                         let preview = if content.len() > 200 {
-                            format!("{}...", &content[..200])
+                            format!("{}...", crate::util::truncate_str(content, 200))
                         } else {
                             content.clone()
                         };
@@ -749,7 +749,7 @@ impl Agent {
                     }
                     ContentBlock::ToolResult { content, .. } => {
                         let preview = if content.len() > 200 {
-                            format!("{}...", &content[..200])
+                            format!("{}...", crate::util::truncate_str(content, 200))
                         } else {
                             content.clone()
                         };
@@ -1192,7 +1192,7 @@ impl Agent {
                         if print_output {
                             print!("\n  → ");
                             let preview = if sdk_content.len() > 200 {
-                                format!("{}...", &sdk_content[..200])
+                                format!("{}...", crate::util::truncate_str(&sdk_content, 200))
                             } else {
                                 sdk_content.clone()
                             };
@@ -1285,7 +1285,7 @@ impl Agent {
                         }
                         if print_output {
                             let preview = if output.output.len() > 200 {
-                                format!("{}...", &output.output[..200])
+                                format!("{}...", crate::util::truncate_str(&output.output, 200))
                             } else {
                                 output.output.clone()
                             };
@@ -2215,7 +2215,7 @@ fn print_tool_summary(tool: &ToolCall) {
         "bash" => {
             if let Some(cmd) = tool.input.get("command").and_then(|v| v.as_str()) {
                 let short = if cmd.len() > 60 {
-                    format!("{}...", &cmd[..60])
+                    format!("{}...", crate::util::truncate_str(cmd, 60))
                 } else {
                     cmd.to_string()
                 };

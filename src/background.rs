@@ -184,7 +184,7 @@ impl BackgroundTaskManager {
                 .await
                 .map(|s| {
                     if s.len() > 500 {
-                        format!("{}...", &s[..500])
+                        format!("{}...", crate::util::truncate_str(&s, 500))
                     } else {
                         s
                     }
