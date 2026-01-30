@@ -2032,13 +2032,21 @@ fn draw_messages(
     frame.render_widget(paragraph, area);
 
     // Now render images over their placeholder regions
+    // Only render if the full image height fits in the visible area
     let centered = app.centered_mode();
     for (line_idx, hash, height) in image_regions {
+        // Skip rendering if image would be clipped at the bottom
+        // (partial images look distorted because they try to fit into smaller space)
+        let available_height = area.height.saturating_sub(line_idx as u16);
+        if available_height < height {
+            continue;
+        }
+
         let image_area = Rect {
             x: area.x,
             y: area.y + line_idx as u16,
             width: area.width,
-            height: height.min(area.height.saturating_sub(line_idx as u16)),
+            height,
         };
         super::mermaid::render_image_widget(hash, image_area, frame.buffer_mut(), centered);
     }
