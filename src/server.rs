@@ -1802,6 +1802,29 @@ async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Resul
         return Ok(output);
     }
 
+    // queue_interrupt:<content> - Queue soft interrupt (for testing)
+    // This adds a message to the agent's soft interrupt queue without blocking
+    if trimmed.starts_with("queue_interrupt:") {
+        let content = trimmed.strip_prefix("queue_interrupt:").unwrap_or("").trim();
+        if content.is_empty() {
+            return Err(anyhow::anyhow!("queue_interrupt: requires content"));
+        }
+        let agent = agent.lock().await;
+        agent.queue_soft_interrupt(content.to_string(), false);
+        return Ok("queued".to_string());
+    }
+
+    // queue_interrupt_urgent:<content> - Queue urgent soft interrupt (can skip tools)
+    if trimmed.starts_with("queue_interrupt_urgent:") {
+        let content = trimmed.strip_prefix("queue_interrupt_urgent:").unwrap_or("").trim();
+        if content.is_empty() {
+            return Err(anyhow::anyhow!("queue_interrupt_urgent: requires content"));
+        }
+        let agent = agent.lock().await;
+        agent.queue_soft_interrupt(content.to_string(), true);
+        return Ok("queued (urgent)".to_string());
+    }
+
     if trimmed.starts_with("tool:") {
         let raw = trimmed.strip_prefix("tool:").unwrap_or("").trim();
         if raw.is_empty() {
@@ -1858,7 +1881,7 @@ async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Resul
 
     if trimmed == "help" {
         return Ok(
-            "debug commands: state, history, tools, last_response, message:<text>, tool:<name> <json>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
+            "debug commands: state, history, tools, last_response, message:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
         );
     }
 
