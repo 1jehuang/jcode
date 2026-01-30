@@ -1771,6 +1771,36 @@ async fn is_server_alive(socket_path: &str) -> bool {
     tokio::net::UnixStream::connect(socket_path).await.is_ok()
 }
 
+/// Check if the initial binary is newer than what the server is running
+fn is_binary_newer_than_server(initial_binary: &std::path::Path) -> bool {
+    // Get mtime of initial binary
+    let initial_mtime = match std::fs::metadata(initial_binary) {
+        Ok(m) => m.modified().ok(),
+        Err(_) => return false,
+    };
+
+    // Get mtime of stable and canary binaries (what the server would use)
+    let stable_mtime = build::stable_binary_path()
+        .ok()
+        .and_then(|p| std::fs::metadata(&p).ok())
+        .and_then(|m| m.modified().ok());
+
+    let canary_mtime = build::canary_binary_path()
+        .ok()
+        .and_then(|p| std::fs::metadata(&p).ok())
+        .and_then(|m| m.modified().ok());
+
+    // If initial is newer than both stable and canary, server needs update
+    match (initial_mtime, stable_mtime, canary_mtime) {
+        (Some(initial), stable, canary) => {
+            let newer_than_stable = stable.map(|s| initial > s).unwrap_or(true);
+            let newer_than_canary = canary.map(|c| initial > c).unwrap_or(true);
+            newer_than_stable && newer_than_canary
+        }
+        _ => false,
+    }
+}
+
 /// Wrapper that runs client, spawning server as detached daemon if needed
 async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()> {
     let initial_binary_path = std::path::PathBuf::from(initial_binary);
@@ -1789,18 +1819,20 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
         let _ = std::fs::remove_file(&socket_path);
         let _ = std::fs::remove_file(server::debug_socket_path());
 
-        // Select binary to use
-        let canary_path = build::canary_binary_path().ok();
-        let stable_path = build::stable_binary_path().ok();
-
-        let binary_path = if canary_path.as_ref().map(|p| p.exists()).unwrap_or(false) {
-            canary_path.unwrap()
-        } else if stable_path.as_ref().map(|p| p.exists()).unwrap_or(false) {
-            stable_path.unwrap()
-        } else if initial_binary_path.exists() {
+        // Select binary to use - prefer the initial binary (target/release/jcode)
+        // since it's guaranteed to be the most up-to-date when starting fresh
+        let binary_path = if initial_binary_path.exists() {
             initial_binary_path.clone()
         } else {
-            anyhow::bail!("No binary found for server!");
+            let canary_path = build::canary_binary_path().ok();
+            let stable_path = build::stable_binary_path().ok();
+            if canary_path.as_ref().map(|p| p.exists()).unwrap_or(false) {
+                canary_path.unwrap()
+            } else if stable_path.as_ref().map(|p| p.exists()).unwrap_or(false) {
+                stable_path.unwrap()
+            } else {
+                anyhow::bail!("No binary found for server!");
+            }
         };
 
         // Spawn server as detached daemon (not tied to this client's lifecycle)
@@ -1826,10 +1858,47 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
         }
         eprintln!("Self-dev server ready on {}", socket_path);
     } else {
-        eprintln!(
-            "Connecting to existing self-dev server on {}...",
-            socket_path
-        );
+        // Server is running - check if we have a newer binary
+        if is_binary_newer_than_server(&initial_binary_path) {
+            eprintln!("Newer binary detected, reloading server...");
+            
+            // Get repo dir and hash for the reload
+            if let Some(repo_dir) = build::get_repo_dir() {
+                if let Ok(hash) = build::current_git_hash(&repo_dir) {
+                    // Install version and update canary symlink
+                    let _ = build::install_version(&repo_dir, &hash);
+                    let _ = build::update_canary_symlink(&hash);
+                    
+                    // Write rebuild signal to trigger server restart
+                    if let Ok(jcode_dir) = storage::jcode_dir() {
+                        let signal_path = jcode_dir.join("rebuild-signal");
+                        let _ = std::fs::write(&signal_path, &hash);
+                        
+                        // Wait for server to restart (socket will briefly disconnect)
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        
+                        // Wait for server to come back up
+                        let start = std::time::Instant::now();
+                        loop {
+                            if start.elapsed() > std::time::Duration::from_secs(30) {
+                                eprintln!("Warning: Server reload timed out, continuing anyway");
+                                break;
+                            }
+                            if is_server_alive(&socket_path).await {
+                                eprintln!("Server reloaded with {}", hash);
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+            }
+        } else {
+            eprintln!(
+                "Connecting to existing self-dev server on {}...",
+                socket_path
+            );
+        }
     }
 
     let session_name = id::extract_session_name(session_id)
