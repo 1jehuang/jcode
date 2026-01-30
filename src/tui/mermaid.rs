@@ -469,28 +469,38 @@ pub fn error_to_lines(error: &str) -> Vec<Line<'static>> {
     let dim = Style::default().fg(Color::Rgb(100, 100, 100));
     let err_style = Style::default().fg(Color::Rgb(200, 80, 80));
 
+    // Calculate box width based on content
+    let header = "mermaid error";
+    let content_width = error.len().max(header.len());
+    let top_padding = content_width.saturating_sub(header.len());
+    let bottom_width = content_width + 1; // +1 for the space after │
+
     vec![
-        Line::from(Span::styled("┌─ mermaid error ", dim)),
+        Line::from(Span::styled(
+            format!("┌─ {} {}┐", header, "─".repeat(top_padding)),
+            dim,
+        )),
         Line::from(vec![
             Span::styled("│ ", dim),
-            Span::styled(error.to_string(), err_style),
+            Span::styled(format!("{:<width$}", error, width = content_width), err_style),
+            Span::styled("│", dim),
         ]),
-        Line::from(Span::styled("└─", dim)),
+        Line::from(Span::styled(format!("└─{}─┘", "─".repeat(bottom_width)), dim)),
     ]
 }
 
 /// Terminal-friendly theme (works on dark backgrounds)
 fn terminal_theme() -> Theme {
     Theme {
-        background: "#1e1e2e".to_string(),
+        background: "transparent".to_string(), // Transparent background for terminal
         primary_color: "#313244".to_string(),
         primary_text_color: "#cdd6f4".to_string(),
         primary_border_color: "#585b70".to_string(),
         line_color: "#7f849c".to_string(),
         secondary_color: "#45475a".to_string(),
         tertiary_color: "#313244".to_string(),
-        edge_label_background: "#1e1e2e".to_string(),
-        cluster_background: "#181825".to_string(),
+        edge_label_background: "none".to_string(), // Transparent edge labels
+        cluster_background: "#18182580".to_string(), // Semi-transparent cluster bg
         cluster_border: "#45475a".to_string(),
         font_family: "monospace".to_string(),
         font_size: 13.0,
