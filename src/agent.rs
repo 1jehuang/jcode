@@ -1545,15 +1545,6 @@ impl Agent {
                 });
             }
 
-            // === INJECTION POINT A: Stream ended, before tools ===
-            if let Some(content) = self.inject_soft_interrupts() {
-                let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
-                    content,
-                    point: "A".to_string(),
-                    tools_skipped: None,
-                });
-            }
-
             // Add assistant message to history
             let mut content_blocks = Vec::new();
             if !text_content.is_empty() {
@@ -1577,6 +1568,17 @@ impl Agent {
             } else {
                 None
             };
+
+            // === INJECTION POINT A: Stream ended, before tools ===
+            // Must be AFTER assistant message is added to maintain correct conversation order
+            // and preserve prompt cache (cache expects assistant response, not user message)
+            if let Some(content) = self.inject_soft_interrupts() {
+                let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                    content,
+                    point: "A".to_string(),
+                    tools_skipped: None,
+                });
+            }
 
             // If no tool calls, check for soft interrupt or exit
             if tool_calls.is_empty() {
@@ -1977,15 +1979,7 @@ impl Agent {
                 });
             }
 
-            // === INJECTION POINT A: Stream ended, before tools ===
-            if let Some(content) = self.inject_soft_interrupts() {
-                let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
-                    content,
-                    point: "A".to_string(),
-                    tools_skipped: None,
-                });
-            }
-
+            // Add assistant message to history
             let mut content_blocks = Vec::new();
             if !text_content.is_empty() {
                 content_blocks.push(ContentBlock::Text {
@@ -2008,6 +2002,17 @@ impl Agent {
             } else {
                 None
             };
+
+            // === INJECTION POINT A: Stream ended, before tools ===
+            // Must be AFTER assistant message is added to maintain correct conversation order
+            // and preserve prompt cache (cache expects assistant response, not user message)
+            if let Some(content) = self.inject_soft_interrupts() {
+                let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                    content,
+                    point: "A".to_string(),
+                    tools_skipped: None,
+                });
+            }
 
             // If no tool calls, check for soft interrupt or exit
             if tool_calls.is_empty() {
