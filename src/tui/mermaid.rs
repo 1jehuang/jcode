@@ -224,14 +224,55 @@ pub fn render_mermaid(content: &str) -> RenderResult {
 }
 
 /// Render an image at the given area using ratatui-image
+/// If centered is true, the image will be horizontally centered within the area
 /// Returns the number of rows used
-pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer) -> u16 {
+pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bool) -> u16 {
+    // Get the cached image dimensions to calculate centered area
+    let img_width = {
+        let cache = RENDER_CACHE.lock().unwrap();
+        cache.get(hash).map(|c| c.width).unwrap_or(0)
+    };
+
+    // Calculate the actual render area (potentially centered)
+    let render_area = if centered && img_width > 0 {
+        // Calculate actual rendered width in terminal cells
+        let rendered_width = if let Some(Some(picker)) = PICKER.get() {
+            let font_size = picker.font_size();
+            let img_width_cells = (img_width as f32 / font_size.0 as f32).ceil() as u16;
+            // If image is wider than area, it will be scaled to fit
+            img_width_cells.min(area.width)
+        } else {
+            area.width // Fallback: assume full width
+        };
+
+        // Center horizontally
+        let x_offset = (area.width.saturating_sub(rendered_width)) / 2;
+        Rect {
+            x: area.x + x_offset,
+            y: area.y,
+            width: rendered_width,
+            height: area.height,
+        }
+    } else {
+        area
+    };
+
+    // Clear the render area to prevent text bleeding through
+    // This helps reduce flicker by ensuring a clean background
+    for y in render_area.top()..render_area.bottom() {
+        for x in render_area.left()..render_area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.reset();
+            }
+        }
+    }
+
     // First try to render from existing state
     {
         let mut state = IMAGE_STATE.lock().unwrap();
         if let Some(protocol) = state.get_mut(&hash) {
             let widget = StatefulImage::default().resize(Resize::Fit(None));
-            widget.render(area, buf, protocol);
+            widget.render(render_area, buf, protocol);
             return area.height;
         }
     }
@@ -252,7 +293,7 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer) -> u16 {
 
                 if let Some(protocol) = state.get_mut(&hash) {
                     let widget = StatefulImage::default().resize(Resize::Fit(None));
-                    widget.render(area, buf, protocol);
+                    widget.render(render_area, buf, protocol);
                     return area.height;
                 }
             }

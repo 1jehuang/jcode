@@ -2017,11 +2017,22 @@ fn draw_messages(
         }
     }
 
-    // Render text first (images will overlay their placeholder regions)
+    // Clear placeholder lines before rendering text to avoid flicker
+    // Replace image placeholder regions with empty lines
+    for &(line_idx, _, height) in &image_regions {
+        for i in 0..height as usize {
+            if line_idx + i < visible_lines.len() {
+                visible_lines[line_idx + i] = Line::from("");
+            }
+        }
+    }
+
+    // Render text (with image regions cleared)
     let paragraph = Paragraph::new(visible_lines);
     frame.render_widget(paragraph, area);
 
     // Now render images over their placeholder regions
+    let centered = app.centered_mode();
     for (line_idx, hash, height) in image_regions {
         let image_area = Rect {
             x: area.x,
@@ -2029,7 +2040,7 @@ fn draw_messages(
             width: area.width,
             height: height.min(area.height.saturating_sub(line_idx as u16)),
         };
-        super::mermaid::render_image_widget(hash, image_area, frame.buffer_mut());
+        super::mermaid::render_image_widget(hash, image_area, frame.buffer_mut(), centered);
     }
 
     // Draw right bar for visible user lines
