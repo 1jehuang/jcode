@@ -58,6 +58,11 @@ struct OpenCodeAnthropicAuth {
     expires: i64,
 }
 
+/// Check if OAuth credentials are available (quick check, doesn't validate)
+pub fn has_credentials() -> bool {
+    load_credentials().is_ok()
+}
+
 pub fn load_credentials() -> Result<ClaudeCredentials> {
     let now_ms = chrono::Utc::now().timestamp_millis();
 

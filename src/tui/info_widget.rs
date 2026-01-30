@@ -70,7 +70,7 @@ impl WidgetKind {
             WidgetKind::SwarmStatus => 3,
             WidgetKind::BackgroundTasks => 2,
             WidgetKind::UsageLimits => 3,
-            WidgetKind::ModelInfo => 2,
+            WidgetKind::ModelInfo => 3, // Model + usage bars
         }
     }
 
@@ -297,7 +297,11 @@ impl InfoWidgetData {
     pub fn has_data_for(&self, kind: WidgetKind) -> bool {
         match kind {
             WidgetKind::Todos => !self.todos.is_empty(),
-            WidgetKind::ContextUsage => false, // Disabled
+            WidgetKind::ContextUsage => self
+                .context_info
+                .as_ref()
+                .map(|c| c.total_chars > 0)
+                .unwrap_or(false),
             WidgetKind::MemoryActivity => self
                 .memory_info
                 .as_ref()
@@ -315,11 +319,7 @@ impl InfoWidgetData {
                 .as_ref()
                 .map(|b| b.running_count > 0 || b.memory_agent_active)
                 .unwrap_or(false),
-            WidgetKind::UsageLimits => self
-                .usage_info
-                .as_ref()
-                .map(|u| u.available)
-                .unwrap_or(false),
+            WidgetKind::UsageLimits => false, // Combined into ModelInfo
             WidgetKind::ModelInfo => self.model.is_some(),
         }
     }
@@ -1164,7 +1164,7 @@ fn format_cost(cost: f32) -> String {
     }
 }
 
-/// Render model info widget
+/// Render model info widget (combined with usage info)
 fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
     let Some(model) = &data.model else {
         return Vec::new();
@@ -1201,21 +1201,37 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
 
     lines.push(Line::from(spans));
 
-    // Session info if available
-    if let Some(sessions) = data.session_count {
-        lines.push(Line::from(vec![Span::styled(
-            format!("{} session{}", sessions, if sessions == 1 { "" } else { "s" }),
-            Style::default().fg(Color::Rgb(140, 140, 150)),
-        )]));
-    }
+    // Usage info (combined from UsageLimits widget)
+    if let Some(info) = &data.usage_info {
+        if info.available {
+            match info.provider {
+                UsageProvider::CostBased => {
+                    // Cost + tokens for API-key providers
+                    lines.push(Line::from(vec![
+                        Span::styled("💰 ", Style::default().fg(Color::Rgb(140, 180, 255))),
+                        Span::styled(
+                            format!("${:.4}", info.total_cost),
+                            Style::default().fg(Color::Rgb(180, 180, 190)),
+                        ),
+                        Span::styled(
+                            format!(" ({}↑ {}↓)", format_tokens(info.input_tokens), format_tokens(info.output_tokens)),
+                            Style::default().fg(Color::Rgb(120, 120, 130)),
+                        ),
+                    ]));
+                }
+                _ => {
+                    // Subscription usage bars
+                    let five_hr_used = (info.five_hour * 100.0).round().clamp(0.0, 100.0) as u8;
+                    let seven_day_used = (info.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
+                    let five_hr_left = 100u8.saturating_sub(five_hr_used);
+                    let seven_day_left = 100u8.saturating_sub(seven_day_used);
 
-    // Debug: show widget count (available / total possible)
-    let available = data.available_widgets().len();
-    let total = WidgetKind::all_by_priority().len();
-    lines.push(Line::from(vec![Span::styled(
-        format!("{}/{} widgets", available, total),
-        Style::default().fg(Color::Rgb(100, 100, 110)),
-    )]));
+                    lines.push(render_labeled_bar("5hr", five_hr_used, five_hr_left, None, inner.width));
+                    lines.push(render_labeled_bar("7d", seven_day_used, seven_day_left, None, inner.width));
+                }
+            }
+        }
+    }
 
     lines
 }

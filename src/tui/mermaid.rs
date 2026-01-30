@@ -15,7 +15,7 @@ use ratatui::prelude::*;
 use ratatui_image::{
     picker::{Picker, ProtocolType},
     protocol::StatefulProtocol,
-    Resize, StatefulImage,
+    CropOptions, Resize, StatefulImage,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -160,7 +160,15 @@ pub fn render_mermaid(content: &str) -> RenderResult {
 
         // Configure theme for terminal (dark background friendly)
         let theme = terminal_theme();
-        let layout_config = LayoutConfig::default();
+        
+        // Use larger spacing for better readability in terminal
+        let layout_config = LayoutConfig {
+            node_spacing: 80.0,  // Default is 50
+            rank_spacing: 80.0,  // Default is 50
+            node_padding_x: 40.0, // Default is 30
+            node_padding_y: 20.0, // Default is 15
+            ..Default::default()
+        };
 
         // Compute layout
         let layout = compute_layout(&parsed.graph, &theme, &layout_config);
@@ -168,10 +176,11 @@ pub fn render_mermaid(content: &str) -> RenderResult {
         // Render to SVG
         let svg = render_svg(&layout, &theme, &layout_config);
 
-        // Convert SVG to PNG
+        // Convert SVG to PNG with larger dimensions for readability
         let render_config = RenderConfig {
+            width: 1600.0,  // Larger than default 1200
+            height: 1200.0, // Larger than default 800
             background: theme.background.clone(),
-            ..Default::default()
         };
 
         write_output_png(&svg, &png_path_clone, &render_config, &theme)
@@ -276,11 +285,21 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         }
     }
 
+    // Use Crop instead of Fit so images clip rather than rescale when space is limited
+    // clip_top: false means clip the bottom when image is too tall
+    // clip_left: false means clip the right side when image is too wide
+    let make_resize = || {
+        Resize::Crop(Some(CropOptions {
+            clip_top: false,
+            clip_left: false,
+        }))
+    };
+
     // First try to render from existing state
     {
         let mut state = IMAGE_STATE.lock().unwrap();
         if let Some(protocol) = state.get_mut(&hash) {
-            let widget = StatefulImage::default().resize(Resize::Fit(None));
+            let widget = StatefulImage::default().resize(make_resize());
             widget.render(render_area, buf, protocol);
             return area.height;
         }
@@ -301,7 +320,7 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
                 state.insert(hash, protocol);
 
                 if let Some(protocol) = state.get_mut(&hash) {
-                    let widget = StatefulImage::default().resize(Resize::Fit(None));
+                    let widget = StatefulImage::default().resize(make_resize());
                     widget.render(render_area, buf, protocol);
                     return area.height;
                 }
@@ -503,7 +522,7 @@ fn terminal_theme() -> Theme {
         cluster_background: "#18182580".to_string(), // Semi-transparent cluster bg
         cluster_border: "#45475a".to_string(),
         font_family: "monospace".to_string(),
-        font_size: 13.0,
+        font_size: 18.0, // Larger font for terminal readability (default was 13)
         text_color: "#cdd6f4".to_string(),
         // Sequence diagram colors (dark theme)
         sequence_actor_fill: "#313244".to_string(),
