@@ -208,6 +208,8 @@ pub enum MemoryState {
     SidecarChecking { count: usize },
     /// Found relevant memories
     FoundRelevant { count: usize },
+    /// Extracting memories from conversation
+    Extracting { reason: String },
 }
 
 impl Default for MemoryState {
@@ -243,6 +245,10 @@ pub enum MemoryEventKind {
     SidecarComplete { latency_ms: u64 },
     /// Memory was surfaced to main agent
     MemorySurfaced { memory_preview: String },
+    /// Extraction started
+    ExtractionStarted { reason: String },
+    /// Extraction completed
+    ExtractionComplete { count: usize },
     /// Error occurred
     Error { message: String },
 }
@@ -939,6 +945,13 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
                     Style::default().fg(Color::Rgb(180, 180, 190)),
                 ),
             ]),
+            MemoryState::Extracting { reason } => Line::from(vec![
+                Span::styled("🧠 ", Style::default().fg(Color::Rgb(200, 150, 255))),
+                Span::styled(
+                    format!("Extracting ({})", reason),
+                    Style::default().fg(Color::Rgb(180, 180, 190)),
+                ),
+            ]),
         };
         lines.push(state_line);
 
@@ -974,6 +987,13 @@ fn format_memory_event(event: &MemoryEvent, max_width: usize) -> (&'static str, 
         MemoryEventKind::MemorySurfaced { memory_preview } => {
             let preview = truncate_smart(memory_preview, max_width.saturating_sub(2));
             ("★", preview, Color::Rgb(255, 220, 100))
+        }
+        MemoryEventKind::ExtractionStarted { reason } => {
+            let msg = truncate_smart(reason, max_width.saturating_sub(2));
+            ("🧠", format!("Extracting: {}", msg), Color::Rgb(200, 150, 255))
+        }
+        MemoryEventKind::ExtractionComplete { count } => {
+            ("✓", format!("Saved {} memories", count), Color::Rgb(100, 200, 100))
         }
         MemoryEventKind::Error { message } => {
             let msg = truncate_smart(message, max_width.saturating_sub(2));
@@ -1846,6 +1866,16 @@ fn render_memory_compact(info: &MemoryInfo) -> Vec<Line<'static>> {
                     Style::default().fg(Color::Rgb(100, 200, 100)),
                 ));
             }
+            MemoryState::Extracting { .. } => {
+                spans.push(Span::styled(
+                    " · ",
+                    Style::default().fg(Color::Rgb(100, 100, 110)),
+                ));
+                spans.push(Span::styled(
+                    "🧠",
+                    Style::default().fg(Color::Rgb(200, 150, 255)),
+                ));
+            }
             MemoryState::Idle => {}
         }
     }
@@ -1925,6 +1955,13 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
                     Style::default().fg(Color::Rgb(180, 180, 190)),
                 ),
             ]),
+            MemoryState::Extracting { reason } => Line::from(vec![
+                Span::styled("🧠 ", Style::default().fg(Color::Rgb(200, 150, 255))),
+                Span::styled(
+                    format!("Extracting ({})", reason),
+                    Style::default().fg(Color::Rgb(180, 180, 190)),
+                ),
+            ]),
         };
         lines.push(state_line);
 
@@ -1966,6 +2003,17 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
                         memory_preview.clone()
                     };
                     ("★", preview, Color::Rgb(255, 220, 100))
+                }
+                MemoryEventKind::ExtractionStarted { reason } => {
+                    let msg = if reason.len() > max_width.saturating_sub(4) {
+                        format!("{}…", &reason[..max_width.saturating_sub(5)])
+                    } else {
+                        reason.clone()
+                    };
+                    ("🧠", format!("Extracting: {}", msg), Color::Rgb(200, 150, 255))
+                }
+                MemoryEventKind::ExtractionComplete { count } => {
+                    ("✓", format!("Saved {} memories", count), Color::Rgb(100, 200, 100))
                 }
                 MemoryEventKind::Error { message } => {
                     let msg = if message.len() > max_width.saturating_sub(4) {

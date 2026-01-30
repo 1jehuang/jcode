@@ -2820,29 +2820,24 @@ impl App {
             }
             ServerEvent::SoftInterruptInjected {
                 content,
-                point,
+                point: _,
                 tools_skipped,
             } => {
-                // Update status to show injection happened
-                let skip_info = tools_skipped
-                    .map(|n| format!(" ({} tools skipped)", n))
-                    .unwrap_or_default();
-                self.set_status_notice(format!(
-                    "✓ Message injected at point {}{}",
-                    point, skip_info
-                ));
-
-                // Update the pending message display to show it was injected
-                // Find and update the "(pending injection)" message if present
+                // When injected, convert pending message to normal user message
+                // Find and update the "(pending injection)" message
                 for msg in self.display_messages.iter_mut().rev() {
                     if msg.title.as_deref() == Some("(pending injection)")
                         && msg.content.contains(&content)
                     {
-                        // Update to show it was injected
+                        // Remove the ⏳ prefix and title - now it's just a normal message
                         msg.content = content.clone();
-                        msg.title = Some(format!("(injected at point {}{})", point, skip_info));
+                        msg.title = None;
                         break;
                     }
+                }
+                // Only show status notice if tools were skipped (urgent interrupt)
+                if let Some(n) = tools_skipped {
+                    self.set_status_notice(format!("⚡ {} tool(s) skipped", n));
                 }
                 false
             }
@@ -3857,6 +3852,95 @@ impl App {
                     });
                 }
             }
+            return;
+        }
+
+        // Handle /remember command - extract memories from current conversation
+        if trimmed == "/remember" {
+            use crate::tui::info_widget::{MemoryEventKind, MemoryState};
+            
+            // Format context for extraction
+            let context = crate::memory::format_context_for_relevance(&self.messages);
+            if context.len() < 100 {
+                self.push_display_message(DisplayMessage {
+                    role: "system".to_string(),
+                    content: "Not enough conversation to extract memories from.".to_string(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+                return;
+            }
+
+            self.push_display_message(DisplayMessage {
+                role: "system".to_string(),
+                content: "🧠 Extracting memories from conversation...".to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+
+            // Update memory state for UI
+            crate::memory::set_state(MemoryState::Extracting { 
+                reason: "manual".to_string() 
+            });
+            crate::memory::add_event(MemoryEventKind::ExtractionStarted { 
+                reason: "/remember command".to_string() 
+            });
+
+            // Spawn extraction in background
+            let context_owned = context.clone();
+            tokio::spawn(async move {
+                let sidecar = crate::sidecar::HaikuSidecar::new();
+                match sidecar.extract_memories(&context_owned).await {
+                    Ok(extracted) if !extracted.is_empty() => {
+                        let manager = crate::memory::MemoryManager::new();
+                        let mut stored_count = 0;
+
+                        for mem in extracted {
+                            let category = match mem.category.as_str() {
+                                "fact" => crate::memory::MemoryCategory::Fact,
+                                "preference" => crate::memory::MemoryCategory::Preference,
+                                "correction" => crate::memory::MemoryCategory::Correction,
+                                _ => crate::memory::MemoryCategory::Fact,
+                            };
+
+                            let trust = match mem.trust.as_str() {
+                                "high" => crate::memory::TrustLevel::High,
+                                "low" => crate::memory::TrustLevel::Low,
+                                _ => crate::memory::TrustLevel::Medium,
+                            };
+
+                            let entry = crate::memory::MemoryEntry::new(category, &mem.content)
+                                .with_source("manual")
+                                .with_trust(trust);
+
+                            if manager.remember_project(entry).is_ok() {
+                                stored_count += 1;
+                            }
+                        }
+
+                        crate::logging::info(&format!(
+                            "/remember: extracted {} memories",
+                            stored_count
+                        ));
+                        crate::memory::add_event(MemoryEventKind::ExtractionComplete { count: stored_count });
+                        crate::memory::set_state(MemoryState::Idle);
+                    }
+                    Ok(_) => {
+                        crate::logging::info("/remember: no memories extracted");
+                        crate::memory::set_state(MemoryState::Idle);
+                    }
+                    Err(e) => {
+                        crate::logging::error(&format!("/remember failed: {}", e));
+                        crate::memory::add_event(MemoryEventKind::Error { message: e.to_string() });
+                        crate::memory::set_state(MemoryState::Idle);
+                    }
+                }
+            });
+
             return;
         }
 
@@ -6104,6 +6188,7 @@ impl App {
             ("/model".into(), "List or switch models"),
             ("/clear".into(), "Clear conversation history"),
             ("/compact".into(), "Compact context (summarize old messages)"),
+            ("/remember".into(), "Extract and save memories from conversation"),
             ("/version".into(), "Show current version"),
             ("/info".into(), "Show session info and tokens"),
             ("/reload".into(), "Smart reload (if newer binary exists)"),
