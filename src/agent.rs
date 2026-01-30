@@ -1569,18 +1569,10 @@ impl Agent {
                 None
             };
 
-            // === INJECTION POINT A: Stream ended, before tools ===
-            // Must be AFTER assistant message is added to maintain correct conversation order
-            // and preserve prompt cache (cache expects assistant response, not user message)
-            if let Some(content) = self.inject_soft_interrupts() {
-                let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
-                    content,
-                    point: "A".to_string(),
-                    tools_skipped: None,
-                });
-            }
-
             // If no tool calls, check for soft interrupt or exit
+            // NOTE: We only inject here (Point B) when there are no tools.
+            // Injecting before tool_results would break the API requirement that
+            // tool_use must be immediately followed by tool_result.
             if tool_calls.is_empty() {
                 // === INJECTION POINT B: No tools, turn complete ===
                 if let Some(content) = self.inject_soft_interrupts() {
@@ -2003,18 +1995,10 @@ impl Agent {
                 None
             };
 
-            // === INJECTION POINT A: Stream ended, before tools ===
-            // Must be AFTER assistant message is added to maintain correct conversation order
-            // and preserve prompt cache (cache expects assistant response, not user message)
-            if let Some(content) = self.inject_soft_interrupts() {
-                let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
-                    content,
-                    point: "A".to_string(),
-                    tools_skipped: None,
-                });
-            }
-
             // If no tool calls, check for soft interrupt or exit
+            // NOTE: We only inject here (Point B) when there are no tools.
+            // Injecting before tool_results would break the API requirement that
+            // tool_use must be immediately followed by tool_result.
             if tool_calls.is_empty() {
                 // === INJECTION POINT B: No tools, turn complete ===
                 if let Some(content) = self.inject_soft_interrupts() {
