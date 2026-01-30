@@ -1090,7 +1090,7 @@ impl MemoryManager {
 
                     if is_relevant {
                         let preview = if memory.content.len() > 30 {
-                            format!("{}...", &memory.content[..30])
+                            format!("{}...", crate::util::truncate_str(&memory.content, 30))
                         } else {
                             memory.content.clone()
                         };
@@ -1296,7 +1296,7 @@ impl MemoryManager {
 
                         if is_relevant {
                             let preview = if memory.content.len() > 30 {
-                                format!("{}...", &memory.content[..30])
+                                format!("{}...", crate::util::truncate_str(&memory.content, 30))
                             } else {
                                 memory.content.clone()
                             };
@@ -1308,7 +1308,7 @@ impl MemoryManager {
                             crate::logging::info(&format!(
                                 "Memory relevant (sim={:.2}): {}",
                                 sim,
-                                &memory.content[..memory.content.len().min(50)]
+                                crate::util::truncate_str(&memory.content, 50)
                             ));
                         } else {
                             add_event(MemoryEventKind::SidecarNotRelevant);

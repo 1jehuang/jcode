@@ -2384,7 +2384,7 @@ fn shorten_model_name(model: &str) -> String {
 
     // Fallback: truncate long names
     if model.len() > 15 {
-        format!("{}…", &model[..14])
+        format!("{}…", crate::util::truncate_str(model, 14))
     } else {
         model.to_string()
     }

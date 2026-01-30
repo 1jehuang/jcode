@@ -550,9 +550,9 @@ async fn generate_summary(
                     conversation_text.push_str(&format!("[Tool: {} - {}]\n", name, input));
                 }
                 ContentBlock::ToolResult { content, .. } => {
-                    // Truncate long tool results
+                    // Truncate long tool results (respecting UTF-8 char boundaries)
                     let truncated = if content.len() > 500 {
-                        format!("{}... (truncated)", &content[..500])
+                        format!("{}... (truncated)", crate::util::truncate_str(content, 500))
                     } else {
                         content.clone()
                     };

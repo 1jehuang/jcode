@@ -163,7 +163,7 @@ impl Tool for ConversationSearchTool {
                             crate::message::ContentBlock::Text { text, .. } => {
                                 // Truncate very long messages
                                 if text.len() > 1000 {
-                                    output.push_str(&text[..1000]);
+                                    output.push_str(crate::util::truncate_str(text, 1000));
                                     output.push_str("... (truncated)\n");
                                 } else {
                                     output.push_str(text);
@@ -175,7 +175,7 @@ impl Tool for ConversationSearchTool {
                             }
                             crate::message::ContentBlock::ToolResult { content, .. } => {
                                 let preview = if content.len() > 200 {
-                                    format!("{}...", &content[..200])
+                                    format!("{}...", crate::util::truncate_str(content, 200))
                                 } else {
                                     content.clone()
                                 };
