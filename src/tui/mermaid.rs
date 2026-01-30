@@ -492,14 +492,14 @@ pub fn error_to_lines(error: &str) -> Vec<Line<'static>> {
 /// Terminal-friendly theme (works on dark backgrounds)
 fn terminal_theme() -> Theme {
     Theme {
-        background: "transparent".to_string(), // Transparent background for terminal
+        background: "#00000000".to_string(), // Fully transparent (RGBA)
         primary_color: "#313244".to_string(),
         primary_text_color: "#cdd6f4".to_string(),
         primary_border_color: "#585b70".to_string(),
         line_color: "#7f849c".to_string(),
         secondary_color: "#45475a".to_string(),
         tertiary_color: "#313244".to_string(),
-        edge_label_background: "none".to_string(), // Transparent edge labels
+        edge_label_background: "#00000000".to_string(), // Transparent edge labels
         cluster_background: "#18182580".to_string(), // Semi-transparent cluster bg
         cluster_border: "#45475a".to_string(),
         font_family: "monospace".to_string(),
