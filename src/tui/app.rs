@@ -3738,6 +3738,7 @@ impl App {
                      • `/reload` - Smart reload (client/server if newer binary exists)\n\
                      • `/rebuild` - Full rebuild (git pull + cargo build + tests){}\n\
                      • `/clear` - Clear conversation (Ctrl+L)\n\
+                     • `/rewind` - Show history with numbers, `/rewind N` to rewind\n\
                      • `/compact` - Manually compact context (summarize old messages)\n\
                      • `/debug-visual` - Enable visual debugging for TUI issues\n\
                      • `/<skill>` - Activate a skill\n\n\
@@ -3941,6 +3942,83 @@ impl App {
                 }
             });
 
+            return;
+        }
+
+        // Handle /rewind command - rewind conversation to a previous point
+        if trimmed == "/rewind" {
+            // Show numbered history
+            if self.session.messages.is_empty() {
+                self.push_display_message(DisplayMessage::system(
+                    "No messages in conversation.".to_string(),
+                ));
+                return;
+            }
+
+            let mut history = String::from("**Conversation history:**\n\n");
+            for (i, msg) in self.session.messages.iter().enumerate() {
+                let role_str = match msg.role {
+                    Role::User => "👤 User",
+                    Role::Assistant => "🤖 Assistant",
+                };
+                let content = msg.content_preview();
+                let preview = crate::util::truncate_str(&content, 80);
+                history.push_str(&format!("  `{}` {} - {}\n", i + 1, role_str, preview));
+            }
+            history.push_str(&format!(
+                "\nUse `/rewind N` to rewind to message N (removes all messages after)."
+            ));
+
+            self.push_display_message(DisplayMessage::system(history));
+            return;
+        }
+
+        if let Some(num_str) = trimmed.strip_prefix("/rewind ") {
+            let num_str = num_str.trim();
+            match num_str.parse::<usize>() {
+                Ok(n) if n > 0 && n <= self.session.messages.len() => {
+                    let removed = self.session.messages.len() - n;
+                    self.session.messages.truncate(n);
+                    self.session.updated_at = chrono::Utc::now();
+                    let _ = self.session.save();
+
+                    // Rebuild display messages from session
+                    self.clear_display_messages();
+                    for rendered in crate::session::render_messages(&self.session) {
+                        self.push_display_message(DisplayMessage {
+                            role: rendered.role,
+                            content: rendered.content,
+                            tool_calls: rendered.tool_calls,
+                            duration_secs: None,
+                            title: None,
+                            tool_data: rendered.tool_data,
+                        });
+                    }
+
+                    // Reset provider session since conversation changed
+                    self.provider_session_id = None;
+
+                    self.push_display_message(DisplayMessage::system(format!(
+                        "✓ Rewound to message {}. Removed {} message{}.",
+                        n,
+                        removed,
+                        if removed == 1 { "" } else { "s" }
+                    )));
+                }
+                Ok(n) => {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Invalid message number: {}. Valid range: 1-{}",
+                        n,
+                        self.session.messages.len()
+                    )));
+                }
+                Err(_) => {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Usage: `/rewind N` where N is a message number (1-{})",
+                        self.session.messages.len()
+                    )));
+                }
+            }
             return;
         }
 
@@ -6187,6 +6265,7 @@ impl App {
             ("/help".into(), "Show help and keyboard shortcuts"),
             ("/model".into(), "List or switch models"),
             ("/clear".into(), "Clear conversation history"),
+            ("/rewind".into(), "Rewind conversation to previous message"),
             ("/compact".into(), "Compact context (summarize old messages)"),
             ("/remember".into(), "Extract and save memories from conversation"),
             ("/version".into(), "Show current version"),

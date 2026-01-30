@@ -86,6 +86,32 @@ impl StoredMessage {
             content: self.content.clone(),
         }
     }
+
+    /// Get a text preview of the message content
+    pub fn content_preview(&self) -> String {
+        for block in &self.content {
+            match block {
+                ContentBlock::Text { text, .. } => {
+                    // Return first non-empty text block
+                    let text = text.trim();
+                    if !text.is_empty() {
+                        return text.replace('\n', " ");
+                    }
+                }
+                ContentBlock::ToolUse { name, .. } => {
+                    return format!("[tool: {}]", name);
+                }
+                ContentBlock::ToolResult { content, .. } => {
+                    let preview = content.trim().replace('\n', " ");
+                    if !preview.is_empty() {
+                        return format!("[result: {}]", preview);
+                    }
+                }
+                _ => {}
+            }
+        }
+        "(empty)".to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
