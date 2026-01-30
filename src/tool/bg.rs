@@ -167,7 +167,7 @@ impl Tool for BgTool {
                         let truncated: String = if output.len() > 50000 {
                             format!(
                                 "{}...\n\n(Output truncated. Use `read` tool on the output file for full content)",
-                                &output[..50000]
+                                crate::util::truncate_str(&output, 50000)
                             )
                         } else {
                             output

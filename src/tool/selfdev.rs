@@ -317,7 +317,7 @@ impl SelfDevTool {
 
             if !crash.stderr.is_empty() {
                 let stderr_preview = if crash.stderr.len() > 500 {
-                    format!("{}...", &crash.stderr[..500])
+                    format!("{}...", crate::util::truncate_str(&crash.stderr, 500))
                 } else {
                     crash.stderr.clone()
                 };

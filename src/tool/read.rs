@@ -353,7 +353,7 @@ fn handle_pdf_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
                     output.push_str(&format!("--- Page {} ---\n", i + 1));
                     // Limit each page to reasonable length
                     if page_text.len() > 10000 {
-                        output.push_str(&page_text[..10000]);
+                        output.push_str(crate::util::truncate_str(page_text, 10000));
                         output.push_str("\n... (page truncated)\n");
                     } else {
                         output.push_str(page_text);

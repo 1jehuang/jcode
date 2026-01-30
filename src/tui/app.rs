@@ -6005,7 +6005,7 @@ impl App {
                     ContentBlock::ToolResult { content, .. } => {
                         // Truncate long results
                         let preview = if content.len() > 200 {
-                            format!("{}...", &content[..200])
+                            format!("{}...", crate::util::truncate_str(content, 200))
                         } else {
                             content.clone()
                         };
