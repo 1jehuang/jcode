@@ -75,10 +75,6 @@ loop {
     // 3. Add assistant message to history
     // (MUST happen before injection to preserve cache and conversation order)
 
-    // ═══════════════════════════════════════════════
-    // ✅ INJECTION POINT A: Stream ended, before tools
-    // ═══════════════════════════════════════════════
-
     // 4. Check if tool calls exist
     if tool_calls.is_empty() {
         // ═══════════════════════════════════════════════
@@ -87,13 +83,14 @@ loop {
         break;
     }
 
-    // 5. Execute tools
+    // 5. Execute tools and add tool_results
     for tc in tool_calls {
         // Execute single tool...
         // Add result to history...
 
         // ═══════════════════════════════════════════════
         // ✅ INJECTION POINT C: Between tool executions
+        // (only for urgent aborts - must add skipped tool_results first)
         // ═══════════════════════════════════════════════
     }
 
@@ -105,28 +102,23 @@ loop {
 }
 ```
 
+### Critical API Constraint
+
+**The Anthropic API requires that every `tool_use` block must be immediately followed by
+its corresponding `tool_result` block.** No user text messages can be injected between
+a `tool_use` and its `tool_result`.
+
+This means we CANNOT inject messages:
+- After the assistant message with tool_use blocks
+- Before all tool_results have been added
+
 ### Injection Point Details
 
 | Point | Location | Timing | Use Case |
 |-------|----------|--------|----------|
-| **A** | After stream ends | Before any tool runs | Early injection, AI sees msg + pending tool calls |
 | **B** | Turn complete | No tools requested | Inject before agent loop exits |
-| **C** | Inside tool loop | Between tools | Urgent: "stop!" can skip remaining tools |
-| **D** | After all tools | Before next API call | Cleanest: all results + user msg together |
-
-### Point A: After Stream Ends
-
-```
-Timeline:
-  Provider: TextDelta... ToolStart... ToolInput... ToolUseEnd... [stream ends]
-  Agent: ──► INJECT HERE ◄──
-  Agent: Execute tool 1, tool 2, tool 3...
-  Agent: Next API call includes: [tool results] + [user message]
-
-AI sees: "I requested these tools, got results, and user said X"
-```
-
-**Best for:** General interjections that don't need to affect tool execution.
+| **C** | Inside tool loop | Between tools (urgent only) | Urgent: "stop!" can skip remaining tools |
+| **D** | After all tools | Before next API call | Default: all results + user msg together |
 
 ### Point B: Turn Complete (No Tools)
 
@@ -241,19 +233,13 @@ impl Agent {
 
 loop {
     // ... stream from provider ...
-
-    // Point A: After stream ends, before tools
-    if let Some(msg) = self.inject_soft_interrupts() {
-        let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
-            content: msg,
-            point: "A".to_string(),
-        });
-    }
-
     // ... add assistant message to history ...
 
+    // NOTE: We CANNOT inject here if there are tool calls!
+    // The API requires tool_use → tool_result with no intervening messages.
+
     if tool_calls.is_empty() {
-        // Point B: No tools, turn complete
+        // Point B: No tools, turn complete - safe to inject
         if let Some(msg) = self.inject_soft_interrupts() {
             let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
                 content: msg,
@@ -269,36 +255,28 @@ loop {
     for (i, tc) in tool_calls.iter().enumerate() {
         // Check for urgent abort before each tool (except first)
         if i > 0 && self.has_urgent_interrupt() {
-            // Point C: Urgent abort, skip remaining tools
+            // Point C: Urgent abort - MUST add skipped tool_results first
+            for skipped in &tool_calls[i..] {
+                self.add_message(Role::User, vec![ContentBlock::ToolResult {
+                    tool_use_id: skipped.id.clone(),
+                    content: "[Skipped: user interrupted]".to_string(),
+                    is_error: Some(true),
+                }]);
+            }
+            // Now safe to inject user message
             if let Some(msg) = self.inject_soft_interrupts() {
                 let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
                     content: msg,
                     point: "C".to_string(),
                 });
-                // Add note about skipped tools
-                self.add_message(Role::User, vec![ContentBlock::Text {
-                    text: format!("[Skipped {} remaining tool(s) due to user interrupt]",
-                                  tool_calls.len() - i),
-                    cache_control: None,
-                }]);
             }
             break;
         }
 
-        // ... execute tool ...
-
-        // Point C: Between tools (non-urgent)
-        if i < tool_calls.len() - 1 {
-            if let Some(msg) = self.inject_soft_interrupts() {
-                let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
-                    content: msg,
-                    point: "C".to_string(),
-                });
-            }
-        }
+        // ... execute tool and add tool_result ...
     }
 
-    // Point D: After all tools, before next API call
+    // Point D: After all tools done, safe to inject
     if let Some(msg) = self.inject_soft_interrupts() {
         let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
             content: msg,
@@ -383,8 +361,8 @@ User presses Shift+Enter during processing:
 
 ## Testing
 
-1. Send message while AI is streaming text → should inject at Point B or D
-2. Send message while AI is executing tools → should inject at Point C or D
-3. Send urgent message while multiple tools queued → should skip remaining tools
+1. Send message while AI is streaming text (no tools) → should inject at Point B
+2. Send message while AI is executing tools → should inject at Point D (after all tools)
+3. Send urgent message while multiple tools queued → should skip remaining tools at Point C
 4. Send multiple messages rapidly → should combine into one injection
-5. Verify no provider errors from mid-stream injection (there shouldn't be any)
+5. Verify no API errors about tool_use/tool_result pairing
