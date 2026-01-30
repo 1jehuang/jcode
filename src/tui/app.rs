@@ -429,6 +429,8 @@ pub struct App {
     status_notice: Option<(String, Instant)>,
     // Message to interleave during processing (set via Shift+Enter)
     interleave_message: Option<String>,
+    // Message sent as soft interrupt but not yet injected (shown in queue preview until injected)
+    pending_soft_interrupt: Option<String>,
     // Queue mode: if true, Enter during processing queues; if false, Enter queues to send next
     // Toggle with Ctrl+Tab or Ctrl+T
     queue_mode: bool,
@@ -584,6 +586,7 @@ impl App {
             scroll_keys: super::keybind::load_scroll_keys(),
             status_notice: None,
             interleave_message: None,
+            pending_soft_interrupt: None,
             queue_mode: display.queue_mode,
             tab_completion_state: None,
             app_started: Instant::now(),
@@ -2409,20 +2412,17 @@ impl App {
                                     // Use soft interrupt - no cancel, message injected at next safe point
                                     if let Some(interleave_msg) = self.interleave_message.take() {
                                         if !interleave_msg.trim().is_empty() {
-                                            // Show in UI immediately for feedback
-                                            self.push_display_message(DisplayMessage {
-                                                role: "user".to_string(),
-                                                content: format!("⏳ {}", interleave_msg),
-                                                tool_calls: vec![],
-                                                duration_secs: None,
-                                                title: Some("(pending injection)".to_string()),
-                                                tool_data: None,
-                                            });
+                                            // Store as pending - will be added to display_messages when injected
+                                            // This keeps it in the queue preview area until actually sent
+                                            let msg_clone = interleave_msg.clone();
                                             // Send soft interrupt to server
                                             if let Err(e) = remote.soft_interrupt(interleave_msg, false).await {
                                                 self.push_display_message(DisplayMessage::error(format!(
                                                     "Failed to queue soft interrupt: {}", e
                                                 )));
+                                            } else {
+                                                // Only mark as pending if send succeeded
+                                                self.pending_soft_interrupt = Some(msg_clone);
                                             }
                                         }
                                     }
@@ -2671,6 +2671,7 @@ impl App {
                 self.is_processing = false;
                 self.status = ProcessingStatus::Idle;
                 self.interleave_message = None;
+                self.pending_soft_interrupt = None;
                 self.thought_line_inserted = false;
                 remote.clear_pending();
                 false
@@ -2767,6 +2768,7 @@ impl App {
                     self.scroll_offset = 0;
                     self.queued_messages.clear();
                     self.interleave_message = None;
+                    self.pending_soft_interrupt = None;
                     self.remote_total_tokens = None;
                 }
                 // Store provider info for UI display
@@ -2823,18 +2825,17 @@ impl App {
                 point: _,
                 tools_skipped,
             } => {
-                // When injected, convert pending message to normal user message
-                // Find and update the "(pending injection)" message
-                for msg in self.display_messages.iter_mut().rev() {
-                    if msg.title.as_deref() == Some("(pending injection)")
-                        && msg.content.contains(&content)
-                    {
-                        // Remove the ⏳ prefix and title - now it's just a normal message
-                        msg.content = content.clone();
-                        msg.title = None;
-                        break;
-                    }
-                }
+                // When injected, NOW add the message to display_messages
+                // (it was previously only in the queue preview area)
+                self.pending_soft_interrupt = None;
+                self.push_display_message(DisplayMessage {
+                    role: "user".to_string(),
+                    content: content.clone(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
                 // Only show status notice if tools were skipped (urgent interrupt)
                 if let Some(n) = tools_skipped {
                     self.set_status_notice(format!("⚡ {} tool(s) skipped", n));
@@ -3318,6 +3319,7 @@ impl App {
         self.status = ProcessingStatus::Idle;
         self.processing_started = None;
         self.interleave_message = None;
+        self.pending_soft_interrupt = None;
         self.thought_line_inserted = false;
     }
 
@@ -3605,6 +3607,7 @@ impl App {
                     // Interrupt generation
                     self.cancel_requested = true;
                     self.interleave_message = None;
+                    self.pending_soft_interrupt = None;
                 } else {
                     // Reset scroll to bottom and clear input
                     self.scroll_offset = 0;
@@ -5335,6 +5338,7 @@ impl App {
                                     if self.cancel_requested {
                                         self.cancel_requested = false;
                                         self.interleave_message = None;
+                                        self.pending_soft_interrupt = None;
                                         self.push_display_message(DisplayMessage {
                                             role: "system".to_string(),
                                             content: "Interrupted".to_string(),
@@ -5403,6 +5407,7 @@ impl App {
                                     if self.cancel_requested {
                                         self.cancel_requested = false;
                                         self.interleave_message = None;
+                                        self.pending_soft_interrupt = None;
                                         self.push_display_message(DisplayMessage {
                                             role: "system".to_string(),
                                             content: "Interrupted".to_string(),
@@ -5891,6 +5896,7 @@ impl App {
                                         if self.cancel_requested {
                                             self.cancel_requested = false;
                                             self.interleave_message = None;
+                                            self.pending_soft_interrupt = None;
                                             self.push_display_message(DisplayMessage {
                                                 role: "system".to_string(),
                                                 content: "Interrupted".to_string(),
@@ -6852,6 +6858,10 @@ impl super::TuiState for App {
         self.interleave_message.as_deref()
     }
 
+    fn pending_soft_interrupt(&self) -> Option<&str> {
+        self.pending_soft_interrupt.as_deref()
+    }
+
     fn scroll_offset(&self) -> usize {
         self.scroll_offset
     }
@@ -7237,7 +7247,11 @@ impl super::TuiState for App {
         let usage_info = {
             // Check if current provider uses OAuth (Anthropic OAuth or OpenAI Codex)
             let provider_name = self.provider.name().to_lowercase();
-            let is_oauth_provider = provider_name.contains("anthropic") || provider_name.contains("claude");
+            // Also check for "remote" provider with OAuth credentials (selfdev/client mode)
+            let has_oauth_creds = crate::auth::claude::has_credentials();
+            let is_oauth_provider = provider_name.contains("anthropic")
+                || provider_name.contains("claude")
+                || (provider_name == "remote" && has_oauth_creds);
             let is_api_key_provider = provider_name.contains("openrouter");
 
             if is_oauth_provider {

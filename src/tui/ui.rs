@@ -19,6 +19,7 @@ const DIM_COLOR: Color = Color::Rgb(80, 80, 80); // Dimmer gray
 const ACCENT_COLOR: Color = Color::Rgb(186, 139, 255); // Purple accent
 const QUEUED_COLOR: Color = Color::Rgb(255, 193, 7); // Amber/yellow for queued
 const ASAP_COLOR: Color = Color::Rgb(110, 210, 255); // Cyan for immediate send
+const PENDING_COLOR: Color = Color::Rgb(180, 230, 140); // Light green for sent/awaiting injection
 const USER_TEXT: Color = Color::Rgb(245, 245, 255); // Bright cool white (user messages)
 const USER_BG: Color = Color::Rgb(35, 40, 50); // Subtle dark blue background for user
 const AI_TEXT: Color = Color::Rgb(220, 220, 215); // Softer warm white (AI messages)
@@ -2032,13 +2033,15 @@ fn draw_messages(
     frame.render_widget(paragraph, area);
 
     // Now render images over their placeholder regions
-    // Only render if the full image height fits in the visible area
+    // Images will be clipped (not scaled) if they don't fully fit
     let centered = app.centered_mode();
     for (line_idx, hash, height) in image_regions {
-        // Skip rendering if image would be clipped at the bottom
-        // (partial images look distorted because they try to fit into smaller space)
+        // Calculate available height - image will be clipped if it doesn't fit
         let available_height = area.height.saturating_sub(line_idx as u16);
-        if available_height < height {
+        let render_height = height.min(available_height);
+        
+        // Skip if no space at all
+        if render_height == 0 {
             continue;
         }
 
@@ -2046,7 +2049,7 @@ fn draw_messages(
             x: area.x,
             y: area.y + line_idx as u16,
             width: area.width,
-            height,
+            height: render_height,
         };
         super::mermaid::render_image_widget(hash, image_area, frame.buffer_mut(), centered);
     }
@@ -2270,7 +2273,7 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             }
         }
     } else {
-        // Idle - show token warning if high usage, otherwise nothing
+        // Idle - show token warning if high usage, otherwise usage limits
         if let Some((total_in, total_out)) = app.total_session_tokens() {
             let total = total_in + total_out;
             if total > 100_000 {
@@ -2292,10 +2295,12 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                     ),
                 ])
             } else {
-                Line::from(Span::styled("", Style::default().fg(DIM_COLOR)))
+                // Show usage limits when idle (subscription providers)
+                build_idle_usage_line(app)
             }
         } else {
-            Line::from(Span::styled("", Style::default().fg(DIM_COLOR)))
+            // Show usage limits when idle (subscription providers)
+            build_idle_usage_line(app)
         }
     };
 
@@ -2306,6 +2311,73 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     };
     let paragraph = Paragraph::new(aligned_line);
     frame.render_widget(paragraph, area);
+}
+
+/// Build usage line for idle state (shows subscription limits or cost)
+fn build_idle_usage_line(app: &dyn TuiState) -> Line<'static> {
+    use super::info_widget::UsageProvider;
+
+    let widget_data = app.info_widget_data();
+    let Some(usage) = &widget_data.usage_info else {
+        return Line::from("");
+    };
+    if !usage.available {
+        return Line::from("");
+    }
+
+    match usage.provider {
+        UsageProvider::CostBased => {
+            // Show cost for API-key providers
+            let cost_str = format!("${:.4}", usage.total_cost);
+            let tokens_str = format!(
+                "{}↑ {}↓",
+                format_tokens_compact(usage.input_tokens),
+                format_tokens_compact(usage.output_tokens)
+            );
+            Line::from(vec![
+                Span::styled("💰 ", Style::default().fg(DIM_COLOR)),
+                Span::styled(cost_str, Style::default().fg(Color::Rgb(140, 180, 255))),
+                Span::styled(format!(" ({})", tokens_str), Style::default().fg(DIM_COLOR)),
+            ])
+        }
+        _ => {
+            // Show subscription usage bars inline
+            let five_hr = (usage.five_hour * 100.0).round() as u8;
+            let seven_day = (usage.seven_day * 100.0).round() as u8;
+
+            let five_hr_color = usage_color(five_hr);
+            let seven_day_color = usage_color(seven_day);
+
+            Line::from(vec![
+                Span::styled("5hr:", Style::default().fg(DIM_COLOR)),
+                Span::styled(format!("{}%", five_hr), Style::default().fg(five_hr_color)),
+                Span::styled(" · 7d:", Style::default().fg(DIM_COLOR)),
+                Span::styled(format!("{}%", seven_day), Style::default().fg(seven_day_color)),
+            ])
+        }
+    }
+}
+
+/// Color for usage percentage (green < 50, yellow 50-80, red > 80)
+fn usage_color(pct: u8) -> Color {
+    if pct >= 80 {
+        Color::Rgb(255, 100, 100) // Red
+    } else if pct >= 50 {
+        Color::Rgb(255, 200, 100) // Yellow
+    } else {
+        Color::Rgb(100, 200, 100) // Green
+    }
+}
+
+/// Format tokens compactly (1.2M, 45K, 123)
+fn format_tokens_compact(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.0}K", tokens as f64 / 1_000.0)
+    } else {
+        format!("{}", tokens)
+    }
 }
 
 fn format_usage_line(tokens_str: String, cache_status: Option<String>) -> String {
@@ -2395,6 +2467,13 @@ fn pending_prompt_count(app: &dyn TuiState) -> usize {
 fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
     let mut previews = Vec::new();
     if app.is_processing() {
+        // Show pending soft interrupt (sent to server, awaiting injection)
+        if let Some(msg) = app.pending_soft_interrupt() {
+            if !msg.is_empty() {
+                previews.push(format!("↻ {}", msg.chars().take(100).collect::<String>()));
+            }
+        }
+        // Show interleave message (in buffer, ready to send)
         if let Some(msg) = app.interleave_message() {
             if !msg.is_empty() {
                 previews.push(format!("⚡ {}", msg.chars().take(100).collect::<String>()));
@@ -2407,17 +2486,33 @@ fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
     previews
 }
 
+/// Types of queued/pending messages
+#[derive(Clone, Copy)]
+enum QueuedMsgType {
+    Pending,    // Sent to server, awaiting injection (↻)
+    Interleave, // In buffer, ready to send immediately (⚡)
+    Queued,     // Waiting for processing to finish (⏳)
+}
+
 fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usize) {
-    let mut items: Vec<(bool, &str)> = Vec::new();
+    let mut items: Vec<(QueuedMsgType, &str)> = Vec::new();
     if app.is_processing() {
+        // Pending soft interrupt (sent to server, awaiting injection)
+        if let Some(msg) = app.pending_soft_interrupt() {
+            if !msg.is_empty() {
+                items.push((QueuedMsgType::Pending, msg));
+            }
+        }
+        // Interleave message (in buffer, ready to send)
         if let Some(msg) = app.interleave_message() {
             if !msg.is_empty() {
-                items.push((true, msg));
+                items.push((QueuedMsgType::Interleave, msg));
             }
         }
     }
+    // Queued messages (waiting for processing to finish)
     for msg in app.queued_messages() {
-        items.push((false, msg.as_str()));
+        items.push((QueuedMsgType::Queued, msg.as_str()));
     }
 
     let pending_count = items.len();
@@ -2425,15 +2520,15 @@ fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usi
         .iter()
         .take(3)
         .enumerate()
-        .map(|(i, (is_asap, msg))| {
+        .map(|(i, (msg_type, msg))| {
             // Distance from input prompt: pending_count - i (first pending is furthest from input)
             // +1 because the input prompt itself is distance 0
             let distance = pending_count.saturating_sub(i);
             let num_color = rainbow_prompt_color(distance);
-            let (indicator, indicator_color, msg_color, dim) = if *is_asap {
-                ("⚡", ASAP_COLOR, ASAP_COLOR, false)
-            } else {
-                ("⏳", QUEUED_COLOR, QUEUED_COLOR, true)
+            let (indicator, indicator_color, msg_color, dim) = match msg_type {
+                QueuedMsgType::Pending => ("↻", PENDING_COLOR, PENDING_COLOR, false),
+                QueuedMsgType::Interleave => ("⚡", ASAP_COLOR, ASAP_COLOR, false),
+                QueuedMsgType::Queued => ("⏳", QUEUED_COLOR, QUEUED_COLOR, true),
             };
             let mut msg_style = Style::default().fg(msg_color);
             if dim {
