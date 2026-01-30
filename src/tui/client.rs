@@ -102,6 +102,63 @@ impl ClientApp {
         }
     }
 
+    /// Log detailed info when an unexpected cache miss occurs (cache write on turn 2+)
+    fn log_cache_miss_if_unexpected(&self) {
+        let user_turn_count = self
+            .display_messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .count();
+        let cache_read = self.streaming_cache_read_tokens.unwrap_or(0);
+        let cache_creation = self.streaming_cache_creation_tokens.unwrap_or(0);
+
+        // Unexpected cache miss: on turn 2+, we have cache writes but no cache reads
+        let is_unexpected = user_turn_count > 1 && cache_creation > 0 && cache_read == 0;
+
+        if is_unexpected {
+            let session_id = self.session_id.as_deref().unwrap_or("unknown");
+            let provider = &self.provider_name;
+            let model = &self.provider_model;
+            let input_tokens = self.streaming_input_tokens;
+            let output_tokens = self.streaming_output_tokens;
+
+            // Count message types in conversation
+            let mut user_msgs = 0;
+            let mut assistant_msgs = 0;
+            let mut tool_msgs = 0;
+            let mut other_msgs = 0;
+            for msg in &self.display_messages {
+                match msg.role.as_str() {
+                    "user" => user_msgs += 1,
+                    "assistant" => assistant_msgs += 1,
+                    "tool_result" | "tool_use" => tool_msgs += 1,
+                    _ => other_msgs += 1,
+                }
+            }
+
+            crate::logging::warn(&format!(
+                "CACHE_MISS: unexpected cache miss on turn {} | \
+                 cache_creation={} cache_read={} | \
+                 input={} output={} | \
+                 session={} provider={} model={} | \
+                 msgs: user={} assistant={} tool={} other={} | \
+                 (client mode)",
+                user_turn_count,
+                cache_creation,
+                cache_read,
+                input_tokens,
+                output_tokens,
+                session_id,
+                provider,
+                model,
+                user_msgs,
+                assistant_msgs,
+                tool_msgs,
+                other_msgs
+            ));
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             // Display state
@@ -536,6 +593,9 @@ impl ClientApp {
                 }
             }
             ServerEvent::Done { .. } => {
+                // Log unexpected cache misses for debugging
+                self.log_cache_miss_if_unexpected();
+
                 if !self.streaming_text.is_empty() {
                     let content = std::mem::take(&mut self.streaming_text);
                     self.push_display_message(DisplayMessage {
