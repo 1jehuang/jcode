@@ -2,6 +2,7 @@
 #![allow(unused_assignments)]
 
 use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
+use crate::cache_tracker::CacheTracker;
 use crate::compaction::CompactionEvent;
 use crate::logging;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall, ToolDefinition};
@@ -45,6 +46,8 @@ pub struct Agent {
     /// Soft interrupt queue: messages to inject at next safe point without cancelling
     /// Uses std::sync::Mutex so it can be accessed without async, even while agent is processing
     soft_interrupt_queue: SoftInterruptQueue,
+    /// Client-side cache tracking for detecting append-only violations
+    cache_tracker: CacheTracker,
 }
 
 impl Agent {
@@ -60,6 +63,7 @@ impl Agent {
             provider_session_id: None,
             pending_alerts: Vec::new(),
             soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+            cache_tracker: CacheTracker::new(),
         };
         agent.session.model = Some(agent.provider.model());
         agent.seed_compaction_from_session();
@@ -83,6 +87,7 @@ impl Agent {
             provider_session_id: None,
             pending_alerts: Vec::new(),
             soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+            cache_tracker: CacheTracker::new(),
         };
         if let Some(model) = agent.session.model.clone() {
             if let Err(e) = agent.provider.set_model(&model) {
@@ -815,6 +820,8 @@ impl Agent {
         loop {
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
+                // Reset cache tracker on compaction since the message history changes
+                self.cache_tracker.reset();
                 if print_output {
                     let tokens_str = event
                         .pre_tokens
@@ -842,6 +849,14 @@ impl Agent {
                     memory
                 );
                 messages_with_memory.push(Message::user(&memory_msg));
+            }
+
+            // Check for client-side cache violations (fallback when provider doesn't report cache tokens)
+            if let Some(violation) = self.cache_tracker.record_request(&messages_with_memory) {
+                logging::warn(&format!(
+                    "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
+                    violation.reason, violation.turn, violation.message_count
+                ));
             }
 
             logging::info(&format!(
@@ -1351,6 +1366,8 @@ impl Agent {
         loop {
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
+                // Reset cache tracker on compaction since the message history changes
+                self.cache_tracker.reset();
                 logging::info(&format!(
                     "Context compacted ({}{})",
                     event.trigger,
@@ -1377,6 +1394,14 @@ impl Agent {
                     memory
                 );
                 messages_with_memory.push(Message::user(&memory_msg));
+            }
+
+            // Check for client-side cache violations (fallback when provider doesn't report cache tokens)
+            if let Some(violation) = self.cache_tracker.record_request(&messages_with_memory) {
+                logging::warn(&format!(
+                    "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
+                    violation.reason, violation.turn, violation.message_count
+                ));
             }
 
             let mut stream = self
@@ -1767,6 +1792,8 @@ impl Agent {
         loop {
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
+                // Reset cache tracker on compaction since the message history changes
+                self.cache_tracker.reset();
                 logging::info(&format!(
                     "Context compacted ({}{})",
                     event.trigger,
@@ -1793,6 +1820,14 @@ impl Agent {
                     memory
                 );
                 messages_with_memory.push(Message::user(&memory_msg));
+            }
+
+            // Check for client-side cache violations (fallback when provider doesn't report cache tokens)
+            if let Some(violation) = self.cache_tracker.record_request(&messages_with_memory) {
+                logging::warn(&format!(
+                    "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
+                    violation.reason, violation.turn, violation.message_count
+                ));
             }
 
             let mut stream = self
