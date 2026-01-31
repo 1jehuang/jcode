@@ -2,6 +2,10 @@
 //!
 //! Uses OpenRouter's OpenAI-compatible API to access 200+ models from various providers.
 //! Models are fetched dynamically from the API and cached to disk.
+//!
+//! Features:
+//! - Provider pinning: Set JCODE_OPENROUTER_PROVIDER to pin to a specific provider (e.g., "Fireworks")
+//! - Cache token parsing: Parses cached_tokens from OpenRouter responses for cache hit detection
 
 use super::{EventStream, Provider};
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
@@ -112,11 +116,22 @@ fn save_disk_cache(models: &[ModelInfo]) {
     }
 }
 
+/// Provider routing configuration
+#[derive(Debug, Clone, Default)]
+pub struct ProviderRouting {
+    /// List of provider slugs to try in order (e.g., ["Fireworks", "Together"])
+    pub order: Option<Vec<String>>,
+    /// Whether to allow fallbacks to other providers (default: true)
+    pub allow_fallbacks: bool,
+}
+
 pub struct OpenRouterProvider {
     client: Client,
     model: Arc<RwLock<String>>,
     api_key: String,
     models_cache: Arc<RwLock<ModelsCache>>,
+    /// Provider routing preferences
+    provider_routing: Arc<RwLock<ProviderRouting>>,
 }
 
 impl OpenRouterProvider {
@@ -127,12 +142,55 @@ impl OpenRouterProvider {
         let model = std::env::var("JCODE_OPENROUTER_MODEL")
             .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
+        // Parse provider routing from environment
+        let provider_routing = Self::parse_provider_routing();
+
         Ok(Self {
             client: Client::new(),
             model: Arc::new(RwLock::new(model)),
             api_key,
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
+            provider_routing: Arc::new(RwLock::new(provider_routing)),
         })
+    }
+
+    /// Parse provider routing configuration from environment variables
+    fn parse_provider_routing() -> ProviderRouting {
+        let mut routing = ProviderRouting {
+            order: None,
+            allow_fallbacks: true,
+        };
+
+        // JCODE_OPENROUTER_PROVIDER: comma-separated list of providers to prefer
+        // e.g., "Fireworks" or "Fireworks,Together"
+        if let Ok(providers) = std::env::var("JCODE_OPENROUTER_PROVIDER") {
+            let order: Vec<String> = providers
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !order.is_empty() {
+                routing.order = Some(order);
+            }
+        }
+
+        // JCODE_OPENROUTER_NO_FALLBACK: disable fallbacks to other providers
+        if std::env::var("JCODE_OPENROUTER_NO_FALLBACK").is_ok() {
+            routing.allow_fallbacks = false;
+        }
+
+        routing
+    }
+
+    /// Set provider routing at runtime
+    pub async fn set_provider_routing(&self, routing: ProviderRouting) {
+        let mut current = self.provider_routing.write().await;
+        *current = routing;
+    }
+
+    /// Get current provider routing
+    pub async fn get_provider_routing(&self) -> ProviderRouting {
+        self.provider_routing.read().await.clone()
     }
 
     /// Check if OPENROUTER_API_KEY is available (env var or config file)
@@ -372,6 +430,20 @@ impl Provider for OpenRouterProvider {
             request["tool_choice"] = serde_json::json!("auto");
         }
 
+        // Add provider routing if configured
+        let routing = self.provider_routing.read().await;
+        if routing.order.is_some() || !routing.allow_fallbacks {
+            let mut provider_obj = serde_json::json!({});
+            if let Some(ref order) = routing.order {
+                provider_obj["order"] = serde_json::json!(order);
+            }
+            if !routing.allow_fallbacks {
+                provider_obj["allow_fallbacks"] = serde_json::json!(false);
+            }
+            request["provider"] = provider_obj;
+        }
+        drop(routing);
+
         // Send request
         let url = format!("{}/chat/completions", API_BASE);
         let response = self
@@ -461,6 +533,12 @@ impl Provider for OpenRouterProvider {
             )),
             api_key: self.api_key.clone(),
             models_cache: Arc::clone(&self.models_cache),
+            provider_routing: Arc::new(RwLock::new(
+                self.provider_routing
+                    .try_read()
+                    .map(|r| r.clone())
+                    .unwrap_or_default(),
+            )),
         })
     }
 }
@@ -629,12 +707,36 @@ impl OpenRouterStream {
                     .get("completion_tokens")
                     .and_then(|t| t.as_u64());
 
-                if input_tokens.is_some() || output_tokens.is_some() {
+                // OpenRouter returns cached tokens in various formats depending on provider:
+                // - "cached_tokens" (OpenRouter's unified field)
+                // - "prompt_tokens_details.cached_tokens" (OpenAI-style)
+                // - "cache_read_input_tokens" (Anthropic-style, passed through)
+                let cache_read_input_tokens = usage
+                    .get("cached_tokens")
+                    .and_then(|t| t.as_u64())
+                    .or_else(|| {
+                        usage
+                            .get("prompt_tokens_details")
+                            .and_then(|d| d.get("cached_tokens"))
+                            .and_then(|t| t.as_u64())
+                    })
+                    .or_else(|| {
+                        usage
+                            .get("cache_read_input_tokens")
+                            .and_then(|t| t.as_u64())
+                    });
+
+                // Cache creation tokens (Anthropic-style, passed through for some providers)
+                let cache_creation_input_tokens = usage
+                    .get("cache_creation_input_tokens")
+                    .and_then(|t| t.as_u64());
+
+                if input_tokens.is_some() || output_tokens.is_some() || cache_read_input_tokens.is_some() {
                     self.pending.push_back(StreamEvent::TokenUsage {
                         input_tokens,
                         output_tokens,
-                        cache_read_input_tokens: None,
-                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens,
+                        cache_creation_input_tokens,
                     });
                 }
             }
