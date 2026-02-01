@@ -138,6 +138,49 @@ flowchart LR
   A3 --> Full
 ```
 
+## UI (TUI)
+
+Two real-time widgets accompany the swarm system: a swarm info widget and a plan
+info widget. Both update continuously from event streams.
+
+### Swarm info widget
+
+- Graph view of agents, worktree managers, coordinator, and channels.
+- Edges represent communication paths: DM, channel, and swarm broadcast.
+- Nodes show status (idle, running, blocked) and current task or intent.
+- Updates in real time based on communication events and tool intent events.
+
+Swarm graph view:
+
+```mermaid
+flowchart LR
+  Coord[Coordinator] -->|broadcast| A1[Agent 1]
+  Coord -->|broadcast| A2[Agent 2]
+  A1 -->|DM| A2
+  A2 -->|channel:#parser| Chan[Channel]
+  A1 -->|channel:#parser| Chan
+  WTM[Worktree Manager] --> A1
+  WTM --> A2
+```
+
+### Plan info widget
+
+- Graph view of the task DAG with dependencies.
+- Nodes show owner, scope, and status (queued, running, done, blocked, failed).
+- Checkpoints are shown as node badges or subnodes.
+- Progress is visible through completed node count and critical path status.
+- Updates in real time from plan broadcasts and task status events.
+
+Plan graph view:
+
+```mermaid
+flowchart TB
+  T1[Define API] --> T2[Refactor Parser]
+  T1 --> T3[Update Tests]
+  T2 --> T4[Integrate]
+  T3 --> T4
+```
+
 ## File Touch and Intent
 
 - File touch notifications are used for conflict detection.
