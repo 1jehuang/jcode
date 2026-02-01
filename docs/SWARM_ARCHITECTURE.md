@@ -44,12 +44,24 @@ integrate work with optional git worktrees.
 - Emit lifecycle events when they start, finish, or stop unexpectedly.
 - Cannot spawn or shut down other agents (including agents spawned by non-coordinator agents).
 
+## Agent Lifecycle States
+
+- spawned: session created, not yet ready.
+- ready: plan and scope received, waiting for work.
+- running: actively executing a task or tool.
+- blocked: cannot proceed (dependency, conflict, or missing info).
+- completed: assigned scope done, waiting for new assignment.
+- failed: unrecoverable error, needs coordinator decision.
+- stopped: intentionally shut down by coordinator.
+- crashed: unexpected exit (no clean shutdown).
+
 ## Agent Lifecycle Notifications
 
 - Each agent emits a completion event when its assigned scope is done.
 - Each agent emits a stop event when it cannot continue or exits unexpectedly.
 - The coordinator receives these events and decides next steps (respawn, rescope,
   shutdown, or mark complete).
+- Lifecycle updates drive the swarm info widget status indicators.
 
 ## User Interaction
 
