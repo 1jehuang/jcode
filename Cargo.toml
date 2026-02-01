@@ -86,7 +86,7 @@ unicode-width = "0.2"   # Unicode character display width
 pdf-extract = "0.8"
 
 # Mermaid diagram rendering (use stable commit, not local WIP)
-mermaid-rs-renderer = { git = "https://github.com/1jehuang/mermaid-rs-renderer.git", rev = "6e75a10" }
+mermaid-rs-renderer = { path = "../mermaid-rs-renderer" }
 
 [dev-dependencies]
 async-stream = "0.3"
