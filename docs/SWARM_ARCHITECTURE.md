@@ -39,6 +39,20 @@ integrate work with optional git worktrees.
 - Receive the full plan plus their scoped instructions on spawn.
 - Propose plan updates when they discover issues or new requirements.
 - Coordinate directly with other agents via DM or channels.
+- Emit lifecycle events when they start, finish, or stop unexpectedly.
+
+## Agent Lifecycle Notifications
+
+- Each agent emits a completion event when its assigned scope is done.
+- Each agent emits a stop event when it cannot continue or exits unexpectedly.
+- The coordinator receives these events and decides next steps (respawn, rescope,
+  or mark complete).
+
+## User Interaction
+
+- The user primarily interacts with the coordinator.
+- Other agents do not surface directly to the user unless the coordinator routes
+  updates or requests.
 
 ## Plan Distribution and Updates
 
