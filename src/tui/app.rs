@@ -2020,11 +2020,18 @@ impl App {
     /// Returns Some(session_id) if hot-reload was requested
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<RunResult> {
         let mut event_stream = EventStream::new();
-        let mut redraw_interval = interval(Duration::from_millis(50));
+        let mut redraw_period = super::redraw_interval(&self);
+        let mut redraw_interval = interval(redraw_period);
         // Subscribe to bus for background task completion notifications
         let mut bus_receiver = Bus::global().subscribe();
 
         loop {
+            let desired_redraw = super::redraw_interval(&self);
+            if desired_redraw != redraw_period {
+                redraw_period = desired_redraw;
+                redraw_interval = interval(redraw_period);
+            }
+
             // Draw UI
             terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
 
@@ -2166,7 +2173,8 @@ impl App {
         use super::backend::RemoteConnection;
 
         let mut event_stream = EventStream::new();
-        let mut redraw_interval = interval(Duration::from_millis(50));
+        let mut redraw_period = super::redraw_interval(&self);
+        let mut redraw_interval = interval(redraw_period);
         let mut reconnect_attempts = 0u32;
         const MAX_RECONNECT_ATTEMPTS: u32 = 30;
 
@@ -2356,6 +2364,12 @@ impl App {
 
             // Main event loop
             loop {
+                let desired_redraw = super::redraw_interval(&self);
+                if desired_redraw != redraw_period {
+                    redraw_period = desired_redraw;
+                    redraw_interval = interval(redraw_period);
+                }
+
                 terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
 
                 if self.should_quit {
@@ -5281,9 +5295,16 @@ impl App {
         terminal: &mut DefaultTerminal,
         event_stream: &mut EventStream,
     ) -> Result<()> {
-        let mut redraw_interval = interval(Duration::from_millis(50));
+        let mut redraw_period = super::redraw_interval(self);
+        let mut redraw_interval = interval(redraw_period);
 
         loop {
+            let desired_redraw = super::redraw_interval(self);
+            if desired_redraw != redraw_period {
+                redraw_period = desired_redraw;
+                redraw_interval = interval(redraw_period);
+            }
+
             if let Some(summary) = self.summarize_tool_results_missing() {
                 let message = format!(
                     "Tool outputs are missing for this turn. {}\n\nPress Ctrl+R to recover into a new session with context copied.",
