@@ -214,17 +214,24 @@ impl TuiCore {
 
     // ========== Paste Handling ==========
 
-    /// Handle paste: store content and insert placeholder
+    /// Handle paste: store content and insert placeholder (or inline for small pastes)
     pub fn handle_paste(&mut self, text: String) {
         let line_count = text.lines().count().max(1);
-        self.pasted_contents.push(text);
-        let placeholder = format!(
-            "[pasted {} line{}]",
-            line_count,
-            if line_count == 1 { "" } else { "s" }
-        );
-        self.input.insert_str(self.cursor_pos, &placeholder);
-        self.cursor_pos += placeholder.len();
+        if line_count < 5 {
+            // Small paste: insert text directly (no placeholder needed)
+            self.input.insert_str(self.cursor_pos, &text);
+            self.cursor_pos += text.len();
+        } else {
+            // Large paste: use placeholder
+            self.pasted_contents.push(text);
+            let placeholder = format!(
+                "[pasted {} line{}]",
+                line_count,
+                if line_count == 1 { "" } else { "s" }
+            );
+            self.input.insert_str(self.cursor_pos, &placeholder);
+            self.cursor_pos += placeholder.len();
+        }
     }
 
     /// Expand paste placeholders in input with actual content
@@ -470,19 +477,34 @@ mod tests {
     fn test_paste_expansion() {
         let mut core = TuiCore::new();
 
-        // Paste single line
+        // Paste single line - should be inlined (< 5 lines)
         core.handle_paste("hello".to_string());
-        assert_eq!(core.input, "[pasted 1 line]");
+        assert_eq!(core.input, "hello");
 
-        // Paste multi-line
+        // Paste multi-line (< 5 lines) - should be inlined
         core.handle_paste("a\nb\nc".to_string());
-        assert_eq!(core.input, "[pasted 1 line][pasted 3 lines]");
+        assert_eq!(core.input, "helloa\nb\nc");
+
+        // Small pastes don't use placeholders, so take_expanded_input just returns as-is
+        let (raw, expanded) = core.take_expanded_input();
+        assert_eq!(raw, "helloa\nb\nc");
+        assert_eq!(expanded, "helloa\nb\nc");
+        assert!(core.input.is_empty());
+        assert!(core.pasted_contents.is_empty());
+    }
+
+    #[test]
+    fn test_paste_large_uses_placeholder() {
+        let mut core = TuiCore::new();
+
+        // Paste 5+ lines - should use placeholder
+        core.handle_paste("a\nb\nc\nd\ne".to_string());
+        assert_eq!(core.input, "[pasted 5 lines]");
 
         // Expand
         let (raw, expanded) = core.take_expanded_input();
-        assert_eq!(raw, "[pasted 1 line][pasted 3 lines]");
-        assert_eq!(expanded, "helloa\nb\nc");
-        assert!(core.input.is_empty());
+        assert_eq!(raw, "[pasted 5 lines]");
+        assert_eq!(expanded, "a\nb\nc\nd\ne");
         assert!(core.pasted_contents.is_empty());
     }
 
