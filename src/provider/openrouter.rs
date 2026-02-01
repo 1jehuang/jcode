@@ -135,6 +135,33 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    /// Return true if this model is a Kimi K2/K2.5 variant (Moonshot).
+    fn is_kimi_model(model: &str) -> bool {
+        let lower = model.to_lowercase();
+        lower.contains("moonshotai/")
+            || lower.contains("kimi-k2")
+            || lower.contains("kimi-k2.5")
+    }
+
+    /// Parse thinking override from env. Values: "enabled"/"disabled"/"auto".
+    /// Returns Some(true)=force enable, Some(false)=force disable, None=auto.
+    fn thinking_override() -> Option<bool> {
+        let raw = std::env::var("JCODE_OPENROUTER_THINKING").ok()?;
+        let value = raw.trim().to_lowercase();
+        match value.as_str() {
+            "enabled" | "enable" | "on" | "true" | "1" => Some(true),
+            "disabled" | "disable" | "off" | "false" | "0" => Some(false),
+            "auto" | "" => None,
+            other => {
+                crate::logging::info(&format!(
+                    "Warning: Unsupported JCODE_OPENROUTER_THINKING '{}'; expected enabled/disabled/auto",
+                    other
+                ));
+                None
+            }
+        }
+    }
+
     pub fn new() -> Result<Self> {
         let api_key = Self::get_api_key()
             .ok_or_else(|| anyhow::anyhow!("OPENROUTER_API_KEY not found in environment or ~/.config/jcode/openrouter.env"))?;
@@ -428,6 +455,18 @@ impl Provider for OpenRouterProvider {
         if !api_tools.is_empty() {
             request["tools"] = serde_json::json!(api_tools);
             request["tool_choice"] = serde_json::json!("auto");
+        }
+
+        // Kimi K2.x defaults to thinking=true. When thinking is enabled, Moonshot expects
+        // reasoning_content on assistant tool-call messages, which jcode doesn't persist.
+        // Default to disabling thinking for Kimi models to avoid 400 errors.
+        let disable_thinking = match Self::thinking_override() {
+            Some(true) => false,
+            Some(false) => true,
+            None => Self::is_kimi_model(&model),
+        };
+        if disable_thinking {
+            request["thinking"] = serde_json::json!({ "type": "disabled" });
         }
 
         // Add provider routing if configured
