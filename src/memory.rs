@@ -17,8 +17,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Instant, SystemTime};
 
 // === Global Activity Tracking ===
 
@@ -27,6 +27,59 @@ static MEMORY_ACTIVITY: Mutex<Option<MemoryActivity>> = Mutex::new(None);
 
 /// Maximum number of recent events to keep
 const MAX_RECENT_EVENTS: usize = 10;
+
+// === Graph Cache ===
+
+struct GraphCacheEntry {
+    graph: MemoryGraph,
+    modified: Option<SystemTime>,
+}
+
+struct GraphCache {
+    entries: HashMap<PathBuf, GraphCacheEntry>,
+}
+
+impl GraphCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+}
+
+static GRAPH_CACHE: OnceLock<Mutex<GraphCache>> = OnceLock::new();
+
+fn graph_cache() -> &'static Mutex<GraphCache> {
+    GRAPH_CACHE.get_or_init(|| Mutex::new(GraphCache::new()))
+}
+
+fn graph_mtime(path: &PathBuf) -> Option<SystemTime> {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+}
+
+fn cached_graph(path: &PathBuf) -> Option<MemoryGraph> {
+    let modified = graph_mtime(path);
+    let cache = graph_cache().lock().ok()?;
+    let entry = cache.entries.get(path)?;
+    if entry.modified == modified {
+        Some(entry.graph.clone())
+    } else {
+        None
+    }
+}
+
+fn cache_graph(path: PathBuf, graph: &MemoryGraph) {
+    let modified = graph_mtime(&path);
+    if let Ok(mut cache) = graph_cache().lock() {
+        cache.entries.insert(
+            path,
+            GraphCacheEntry {
+                graph: graph.clone(),
+                modified,
+            },
+        );
+    }
+}
 
 // === Async Memory Buffer ===
 
@@ -970,6 +1023,16 @@ impl MemoryManager {
             }
         };
 
+        self.find_similar_with_embedding(&query_embedding, threshold, limit)
+    }
+
+    /// Find memories similar to the given embedding
+    pub fn find_similar_with_embedding(
+        &self,
+        query_embedding: &[f32],
+        threshold: f32,
+        limit: usize,
+    ) -> Result<Vec<(MemoryEntry, f32)>> {
         // Collect all memories with embeddings
         let mut all_memories: Vec<MemoryEntry> = Vec::new();
         if let Ok(project) = self.load_project_graph() {
@@ -984,7 +1047,7 @@ impl MemoryManager {
             .into_iter()
             .filter_map(|entry| {
                 entry.embedding.as_ref().map(|emb| {
-                    let sim = crate::embedding::cosine_similarity(&query_embedding, emb);
+                    let sim = crate::embedding::cosine_similarity(query_embedding, emb);
                     (entry.clone(), sim)
                 })
             })
@@ -1540,43 +1603,71 @@ impl MemoryManager {
 
     /// Load project memories as a MemoryGraph with automatic migration
     pub fn load_project_graph(&self) -> Result<MemoryGraph> {
-        match self.project_memory_path()? {
-            Some(path) if path.exists() => {
-                // Try loading as MemoryGraph first
-                if let Ok(graph) = storage::read_json::<MemoryGraph>(&path) {
-                    if graph.graph_version == GRAPH_VERSION {
-                        return Ok(graph);
-                    }
-                }
+        let Some(path) = self.project_memory_path()? else {
+            return Ok(MemoryGraph::new());
+        };
 
-                // Fall back to legacy MemoryStore and migrate
-                let store: MemoryStore = storage::read_json(&path)?;
-                let graph = MemoryGraph::from_legacy_store(store);
-
-                // Save migrated format (create backup first)
-                let backup_path = path.with_extension("json.bak");
-                if !backup_path.exists() {
-                    let _ = std::fs::copy(&path, &backup_path);
-                }
-                storage::write_json(&path, &graph)?;
-
-                crate::logging::info(&format!(
-                    "Migrated memory store to graph format: {}",
-                    path.display()
-                ));
-                Ok(graph)
+        if !self.test_mode {
+            if let Some(graph) = cached_graph(&path) {
+                return Ok(graph);
             }
-            _ => Ok(MemoryGraph::new()),
+        }
+
+        if path.exists() {
+            // Try loading as MemoryGraph first
+            if let Ok(graph) = storage::read_json::<MemoryGraph>(&path) {
+                if graph.graph_version == GRAPH_VERSION {
+                    if !self.test_mode {
+                        cache_graph(path, &graph);
+                    }
+                    return Ok(graph);
+                }
+            }
+
+            // Fall back to legacy MemoryStore and migrate
+            let store: MemoryStore = storage::read_json(&path)?;
+            let graph = MemoryGraph::from_legacy_store(store);
+
+            // Save migrated format (create backup first)
+            let backup_path = path.with_extension("json.bak");
+            if !backup_path.exists() {
+                let _ = std::fs::copy(&path, &backup_path);
+            }
+            storage::write_json(&path, &graph)?;
+
+            crate::logging::info(&format!(
+                "Migrated memory store to graph format: {}",
+                path.display()
+            ));
+            if !self.test_mode {
+                cache_graph(path, &graph);
+            }
+            Ok(graph)
+        } else {
+            let graph = MemoryGraph::new();
+            if !self.test_mode {
+                cache_graph(path, &graph);
+            }
+            Ok(graph)
         }
     }
 
     /// Load global memories as a MemoryGraph with automatic migration
     pub fn load_global_graph(&self) -> Result<MemoryGraph> {
         let path = self.global_memory_path()?;
+        if !self.test_mode {
+            if let Some(graph) = cached_graph(&path) {
+                return Ok(graph);
+            }
+        }
+
         if path.exists() {
             // Try loading as MemoryGraph first
             if let Ok(graph) = storage::read_json::<MemoryGraph>(&path) {
                 if graph.graph_version == GRAPH_VERSION {
+                    if !self.test_mode {
+                        cache_graph(path, &graph);
+                    }
                     return Ok(graph);
                 }
             }
@@ -1596,9 +1687,16 @@ impl MemoryManager {
                 "Migrated global memory store to graph format: {}",
                 path.display()
             ));
+            if !self.test_mode {
+                cache_graph(path, &graph);
+            }
             Ok(graph)
         } else {
-            Ok(MemoryGraph::new())
+            let graph = MemoryGraph::new();
+            if !self.test_mode {
+                cache_graph(path, &graph);
+            }
+            Ok(graph)
         }
     }
 
@@ -1606,6 +1704,9 @@ impl MemoryManager {
     pub fn save_project_graph(&self, graph: &MemoryGraph) -> Result<()> {
         if let Some(path) = self.project_memory_path()? {
             storage::write_json(&path, graph)?;
+            if !self.test_mode {
+                cache_graph(path, graph);
+            }
         }
         Ok(())
     }
@@ -1613,7 +1714,11 @@ impl MemoryManager {
     /// Save global memories as a MemoryGraph
     pub fn save_global_graph(&self, graph: &MemoryGraph) -> Result<()> {
         let path = self.global_memory_path()?;
-        storage::write_json(&path, graph)
+        storage::write_json(&path, graph)?;
+        if !self.test_mode {
+            cache_graph(path, graph);
+        }
+        Ok(())
     }
 
     /// Add a tag to a memory
