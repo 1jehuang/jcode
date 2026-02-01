@@ -183,6 +183,12 @@ pub fn render_mermaid(content: &str) -> RenderResult {
             background: theme.background.clone(),
         };
 
+        // Ensure parent directory exists
+        if let Some(parent) = png_path_clone.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create cache directory: {}", e))?;
+        }
+
         write_output_png(&svg, &png_path_clone, &render_config, &theme)
             .map_err(|e| format!("Render error: {}", e))?;
 
@@ -275,15 +281,10 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         area
     };
 
-    // Clear the render area to prevent text bleeding through
-    // This helps reduce flicker by ensuring a clean background
-    for y in render_area.top()..render_area.bottom() {
-        for x in render_area.left()..render_area.right() {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.reset();
-            }
-        }
-    }
+    // Note: We intentionally do NOT clear the buffer here.
+    // ratatui-image handles clearing internally via cell.set_skip(true).
+    // Manual clearing causes flicker during scroll because it wipes the
+    // Unicode placeholders before ratatui-image can redraw them.
 
     // Use Crop instead of Fit so images clip rather than rescale when space is limited
     // clip_top: false means clip the bottom when image is too tall
