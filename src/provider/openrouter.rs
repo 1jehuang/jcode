@@ -421,6 +421,10 @@ impl Provider for OpenRouterProvider {
 
                     if !tool_calls.is_empty() {
                         assistant_msg["tool_calls"] = serde_json::json!(tool_calls);
+                        // Moonshot/Kimi requires reasoning_content on tool-call messages when thinking is enabled.
+                        if Self::is_kimi_model(&model) {
+                            assistant_msg["reasoning_content"] = serde_json::json!("");
+                        }
                     }
 
                     if !text_content.is_empty() || !tool_calls.is_empty() {
@@ -457,16 +461,11 @@ impl Provider for OpenRouterProvider {
             request["tool_choice"] = serde_json::json!("auto");
         }
 
-        // Kimi K2.x defaults to thinking=true. When thinking is enabled, Moonshot expects
-        // reasoning_content on assistant tool-call messages, which jcode doesn't persist.
-        // Default to disabling thinking for Kimi models to avoid 400 errors.
-        let disable_thinking = match Self::thinking_override() {
-            Some(true) => false,
-            Some(false) => true,
-            None => Self::is_kimi_model(&model),
-        };
-        if disable_thinking {
-            request["thinking"] = serde_json::json!({ "type": "disabled" });
+        // Optional thinking override for OpenRouter (provider-specific).
+        if let Some(enable) = Self::thinking_override() {
+            request["thinking"] = serde_json::json!({
+                "type": if enable { "enabled" } else { "disabled" }
+            });
         }
 
         // Add provider routing if configured
