@@ -24,6 +24,9 @@ use std::panic;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex, OnceLock};
 
+const DEFAULT_RENDER_WIDTH: u32 = 1600;
+const DEFAULT_RENDER_HEIGHT: u32 = 1200;
+
 /// Global picker for terminal capability detection
 /// Initialized once on first use
 static PICKER: OnceLock<Option<Picker>> = OnceLock::new();
@@ -34,6 +37,14 @@ static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> =
 
 /// Image state cache - holds StatefulProtocol for each rendered image
 static IMAGE_STATE: LazyLock<Mutex<HashMap<u64, StatefulProtocol>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Pending mermaid content for lazy rendering (hash -> content)
+static PENDING_DIAGRAMS: LazyLock<Mutex<HashMap<u64, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Render errors for lazy mermaid diagrams (hash -> error message)
+static RENDER_ERRORS: LazyLock<Mutex<HashMap<u64, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Initialize the global picker by querying terminal capabilities.
@@ -47,6 +58,37 @@ pub fn protocol_type() -> Option<ProtocolType> {
     PICKER.get().and_then(|p| p.map(|p| p.protocol_type()))
 }
 
+pub fn image_protocol_available() -> bool {
+    PICKER.get().and_then(|p| *p).is_some()
+}
+
+fn has_render_error(hash: u64) -> bool {
+    RENDER_ERRORS
+        .lock()
+        .ok()
+        .map_or(false, |errors| errors.contains_key(&hash))
+}
+
+fn record_render_error(hash: u64, message: String) {
+    if let Ok(mut errors) = RENDER_ERRORS.lock() {
+        errors.insert(hash, message);
+    }
+}
+
+fn clear_render_error(hash: u64) {
+    if let Ok(mut errors) = RENDER_ERRORS.lock() {
+        errors.remove(&hash);
+    }
+}
+
+pub fn error_lines_for(hash: u64) -> Option<Vec<Line<'static>>> {
+    let message = RENDER_ERRORS
+        .lock()
+        .ok()
+        .and_then(|errors| errors.get(&hash).cloned());
+    message.map(|msg| error_to_lines(&msg))
+}
+
 /// Mermaid rendering cache
 struct MermaidCache {
     /// Map from content hash to rendered PNG path
@@ -55,6 +97,7 @@ struct MermaidCache {
     cache_dir: PathBuf,
 }
 
+#[derive(Clone)]
 struct CachedDiagram {
     path: PathBuf,
     width: u32,
@@ -90,6 +133,28 @@ impl MermaidCache {
     }
 }
 
+fn cached_diagram(hash: u64) -> Option<CachedDiagram> {
+    let mut cache = RENDER_CACHE.lock().ok()?;
+    if let Some(cached) = cache.get(hash) {
+        return Some(cached.clone());
+    }
+
+    let path = cache.cache_path(hash);
+    if path.exists() {
+        if let Some((width, height)) = get_png_dimensions(&path) {
+            let cached = CachedDiagram {
+                path,
+                width,
+                height,
+            };
+            cache.insert(hash, cached.clone());
+            return Some(cached);
+        }
+    }
+
+    None
+}
+
 /// Result of attempting to render a mermaid diagram
 pub enum RenderResult {
     /// Successfully rendered to image - includes content hash for state lookup
@@ -123,18 +188,15 @@ pub fn render_mermaid(content: &str) -> RenderResult {
     // Calculate content hash for caching
     let hash = hash_content(content);
 
-    // Check cache
-    {
-        let cache = RENDER_CACHE.lock().unwrap();
-        if let Some(cached) = cache.get(hash) {
-            if cached.path.exists() {
-                return RenderResult::Image {
-                    hash,
-                    path: cached.path.clone(),
-                    width: cached.width,
-                    height: cached.height,
-                };
-            }
+    // Check cache (in-memory or on-disk)
+    if let Some(cached) = cached_diagram(hash) {
+        if cached.path.exists() {
+            return RenderResult::Image {
+                hash,
+                path: cached.path,
+                width: cached.width,
+                height: cached.height,
+            };
         }
     }
 
@@ -178,8 +240,8 @@ pub fn render_mermaid(content: &str) -> RenderResult {
 
         // Convert SVG to PNG with larger dimensions for readability
         let render_config = RenderConfig {
-            width: 1600.0,  // Larger than default 1200
-            height: 1200.0, // Larger than default 800
+            width: DEFAULT_RENDER_WIDTH as f32,  // Larger than default 1200
+            height: DEFAULT_RENDER_HEIGHT as f32, // Larger than default 800
             background: theme.background.clone(),
         };
 
@@ -238,6 +300,61 @@ pub fn render_mermaid(content: &str) -> RenderResult {
         path: png_path,
         width,
         height,
+    }
+}
+
+/// Register mermaid content for lazy rendering
+fn register_pending(hash: u64, content: &str) {
+    if let Ok(mut pending) = PENDING_DIAGRAMS.lock() {
+        pending.entry(hash).or_insert_with(|| content.to_string());
+    }
+}
+
+/// Render mermaid lazily when image protocols are available.
+/// Falls back to immediate rendering when images aren't supported.
+pub fn render_mermaid_lazy(content: &str, max_width: Option<usize>) -> Vec<Line<'static>> {
+    if !image_protocol_available() {
+        let result = render_mermaid(content);
+        return result_to_lines(result, max_width);
+    }
+
+    let hash = hash_content(content);
+    if let Some(lines) = error_lines_for(hash) {
+        return lines;
+    }
+    register_pending(hash, content);
+
+    let max_w = max_width.map(|w| w as u16).unwrap_or(80);
+    let (width, height) = cached_diagram(hash)
+        .map(|cached| (cached.width, cached.height))
+        .unwrap_or((DEFAULT_RENDER_WIDTH, DEFAULT_RENDER_HEIGHT));
+    let estimated_height = estimate_image_height(width, height, max_w);
+
+    image_widget_placeholder(hash, estimated_height)
+}
+
+/// Ensure a mermaid diagram is rendered (called when it becomes visible)
+pub fn ensure_rendered(hash: u64) {
+    if cached_diagram(hash).is_some() {
+        clear_render_error(hash);
+        return;
+    }
+
+    if has_render_error(hash) {
+        return;
+    }
+
+    let content = if let Ok(mut pending) = PENDING_DIAGRAMS.lock() {
+        pending.remove(&hash)
+    } else {
+        None
+    };
+
+    if let Some(content) = content {
+        match render_mermaid(&content) {
+            RenderResult::Error(msg) => record_render_error(hash, msg),
+            _ => clear_render_error(hash),
+        }
     }
 }
 

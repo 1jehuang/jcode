@@ -308,9 +308,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     .unwrap_or(false);
 
                 if is_mermaid {
-                    // Render mermaid diagram
-                    let result = mermaid::render_mermaid(&code_block_content);
-                    let mermaid_lines = mermaid::result_to_lines(result, max_width);
+                    let mermaid_lines = mermaid::render_mermaid_lazy(&code_block_content, max_width);
                     lines.extend(mermaid_lines);
                 } else {
                     // Render code block with syntax highlighting (cached)
@@ -820,8 +818,7 @@ pub fn render_markdown_lazy(
                     .unwrap_or(false);
 
                 if is_mermaid {
-                    let result = mermaid::render_mermaid(&code_block_content);
-                    let mermaid_lines = mermaid::result_to_lines(result, max_width);
+                    let mermaid_lines = mermaid::render_mermaid_lazy(&code_block_content, max_width);
                     lines.extend(mermaid_lines);
                 } else {
                     // Calculate the line range this code block will occupy
@@ -1246,8 +1243,12 @@ mod tests {
 
         // The key test: it should NOT contain syntax-highlighted code (the raw mermaid source)
         // It should either be empty (image displayed) or contain mermaid metadata
+        let lower = text.to_lowercase();
         assert!(
-            lines.is_empty() || text.contains("mermaid") || text.contains("flowchart"),
+            lines.is_empty()
+                || lower.contains("mermaid")
+                || lower.contains("flowchart")
+                || lower.contains("mermaid_image"),
             "Expected mermaid handling, got: {}",
             text
         );

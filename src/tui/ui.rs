@@ -2002,6 +2002,7 @@ fn draw_messages(
 
     // Scan for mermaid image placeholders and render them separately
     let mut image_regions: Vec<(usize, u64, u16)> = Vec::new(); // (line_idx, hash, height)
+    let mut error_regions: Vec<(usize, Vec<Line<'static>>, u16)> = Vec::new(); // (line_idx, lines, height)
     for (idx, line) in visible_lines.iter().enumerate() {
         if let Some(hash) = super::mermaid::parse_image_placeholder(line) {
             // Count consecutive placeholder lines for this image
@@ -2014,7 +2015,12 @@ fn draw_messages(
                     break;
                 }
             }
-            image_regions.push((idx, hash, height));
+            if let Some(lines) = super::mermaid::error_lines_for(hash) {
+                error_regions.push((idx, lines, height));
+            } else {
+                super::mermaid::ensure_rendered(hash);
+                image_regions.push((idx, hash, height));
+            }
         }
     }
 
@@ -2024,6 +2030,16 @@ fn draw_messages(
         for i in 0..height as usize {
             if line_idx + i < visible_lines.len() {
                 visible_lines[line_idx + i] = Line::from("");
+            }
+        }
+    }
+
+    // Replace placeholder lines with error messages when rendering failed
+    for (line_idx, lines, height) in error_regions {
+        for i in 0..height as usize {
+            if line_idx + i < visible_lines.len() {
+                let line = lines.get(i).cloned().unwrap_or_else(|| Line::from(""));
+                visible_lines[line_idx + i] = line;
             }
         }
     }
