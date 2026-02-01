@@ -143,8 +143,11 @@ All agents can broadcast and send DMs or channel messages.
 
 All inter-agent communication is delivered as notifications (DMs, channel messages,
 broadcasts, plan updates, intent notices, and lifecycle events). Notifications are
-queued as soft interrupts and injected into the running agent at safe points, so
+queued as soft interrupts and injected into running agents at safe points, so
 messages can be interleaved during a turn without starting a new turn.
+
+Completed or idle agents do not resume automatically when notifications arrive.
+They only resume when the coordinator assigns new work or respawns them.
 
 Summary read and full context read are separate operations:
 
