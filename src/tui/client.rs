@@ -467,7 +467,8 @@ impl ClientApp {
             let (reader, writer) = stream.into_split();
             let mut reader = BufReader::new(reader);
             let writer = std::sync::Arc::new(tokio::sync::Mutex::new(writer));
-            let mut redraw_interval = interval(Duration::from_millis(16));
+            let mut redraw_period = super::redraw_interval(&self);
+            let mut redraw_interval = interval(redraw_period);
             let mut server_line = String::new();
 
             // Subscribe to server events and get history
@@ -513,6 +514,12 @@ impl ClientApp {
 
             // Main event loop
             loop {
+                let desired_redraw = super::redraw_interval(&self);
+                if desired_redraw != redraw_period {
+                    redraw_period = desired_redraw;
+                    redraw_interval = interval(redraw_period);
+                }
+
                 // Draw UI
                 terminal.draw(|frame| super::ui::draw(frame, &self))?;
 
