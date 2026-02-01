@@ -1160,8 +1160,24 @@ impl TuiState for ClientApp {
             None
         };
 
+        // Determine authentication method for client mode
+        let auth_method = if provider_name.contains("claude") || provider_name.contains("anthropic") {
+            if has_creds {
+                super::info_widget::AuthMethod::AnthropicOAuth
+            } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+                super::info_widget::AuthMethod::AnthropicApiKey
+            } else {
+                super::info_widget::AuthMethod::Unknown
+            }
+        } else if provider_name.contains("openrouter") {
+            super::info_widget::AuthMethod::OpenRouterApiKey
+        } else {
+            super::info_widget::AuthMethod::Unknown
+        };
+
         super::info_widget::InfoWidgetData {
             usage_info,
+            auth_method,
             ..Default::default()
         }
     }
