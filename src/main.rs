@@ -1462,6 +1462,103 @@ async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn spawn_resume_in_new_terminal(
+    exe: &std::path::Path,
+    session_id: &str,
+    cwd: &std::path::Path,
+) -> Result<bool> {
+    use std::process::{Command, Stdio};
+
+    let mut candidates: Vec<String> = Vec::new();
+    if let Ok(term) = std::env::var("JCODE_TERMINAL") {
+        if !term.trim().is_empty() {
+            candidates.push(term);
+        }
+    }
+    candidates.extend([
+        "kitty",
+        "wezterm",
+        "alacritty",
+        "gnome-terminal",
+        "konsole",
+        "xterm",
+        "foot",
+    ]
+    .iter()
+    .map(|s| s.to_string()));
+
+    for term in candidates {
+        let mut cmd = Command::new(&term);
+        cmd.current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        match term.as_str() {
+            "kitty" => {
+                cmd.args(["--title", "jcode resume", "-e"])
+                    .arg(exe)
+                    .arg("--resume")
+                    .arg(session_id);
+            }
+            "wezterm" => {
+                cmd.args([
+                    "start",
+                    "--always-new-process",
+                    "--",
+                    exe.to_string_lossy().as_ref(),
+                    "--resume",
+                    session_id,
+                ]);
+            }
+            "alacritty" => {
+                cmd.args(["-e"])
+                    .arg(exe)
+                    .arg("--resume")
+                    .arg(session_id);
+            }
+            "gnome-terminal" => {
+                cmd.args(["--", exe.to_string_lossy().as_ref(), "--resume", session_id]);
+            }
+            "konsole" => {
+                cmd.args(["-e"])
+                    .arg(exe)
+                    .arg("--resume")
+                    .arg(session_id);
+            }
+            "xterm" => {
+                cmd.args(["-e"])
+                    .arg(exe)
+                    .arg("--resume")
+                    .arg(session_id);
+            }
+            "foot" => {
+                cmd.args(["-e"])
+                    .arg(exe)
+                    .arg("--resume")
+                    .arg(session_id);
+            }
+            _ => continue,
+        }
+
+        if cmd.spawn().is_ok() {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+#[cfg(not(unix))]
+fn spawn_resume_in_new_terminal(
+    _exe: &std::path::Path,
+    _session_id: &str,
+    _cwd: &std::path::Path,
+) -> Result<bool> {
+    Ok(false)
+}
+
 /// Get the jcode repository directory (where the source code lives)
 fn get_repo_dir() -> Option<std::path::PathBuf> {
     build::get_repo_dir()
@@ -1633,24 +1730,48 @@ fn list_sessions() -> Result<()> {
                 "Recovered {} crashed session(s) from the last crash window.",
                 recovered.len()
             );
-            if recovered.len() > 1 {
-                eprintln!("Other recovered sessions:");
-                for id in recovered.iter().skip(1) {
-                    eprintln!("  jcode --resume {}", id);
+
+            let exe = std::env::current_exe()?;
+            let cwd = std::env::current_dir()?;
+            let mut spawned = 0usize;
+            let mut warned_no_terminal = false;
+
+            for session_id in recovered {
+                let mut session_cwd = cwd.clone();
+                if let Ok(session) = session::Session::load(&session_id) {
+                    if let Some(dir) = session.working_dir.as_deref() {
+                        if std::path::Path::new(dir).is_dir() {
+                            session_cwd = std::path::PathBuf::from(dir);
+                        }
+                    }
+                }
+
+                match spawn_resume_in_new_terminal(&exe, &session_id, &session_cwd) {
+                    Ok(true) => {
+                        spawned += 1;
+                    }
+                    Ok(false) => {
+                        if !warned_no_terminal {
+                            eprintln!("No supported terminal emulator found. Run these commands manually:");
+                            warned_no_terminal = true;
+                        }
+                        eprintln!("  jcode --resume {}", session_id);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to spawn session {}: {}", session_id, e);
+                    }
                 }
             }
 
-            // Exec into the most recent recovered session
-            use std::os::unix::process::CommandExt;
-            let exe = std::env::current_exe()?;
-            let cwd = std::env::current_dir()?;
-            let first = &recovered[0];
-            let err = ProcessCommand::new(&exe)
-                .arg("--resume")
-                .arg(first)
-                .current_dir(cwd)
-                .exec();
-            Err(anyhow::anyhow!("Failed to exec: {}", err))
+            if spawned == 0 && warned_no_terminal {
+                return Ok(());
+            }
+
+            if spawned == 0 {
+                anyhow::bail!("Failed to spawn any recovered sessions");
+            }
+
+            Ok(())
         }
         None => {
             // User cancelled
