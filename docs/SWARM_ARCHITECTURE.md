@@ -22,6 +22,7 @@ integrate work with optional git worktrees.
 - Creates the initial, comprehensive plan.
 - Spawns all subagents and assigns scopes.
 - Can shut down agents and spawn replacements as needed.
+- Is the only role allowed to spawn or stop agents.
 - Decides if a git worktree is needed and groups agents per worktree.
 - Reviews plan update proposals and broadcasts approved updates.
 - Can issue plan updates directly when it discovers a plan issue.
@@ -41,7 +42,7 @@ integrate work with optional git worktrees.
 - Propose plan updates when they discover issues or new requirements.
 - Coordinate directly with other agents via DM or channels.
 - Emit lifecycle events when they start, finish, or stop unexpectedly.
-- Cannot spawn or shut down other agents.
+- Cannot spawn or shut down other agents (including agents spawned by non-coordinator agents).
 
 ## Agent Lifecycle Notifications
 
@@ -59,10 +60,12 @@ integrate work with optional git worktrees.
 ## Plan Distribution and Updates
 
 - Plan v1 is created by the coordinator and sent to all agents on spawn.
-- Each agent keeps a local copy of the plan.
+- Each agent keeps a local copy of the plan and tracks the plan version.
 - Plan updates are proposed by agents and must be reviewed by the coordinator.
+- Agents must request plan changes by DMing the coordinator.
 - Only approved updates are broadcast to all agents.
 - The plan is not stored in a repo file; it is distributed on spawn and via broadcast.
+- Agents that miss a broadcast can request a plan resync from the coordinator.
 
 Plan update flow:
 
@@ -121,6 +124,8 @@ resolution. The system supports:
 - Direct messages (DMs)
 - Swarm broadcast
 - Topic channels (group chats)
+
+All agents can broadcast and send DMs or channel messages.
 
 Summary read and full context read are separate operations:
 
