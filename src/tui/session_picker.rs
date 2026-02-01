@@ -10,7 +10,7 @@ use crate::session::{self, CrashedSessionsInfo, Session, SessionStatus};
 use crate::storage;
 use crate::tui::markdown;
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -347,6 +347,8 @@ pub struct SessionPicker {
     server_count: usize,
     /// Crashed sessions pending batch restore
     crashed_sessions: Option<CrashedSessionsInfo>,
+    last_list_area: Option<Rect>,
+    last_preview_area: Option<Rect>,
 }
 
 impl SessionPicker {
@@ -372,6 +374,8 @@ impl SessionPicker {
             auto_scroll_preview: true,
             server_count: 0,
             crashed_sessions,
+            last_list_area: None,
+            last_preview_area: None,
         }
     }
 
@@ -437,6 +441,8 @@ impl SessionPicker {
             auto_scroll_preview: true,
             server_count,
             crashed_sessions,
+            last_list_area: None,
+            last_preview_area: None,
         }
     }
 
@@ -509,6 +515,36 @@ impl SessionPicker {
 
     pub fn scroll_preview_up(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_sub(3);
+    }
+
+    fn point_in_rect(col: u16, row: u16, rect: Rect) -> bool {
+        col >= rect.x
+            && col < rect.x.saturating_add(rect.width)
+            && row >= rect.y
+            && row < rect.y.saturating_add(rect.height)
+    }
+
+    fn handle_mouse_scroll(&mut self, col: u16, row: u16, kind: MouseEventKind) {
+        if let Some(preview) = self.last_preview_area {
+            if Self::point_in_rect(col, row, preview) {
+                match kind {
+                    MouseEventKind::ScrollUp => self.scroll_preview_up(),
+                    MouseEventKind::ScrollDown => self.scroll_preview_down(),
+                    _ => {}
+                }
+                return;
+            }
+        }
+
+        if let Some(list) = self.last_list_area {
+            if Self::point_in_rect(col, row, list) {
+                match kind {
+                    MouseEventKind::ScrollUp => self.previous(),
+                    MouseEventKind::ScrollDown => self.next(),
+                    _ => {}
+                }
+            }
+        }
     }
 
     fn render_session_item(&self, session: &SessionInfo, is_selected: bool) -> ListItem<'static> {
@@ -876,12 +912,35 @@ impl SessionPicker {
                     // AI messages: use actual markdown renderer
                     let max_width = (area.width as usize).saturating_sub(4);
                     let md_lines = markdown::render_markdown_with_width(&content, Some(max_width));
+                    let mut sanitized = Vec::new();
+                    let mut skip_mermaid_blank = false;
+
+                    for line in md_lines {
+                        if super::mermaid::parse_image_placeholder(&line).is_some() {
+                            sanitized.push(Line::from(vec![Span::styled(
+                                "[mermaid diagram]",
+                                Style::default().fg(DIM_COLOR),
+                            )]));
+                            skip_mermaid_blank = true;
+                            continue;
+                        }
+
+                        if skip_mermaid_blank
+                            && line.spans.len() == 1
+                            && line.spans[0].content.trim().is_empty()
+                        {
+                            continue;
+                        }
+
+                        skip_mermaid_blank = false;
+                        sanitized.push(line);
+                    }
 
                     // Take first 12 lines of rendered markdown
-                    for md_line in md_lines.into_iter().take(12) {
-                        lines.push(md_line);
-                    }
-                    if content.lines().count() > 12 {
+                    let truncated = sanitized.len() > 12;
+                    let preview_lines = sanitized.into_iter().take(12).collect::<Vec<_>>();
+                    lines.extend(preview_lines);
+                    if truncated {
                         lines.push(Line::from(vec![Span::styled(
                             "...",
                             Style::default().fg(DIM_COLOR),
@@ -1012,6 +1071,9 @@ impl SessionPicker {
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
             .split(main_area);
 
+        self.last_list_area = Some(chunks[0]);
+        self.last_preview_area = Some(chunks[1]);
+
         self.render_session_list(frame, chunks[0]);
         self.render_preview(frame, chunks[1]);
     }
@@ -1022,83 +1084,99 @@ impl SessionPicker {
         // Initialize mermaid image picker (queries terminal for graphics protocol support)
         super::mermaid::init_picker();
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
+        let mouse_capture = crate::config::config().display.mouse_capture;
+        if mouse_capture {
+            crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+        }
 
         let result = loop {
             terminal.draw(|frame| self.render(frame))?;
 
             if event::poll(Duration::from_millis(100))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind != KeyEventKind::Press {
-                        continue;
-                    }
+                match event::read()? {
+                    Event::Key(key) => {
+                        if key.kind != KeyEventKind::Press {
+                            continue;
+                        }
 
-                    match key.code {
-                        KeyCode::Esc | KeyCode::Char('q') => {
-                            break Ok(None);
-                        }
-                        KeyCode::Enter => {
-                            break Ok(self
-                                .selected_session()
-                                .map(|s| PickerResult::Selected(s.id.clone())));
-                        }
-                        KeyCode::Char('R') | KeyCode::Char('B') | KeyCode::Char('b') => {
-                            // Only allow batch restore if there are crashed sessions
-                            if self.crashed_sessions.is_some() {
-                                break Ok(Some(PickerResult::RestoreAllCrashed));
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                break Ok(None);
                             }
-                        }
-                        KeyCode::Down => {
-                            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                            KeyCode::Enter => {
+                                break Ok(self
+                                    .selected_session()
+                                    .map(|s| PickerResult::Selected(s.id.clone())));
+                            }
+                            KeyCode::Char('R') | KeyCode::Char('B') | KeyCode::Char('b') => {
+                                // Only allow batch restore if there are crashed sessions
+                                if self.crashed_sessions.is_some() {
+                                    break Ok(Some(PickerResult::RestoreAllCrashed));
+                                }
+                            }
+                            KeyCode::Down => {
+                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                    self.scroll_preview_down();
+                                } else {
+                                    self.next();
+                                }
+                            }
+                            KeyCode::Up => {
+                                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                    self.scroll_preview_up();
+                                } else {
+                                    self.previous();
+                                }
+                            }
+                            KeyCode::Char('j') | KeyCode::Char('J') => {
+                                if key.modifiers.contains(KeyModifiers::SHIFT)
+                                    || matches!(key.code, KeyCode::Char('J'))
+                                {
+                                    self.scroll_preview_down();
+                                } else {
+                                    self.next();
+                                }
+                            }
+                            KeyCode::Char('k') | KeyCode::Char('K') => {
+                                if key.modifiers.contains(KeyModifiers::SHIFT)
+                                    || matches!(key.code, KeyCode::Char('K'))
+                                {
+                                    self.scroll_preview_up();
+                                } else {
+                                    self.previous();
+                                }
+                            }
+                            KeyCode::PageDown => {
                                 self.scroll_preview_down();
-                            } else {
-                                self.next();
-                            }
-                        }
-                        KeyCode::Up => {
-                            if key.modifiers.contains(KeyModifiers::SHIFT) {
-                                self.scroll_preview_up();
-                            } else {
-                                self.previous();
-                            }
-                        }
-                        KeyCode::Char('j') | KeyCode::Char('J') => {
-                            if key.modifiers.contains(KeyModifiers::SHIFT)
-                                || matches!(key.code, KeyCode::Char('J'))
-                            {
                                 self.scroll_preview_down();
-                            } else {
-                                self.next();
+                                self.scroll_preview_down();
                             }
-                        }
-                        KeyCode::Char('k') | KeyCode::Char('K') => {
-                            if key.modifiers.contains(KeyModifiers::SHIFT)
-                                || matches!(key.code, KeyCode::Char('K'))
-                            {
+                            KeyCode::PageUp => {
                                 self.scroll_preview_up();
-                            } else {
-                                self.previous();
+                                self.scroll_preview_up();
+                                self.scroll_preview_up();
                             }
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                break Ok(None);
+                            }
+                            _ => {}
                         }
-                        KeyCode::PageDown => {
-                            self.scroll_preview_down();
-                            self.scroll_preview_down();
-                            self.scroll_preview_down();
-                        }
-                        KeyCode::PageUp => {
-                            self.scroll_preview_up();
-                            self.scroll_preview_up();
-                            self.scroll_preview_up();
-                        }
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            break Ok(None);
+                    }
+                    Event::Mouse(mouse) => match mouse.kind {
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                            self.handle_mouse_scroll(mouse.column, mouse.row, mouse.kind);
                         }
                         _ => {}
-                    }
+                    },
+                    _ => {}
                 }
             }
         };
 
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
+        if mouse_capture {
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+        }
         ratatui::restore();
 
         result
