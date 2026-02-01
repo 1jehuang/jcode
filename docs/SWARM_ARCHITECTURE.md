@@ -1,0 +1,159 @@
+# Swarm Architecture (Proposed)
+
+Status: Proposed
+
+This document captures the intended swarm coordination design based on the current
+project direction. It describes how agents coordinate, plan, communicate, and
+integrate work with optional git worktrees.
+
+## Goals
+
+- Parallel work across many agents without locks.
+- A comprehensive initial plan, but allowed to evolve as work progresses.
+- Plan distribution is out-of-band (not stored in the repo).
+- Explicit coordination via broadcast updates, DMs, and channels.
+- Optional git worktrees used only when they make sense.
+- Integration handled by worktree managers, not the coordinator.
+
+## Roles
+
+### Coordinator
+
+- Creates the initial, comprehensive plan.
+- Spawns all subagents and assigns scopes.
+- Decides if a git worktree is needed and groups agents per worktree.
+- Reviews plan update proposals and broadcasts approved updates.
+- Can issue plan updates directly when it discovers a plan issue.
+- Does not perform merges or integration.
+
+### Worktree Manager
+
+- Owns a single worktree scope.
+- Knows the full plan and the worktree scope.
+- Coordinates work inside that worktree.
+- Responsible for integration when that worktree scope is done.
+
+### Agents
+
+- Execute tasks in parallel.
+- Receive the full plan plus their scoped instructions on spawn.
+- Propose plan updates when they discover issues or new requirements.
+- Coordinate directly with other agents via DM or channels.
+
+## Plan Distribution and Updates
+
+- Plan v1 is created by the coordinator and sent to all agents on spawn.
+- Each agent keeps a local copy of the plan.
+- Plan updates are proposed by agents and must be reviewed by the coordinator.
+- Only approved updates are broadcast to all agents.
+- The plan is not stored in a repo file; it is distributed on spawn and via broadcast.
+
+Plan update flow:
+
+```mermaid
+flowchart LR
+  Agent[Agent] -->|propose update| Coordinator
+  Coordinator -->|approve update| Broadcast
+  Coordinator -->|direct update| Broadcast
+  Broadcast --> Agents[All Agents]
+```
+
+## Worktree Usage
+
+- Worktrees are optional and used only when isolation helps (large refactors,
+  risky changes, or divergent dependencies).
+- Most work should remain in the main workspace unless a worktree is justified.
+- Many agents can share a single worktree.
+- Each worktree has a Worktree Manager who owns integration.
+
+Worktree grouping:
+
+```mermaid
+flowchart TB
+  Coordinator --> Plan
+  Plan --> A1[Agent 1]
+  Plan --> A2[Agent 2]
+  Plan --> A3[Agent 3]
+  Plan --> A4[Agent 4]
+
+  Coordinator --> WTM1[Worktree Manager 1]
+  Coordinator --> WTM2[Worktree Manager 2]
+
+  WTM1 --> WT1[Worktree Group 1]
+  WT1 --> A1
+  WT1 --> A2
+
+  WTM2 --> WT2[Worktree Group 2]
+  WT2 --> A3
+  WT2 --> A4
+```
+
+Integration:
+
+```mermaid
+flowchart LR
+  WTM1 -->|integrate| Integration[Integration Branch]
+  WTM2 -->|integrate| Integration
+  Integration --> Main[Main Branch]
+```
+
+## Communication
+
+Explicit agent-to-agent communication is required for coordination and conflict
+resolution. The system supports:
+
+- Direct messages (DMs)
+- Swarm broadcast
+- Topic channels (group chats)
+
+Summary read and full context read are separate operations:
+
+- Summary read: short activity feed (tool calls with intent, brief results, and
+  optionally exposed thoughts).
+- Full context read: explicit, heavy read of an agent's full context and tool
+  outputs. This should be used sparingly to avoid context bloat.
+
+Communication topology:
+
+```mermaid
+flowchart LR
+  A1[Agent 1] -->|DM| Comms[Comms Router]
+  A2[Agent 2] -->|DM| Comms
+  A3[Agent 3] -->|DM| Comms
+
+  A1 -->|channel| Comms
+  A2 -->|channel| Comms
+  A3 -->|swarm| Comms
+
+  Comms --> A1
+  Comms --> A2
+  Comms --> A3
+
+  A1 --> Summary[Summary Feed]
+  A2 --> Summary
+  A3 --> Summary
+
+  A1 --> Full[Full Context Store]
+  A2 --> Full
+  A3 --> Full
+```
+
+## File Touch and Intent
+
+- File touch notifications are used for conflict detection.
+- An optional short `intent` field on tool calls is planned to provide a
+  preemptive summary of what a tool is trying to do.
+- Intent should be brief and is used to build the summary activity feed.
+
+## Conflict Handling (No Locks)
+
+- The system is optimistic by default (no locks).
+- Conflicts should prompt the involved agents to communicate directly.
+- Coordination happens via DM or channel, not through the coordinator.
+
+## Summary
+
+This design emphasizes parallelism, explicit communication, and optional worktree
+isolation. The coordinator is responsible for planning and plan updates; worktree
+managers are responsible for integration; agents collaborate directly to resolve
+conflicts.
