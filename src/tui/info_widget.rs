@@ -152,6 +152,23 @@ pub enum UsageProvider {
     CostBased,
 }
 
+/// Authentication method used to access the model
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthMethod {
+    #[default]
+    Unknown,
+    /// Anthropic OAuth (Claude Code CLI style)
+    AnthropicOAuth,
+    /// Anthropic API key
+    AnthropicApiKey,
+    /// OpenAI OAuth (Codex style)
+    OpenAIOAuth,
+    /// OpenAI API key
+    OpenAIApiKey,
+    /// OpenRouter API key
+    OpenRouterApiKey,
+}
+
 /// Subscription usage info for the info widget
 #[derive(Debug, Default, Clone)]
 pub struct UsageInfo {
@@ -280,6 +297,8 @@ pub struct InfoWidgetData {
     pub background_info: Option<BackgroundInfo>,
     /// Subscription usage info
     pub usage_info: Option<UsageInfo>,
+    /// Authentication method used to access the model
+    pub auth_method: AuthMethod,
 }
 
 impl InfoWidgetData {
@@ -633,8 +652,8 @@ fn calculate_widget_height(kind: WidgetKind, data: &InfoWidgetData, width: u16, 
                 return 0;
             }
             let mut h = 1u16; // Model name
-            if data.session_count.is_some() {
-                h += 1; // Session info
+            if data.auth_method != AuthMethod::Unknown {
+                h += 1; // Auth method line
             }
             h
         }
@@ -1200,6 +1219,22 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
     }
 
     lines.push(Line::from(spans));
+
+    // Auth method line
+    if data.auth_method != AuthMethod::Unknown {
+        let (icon, label, color) = match data.auth_method {
+            AuthMethod::AnthropicOAuth => ("🔐", "OAuth", Color::Rgb(255, 160, 100)),
+            AuthMethod::AnthropicApiKey => ("🔑", "API Key", Color::Rgb(180, 180, 190)),
+            AuthMethod::OpenAIOAuth => ("🔐", "OAuth", Color::Rgb(100, 200, 180)),
+            AuthMethod::OpenAIApiKey => ("🔑", "API Key", Color::Rgb(180, 180, 190)),
+            AuthMethod::OpenRouterApiKey => ("🔑", "API Key", Color::Rgb(140, 180, 255)),
+            AuthMethod::Unknown => unreachable!(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", icon), Style::default().fg(color)),
+            Span::styled(label, Style::default().fg(Color::Rgb(140, 140, 150))),
+        ]));
+    }
 
     // Usage info (combined from UsageLimits widget)
     if let Some(info) = &data.usage_info {
