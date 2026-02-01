@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub fn jcode_dir() -> Result<PathBuf> {
@@ -25,8 +26,10 @@ pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
     }
 
     let tmp_path = path.with_extension("tmp");
-    let json = serde_json::to_string_pretty(value)?;
-    std::fs::write(&tmp_path, json)?;
+    let file = std::fs::File::create(&tmp_path)?;
+    let mut writer = std::io::BufWriter::new(file);
+    serde_json::to_writer(&mut writer, value)?;
+    writer.flush()?;
     std::fs::rename(tmp_path, path)?;
     Ok(())
 }

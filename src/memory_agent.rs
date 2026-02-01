@@ -281,8 +281,8 @@ impl MemoryAgent {
         self.last_context_string = Some(context.clone());
 
         // Step 2: Find similar memories by embedding
-        let candidates = self.memory_manager.find_similar(
-            &context,
+        let candidates = self.memory_manager.find_similar_with_embedding(
+            &context_embedding,
             memory::EMBEDDING_SIMILARITY_THRESHOLD,
             memory::EMBEDDING_MAX_HITS,
         )?;
