@@ -141,6 +141,11 @@ resolution. The system supports:
 
 All agents can broadcast and send DMs or channel messages.
 
+All inter-agent communication is delivered as notifications (DMs, channel messages,
+broadcasts, plan updates, intent notices, and lifecycle events). Notifications are
+queued as soft interrupts and injected into the running agent at safe points, so
+messages can be interleaved during a turn without starting a new turn.
+
 Summary read and full context read are separate operations:
 
 - Summary read: short activity feed (tool calls with intent, brief results, and
@@ -183,7 +188,7 @@ info widget. Both update continuously from event streams.
 - Graph view of agents, worktree managers, coordinator, and channels.
 - Edges represent communication paths: DM, channel, and swarm broadcast.
 - Nodes show status (idle, running, blocked) and current task or intent.
-- Updates in real time based on communication events and tool intent events.
+- Updates in real time based on communication events, lifecycle events, and tool intent events.
 
 Swarm graph view:
 
