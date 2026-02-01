@@ -6,6 +6,7 @@ use crate::auth;
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -71,6 +72,7 @@ struct UsageWindow {
 
 /// Global usage tracker
 static USAGE: tokio::sync::OnceCell<Arc<RwLock<UsageData>>> = tokio::sync::OnceCell::const_new();
+static REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 /// Initialize or get the global usage tracker
 async fn get_usage() -> Arc<RwLock<UsageData>> {
@@ -129,6 +131,34 @@ async fn fetch_usage() -> Result<UsageData> {
     })
 }
 
+async fn refresh_usage(usage: Arc<RwLock<UsageData>>) {
+    match fetch_usage().await {
+        Ok(new_data) => {
+            *usage.write().await = new_data;
+        }
+        Err(e) => {
+            let mut data = usage.write().await;
+            data.last_error = Some(e.to_string());
+            data.fetched_at = Some(Instant::now()); // Prevent spam retries
+            crate::logging::error(&format!("Usage fetch error: {}", e));
+        }
+    }
+}
+
+fn try_spawn_refresh(usage: Arc<RwLock<UsageData>>) {
+    if REFRESH_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    tokio::spawn(async move {
+        refresh_usage(usage).await;
+        REFRESH_IN_FLIGHT.store(false, Ordering::SeqCst);
+    });
+}
+
 /// Get current usage data, refreshing if stale
 pub async fn get() -> UsageData {
     let usage = get_usage().await;
@@ -140,21 +170,7 @@ pub async fn get() -> UsageData {
     };
 
     if should_refresh {
-        // Spawn a refresh task if not already running
-        let usage_clone = usage.clone();
-        tokio::spawn(async move {
-            match fetch_usage().await {
-                Ok(new_data) => {
-                    *usage_clone.write().await = new_data;
-                }
-                Err(e) => {
-                    let mut data = usage_clone.write().await;
-                    data.last_error = Some(e.to_string());
-                    data.fetched_at = Some(Instant::now()); // Prevent spam retries
-                    crate::logging::error(&format!("Usage fetch error: {}", e));
-                }
-            }
-        });
+        try_spawn_refresh(usage.clone());
     }
 
     current_data
@@ -164,23 +180,11 @@ pub async fn get() -> UsageData {
 pub fn get_sync() -> UsageData {
     // Try to get cached data
     if let Some(usage) = USAGE.get() {
-        // Spawn async refresh if stale
-        let usage_clone = usage.clone();
-        tokio::spawn(async move {
-            let should_refresh = {
-                let data = usage_clone.read().await;
-                data.is_stale()
-            };
-
-            if should_refresh {
-                if let Ok(new_data) = fetch_usage().await {
-                    *usage_clone.write().await = new_data;
-                }
-            }
-        });
-
         // Return current cached value (blocking read)
         if let Ok(data) = usage.try_read() {
+            if data.is_stale() {
+                try_spawn_refresh(usage.clone());
+            }
             return data.clone();
         }
     }
