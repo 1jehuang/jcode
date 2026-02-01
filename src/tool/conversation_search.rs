@@ -2,7 +2,8 @@
 
 use super::{Tool, ToolContext, ToolOutput};
 use crate::compaction::CompactionManager;
-use crate::message::Role;
+use crate::message::{Message, Role};
+use crate::session::Session;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -78,9 +79,10 @@ impl Tool for ConversationSearchTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: SearchInput = serde_json::from_value(input)?;
         let manager = self.compaction.read().await;
+        let session_messages = load_session_messages(&ctx.session_id);
 
         let mut output = String::new();
 
@@ -106,7 +108,10 @@ impl Tool for ConversationSearchTool {
 
         // Handle keyword search
         if let Some(query) = params.query {
-            let results = manager.search_history(&query);
+            let results = session_messages
+                .as_deref()
+                .map(|messages| search_messages(messages, &query))
+                .unwrap_or_default();
 
             if results.is_empty() {
                 output.push_str(&format!(
@@ -139,14 +144,20 @@ impl Tool for ConversationSearchTool {
 
         // Handle turn range request
         if let Some(range) = params.turns {
-            let turns = manager.get_turns(range.start, range.end);
+            let turns = session_messages.as_deref().map(|messages| {
+                messages
+                    .iter()
+                    .skip(range.start)
+                    .take(range.end.saturating_sub(range.start))
+                    .collect::<Vec<_>>()
+            });
 
-            if turns.is_empty() {
+            if turns.as_ref().map(|t| t.is_empty()).unwrap_or(true) {
                 output.push_str(&format!(
                     "## Turns {}-{}\n\nNo turns found in that range.\n",
                     range.start, range.end
                 ));
-            } else {
+            } else if let Some(turns) = turns {
                 output.push_str(&format!("## Turns {}-{}\n\n", range.start, range.end));
 
                 for (idx, msg) in turns.iter().enumerate() {
@@ -199,23 +210,125 @@ impl Tool for ConversationSearchTool {
     }
 }
 
+/// Search result from conversation history
+struct SearchResult {
+    turn: usize,
+    role: Role,
+    snippet: String,
+}
+
+fn load_session_messages(session_id: &str) -> Option<Vec<Message>> {
+    let session = Session::load(session_id).ok()?;
+    Some(
+        session
+            .messages
+            .into_iter()
+            .map(|msg| msg.to_message())
+            .collect(),
+    )
+}
+
+fn search_messages(messages: &[Message], query: &str) -> Vec<SearchResult> {
+    let query_lower = query.to_lowercase();
+    let mut results = Vec::new();
+
+    for (idx, msg) in messages.iter().enumerate() {
+        let text = message_to_text(msg);
+        if text.to_lowercase().contains(&query_lower) {
+            let snippet = extract_snippet(&text, &query_lower);
+            results.push(SearchResult {
+                turn: idx,
+                role: msg.role.clone(),
+                snippet,
+            });
+        }
+    }
+
+    results
+}
+
+fn message_to_text(msg: &Message) -> String {
+    msg.content
+        .iter()
+        .filter_map(|block| match block {
+            crate::message::ContentBlock::Text { text, .. } => Some(text.clone()),
+            crate::message::ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn extract_snippet(text: &str, query: &str) -> String {
+    let lower = text.to_lowercase();
+    if let Some(pos) = lower.find(query) {
+        let start = pos.saturating_sub(50);
+        let end = (pos + query.len() + 50).min(text.len());
+        let mut snippet = text[start..end].to_string();
+        if start > 0 {
+            snippet = format!("...{}", snippet);
+        }
+        if end < text.len() {
+            snippet = format!("{}...", snippet);
+        }
+        snippet
+    } else {
+        text.chars().take(100).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::compaction::CompactionManager;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn create_test_tool() -> ConversationSearchTool {
         let manager = Arc::new(RwLock::new(CompactionManager::new()));
         ConversationSearchTool::new(manager)
     }
 
-    fn create_test_context() -> ToolContext {
-        ToolContext {
-            session_id: "test-session".to_string(),
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    fn setup_session(messages: Vec<Message>) -> (ToolContext, std::path::PathBuf, Option<String>) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("jcode-test-{}", nonce));
+        let _ = std::fs::create_dir_all(base.join("sessions"));
+
+        let previous_home = std::env::var("JCODE_HOME").ok();
+        std::env::set_var("JCODE_HOME", &base);
+
+        let session_id = format!("test-session-{}", nonce);
+        let mut session = Session::create_with_id(session_id.clone(), None, None);
+        for msg in messages {
+            session.add_message(msg.role.clone(), msg.content.clone());
+        }
+        session.save().unwrap();
+
+        let ctx = ToolContext {
+            session_id,
             message_id: "test-message".to_string(),
             tool_call_id: "test-tool-call".to_string(),
             working_dir: None,
+        };
+
+        (ctx, base, previous_home)
+    }
+
+    fn restore_env(base: std::path::PathBuf, previous_home: Option<String>) {
+        if let Some(prev) = previous_home {
+            std::env::set_var("JCODE_HOME", prev);
+        } else {
+            std::env::remove_var("JCODE_HOME");
         }
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
@@ -226,32 +339,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_stats() {
+        let _guard = env_lock();
         let tool = create_test_tool();
-        let ctx = create_test_context();
+        let (ctx, base, previous_home) = setup_session(Vec::new());
         let input = json!({"stats": true});
 
         let result = tool.execute(input, ctx).await.unwrap();
         assert!(result.output.contains("Conversation Stats"));
         assert!(result.output.contains("Total turns"));
+        restore_env(base, previous_home);
     }
 
     #[tokio::test]
     async fn test_empty_search() {
+        let _guard = env_lock();
         let tool = create_test_tool();
-        let ctx = create_test_context();
+        let (ctx, base, previous_home) = setup_session(Vec::new());
         let input = json!({"query": "nonexistent"});
 
         let result = tool.execute(input, ctx).await.unwrap();
         assert!(result.output.contains("No results found"));
+        restore_env(base, previous_home);
     }
 
     #[tokio::test]
     async fn test_empty_turns() {
+        let _guard = env_lock();
         let tool = create_test_tool();
-        let ctx = create_test_context();
+        let (ctx, base, previous_home) = setup_session(Vec::new());
         let input = json!({"turns": {"start": 0, "end": 5}});
 
         let result = tool.execute(input, ctx).await.unwrap();
         assert!(result.output.contains("No turns found"));
+        restore_env(base, previous_home);
     }
 }

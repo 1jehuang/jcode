@@ -82,9 +82,6 @@ pub struct CompactionManager {
     /// Used to trigger compaction with real token counts instead of only heuristics.
     observed_input_tokens: Option<u64>,
 
-    /// Full conversation history for RAG (never compacted)
-    full_history: Vec<Message>,
-
     /// Last compaction event (if any)
     last_compaction: Option<CompactionEvent>,
 }
@@ -99,7 +96,6 @@ impl CompactionManager {
             total_turns: 0,
             token_budget: DEFAULT_TOKEN_BUDGET,
             observed_input_tokens: None,
-            full_history: Vec::new(),
             last_compaction: None,
         }
     }
@@ -127,7 +123,6 @@ impl CompactionManager {
     /// Add a message to the conversation
     pub fn add_message(&mut self, message: Message) {
         self.messages.push(message.clone());
-        self.full_history.push(message);
         self.total_turns += 1;
     }
 
@@ -416,41 +411,6 @@ impl CompactionManager {
         }
     }
 
-    /// Get full history for RAG search
-    pub fn full_history(&self) -> &[Message] {
-        &self.full_history
-    }
-
-    /// Search full history by keyword
-    pub fn search_history(&self, query: &str) -> Vec<SearchResult> {
-        let query_lower = query.to_lowercase();
-        let mut results = Vec::new();
-
-        for (idx, msg) in self.full_history.iter().enumerate() {
-            let text = Self::message_to_text(msg);
-            if text.to_lowercase().contains(&query_lower) {
-                // Find matching snippet
-                let snippet = Self::extract_snippet(&text, &query_lower);
-                results.push(SearchResult {
-                    turn: idx,
-                    role: msg.role.clone(),
-                    snippet,
-                });
-            }
-        }
-
-        results
-    }
-
-    /// Get specific turns from history
-    pub fn get_turns(&self, start: usize, end: usize) -> Vec<&Message> {
-        self.full_history
-            .iter()
-            .skip(start)
-            .take(end.saturating_sub(start))
-            .collect()
-    }
-
     /// Check if compaction is in progress
     pub fn is_compacting(&self) -> bool {
         self.pending_task.is_some()
@@ -482,49 +442,12 @@ impl CompactionManager {
             .sum()
     }
 
-    fn message_to_text(msg: &Message) -> String {
-        msg.content
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text, .. } => Some(text.clone()),
-                ContentBlock::ToolResult { content, .. } => Some(content.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn extract_snippet(text: &str, query: &str) -> String {
-        let lower = text.to_lowercase();
-        if let Some(pos) = lower.find(query) {
-            let start = pos.saturating_sub(50);
-            let end = (pos + query.len() + 50).min(text.len());
-            let mut snippet = text[start..end].to_string();
-            if start > 0 {
-                snippet = format!("...{}", snippet);
-            }
-            if end < text.len() {
-                snippet = format!("{}...", snippet);
-            }
-            snippet
-        } else {
-            text.chars().take(100).collect()
-        }
-    }
 }
 
 impl Default for CompactionManager {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Search result from conversation history
-#[derive(Debug, Clone)]
-pub struct SearchResult {
-    pub turn: usize,
-    pub role: Role,
-    pub snippet: String,
 }
 
 /// Stats about compaction state
@@ -663,7 +586,6 @@ mod tests {
         manager.add_message(make_text_message(Role::Assistant, "Hi there!"));
 
         assert_eq!(manager.messages.len(), 2);
-        assert_eq!(manager.full_history.len(), 2);
         assert_eq!(manager.total_turns, 2);
     }
 
@@ -713,28 +635,6 @@ mod tests {
         manager.update_observed_input_tokens(850);
 
         assert!(manager.should_compact());
-    }
-
-    #[test]
-    fn test_search_history() {
-        let mut manager = CompactionManager::new();
-        manager.add_message(make_text_message(Role::User, "Fix the authentication bug"));
-        manager.add_message(make_text_message(Role::Assistant, "I'll look at auth.rs"));
-        manager.add_message(make_text_message(Role::User, "Also check the database"));
-
-        let results = manager.search_history("auth");
-        assert_eq!(results.len(), 2);
-    }
-
-    #[test]
-    fn test_get_turns() {
-        let mut manager = CompactionManager::new();
-        for i in 0..10 {
-            manager.add_message(make_text_message(Role::User, &format!("Turn {}", i)));
-        }
-
-        let turns = manager.get_turns(3, 6);
-        assert_eq!(turns.len(), 3);
     }
 
     #[test]
