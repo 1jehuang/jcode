@@ -334,6 +334,8 @@ pub struct App {
     streaming_output_tokens: u64,
     streaming_cache_read_tokens: Option<u64>,
     streaming_cache_creation_tokens: Option<u64>,
+    // Upstream provider (e.g., which provider OpenRouter routed to)
+    upstream_provider: Option<String>,
     // Total session token usage (accumulated across all turns)
     total_input_tokens: u64,
     total_output_tokens: u64,
@@ -535,6 +537,7 @@ impl App {
             streaming_output_tokens: 0,
             streaming_cache_read_tokens: None,
             streaming_cache_creation_tokens: None,
+            upstream_provider: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             total_cost: 0.0,
@@ -2628,6 +2631,10 @@ impl App {
                 }
                 false
             }
+            ServerEvent::UpstreamProvider { provider } => {
+                self.upstream_provider = Some(provider);
+                false
+            }
             ServerEvent::Done { id } => {
                 // Only process Done for our current message request
                 // (ignore Done events for Subscribe, GetHistory, etc.)
@@ -3622,17 +3629,24 @@ impl App {
     }
 
     /// Queue a message to be sent later
-    /// Handle paste: store content and insert placeholder
+    /// Handle paste: store content and insert placeholder (or inline for small pastes)
     fn handle_paste(&mut self, text: String) {
         let line_count = text.lines().count().max(1);
-        self.pasted_contents.push(text);
-        let placeholder = format!(
-            "[pasted {} line{}]",
-            line_count,
-            if line_count == 1 { "" } else { "s" }
-        );
-        self.input.insert_str(self.cursor_pos, &placeholder);
-        self.cursor_pos += placeholder.len();
+        if line_count < 5 {
+            // Small paste: insert text directly (no placeholder needed)
+            self.input.insert_str(self.cursor_pos, &text);
+            self.cursor_pos += text.len();
+        } else {
+            // Large paste: use placeholder
+            self.pasted_contents.push(text);
+            let placeholder = format!(
+                "[pasted {} line{}]",
+                line_count,
+                if line_count == 1 { "" } else { "s" }
+            );
+            self.input.insert_str(self.cursor_pos, &placeholder);
+            self.cursor_pos += placeholder.len();
+        }
     }
 
     /// Expand paste placeholders in input with actual content
@@ -4601,6 +4615,7 @@ impl App {
         self.streaming_output_tokens = 0;
         self.streaming_cache_read_tokens = None;
         self.streaming_cache_creation_tokens = None;
+        self.upstream_provider = None;
         self.processing_started = Some(Instant::now());
         self.pending_turn = true;
     }
@@ -4643,6 +4658,7 @@ impl App {
             self.streaming_output_tokens = 0;
             self.streaming_cache_read_tokens = None;
             self.streaming_cache_creation_tokens = None;
+            self.upstream_provider = None;
             self.processing_started = Some(Instant::now());
             self.status = ProcessingStatus::Sending;
 
@@ -5062,6 +5078,10 @@ impl App {
                         self.streaming_text.push_str(&compact_msg);
                         // Reset warning so it can appear again
                         self.context_warning_shown = false;
+                    }
+                    StreamEvent::UpstreamProvider { provider } => {
+                        // Store the upstream provider (e.g., Fireworks, Together)
+                        self.upstream_provider = Some(provider);
                     }
                     StreamEvent::ToolResult {
                         tool_use_id,
@@ -5655,6 +5675,10 @@ impl App {
                                         );
                                         self.streaming_text.push_str(&compact_msg);
                                         self.context_warning_shown = false;
+                                    }
+                                    StreamEvent::UpstreamProvider { provider } => {
+                                        // Store the upstream provider (e.g., Fireworks, Together)
+                                        self.upstream_provider = Some(provider);
                                     }
                                     StreamEvent::ToolResult { tool_use_id, content, is_error } => {
                                         // SDK already executed this tool
@@ -6553,6 +6577,11 @@ impl App {
         self.provider.model()
     }
 
+    /// Get the upstream provider (e.g., which provider OpenRouter routed to)
+    pub fn upstream_provider(&self) -> Option<&str> {
+        self.upstream_provider.as_deref()
+    }
+
     pub fn mcp_servers(&self) -> &[String] {
         &self.mcp_server_names
     }
@@ -6876,6 +6905,10 @@ impl super::TuiState for App {
         self.remote_provider_model
             .clone()
             .unwrap_or_else(|| self.provider.model().to_string())
+    }
+
+    fn upstream_provider(&self) -> Option<String> {
+        self.upstream_provider.clone()
     }
 
     fn mcp_servers(&self) -> Vec<String> {
@@ -7770,10 +7803,10 @@ mod tests {
 
         app.handle_paste("hello world".to_string());
 
-        assert_eq!(app.input(), "[pasted 1 line]");
-        assert_eq!(app.cursor_pos(), 15);
-        assert_eq!(app.pasted_contents.len(), 1);
-        assert_eq!(app.pasted_contents[0], "hello world");
+        // Small paste (< 5 lines) is inlined directly
+        assert_eq!(app.input(), "hello world");
+        assert_eq!(app.cursor_pos(), 11);
+        assert!(app.pasted_contents.is_empty()); // No placeholder storage needed
     }
 
     #[test]
@@ -7782,8 +7815,19 @@ mod tests {
 
         app.handle_paste("line 1\nline 2\nline 3".to_string());
 
-        assert_eq!(app.input(), "[pasted 3 lines]");
-        assert_eq!(app.cursor_pos(), 16);
+        // Small paste (< 5 lines) is inlined directly
+        assert_eq!(app.input(), "line 1\nline 2\nline 3");
+        assert!(app.pasted_contents.is_empty());
+    }
+
+    #[test]
+    fn test_handle_paste_large() {
+        let mut app = create_test_app();
+
+        app.handle_paste("a\nb\nc\nd\ne".to_string());
+
+        // Large paste (5+ lines) uses placeholder
+        assert_eq!(app.input(), "[pasted 5 lines]");
         assert_eq!(app.pasted_contents.len(), 1);
     }
 
@@ -7791,34 +7835,35 @@ mod tests {
     fn test_paste_expansion_on_submit() {
         let mut app = create_test_app();
 
-        // Type prefix, paste, type suffix
+        // Type prefix, paste large content, type suffix
         app.handle_key(KeyCode::Char('A'), KeyModifiers::empty())
             .unwrap();
         app.handle_key(KeyCode::Char(':'), KeyModifiers::empty())
             .unwrap();
         app.handle_key(KeyCode::Char(' '), KeyModifiers::empty())
             .unwrap();
-        app.handle_paste("pasted content".to_string());
+        // Paste 5 lines to trigger placeholder
+        app.handle_paste("1\n2\n3\n4\n5".to_string());
         app.handle_key(KeyCode::Char(' '), KeyModifiers::empty())
             .unwrap();
         app.handle_key(KeyCode::Char('B'), KeyModifiers::empty())
             .unwrap();
 
         // Input shows placeholder
-        assert_eq!(app.input(), "A: [pasted 1 line] B");
+        assert_eq!(app.input(), "A: [pasted 5 lines] B");
 
         // Submit expands placeholder
         app.submit_input();
 
         // Display shows placeholder (user sees condensed view)
         assert_eq!(app.display_messages().len(), 1);
-        assert_eq!(app.display_messages()[0].content, "A: [pasted 1 line] B");
+        assert_eq!(app.display_messages()[0].content, "A: [pasted 5 lines] B");
 
         // Model receives expanded content (actual pasted text)
         assert_eq!(app.messages.len(), 1);
         match &app.messages[0].content[0] {
             crate::message::ContentBlock::Text { text, .. } => {
-                assert_eq!(text, "A: pasted content B");
+                assert_eq!(text, "A: 1\n2\n3\n4\n5 B");
             }
             _ => panic!("Expected Text content block"),
         }
@@ -7831,21 +7876,19 @@ mod tests {
     fn test_multiple_pastes() {
         let mut app = create_test_app();
 
+        // Small pastes are inlined
         app.handle_paste("first".to_string());
         app.handle_key(KeyCode::Char(' '), KeyModifiers::empty())
             .unwrap();
         app.handle_paste("second\nline".to_string());
 
-        assert_eq!(app.input(), "[pasted 1 line] [pasted 2 lines]");
-        assert_eq!(app.pasted_contents.len(), 2);
+        // Both small pastes inlined directly
+        assert_eq!(app.input(), "first second\nline");
+        assert!(app.pasted_contents.is_empty());
 
         app.submit_input();
-        // Display shows placeholders (user sees condensed view)
-        assert_eq!(
-            app.display_messages()[0].content,
-            "[pasted 1 line] [pasted 2 lines]"
-        );
-        // Model receives expanded content
+        // Display and model both get the same content (no expansion needed)
+        assert_eq!(app.display_messages()[0].content, "first second\nline");
         match &app.messages[0].content[0] {
             crate::message::ContentBlock::Text { text, .. } => {
                 assert_eq!(text, "first second\nline");
