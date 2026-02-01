@@ -22,6 +22,8 @@ const RESPONSES_PATH: &str = "responses";
 const DEFAULT_MODEL: &str = "gpt-5.2-codex";
 const ORIGINATOR: &str = "codex_cli_rs";
 const CHATGPT_INSTRUCTIONS: &str = include_str!("../prompts/gpt-5.1-codex-max_prompt.md");
+const MISSING_TOOL_OUTPUT_MESSAGE: &str =
+    "[Error] Tool output missing (session interrupted before tool execution completed)";
 
 /// Maximum number of retries for transient errors
 const MAX_RETRIES: u32 = 3;
@@ -206,21 +208,42 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
 fn build_responses_input(messages: &[Message]) -> Vec<Value> {
     use std::collections::HashSet;
 
-    // First pass: collect all tool call IDs from ToolUse blocks
+    // First pass: collect tool call IDs and tool result IDs
     let mut tool_call_ids: HashSet<String> = HashSet::new();
+    let mut tool_result_ids: HashSet<String> = HashSet::new();
     for msg in messages {
-        if let Role::Assistant = msg.role {
-            for block in &msg.content {
-                if let ContentBlock::ToolUse { id, .. } = block {
-                    tool_call_ids.insert(id.clone());
+        match msg.role {
+            Role::Assistant => {
+                for block in &msg.content {
+                    if let ContentBlock::ToolUse { id, .. } = block {
+                        tool_call_ids.insert(id.clone());
+                    }
+                }
+            }
+            Role::User => {
+                for block in &msg.content {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                        tool_result_ids.insert(tool_use_id.clone());
+                    }
                 }
             }
         }
     }
 
+    let missing_tool_outputs: HashSet<_> =
+        tool_call_ids.difference(&tool_result_ids).cloned().collect();
+    if !missing_tool_outputs.is_empty() {
+        crate::logging::info(&format!(
+            "[openai] Injecting synthetic tool outputs for {} dangling call(s)",
+            missing_tool_outputs.len()
+        ));
+    }
+
     // Second pass: build items, filtering orphaned tool results
     let mut items = Vec::new();
     let mut skipped_results = 0;
+    let mut injected_missing = 0;
+    let mut injected_ids: HashSet<String> = HashSet::new();
 
     for msg in messages {
         match msg.role {
@@ -282,6 +305,14 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
                                 "arguments": arguments,
                                 "call_id": id
                             }));
+                            if missing_tool_outputs.contains(id) && injected_ids.insert(id.clone()) {
+                                injected_missing += 1;
+                                items.push(serde_json::json!({
+                                    "type": "function_call_output",
+                                    "call_id": id,
+                                    "output": MISSING_TOOL_OUTPUT_MESSAGE
+                                }));
+                            }
                         }
                         _ => {}
                     }
@@ -290,6 +321,12 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
         }
     }
 
+    if injected_missing > 0 {
+        crate::logging::info(&format!(
+            "[openai] Injected {} synthetic tool output(s) to prevent API error",
+            injected_missing
+        ));
+    }
     if skipped_results > 0 {
         crate::logging::info(&format!(
             "[openai] Filtered {} orphaned tool result(s) to prevent API error",
@@ -877,6 +914,7 @@ fn is_retryable_error(error_str: &str) -> bool {
         || error_str.contains("broken pipe")
         || error_str.contains("timed out")
         || error_str.contains("timeout")
+        || error_str.contains("failed to send request to openai api")
         // Stream/decode errors
         || error_str.contains("error decoding")
         || error_str.contains("error reading")
@@ -909,5 +947,127 @@ mod tests {
 
         provider.set_model("gpt-5.2-codex").unwrap();
         assert_eq!(provider.model(), "gpt-5.2-codex");
+    }
+
+    #[test]
+    fn test_build_responses_input_injects_missing_tool_output() {
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "hi".to_string(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                }],
+            },
+        ];
+
+        let items = build_responses_input(&messages);
+        let mut saw_call = false;
+        let mut saw_output = false;
+
+        for item in &items {
+            let item_type = item.get("type").and_then(|v| v.as_str());
+            match item_type {
+                Some("function_call") => {
+                    if item.get("call_id").and_then(|v| v.as_str()) == Some("call_1") {
+                        saw_call = true;
+                    }
+                }
+                Some("function_call_output") => {
+                    if item.get("call_id").and_then(|v| v.as_str()) == Some("call_1") {
+                        let output = item.get("output").and_then(|v| v.as_str());
+                        assert_eq!(output, Some(MISSING_TOOL_OUTPUT_MESSAGE));
+                        saw_output = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_call);
+        assert!(saw_output);
+    }
+
+    #[test]
+    fn test_build_responses_input_preserves_tool_output() {
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                }],
+            },
+            Message::tool_result("call_1", "ok", false),
+        ];
+
+        let items = build_responses_input(&messages);
+        let mut outputs = Vec::new();
+
+        for item in &items {
+            if item.get("type").and_then(|v| v.as_str()) == Some("function_call_output")
+                && item.get("call_id").and_then(|v| v.as_str()) == Some("call_1")
+            {
+                if let Some(output) = item.get("output").and_then(|v| v.as_str()) {
+                    outputs.push(output.to_string());
+                }
+            }
+        }
+
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0], "ok");
+    }
+
+    #[test]
+    fn test_build_responses_input_injects_only_missing_outputs() {
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_a".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "pwd"}),
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_b".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "whoami"}),
+                }],
+            },
+            Message::tool_result("call_b", "done", false),
+        ];
+
+        let items = build_responses_input(&messages);
+        let mut output_a = None;
+        let mut output_b = None;
+
+        for item in &items {
+            if item.get("type").and_then(|v| v.as_str()) == Some("function_call_output") {
+                match item.get("call_id").and_then(|v| v.as_str()) {
+                    Some("call_a") => {
+                        output_a = item.get("output").and_then(|v| v.as_str()).map(|v| v.to_string());
+                    }
+                    Some("call_b") => {
+                        output_b = item.get("output").and_then(|v| v.as_str()).map(|v| v.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        assert_eq!(output_a.as_deref(), Some(MISSING_TOOL_OUTPUT_MESSAGE));
+        assert_eq!(output_b.as_deref(), Some("done"));
     }
 }
