@@ -407,6 +407,8 @@ pub struct App {
     remote_session_id: Option<String>,
     // All sessions on the server (remote mode only)
     remote_sessions: Vec<String>,
+    // Swarm member status snapshots (remote mode only)
+    remote_swarm_members: Vec<crate::protocol::SwarmMemberStatus>,
     // Number of connected clients (remote mode only)
     remote_client_count: Option<usize>,
     // Build version tracking for auto-migration
@@ -577,6 +579,7 @@ impl App {
             tool_result_ids: HashSet::new(),
             remote_session_id: None,
             remote_sessions: Vec::new(),
+            remote_swarm_members: Vec::new(),
             known_stable_version: crate::build::read_stable_version().ok().flatten(),
             last_version_check: Some(Instant::now()),
             pending_migration: None,
@@ -668,10 +671,10 @@ impl App {
         let server_count = manager.config().servers.len();
         if server_count > 0 {
             drop(manager);
-            
+
             // Log configured servers
             crate::logging::info(&format!("MCP: Found {} server(s) in config", server_count));
-            
+
             let (successes, failures) = {
                 let manager = self.mcp_manager.write().await;
                 let result = manager.connect_all().await.unwrap_or((0, Vec::new()));
@@ -679,14 +682,14 @@ impl App {
                 self.mcp_server_names = manager.connected_servers().await;
                 result
             };
-            
+
             // Show connection results
             if successes > 0 {
                 let msg = format!("MCP: Connected to {} server(s)", successes);
                 crate::logging::info(&msg);
                 self.set_status_notice(&format!("mcp: {} connected", successes));
             }
-            
+
             if !failures.is_empty() {
                 for (name, error) in &failures {
                     let msg = format!("MCP '{}' failed: {}", name, error);
@@ -954,7 +957,10 @@ impl App {
                     self.queue_message();
                     self.debug_trace
                         .record("message", format!("queued:{}", msg));
-                    format!("OK: queued message '{}' (will send after current turn)", msg)
+                    format!(
+                        "OK: queued message '{}' (will send after current turn)",
+                        msg
+                    )
                 }
                 SendAction::Interleave => {
                     let expanded = self.expand_paste_placeholders(&self.input.clone());
@@ -2240,19 +2246,22 @@ impl App {
                                         break 'outer;
                                     }
                                     // Handle scroll keys in disconnected state
-                                    if let Some(amount) =
-                                        self.scroll_keys.scroll_amount(key.code.clone(), key.modifiers)
+                                    if let Some(amount) = self
+                                        .scroll_keys
+                                        .scroll_amount(key.code.clone(), key.modifiers)
                                     {
-                                        let max_estimate =
-                                            self.display_messages.len() * 100 + self.streaming_text.len();
+                                        let max_estimate = self.display_messages.len() * 100
+                                            + self.streaming_text.len();
                                         if amount < 0 {
-                                            self.scroll_offset =
-                                                (self.scroll_offset + (-amount) as usize).min(max_estimate);
+                                            self.scroll_offset = (self.scroll_offset
+                                                + (-amount) as usize)
+                                                .min(max_estimate);
                                         } else {
                                             self.scroll_offset =
                                                 self.scroll_offset.saturating_sub(amount as usize);
                                         }
-                                        terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
+                                        terminal
+                                            .draw(|frame| crate::tui::ui::draw(frame, &self))?;
                                     }
                                 }
                             }
@@ -2777,6 +2786,7 @@ impl App {
                     self.interleave_message = None;
                     self.pending_soft_interrupt = None;
                     self.remote_total_tokens = None;
+                    self.remote_swarm_members.clear();
                 }
                 // Store provider info for UI display
                 if let Some(name) = provider_name {
@@ -2807,6 +2817,10 @@ impl App {
                         });
                     }
                 }
+                false
+            }
+            ServerEvent::SwarmStatus { members } => {
+                self.remote_swarm_members = members;
                 false
             }
             ServerEvent::ModelChanged { model, error, .. } => {
@@ -3033,7 +3047,8 @@ impl App {
                         // Send soft interrupt immediately
                         if let Err(e) = remote.soft_interrupt(expanded, false).await {
                             self.push_display_message(DisplayMessage::error(format!(
-                                "Failed to queue soft interrupt: {}", e
+                                "Failed to queue soft interrupt: {}",
+                                e
                             )));
                         } else {
                             self.set_status_notice("⏭ Queued for injection");
@@ -3256,7 +3271,8 @@ impl App {
                             // Send soft interrupt immediately
                             if let Err(e) = remote.soft_interrupt(expanded, false).await {
                                 self.push_display_message(DisplayMessage::error(format!(
-                                    "Failed to queue soft interrupt: {}", e
+                                    "Failed to queue soft interrupt: {}",
+                                    e
                                 )));
                             } else {
                                 self.set_status_notice("⏭ Queued for injection");
@@ -3826,7 +3842,11 @@ impl App {
                         manager.token_budget() / 1000,
                         stats.context_usage * 100.0,
                         if stats.has_summary { "yes" } else { "no" },
-                        if stats.is_compacting { "in progress..." } else { "no" }
+                        if stats.is_compacting {
+                            "in progress..."
+                        } else {
+                            "no"
+                        }
                     );
 
                     match manager.force_compact(self.provider.clone()) {
@@ -3876,7 +3896,7 @@ impl App {
         // Handle /remember command - extract memories from current conversation
         if trimmed == "/remember" {
             use crate::tui::info_widget::{MemoryEventKind, MemoryState};
-            
+
             // Format context for extraction
             let context = crate::memory::format_context_for_relevance(&self.messages);
             if context.len() < 100 {
@@ -3901,11 +3921,11 @@ impl App {
             });
 
             // Update memory state for UI
-            crate::memory::set_state(MemoryState::Extracting { 
-                reason: "manual".to_string() 
+            crate::memory::set_state(MemoryState::Extracting {
+                reason: "manual".to_string(),
             });
-            crate::memory::add_event(MemoryEventKind::ExtractionStarted { 
-                reason: "/remember command".to_string() 
+            crate::memory::add_event(MemoryEventKind::ExtractionStarted {
+                reason: "/remember command".to_string(),
             });
 
             // Spawn extraction in background
@@ -3944,7 +3964,9 @@ impl App {
                             "/remember: extracted {} memories",
                             stored_count
                         ));
-                        crate::memory::add_event(MemoryEventKind::ExtractionComplete { count: stored_count });
+                        crate::memory::add_event(MemoryEventKind::ExtractionComplete {
+                            count: stored_count,
+                        });
                         crate::memory::set_state(MemoryState::Idle);
                     }
                     Ok(_) => {
@@ -3953,7 +3975,9 @@ impl App {
                     }
                     Err(e) => {
                         crate::logging::error(&format!("/remember failed: {}", e));
-                        crate::memory::add_event(MemoryEventKind::Error { message: e.to_string() });
+                        crate::memory::add_event(MemoryEventKind::Error {
+                            message: e.to_string(),
+                        });
                         crate::memory::set_state(MemoryState::Idle);
                     }
                 }
@@ -6022,7 +6046,10 @@ impl App {
     }
 
     /// Build split system prompt for better caching
-    fn build_system_prompt_split(&mut self, memory_prompt: Option<&str>) -> crate::prompt::SplitSystemPrompt {
+    fn build_system_prompt_split(
+        &mut self,
+        memory_prompt: Option<&str>,
+    ) -> crate::prompt::SplitSystemPrompt {
         let skill_prompt = self
             .active_skill
             .as_ref()
@@ -6296,8 +6323,14 @@ impl App {
             ("/model".into(), "List or switch models"),
             ("/clear".into(), "Clear conversation history"),
             ("/rewind".into(), "Rewind conversation to previous message"),
-            ("/compact".into(), "Compact context (summarize old messages)"),
-            ("/remember".into(), "Extract and save memories from conversation"),
+            (
+                "/compact".into(),
+                "Compact context (summarize old messages)",
+            ),
+            (
+                "/remember".into(),
+                "Extract and save memories from conversation",
+            ),
             ("/version".into(), "Show current version"),
             ("/info".into(), "Show session info and tokens"),
             ("/reload".into(), "Smart reload (if newer binary exists)"),
@@ -6832,7 +6865,8 @@ impl App {
         // Only calculate cost for API-key providers
         if !provider_name.contains("openrouter")
             && !provider_name.contains("anthropic")
-            && !provider_name.contains("openai") {
+            && !provider_name.contains("openai")
+        {
             return;
         }
 
@@ -6844,12 +6878,13 @@ impl App {
         }
 
         // Default pricing (will be cached after first turn)
-        let prompt_price = *self.cached_prompt_price.get_or_insert(15.0);  // $15/1M tokens default
-        let completion_price = *self.cached_completion_price.get_or_insert(60.0);  // $60/1M tokens default
+        let prompt_price = *self.cached_prompt_price.get_or_insert(15.0); // $15/1M tokens default
+        let completion_price = *self.cached_completion_price.get_or_insert(60.0); // $60/1M tokens default
 
         // Calculate cost for this turn
         let prompt_cost = (self.streaming_input_tokens as f32 * prompt_price) / 1_000_000.0;
-        let completion_cost = (self.streaming_output_tokens as f32 * completion_price) / 1_000_000.0;
+        let completion_cost =
+            (self.streaming_output_tokens as f32 * completion_price) / 1_000_000.0;
         self.total_cost += prompt_cost + completion_cost;
     }
 }
@@ -7231,24 +7266,74 @@ impl super::TuiState for App {
         // Gather swarm info
         let swarm_info = {
             let subagent_status = self.subagent_status.clone();
-            let (session_count, client_count, session_names) = if self.is_remote {
+            let mut members: Vec<crate::protocol::SwarmMemberStatus> = Vec::new();
+            let (session_count, client_count, session_names, has_activity) = if self.is_remote {
+                members = self.remote_swarm_members.clone();
+                let session_names = if !members.is_empty() {
+                    members
+                        .iter()
+                        .map(|m| {
+                            m.friendly_name
+                                .clone()
+                                .unwrap_or_else(|| m.session_id.chars().take(8).collect())
+                        })
+                        .collect()
+                } else {
+                    self.remote_sessions.clone()
+                };
+                let session_count = if !members.is_empty() {
+                    members.len()
+                } else {
+                    self.remote_sessions.len()
+                };
+                let has_activity = members
+                    .iter()
+                    .any(|m| m.status != "ready" || m.detail.is_some());
                 (
-                    self.remote_sessions.len(),
+                    session_count,
                     self.remote_client_count,
-                    self.remote_sessions.clone(),
+                    session_names,
+                    has_activity,
                 )
             } else {
-                // In local mode, just show current session
-                (1, None, vec![self.session.id.clone()])
+                let (status, detail) = match &self.status {
+                    ProcessingStatus::Idle => ("ready".to_string(), None),
+                    ProcessingStatus::Sending => {
+                        ("running".to_string(), Some("sending".to_string()))
+                    }
+                    ProcessingStatus::Streaming => {
+                        ("running".to_string(), Some("streaming".to_string()))
+                    }
+                    ProcessingStatus::RunningTool(name) => {
+                        ("running".to_string(), Some(format!("tool: {}", name)))
+                    }
+                };
+                let detail = subagent_status.clone().or(detail);
+                let has_activity = status != "ready" || detail.is_some();
+                if has_activity {
+                    members.push(crate::protocol::SwarmMemberStatus {
+                        session_id: self.session.id.clone(),
+                        friendly_name: Some(self.session.display_name().to_string()),
+                        status,
+                        detail,
+                    });
+                }
+                (
+                    1,
+                    None,
+                    vec![self.session.display_name().to_string()],
+                    has_activity,
+                )
             };
 
             // Only show if there's something interesting
-            if subagent_status.is_some() || session_count > 1 || client_count.is_some() {
+            if has_activity || session_count > 1 || client_count.is_some() {
                 Some(super::info_widget::SwarmInfo {
                     session_count,
                     subagent_status,
                     client_count,
                     session_names,
+                    members,
                 })
             } else {
                 None
@@ -7300,7 +7385,10 @@ impl super::TuiState for App {
                     output_tokens: 0,
                     available: true,
                 })
-            } else if is_api_key_provider || self.total_input_tokens > 0 || self.total_output_tokens > 0 {
+            } else if is_api_key_provider
+                || self.total_input_tokens > 0
+                || self.total_output_tokens > 0
+            {
                 // Show costs for API-key providers (OpenRouter, direct API key)
                 // Also show if we have any token usage
                 Some(super::info_widget::UsageInfo {
@@ -7814,7 +7902,8 @@ mod tests {
             app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
                 .unwrap();
         }
-        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
 
         // Should be in interleave_message, not queued
         assert_eq!(app.interleave_message.as_deref(), Some("urgent"));
@@ -8052,7 +8141,11 @@ mod tests {
         // Test 1: When not processing, should submit directly
         app.is_processing = false;
         let result = app.handle_debug_command("message:hello");
-        assert!(result.starts_with("OK: submitted message"), "Expected submitted, got: {}", result);
+        assert!(
+            result.starts_with("OK: submitted message"),
+            "Expected submitted, got: {}",
+            result
+        );
         // The message should be processed (added to messages and pending_turn set)
         assert!(app.pending_turn);
         assert_eq!(app.messages.len(), 1);
@@ -8065,7 +8158,11 @@ mod tests {
         app.is_processing = true;
         app.queue_mode = true;
         let result = app.handle_debug_command("message:queued_msg");
-        assert!(result.contains("queued"), "Expected queued, got: {}", result);
+        assert!(
+            result.contains("queued"),
+            "Expected queued, got: {}",
+            result
+        );
         assert_eq!(app.queued_count(), 1);
         assert_eq!(app.queued_messages()[0], "queued_msg");
 
@@ -8073,7 +8170,11 @@ mod tests {
         app.queued_messages.clear();
         app.queue_mode = false;
         let result = app.handle_debug_command("message:interleave_msg");
-        assert!(result.contains("interleave"), "Expected interleave, got: {}", result);
+        assert!(
+            result.contains("interleave"),
+            "Expected interleave, got: {}",
+            result
+        );
         assert_eq!(app.interleave_message.as_deref(), Some("interleave_msg"));
     }
 }
