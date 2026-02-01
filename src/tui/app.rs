@@ -7317,6 +7317,41 @@ impl super::TuiState for App {
             }
         };
 
+        // Determine authentication method
+        let auth_method = if self.is_remote {
+            super::info_widget::AuthMethod::Unknown
+        } else {
+            let provider_name = self.provider.name().to_lowercase();
+            if provider_name.contains("anthropic") || provider_name.contains("claude") {
+                // Check if using OAuth or API key
+                if crate::auth::claude::has_credentials() {
+                    super::info_widget::AuthMethod::AnthropicOAuth
+                } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+                    super::info_widget::AuthMethod::AnthropicApiKey
+                } else {
+                    super::info_widget::AuthMethod::Unknown
+                }
+            } else if provider_name.contains("openai") {
+                // Check if using OAuth or API key
+                match crate::auth::codex::load_credentials() {
+                    Ok(creds) if !creds.refresh_token.is_empty() => {
+                        super::info_widget::AuthMethod::OpenAIOAuth
+                    }
+                    _ => {
+                        if std::env::var("OPENAI_API_KEY").is_ok() {
+                            super::info_widget::AuthMethod::OpenAIApiKey
+                        } else {
+                            super::info_widget::AuthMethod::Unknown
+                        }
+                    }
+                }
+            } else if provider_name.contains("openrouter") {
+                super::info_widget::AuthMethod::OpenRouterApiKey
+            } else {
+                super::info_widget::AuthMethod::Unknown
+            }
+        };
+
         super::info_widget::InfoWidgetData {
             todos,
             context_info,
@@ -7330,6 +7365,7 @@ impl super::TuiState for App {
             swarm_info,
             background_info,
             usage_info,
+            auth_method,
         }
     }
 
