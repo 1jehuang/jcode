@@ -170,6 +170,10 @@ impl TuiState for BenchState {
         self.provider_model.clone()
     }
 
+    fn upstream_provider(&self) -> Option<String> {
+        None
+    }
+
     fn mcp_servers(&self) -> Vec<String> {
         Vec::new()
     }
