@@ -552,6 +552,8 @@ struct OpenRouterStream {
     buffer: String,
     pending: VecDeque<StreamEvent>,
     current_tool_call: Option<ToolCallAccumulator>,
+    /// Track if we've emitted the provider info (only emit once)
+    provider_emitted: bool,
 }
 
 #[derive(Default)]
@@ -568,6 +570,7 @@ impl OpenRouterStream {
             buffer: String::new(),
             pending: VecDeque::new(),
             current_tool_call: None,
+            provider_emitted: false,
         }
     }
 
@@ -601,6 +604,17 @@ impl OpenRouterStream {
                 Ok(v) => v,
                 Err(_) => continue,
             };
+
+            // Extract upstream provider info (only emit once)
+            // OpenRouter returns "provider" field indicating which provider handled the request
+            if !self.provider_emitted {
+                if let Some(provider) = parsed.get("provider").and_then(|p| p.as_str()) {
+                    self.provider_emitted = true;
+                    self.pending.push_back(StreamEvent::UpstreamProvider {
+                        provider: provider.to_string(),
+                    });
+                }
+            }
 
             // Check for error
             if let Some(error) = parsed.get("error") {

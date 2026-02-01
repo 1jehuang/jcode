@@ -1046,6 +1046,12 @@ impl Agent {
                             break;
                         }
                     }
+                    StreamEvent::UpstreamProvider { provider } => {
+                        // Log upstream provider for local trace output
+                        if trace {
+                            eprintln!("[trace] upstream_provider={}", provider);
+                        }
+                    }
                     StreamEvent::Compaction {
                         trigger,
                         pre_tokens,
@@ -1550,6 +1556,9 @@ impl Agent {
                             let _ = sender.send(native_result).await;
                         }
                     }
+                    StreamEvent::UpstreamProvider { provider } => {
+                        let _ = event_tx.send(ServerEvent::UpstreamProvider { provider });
+                    }
                     StreamEvent::Error { message, .. } => {
                         return Err(anyhow::anyhow!("Stream error: {}", message));
                     }
@@ -1972,6 +1981,9 @@ impl Agent {
                         if let Some(sender) = self.provider.native_result_sender() {
                             let _ = sender.send(native_result).await;
                         }
+                    }
+                    StreamEvent::UpstreamProvider { provider } => {
+                        let _ = event_tx.send(ServerEvent::UpstreamProvider { provider });
                     }
                     StreamEvent::Error { message, .. } => {
                         return Err(anyhow::anyhow!("Stream error: {}", message));

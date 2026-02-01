@@ -214,6 +214,10 @@ pub enum ServerEvent {
         cache_creation_input: Option<u64>,
     },
 
+    /// Upstream provider info (e.g., which provider OpenRouter routed to)
+    #[serde(rename = "upstream_provider")]
+    UpstreamProvider { provider: String },
+
     /// Soft interrupt message was injected at a safe point
     #[serde(rename = "soft_interrupt_injected")]
     SoftInterruptInjected {

@@ -53,6 +53,7 @@ pub struct ClientApp {
     streaming_output_tokens: u64,
     streaming_cache_read_tokens: Option<u64>,
     streaming_cache_creation_tokens: Option<u64>,
+    upstream_provider: Option<String>,
     total_input_tokens: u64,
     total_output_tokens: u64,
     total_cost: f32,
@@ -176,6 +177,7 @@ impl ClientApp {
             streaming_output_tokens: 0,
             streaming_cache_read_tokens: None,
             streaming_cache_creation_tokens: None,
+            upstream_provider: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             total_cost: 0.0,
@@ -592,6 +594,9 @@ impl ClientApp {
                     self.streaming_cache_creation_tokens = cache_creation_input;
                 }
             }
+            ServerEvent::UpstreamProvider { provider } => {
+                self.upstream_provider = Some(provider);
+            }
             ServerEvent::Done { .. } => {
                 // Log unexpected cache misses for debugging
                 self.log_cache_miss_if_unexpected();
@@ -709,6 +714,7 @@ impl ClientApp {
                     self.streaming_output_tokens = 0;
                     self.streaming_cache_read_tokens = None;
                     self.streaming_cache_creation_tokens = None;
+                    self.upstream_provider = None;
                     self.processing_started = None;
                     self.last_activity = None;
                     self.is_processing = false;
@@ -887,6 +893,7 @@ impl ClientApp {
                         w.write_all(json.as_bytes()).await?;
 
                         self.is_processing = true;
+                        self.upstream_provider = None;
                     }
                 }
             }
@@ -977,6 +984,11 @@ impl TuiState for ClientApp {
 
     fn provider_model(&self) -> String {
         self.provider_model.clone()
+    }
+
+    fn upstream_provider(&self) -> Option<String> {
+        // Client doesn't track upstream provider yet
+        None
     }
 
     fn mcp_servers(&self) -> Vec<String> {
