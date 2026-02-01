@@ -272,9 +272,9 @@ Server State:
 ┌─────────────────────────────────────────────────────────────────┐
 │ sessions: HashMap<String, Arc<Mutex<Agent>>>                   │
 │ swarm_members: HashMap<String, SwarmMember>                    │
-│ swarms_by_cwd: HashMap<PathBuf, HashSet<String>>              │
+│ swarms_by_id: HashMap<String, HashSet<String>>                │
 │ file_touches: HashMap<PathBuf, Vec<FileAccess>>               │
-│ shared_context: HashMap<PathBuf, HashMap<String, SharedCtx>>  │
+│ shared_context: HashMap<String, HashMap<String, SharedCtx>>   │
 │ event_tx: broadcast::Sender<ServerEvent>                       │
 └─────────────────────────────────────────────────────────────────┘
 
@@ -304,7 +304,8 @@ Request types:  Message, Cancel, Clear, Ping, Subscribe, GetHistory,
                 CommShare, CommRead, CommMessage, CommList
 
 Event types:    Ack, TextDelta, ToolStart, ToolResult, TurnComplete,
-                Error, History, TokenUsage, ModelChanged, Notification
+                Error, History, TokenUsage, ModelChanged, Notification,
+                SwarmStatus
 ```
 
 </details>
