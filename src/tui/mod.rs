@@ -176,6 +176,33 @@ pub struct RouteOption {
     pub detail: String,
 }
 
+pub(crate) const REDRAW_FAST: Duration = Duration::from_millis(50);
+pub(crate) const REDRAW_IDLE: Duration = Duration::from_millis(250);
+pub(crate) const REDRAW_DEEP_IDLE: Duration = Duration::from_millis(1000);
+const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
+
+pub(crate) fn should_animate(state: &dyn TuiState) -> bool {
+    state.is_processing()
+        || state.status_notice().is_some()
+        || state.rate_limit_remaining().is_some()
+}
+
+pub(crate) fn redraw_interval(state: &dyn TuiState) -> Duration {
+    if should_animate(state) {
+        return REDRAW_FAST;
+    }
+
+    let deep_idle = state
+        .time_since_activity()
+        .map(|d| d >= REDRAW_DEEP_IDLE_AFTER)
+        .unwrap_or(false);
+    if deep_idle {
+        REDRAW_DEEP_IDLE
+    } else {
+        REDRAW_IDLE
+    }
+}
+
 pub(crate) fn subscribe_metadata() -> (Option<String>, Option<bool>) {
     let working_dir = std::env::current_dir().ok();
     let working_dir_str = working_dir.as_ref().map(|p| p.display().to_string());
