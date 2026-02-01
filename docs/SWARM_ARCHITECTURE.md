@@ -21,6 +21,7 @@ integrate work with optional git worktrees.
 
 - Creates the initial, comprehensive plan.
 - Spawns all subagents and assigns scopes.
+- Can shut down agents and spawn replacements as needed.
 - Decides if a git worktree is needed and groups agents per worktree.
 - Reviews plan update proposals and broadcasts approved updates.
 - Can issue plan updates directly when it discovers a plan issue.
@@ -40,13 +41,14 @@ integrate work with optional git worktrees.
 - Propose plan updates when they discover issues or new requirements.
 - Coordinate directly with other agents via DM or channels.
 - Emit lifecycle events when they start, finish, or stop unexpectedly.
+- Cannot spawn or shut down other agents.
 
 ## Agent Lifecycle Notifications
 
 - Each agent emits a completion event when its assigned scope is done.
 - Each agent emits a stop event when it cannot continue or exits unexpectedly.
 - The coordinator receives these events and decides next steps (respawn, rescope,
-  or mark complete).
+  shutdown, or mark complete).
 
 ## User Interaction
 
