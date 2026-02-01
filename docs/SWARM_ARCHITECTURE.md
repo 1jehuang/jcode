@@ -84,6 +84,8 @@ flowchart LR
 - Most work should remain in the main workspace unless a worktree is justified.
 - Many agents can share a single worktree.
 - Each worktree has a Worktree Manager who owns integration.
+- Each worktree is assigned a logical `swarm_id` so communication, plan updates,
+  and UI views span all worktrees in the same swarm.
 
 Worktree grouping:
 
