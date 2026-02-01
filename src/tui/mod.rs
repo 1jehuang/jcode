@@ -43,6 +43,8 @@ pub trait TuiState {
     fn scroll_offset(&self) -> usize;
     fn provider_name(&self) -> String;
     fn provider_model(&self) -> String;
+    /// Upstream provider (e.g., which provider OpenRouter routed to)
+    fn upstream_provider(&self) -> Option<String>;
     fn mcp_servers(&self) -> Vec<String>;
     fn available_skills(&self) -> Vec<String>;
     fn streaming_tokens(&self) -> (u64, u64);

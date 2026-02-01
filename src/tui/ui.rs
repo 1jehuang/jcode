@@ -1035,21 +1035,21 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     // Use packed layout when content fits, scrolling layout otherwise
     let use_packed = content_height + fixed_height <= available_height;
 
-    // Layout: messages (includes header), status, queued, input
+    // Layout: messages (includes header), queued, status, input
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if use_packed {
             [
                 Constraint::Length(content_height.max(1)), // Messages (exact height)
+                Constraint::Length(queued_height),         // Queued messages (above status)
                 Constraint::Length(1),                     // Status line
-                Constraint::Length(queued_height),         // Queued messages
                 Constraint::Length(input_height),          // Input
             ]
         } else {
             [
                 Constraint::Min(3),                // Messages (scrollable)
+                Constraint::Length(queued_height), // Queued messages (above status)
                 Constraint::Length(1),             // Status line
-                Constraint::Length(queued_height), // Queued messages
                 Constraint::Length(input_height),  // Input
             ]
         })
@@ -1060,10 +1060,10 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         capture.layout.use_packed = use_packed;
         capture.layout.estimated_content_height = content_height as usize;
         capture.layout.messages_area = Some(chunks[0].into());
-        capture.layout.status_area = Some(chunks[1].into());
         if queued_height > 0 {
-            capture.layout.queued_area = Some(chunks[2].into());
+            capture.layout.queued_area = Some(chunks[1].into());
         }
+        capture.layout.status_area = Some(chunks[2].into());
         capture.layout.input_area = Some(chunks[3].into());
         capture.layout.input_lines_raw = app.input().lines().count().max(1);
         capture.layout.input_lines_wrapped = base_input_height as usize;
@@ -1110,10 +1110,10 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     let draw_start = Instant::now();
     let margins = draw_messages(frame, app, chunks[0], &prepared);
     let draw_elapsed = draw_start.elapsed();
-    draw_status(frame, app, chunks[1]);
     if queued_height > 0 {
-        draw_queued(frame, app, chunks[2], user_count + 1);
+        draw_queued(frame, app, chunks[1], user_count + 1);
     }
+    draw_status(frame, app, chunks[2], pending_count);
     draw_input(
         frame,
         app,
@@ -1293,11 +1293,17 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     };
 
     let model = app.provider_model();
+    let upstream = app.upstream_provider();
 
-    // Line: Full model ID (dimmed) + hint to switch
+    // Line: Full model ID (dimmed) + upstream provider if available + hint to switch
+    let model_info = if let Some(ref provider) = upstream {
+        format!("{} via {} · /model to switch", model, provider)
+    } else {
+        format!("{} · /model to switch", model)
+    };
     lines.push(
         Line::from(Span::styled(
-            format!("{} · /model to switch", model),
+            model_info,
             Style::default().fg(DIM_COLOR),
         ))
         .alignment(align),
@@ -2121,7 +2127,7 @@ fn format_elapsed(secs: f32) -> String {
     }
 }
 
-fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
+fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count: usize) {
     let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
     let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
     
@@ -2131,6 +2137,13 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let unexpected_cache_miss = user_turn_count > 1 
         && cache_creation.unwrap_or(0) > 0 
         && cache_read.unwrap_or(0) == 0;
+    
+    // Helper to append queued count indicator
+    let queued_suffix = if pending_count > 0 {
+        format!(" · +{} queued", pending_count)
+    } else {
+        String::new()
+    };
 
     let line = if let Some(notice) = app.status_notice() {
         Line::from(vec![Span::styled(
@@ -2153,12 +2166,6 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         let secs = remaining.as_secs();
         let spinner_idx = (elapsed * 4.0) as usize % SPINNER_FRAMES.len();
         let spinner = SPINNER_FRAMES[spinner_idx];
-        let pending_count = pending_prompt_count(app);
-        let queued_info = if pending_count > 0 {
-            format!(" (+{} queued)", pending_count)
-        } else {
-            String::new()
-        };
         // Format time remaining in a human-readable way
         let time_str = if secs >= 3600 {
             let hours = secs / 3600;
@@ -2176,7 +2183,7 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             Span::styled(
                 format!(
                     " Rate limited. Auto-retry in {}...{}",
-                    time_str, queued_info
+                    time_str, queued_suffix
                 ),
                 Style::default().fg(Color::Rgb(255, 193, 7)),
             ),
@@ -2188,13 +2195,19 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
         match app.status() {
             ProcessingStatus::Idle => Line::from(""),
-            ProcessingStatus::Sending => Line::from(vec![
-                Span::styled(spinner, Style::default().fg(AI_COLOR)),
-                Span::styled(
-                    format!(" sending… {}", format_elapsed(elapsed)),
-                    Style::default().fg(DIM_COLOR),
-                ),
-            ]),
+            ProcessingStatus::Sending => {
+                let mut spans = vec![
+                    Span::styled(spinner, Style::default().fg(AI_COLOR)),
+                    Span::styled(
+                        format!(" sending… {}", format_elapsed(elapsed)),
+                        Style::default().fg(DIM_COLOR),
+                    ),
+                ];
+                if !queued_suffix.is_empty() {
+                    spans.push(Span::styled(queued_suffix.clone(), Style::default().fg(QUEUED_COLOR)));
+                }
+                Line::from(spans)
+            }
             ProcessingStatus::Streaming => {
                 // Show stale indicator if no activity for >2s
                 let time_str = format_elapsed(elapsed);
@@ -2211,10 +2224,14 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                     };
                     status_text = format!("⚠ {} cache miss · {}", miss_str, status_text);
                 }
-                Line::from(vec![
+                let mut spans = vec![
                     Span::styled(spinner, Style::default().fg(AI_COLOR)),
                     Span::styled(format!(" {}", status_text), Style::default().fg(if unexpected_cache_miss { Color::Rgb(255, 193, 7) } else { DIM_COLOR })),
-                ])
+                ];
+                if !queued_suffix.is_empty() {
+                    spans.push(Span::styled(queued_suffix.clone(), Style::default().fg(QUEUED_COLOR)));
+                }
+                Line::from(spans)
             }
             ProcessingStatus::RunningTool(ref name) => {
                 // Animated progress dots - surrounds tool name only
@@ -2267,6 +2284,10 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                         format!("{}", miss_tokens)
                     };
                     spans.push(Span::styled(format!(" · ⚠ {} cache miss", miss_str), Style::default().fg(Color::Rgb(255, 193, 7))));
+                }
+                
+                if !queued_suffix.is_empty() {
+                    spans.push(Span::styled(queued_suffix.clone(), Style::default().fg(QUEUED_COLOR)));
                 }
                 
                 Line::from(spans)

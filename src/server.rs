@@ -4,6 +4,7 @@
 use crate::agent::Agent;
 use crate::build;
 use crate::bus::{Bus, BusEvent, FileOp};
+use crate::id;
 use crate::protocol::{
     decode_request, encode_event, AgentInfo, ContextEntry, HistoryMessage, NotificationType,
     Request, ServerEvent,
@@ -49,6 +50,40 @@ pub struct SharedContext {
     pub value: String,
     pub from_session: String,
     pub from_name: Option<String>,
+}
+
+#[derive(Default)]
+struct ClientDebugState {
+    active_id: Option<String>,
+    clients: HashMap<String, mpsc::UnboundedSender<(u64, String)>>,
+}
+
+impl ClientDebugState {
+    fn register(&mut self, client_id: String, tx: mpsc::UnboundedSender<(u64, String)>) {
+        self.active_id = Some(client_id.clone());
+        self.clients.insert(client_id, tx);
+    }
+
+    fn unregister(&mut self, client_id: &str) {
+        self.clients.remove(client_id);
+        if self.active_id.as_deref() == Some(client_id) {
+            self.active_id = self.clients.keys().next().cloned();
+        }
+    }
+
+    fn active_sender(&mut self) -> Option<(String, mpsc::UnboundedSender<(u64, String)>)> {
+        if let Some(active_id) = self.active_id.clone() {
+            if let Some(tx) = self.clients.get(&active_id) {
+                return Some((active_id, tx.clone()));
+            }
+        }
+        if let Some((id, tx)) = self.clients.iter().next() {
+            let id = id.clone();
+            self.active_id = Some(id.clone());
+            return Some((id, tx.clone()));
+        }
+        None
+    }
 }
 
 /// Socket path for main communication
@@ -254,8 +289,8 @@ pub struct Server {
     swarms_by_cwd: Arc<RwLock<HashMap<PathBuf, HashSet<String>>>>,
     /// Shared context by swarm (cwd -> key -> SharedContext)
     shared_context: Arc<RwLock<HashMap<PathBuf, HashMap<String, SharedContext>>>>,
-    /// Channel to forward client debug commands to TUI (request_id, command)
-    client_debug_tx: Arc<RwLock<Option<mpsc::UnboundedSender<(u64, String)>>>>,
+    /// Active and available TUI debug channels (request_id, command)
+    client_debug_state: Arc<RwLock<ClientDebugState>>,
     /// Channel to receive client debug responses from TUI (request_id, response)
     client_debug_response_tx: broadcast::Sender<(u64, String)>,
 }
@@ -278,7 +313,7 @@ impl Server {
             swarm_members: Arc::new(RwLock::new(HashMap::new())),
             swarms_by_cwd: Arc::new(RwLock::new(HashMap::new())),
             shared_context: Arc::new(RwLock::new(HashMap::new())),
-            client_debug_tx: Arc::new(RwLock::new(None)),
+            client_debug_state: Arc::new(RwLock::new(ClientDebugState::default())),
             client_debug_response_tx,
         }
     }
@@ -319,7 +354,7 @@ impl Server {
             swarm_members: Arc::new(RwLock::new(HashMap::new())),
             swarms_by_cwd: Arc::new(RwLock::new(HashMap::new())),
             shared_context: Arc::new(RwLock::new(HashMap::new())),
-            client_debug_tx: Arc::new(RwLock::new(None)),
+            client_debug_state: Arc::new(RwLock::new(ClientDebugState::default())),
             client_debug_response_tx,
         }
     }
@@ -605,7 +640,7 @@ impl Server {
         let main_swarms_by_cwd = Arc::clone(&self.swarms_by_cwd);
         let main_shared_context = Arc::clone(&self.shared_context);
         let main_file_touches = Arc::clone(&self.file_touches);
-        let main_client_debug_tx = Arc::clone(&self.client_debug_tx);
+        let main_client_debug_state = Arc::clone(&self.client_debug_state);
         let main_client_debug_response_tx = self.client_debug_response_tx.clone();
         let main_server_name = self.identity.name.clone();
         let main_server_icon = self.identity.icon.clone();
@@ -624,7 +659,7 @@ impl Server {
                         let swarms_by_cwd = Arc::clone(&main_swarms_by_cwd);
                         let shared_context = Arc::clone(&main_shared_context);
                         let file_touches = Arc::clone(&main_file_touches);
-                        let client_debug_tx = Arc::clone(&main_client_debug_tx);
+                        let client_debug_state = Arc::clone(&main_client_debug_state);
                         let client_debug_response_tx = main_client_debug_response_tx.clone();
                         let server_name = main_server_name.clone();
                         let server_icon = main_server_icon.clone();
@@ -645,7 +680,7 @@ impl Server {
                                 swarms_by_cwd,
                                 shared_context,
                                 file_touches,
-                                client_debug_tx,
+                                client_debug_state,
                                 client_debug_response_tx,
                                 server_name,
                                 server_icon,
@@ -672,7 +707,7 @@ impl Server {
         let debug_is_processing = Arc::clone(&self.is_processing);
         let debug_session_id = Arc::clone(&self.session_id);
         let debug_provider = Arc::clone(&self.provider);
-        let debug_client_debug_tx = Arc::clone(&self.client_debug_tx);
+        let debug_client_debug_state = Arc::clone(&self.client_debug_state);
         let debug_client_debug_response_tx = self.client_debug_response_tx.clone();
 
         let debug_handle = tokio::spawn(async move {
@@ -683,7 +718,7 @@ impl Server {
                         let is_processing = Arc::clone(&debug_is_processing);
                         let session_id = Arc::clone(&debug_session_id);
                         let provider = Arc::clone(&debug_provider);
-                        let client_debug_tx = Arc::clone(&debug_client_debug_tx);
+                        let client_debug_state = Arc::clone(&debug_client_debug_state);
                         let client_debug_response_tx = debug_client_debug_response_tx.clone();
 
                         tokio::spawn(async move {
@@ -693,7 +728,7 @@ impl Server {
                                 is_processing,
                                 session_id,
                                 provider,
-                                client_debug_tx,
+                                client_debug_state,
                                 client_debug_response_tx,
                             )
                             .await
@@ -727,7 +762,7 @@ async fn handle_client(
     swarms_by_cwd: Arc<RwLock<HashMap<PathBuf, HashSet<String>>>>,
     shared_context: Arc<RwLock<HashMap<PathBuf, HashMap<String, SharedContext>>>>,
     file_touches: Arc<RwLock<HashMap<PathBuf, Vec<FileAccess>>>>,
-    client_debug_tx: Arc<RwLock<Option<mpsc::UnboundedSender<(u64, String)>>>>,
+    client_debug_state: Arc<RwLock<ClientDebugState>>,
     client_debug_response_tx: broadcast::Sender<(u64, String)>,
     server_name: String,
     server_icon: String,
@@ -825,9 +860,10 @@ async fn handle_client(
     // Set up client debug command channel
     // This client becomes the "active" debug client that receives client: commands
     let (debug_cmd_tx, mut debug_cmd_rx) = mpsc::unbounded_channel::<(u64, String)>();
+    let client_debug_id = id::new_id("client");
     {
-        let mut tx_guard = client_debug_tx.write().await;
-        *tx_guard = Some(debug_cmd_tx);
+        let mut debug_state = client_debug_state.write().await;
+        debug_state.register(client_debug_id.clone(), debug_cmd_tx);
     }
 
     loop {
@@ -1655,8 +1691,8 @@ async fn handle_client(
 
     // Clean up: remove client debug channel
     {
-        let mut tx_guard = client_debug_tx.write().await;
-        *tx_guard = None;
+        let mut debug_state = client_debug_state.write().await;
+        debug_state.unregister(&client_debug_id);
     }
 
     if let Some(handle) = processing_task.take() {
@@ -2070,7 +2106,7 @@ async fn handle_debug_client(
     is_processing: Arc<RwLock<bool>>,
     session_id: Arc<RwLock<String>>,
     provider: Arc<dyn Provider>,
-    client_debug_tx: Arc<RwLock<Option<mpsc::UnboundedSender<(u64, String)>>>>,
+    client_debug_state: Arc<RwLock<ClientDebugState>>,
     client_debug_response_tx: broadcast::Sender<(u64, String)>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
@@ -2140,12 +2176,22 @@ async fn handle_debug_client(
                 let result = match namespace {
                     "client" => {
                         // Forward to TUI client
-                        let tx_guard = client_debug_tx.read().await;
-                        if let Some(ref tx) = *tx_guard {
-                            // Subscribe to response channel before sending
-                            let mut response_rx = client_debug_response_tx.subscribe();
+                        let mut response_rx = client_debug_response_tx.subscribe();
+                        let mut attempts = 0usize;
 
-                            // Send command to TUI
+                        loop {
+                            let (client_id, tx) = {
+                                let mut debug_state = client_debug_state.write().await;
+                                match debug_state.active_sender() {
+                                    Some(active) => active,
+                                    None => {
+                                        break Err(anyhow::anyhow!(
+                                            "No TUI client connected"
+                                        ));
+                                    }
+                                }
+                            };
+
                             if tx.send((id, cmd.to_string())).is_ok() {
                                 // Wait for response with timeout
                                 let timeout = tokio::time::Duration::from_secs(30);
@@ -2160,16 +2206,23 @@ async fn handle_debug_client(
                                 })
                                 .await
                                 {
-                                    Ok(result) => result,
+                                    Ok(result) => break result,
                                     Err(_) => {
-                                        Err(anyhow::anyhow!("Timeout waiting for client response"))
+                                        break Err(anyhow::anyhow!(
+                                            "Timeout waiting for client response"
+                                        ));
                                     }
                                 }
                             } else {
-                                Err(anyhow::anyhow!("Failed to send command to TUI client"))
+                                let mut debug_state = client_debug_state.write().await;
+                                debug_state.unregister(&client_id);
+                                attempts += 1;
+                                if debug_state.clients.is_empty() || attempts > 8 {
+                                    break Err(anyhow::anyhow!(
+                                        "No TUI client connected"
+                                    ));
+                                }
                             }
-                        } else {
-                            Err(anyhow::anyhow!("No TUI client connected"))
                         }
                     }
                     "tester" => {
