@@ -334,7 +334,51 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
         ));
     }
 
-    items
+    // Final safety pass: ensure every function_call has a matching function_call_output.
+    // This prevents the OpenAI 400 "No tool output found" error if earlier logic misses a case.
+    let mut output_ids: HashSet<String> = HashSet::new();
+    for item in &items {
+        if item.get("type").and_then(|v| v.as_str()) == Some("function_call_output") {
+            if let Some(call_id) = item.get("call_id").and_then(|v| v.as_str()) {
+                output_ids.insert(call_id.to_string());
+            }
+        }
+    }
+
+    let mut normalized: Vec<Value> = Vec::with_capacity(items.len());
+    let mut extra_injected = 0;
+    for item in items {
+        let is_call = matches!(
+            item.get("type").and_then(|v| v.as_str()),
+            Some("function_call") | Some("custom_tool_call")
+        );
+        let call_id = item.get("call_id").and_then(|v| v.as_str());
+
+        normalized.push(item);
+
+        if is_call {
+            if let Some(call_id) = call_id {
+                if !output_ids.contains(call_id) {
+                    extra_injected += 1;
+                    output_ids.insert(call_id.to_string());
+                    normalized.push(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": MISSING_TOOL_OUTPUT_MESSAGE
+                    }));
+                }
+            }
+        }
+    }
+
+    if extra_injected > 0 {
+        crate::logging::info(&format!(
+            "[openai] Safety-injected {} missing tool output(s) at request build",
+            extra_injected
+        ));
+    }
+
+    normalized
 }
 
 #[derive(Deserialize, Debug)]
