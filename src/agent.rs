@@ -379,7 +379,7 @@ impl Agent {
         let alerts = self.take_alerts();
         if !alerts.is_empty() {
             let alert_text = format!(
-                "[NOTIFICATION]\nYou received {} notification(s) from other agents working in this codebase:\n\n{}\n\nUse the communicate tool (actions: list, read, message, share) to coordinate with other agents.",
+                "[NOTIFICATION]\nYou received {} notification(s) from other agents working in this codebase:\n\n{}\n\nUse the communicate tool (actions: list, read, message/broadcast, dm, channel, share) to coordinate with other agents.",
                 alerts.len(),
                 alerts.join("\n\n---\n\n")
             );
@@ -413,7 +413,7 @@ impl Agent {
         let alerts = self.take_alerts();
         if !alerts.is_empty() {
             let alert_text = format!(
-                "[NOTIFICATION]\nYou received {} notification(s) from other agents working in this codebase:\n\n{}\n\nUse the communicate tool (actions: list, read, message, share) to coordinate with other agents.",
+                "[NOTIFICATION]\nYou received {} notification(s) from other agents working in this codebase:\n\n{}\n\nUse the communicate tool (actions: list, read, message/broadcast, dm, channel, share) to coordinate with other agents.",
                 alerts.len(),
                 alerts.join("\n\n---\n\n")
             );

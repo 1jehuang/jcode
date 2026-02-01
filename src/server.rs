@@ -1536,6 +1536,8 @@ async fn handle_client(
                 id,
                 from_session,
                 message,
+                to_session,
+                channel,
             } => {
                 // Find the swarm (cwd) for this session
                 let cwd = {
@@ -1553,7 +1555,6 @@ async fn handle_client(
                             .and_then(|m| m.friendly_name.clone())
                     };
 
-                    // Send to all swarm members except sender
                     let swarm_session_ids: Vec<String> = {
                         let swarms = swarms_by_cwd.read().await;
                         swarms
@@ -1562,30 +1563,56 @@ async fn handle_client(
                             .unwrap_or_default()
                     };
 
+                    let scope = if to_session.is_some() {
+                        "dm"
+                    } else if channel.is_some() {
+                        "channel"
+                    } else {
+                        "broadcast"
+                    };
+
                     let members = swarm_members.read().await;
                     let sessions = sessions.read().await;
-                    for sid in &swarm_session_ids {
-                        if sid != &from_session {
-                            if let Some(member) = members.get(sid) {
-                                let notification_msg = format!(
-                                    "Message from {}: {}",
-                                    friendly_name
-                                        .as_deref()
-                                        .unwrap_or(&from_session[..8.min(from_session.len())]),
-                                    message
-                                );
-                                let _ = member.event_tx.send(ServerEvent::Notification {
-                                    from_session: from_session.clone(),
-                                    from_name: friendly_name.clone(),
-                                    notification_type: NotificationType::Message,
-                                    message: notification_msg.clone(),
-                                });
 
-                                // Also push to the agent's pending alerts
-                                if let Some(agent) = sessions.get(sid) {
-                                    if let Ok(mut agent) = agent.try_lock() {
-                                        agent.push_alert(notification_msg);
-                                    }
+                    let target_sessions: Vec<String> = if let Some(target) = to_session.clone() {
+                        vec![target]
+                    } else {
+                        swarm_session_ids
+                            .iter()
+                            .filter(|sid| *sid != &from_session)
+                            .cloned()
+                            .collect()
+                    };
+
+                    for sid in &target_sessions {
+                        if !swarm_session_ids.contains(sid) {
+                            continue;
+                        }
+                        if let Some(member) = members.get(sid) {
+                            let from_label = friendly_name
+                                .as_deref()
+                                .unwrap_or(&from_session[..8.min(from_session.len())]);
+                            let scope_label = match (scope, channel.as_deref()) {
+                                ("channel", Some(ch)) => format!("#{}", ch),
+                                ("dm", _) => "DM".to_string(),
+                                _ => "broadcast".to_string(),
+                            };
+                            let notification_msg =
+                                format!("{} from {}: {}", scope_label, from_label, message);
+                            let _ = member.event_tx.send(ServerEvent::Notification {
+                                from_session: from_session.clone(),
+                                from_name: friendly_name.clone(),
+                                notification_type: NotificationType::Message {
+                                    scope: Some(scope.to_string()),
+                                    channel: channel.clone(),
+                                },
+                                message: notification_msg.clone(),
+                            });
+
+                            // Also push to the agent's pending alerts
+                            if let Some(agent) = sessions.get(sid) {
+                                if let Ok(mut agent) = agent.try_lock() {
+                                    agent.push_alert(notification_msg);
                                 }
                             }
                         }
