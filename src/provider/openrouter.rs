@@ -8,7 +8,9 @@
 //! - Cache token parsing: Parses cached_tokens from OpenRouter responses for cache hit detection
 
 use super::{EventStream, Provider};
-use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
+use crate::message::{
+    ContentBlock, Message, Role, StreamEvent, ToolDefinition, TOOL_OUTPUT_MISSING_TEXT,
+};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -16,7 +18,7 @@ use futures::Stream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -434,7 +436,9 @@ impl OpenRouterProvider {
         let mut pin = self.provider_pin.lock().unwrap();
         if let Some(existing) = pin.as_ref() {
             let should_clear = existing.model != model
-                || (clear_explicit && existing.model == model && existing.source == PinSource::Explicit);
+                || (clear_explicit
+                    && existing.model == model
+                    && existing.source == PinSource::Explicit);
             if should_clear {
                 *pin = None;
             }
@@ -719,6 +723,20 @@ impl Provider for OpenRouterProvider {
             }));
         }
 
+        let mut tool_result_ids: HashSet<String> = HashSet::new();
+        for msg in messages {
+            if let Role::User = msg.role {
+                for block in &msg.content {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                        tool_result_ids.insert(tool_use_id.clone());
+                    }
+                }
+            }
+        }
+
+        let missing_output = format!("[Error] {}", TOOL_OUTPUT_MISSING_TEXT);
+        let mut injected_missing = 0usize;
+
         // Convert messages
         for msg in messages {
             match msg.role {
@@ -754,6 +772,7 @@ impl Provider for OpenRouterProvider {
                 Role::Assistant => {
                     let mut text_content = String::new();
                     let mut tool_calls = Vec::new();
+                    let mut missing_tool_outputs: Vec<String> = Vec::new();
 
                     for block in &msg.content {
                         match block {
@@ -769,6 +788,10 @@ impl Provider for OpenRouterProvider {
                                         "arguments": serde_json::to_string(input).unwrap_or_default()
                                     }
                                 }));
+                                if !tool_result_ids.contains(id) {
+                                    tool_result_ids.insert(id.clone());
+                                    missing_tool_outputs.push(id.clone());
+                                }
                             }
                             _ => {}
                         }
@@ -784,18 +807,41 @@ impl Provider for OpenRouterProvider {
 
                     if !tool_calls.is_empty() {
                         assistant_msg["tool_calls"] = serde_json::json!(tool_calls);
-                        // Some providers (e.g., Moonshot/Kimi) require reasoning_content on tool-call messages
-                        // when thinking is enabled. Provide an empty string to satisfy schema.
-                        if include_reasoning_content {
-                            assistant_msg["reasoning_content"] = serde_json::json!("");
+                    }
+
+                    // Some providers (e.g., Moonshot/Kimi) require reasoning_content when thinking is enabled.
+                    // Provide a minimal placeholder if missing/empty to satisfy schema.
+                    if include_reasoning_content {
+                        let current = assistant_msg
+                            .get("reasoning_content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if current.is_empty() {
+                            assistant_msg["reasoning_content"] = serde_json::json!(" ");
                         }
                     }
 
                     if !text_content.is_empty() || !tool_calls.is_empty() {
                         api_messages.push(assistant_msg);
+                        if !missing_tool_outputs.is_empty() {
+                            injected_missing += missing_tool_outputs.len();
+                            for missing_id in missing_tool_outputs {
+                                api_messages.push(serde_json::json!({
+                                    "role": "tool",
+                                    "tool_call_id": missing_id,
+                                    "content": missing_output.clone()
+                                }));
+                            }
+                        }
                     }
                 }
             }
+        }
+        if injected_missing > 0 {
+            crate::logging::info(&format!(
+                "[openrouter] Injected {} synthetic tool output(s) to prevent API error",
+                injected_missing
+            ));
         }
 
         // Build tools in OpenAI format
