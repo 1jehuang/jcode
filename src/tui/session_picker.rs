@@ -1010,7 +1010,11 @@ impl SessionPicker {
         let line = Line::from(vec![
             Span::styled(" 💥 ", Style::default().fg(CRASH_ICON).bg(CRASH_BG)),
             Span::styled(
-                format!("{} crashed session{}", count, if count == 1 { "" } else { "s" }),
+                format!(
+                    "{} crashed session{}",
+                    count,
+                    if count == 1 { "" } else { "s" }
+                ),
                 Style::default()
                     .fg(CRASH_FG)
                     .bg(CRASH_BG)
@@ -1020,14 +1024,8 @@ impl SessionPicker {
                 format!(" ({}) ", names_display),
                 Style::default().fg(DIM).bg(CRASH_BG),
             ),
-            Span::styled(
-                format!("{} ", ago),
-                Style::default().fg(DIM).bg(CRASH_BG),
-            ),
-            Span::styled(
-                "— Press ",
-                Style::default().fg(DIM).bg(CRASH_BG),
-            ),
+            Span::styled(format!("{} ", ago), Style::default().fg(DIM).bg(CRASH_BG)),
+            Span::styled("— Press ", Style::default().fg(DIM).bg(CRASH_BG)),
             Span::styled(
                 "B",
                 Style::default()
@@ -1035,10 +1033,7 @@ impl SessionPicker {
                     .bg(CRASH_BG)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                " to batch restore ",
-                Style::default().fg(DIM).bg(CRASH_BG),
-            ),
+            Span::styled(" to batch restore ", Style::default().fg(DIM).bg(CRASH_BG)),
         ]);
 
         // Fill the rest of the line with background

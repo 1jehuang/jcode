@@ -961,8 +961,12 @@ fn run_memory_command(cmd: MemoryCommand) -> Result<()> {
                     let conf = entry.effective_confidence();
                     println!(
                         "- [{}] {}{}\n  id: {} (conf: {:.0}%, accessed: {}x)",
-                        entry.category, entry.content, tags_str, entry.id,
-                        conf * 100.0, entry.access_count
+                        entry.category,
+                        entry.content,
+                        tags_str,
+                        entry.id,
+                        conf * 100.0,
+                        entry.access_count
                     );
                     println!();
                 }
@@ -977,7 +981,11 @@ fn run_memory_command(cmd: MemoryCommand) -> Result<()> {
                         if results.is_empty() {
                             println!("No memories found matching '{}'", query);
                         } else {
-                            println!("Found {} memories matching '{}' (semantic):\n", results.len(), query);
+                            println!(
+                                "Found {} memories matching '{}' (semantic):\n",
+                                results.len(),
+                                query
+                            );
                             for (entry, score) in results {
                                 let tags_str = if entry.tags.is_empty() {
                                     String::new()
@@ -986,7 +994,10 @@ fn run_memory_command(cmd: MemoryCommand) -> Result<()> {
                                 };
                                 println!(
                                     "- [{}] {}{}\n  id: {} (score: {:.0}%)",
-                                    entry.category, entry.content, tags_str, entry.id,
+                                    entry.category,
+                                    entry.content,
+                                    tags_str,
+                                    entry.id,
                                     score * 100.0
                                 );
                                 println!();
@@ -1004,7 +1015,11 @@ fn run_memory_command(cmd: MemoryCommand) -> Result<()> {
                         if results.is_empty() {
                             println!("No memories found matching '{}'", query);
                         } else {
-                            println!("Found {} memories matching '{}' (keyword):\n", results.len(), query);
+                            println!(
+                                "Found {} memories matching '{}' (keyword):\n",
+                                results.len(),
+                                query
+                            );
                             for entry in results {
                                 let tags_str = if entry.tags.is_empty() {
                                     String::new()
@@ -1045,7 +1060,11 @@ fn run_memory_command(cmd: MemoryCommand) -> Result<()> {
             println!("Exported {} memories to {}", all_memories.len(), output);
         }
 
-        MemoryCommand::Import { input, scope, overwrite } => {
+        MemoryCommand::Import {
+            input,
+            scope,
+            overwrite,
+        } => {
             let content = std::fs::read_to_string(&input)?;
             let memories: Vec<MemoryEntry> = serde_json::from_str(&content)?;
 
@@ -1088,7 +1107,8 @@ fn run_memory_command(cmd: MemoryCommand) -> Result<()> {
             let mut project_count = 0;
             let mut global_count = 0;
             let mut total_tags = std::collections::HashSet::new();
-            let mut categories: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let mut categories: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
 
             if let Ok(graph) = manager.load_project_graph() {
                 project_count = graph.memory_count();
@@ -1476,17 +1496,19 @@ fn spawn_resume_in_new_terminal(
             candidates.push(term);
         }
     }
-    candidates.extend([
-        "kitty",
-        "wezterm",
-        "alacritty",
-        "gnome-terminal",
-        "konsole",
-        "xterm",
-        "foot",
-    ]
-    .iter()
-    .map(|s| s.to_string()));
+    candidates.extend(
+        [
+            "kitty",
+            "wezterm",
+            "alacritty",
+            "gnome-terminal",
+            "konsole",
+            "xterm",
+            "foot",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
 
     for term in candidates {
         let mut cmd = Command::new(&term);
@@ -1513,31 +1535,19 @@ fn spawn_resume_in_new_terminal(
                 ]);
             }
             "alacritty" => {
-                cmd.args(["-e"])
-                    .arg(exe)
-                    .arg("--resume")
-                    .arg(session_id);
+                cmd.args(["-e"]).arg(exe).arg("--resume").arg(session_id);
             }
             "gnome-terminal" => {
                 cmd.args(["--", exe.to_string_lossy().as_ref(), "--resume", session_id]);
             }
             "konsole" => {
-                cmd.args(["-e"])
-                    .arg(exe)
-                    .arg("--resume")
-                    .arg(session_id);
+                cmd.args(["-e"]).arg(exe).arg("--resume").arg(session_id);
             }
             "xterm" => {
-                cmd.args(["-e"])
-                    .arg(exe)
-                    .arg("--resume")
-                    .arg(session_id);
+                cmd.args(["-e"]).arg(exe).arg("--resume").arg(session_id);
             }
             "foot" => {
-                cmd.args(["-e"])
-                    .arg(exe)
-                    .arg("--resume")
-                    .arg(session_id);
+                cmd.args(["-e"]).arg(exe).arg("--resume").arg(session_id);
             }
             _ => continue,
         }
@@ -1984,22 +1994,22 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
         // Server is running - check if we have a newer binary
         if is_binary_newer_than_server(&initial_binary_path) {
             eprintln!("Newer binary detected, reloading server...");
-            
+
             // Get repo dir and hash for the reload
             if let Some(repo_dir) = build::get_repo_dir() {
                 if let Ok(hash) = build::current_git_hash(&repo_dir) {
                     // Install version and update canary symlink
                     let _ = build::install_version(&repo_dir, &hash);
                     let _ = build::update_canary_symlink(&hash);
-                    
+
                     // Write rebuild signal to trigger server restart
                     if let Ok(jcode_dir) = storage::jcode_dir() {
                         let signal_path = jcode_dir.join("rebuild-signal");
                         let _ = std::fs::write(&signal_path, &hash);
-                        
+
                         // Wait for server to restart (socket will briefly disconnect)
                         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                        
+
                         // Wait for server to come back up
                         let start = std::time::Instant::now();
                         loop {

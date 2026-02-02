@@ -11,6 +11,7 @@ use crate::protocol::{
 };
 use crate::provider::Provider;
 use crate::registry::{server_debug_socket_path, server_socket_path};
+use crate::todo::{save_todos, TodoItem};
 use crate::tool::Registry;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -1841,7 +1842,10 @@ async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Resul
     // queue_interrupt:<content> - Queue soft interrupt (for testing)
     // This adds a message to the agent's soft interrupt queue without blocking
     if trimmed.starts_with("queue_interrupt:") {
-        let content = trimmed.strip_prefix("queue_interrupt:").unwrap_or("").trim();
+        let content = trimmed
+            .strip_prefix("queue_interrupt:")
+            .unwrap_or("")
+            .trim();
         if content.is_empty() {
             return Err(anyhow::anyhow!("queue_interrupt: requires content"));
         }
@@ -1852,7 +1856,10 @@ async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Resul
 
     // queue_interrupt_urgent:<content> - Queue urgent soft interrupt (can skip tools)
     if trimmed.starts_with("queue_interrupt_urgent:") {
-        let content = trimmed.strip_prefix("queue_interrupt_urgent:").unwrap_or("").trim();
+        let content = trimmed
+            .strip_prefix("queue_interrupt_urgent:")
+            .unwrap_or("")
+            .trim();
         if content.is_empty() {
             return Err(anyhow::anyhow!("queue_interrupt_urgent: requires content"));
         }
@@ -1911,6 +1918,7 @@ async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Resul
             "is_canary": agent.is_canary(),
             "provider": agent.provider_name(),
             "model": agent.provider_model(),
+            "upstream_provider": agent.last_upstream_provider(),
         });
         return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
     }
@@ -1938,12 +1946,21 @@ async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Resul
 
     // set_provider:<name> - Switch to a provider with default model
     if trimmed.starts_with("set_provider:") {
-        let provider = trimmed.strip_prefix("set_provider:").unwrap_or("").trim().to_lowercase();
+        let provider = trimmed
+            .strip_prefix("set_provider:")
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
         let default_model = match provider.as_str() {
             "claude" | "anthropic" => "claude-opus-4-5-20251101",
             "openai" | "codex" => "gpt-5.2-codex",
             "openrouter" => "anthropic/claude-sonnet-4",
-            _ => return Err(anyhow::anyhow!("Unknown provider '{}'. Use: claude, openai, openrouter", provider)),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Unknown provider '{}'. Use: claude, openai, openrouter",
+                    provider
+                ))
+            }
         };
         let mut agent = agent.lock().await;
         agent.set_model(default_model)?;
@@ -2185,9 +2202,7 @@ async fn handle_debug_client(
                                 match debug_state.active_sender() {
                                     Some(active) => active,
                                     None => {
-                                        break Err(anyhow::anyhow!(
-                                            "No TUI client connected"
-                                        ));
+                                        break Err(anyhow::anyhow!("No TUI client connected"));
                                     }
                                 }
                             };
@@ -2218,9 +2233,7 @@ async fn handle_debug_client(
                                 debug_state.unregister(&client_id);
                                 attempts += 1;
                                 if debug_state.clients.is_empty() || attempts > 8 {
-                                    break Err(anyhow::anyhow!(
-                                        "No TUI client connected"
-                                    ));
+                                    break Err(anyhow::anyhow!("No TUI client connected"));
                                 }
                             }
                         }
@@ -2234,7 +2247,8 @@ async fn handle_debug_client(
                         if cmd == "create_session" || cmd.starts_with("create_session:") {
                             create_headless_session(&sessions, &session_id, &provider, cmd).await
                         } else if cmd.starts_with("destroy_session:") {
-                            let target_id = cmd.strip_prefix("destroy_session:").unwrap_or("").trim();
+                            let target_id =
+                                cmd.strip_prefix("destroy_session:").unwrap_or("").trim();
                             if target_id.is_empty() {
                                 Err(anyhow::anyhow!("destroy_session: requires a session_id"))
                             } else {
@@ -2993,9 +3007,7 @@ async fn monitor_selfdev_signals() {
                         std::thread::sleep(std::time::Duration::from_millis(200));
 
                         // Exec into the new binary with serve mode
-                        let err = ProcessCommand::new(&binary)
-                            .arg("serve")
-                            .exec();
+                        let err = ProcessCommand::new(&binary).arg("serve").exec();
 
                         // If we get here, exec failed
                         crate::logging::error(&format!("Failed to exec into canary: {}", err));
@@ -3011,16 +3023,16 @@ async fn monitor_selfdev_signals() {
         if rollback_path.exists() {
             if let Ok(_hash) = std::fs::read_to_string(&rollback_path) {
                 let _ = std::fs::remove_file(&rollback_path);
-                crate::logging::info("Server: rollback signal received, exec'ing into stable binary");
+                crate::logging::info(
+                    "Server: rollback signal received, exec'ing into stable binary",
+                );
 
                 // Get stable binary path
                 if let Ok(binary) = crate::build::stable_binary_path() {
                     if binary.exists() {
                         std::thread::sleep(std::time::Duration::from_millis(200));
 
-                        let err = ProcessCommand::new(&binary)
-                            .arg("serve")
-                            .exec();
+                        let err = ProcessCommand::new(&binary).arg("serve").exec();
 
                         crate::logging::error(&format!("Failed to exec into stable: {}", err));
                     }

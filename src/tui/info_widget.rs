@@ -184,6 +184,10 @@ pub struct UsageInfo {
     pub input_tokens: u64,
     /// Output tokens used - for cost calculation
     pub output_tokens: u64,
+    /// Cache read tokens (from cache, cheaper) - for API-key providers
+    pub cache_read_tokens: Option<u64>,
+    /// Cache write tokens (creating cache, more expensive) - for API-key providers
+    pub cache_write_tokens: Option<u64>,
     /// Whether data was successfully fetched / available to show
     pub available: bool,
 }
@@ -299,6 +303,8 @@ pub struct InfoWidgetData {
     pub usage_info: Option<UsageInfo>,
     /// Authentication method used to access the model
     pub auth_method: AuthMethod,
+    /// Upstream provider (e.g., which OpenRouter provider served the request: fireworks, etc.)
+    pub upstream_provider: Option<String>,
 }
 
 impl InfoWidgetData {
@@ -557,7 +563,8 @@ pub fn calculate_placements(
                 // Recalculate width for the new row range to avoid overlapping text
                 // The new rows might have wider text than the original rows
                 let margin = &margin_spaces[margin_idx];
-                let new_end = (new_top as usize + remaining_height as usize).min(margin.widths.len());
+                let new_end =
+                    (new_top as usize + remaining_height as usize).min(margin.widths.len());
                 if (new_top as usize) < new_end {
                     // Get actual minimum margin width (unclamped) for positioning
                     let actual_min_width = margin.widths[new_top as usize..new_end]
@@ -568,7 +575,7 @@ pub fn calculate_placements(
                     // Widget width is clamped to MAX_WIDGET_WIDTH
                     let new_min_width = actual_min_width.min(MAX_WIDGET_WIDTH);
                     all_rects[idx].3 = new_min_width; // new widget width (clamped)
-                    // Position x at the start of the margin (use actual margin width)
+                                                      // Position x at the start of the margin (use actual margin width)
                     all_rects[idx].4 = match side {
                         Side::Right => margin.x_offset.saturating_sub(actual_min_width),
                         Side::Left => margin.x_offset,
@@ -589,7 +596,12 @@ pub fn calculate_placements(
 }
 
 /// Calculate the height needed for a specific widget type
-fn calculate_widget_height(kind: WidgetKind, data: &InfoWidgetData, width: u16, max_height: u16) -> u16 {
+fn calculate_widget_height(
+    kind: WidgetKind,
+    data: &InfoWidgetData,
+    width: u16,
+    max_height: u16,
+) -> u16 {
     let inner_width = width.saturating_sub(2) as usize;
     let border_height = 2u16;
 
@@ -641,7 +653,12 @@ fn calculate_widget_height(kind: WidgetKind, data: &InfoWidgetData, width: u16, 
             1 // Single line
         }
         WidgetKind::UsageLimits => {
-            if data.usage_info.as_ref().map(|u| u.available).unwrap_or(false) {
+            if data
+                .usage_info
+                .as_ref()
+                .map(|u| u.available)
+                .unwrap_or(false)
+            {
                 2 // Two bars
             } else {
                 0
@@ -793,7 +810,11 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
 }
 
 /// Render content for a specific widget type
-fn render_widget_content(kind: WidgetKind, data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+fn render_widget_content(
+    kind: WidgetKind,
+    data: &InfoWidgetData,
+    inner: Rect,
+) -> Vec<Line<'static>> {
     match kind {
         WidgetKind::Todos => render_todos_widget(data, inner),
         WidgetKind::ContextUsage => render_context_widget(data, inner),
@@ -813,8 +834,16 @@ fn render_todos_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
 
     let mut lines: Vec<Line> = Vec::new();
     let total = data.todos.len();
-    let completed: usize = data.todos.iter().filter(|t| t.status == "completed").count();
-    let in_progress: usize = data.todos.iter().filter(|t| t.status == "in_progress").count();
+    let completed: usize = data
+        .todos
+        .iter()
+        .filter(|t| t.status == "completed")
+        .count();
+    let in_progress: usize = data
+        .todos
+        .iter()
+        .filter(|t| t.status == "in_progress")
+        .count();
 
     // Header with progress
     lines.push(Line::from(vec![
@@ -916,7 +945,13 @@ fn render_context_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
         .clamp(0.0, 100.0) as u8;
     let left_pct = 100u8.saturating_sub(used_pct);
 
-    vec![render_labeled_bar("Context", used_pct, left_pct, None, inner.width)]
+    vec![render_labeled_bar(
+        "Context",
+        used_pct,
+        left_pct,
+        None,
+        inner.width,
+    )]
 }
 
 /// Render memory activity widget
@@ -948,7 +983,10 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
             ]),
             MemoryState::Embedding => Line::from(vec![
                 Span::styled("🔍 ", Style::default().fg(Color::Rgb(255, 200, 100))),
-                Span::styled("Searching...", Style::default().fg(Color::Rgb(180, 180, 190))),
+                Span::styled(
+                    "Searching...",
+                    Style::default().fg(Color::Rgb(180, 180, 190)),
+                ),
             ]),
             MemoryState::SidecarChecking { count } => Line::from(vec![
                 Span::styled("⚡ ", Style::default().fg(Color::Rgb(255, 200, 100))),
@@ -977,7 +1015,8 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
         // Recent events (limit to 3)
         let max_events = (inner.height.saturating_sub(2) as usize).min(3);
         for event in activity.recent_events.iter().take(max_events) {
-            let (icon, text, color) = format_memory_event(event, inner.width.saturating_sub(4) as usize);
+            let (icon, text, color) =
+                format_memory_event(event, inner.width.saturating_sub(4) as usize);
             lines.push(Line::from(vec![
                 Span::styled(format!("  {} ", icon), Style::default().fg(color)),
                 Span::styled(text, Style::default().fg(Color::Rgb(140, 140, 150))),
@@ -990,30 +1029,44 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
 
 fn format_memory_event(event: &MemoryEvent, max_width: usize) -> (&'static str, String, Color) {
     match &event.kind {
-        MemoryEventKind::EmbeddingStarted => ("🔍", "Embedding...".to_string(), Color::Rgb(140, 180, 255)),
+        MemoryEventKind::EmbeddingStarted => {
+            ("🔍", "Embedding...".to_string(), Color::Rgb(140, 180, 255))
+        }
         MemoryEventKind::EmbeddingComplete { latency_ms, hits } => (
             "→",
             format!("{} hits ({}ms)", hits, latency_ms),
             Color::Rgb(140, 180, 255),
         ),
-        MemoryEventKind::SidecarStarted => ("⚡", "Verifying".to_string(), Color::Rgb(255, 200, 100)),
+        MemoryEventKind::SidecarStarted => {
+            ("⚡", "Verifying".to_string(), Color::Rgb(255, 200, 100))
+        }
         MemoryEventKind::SidecarRelevant { memory_preview } => {
             let preview = truncate_smart(memory_preview, max_width.saturating_sub(2));
             ("✓", preview, Color::Rgb(100, 200, 100))
         }
-        MemoryEventKind::SidecarNotRelevant => ("✗", "Not relevant".to_string(), Color::Rgb(150, 150, 160)),
-        MemoryEventKind::SidecarComplete { latency_ms } => ("⏱", format!("{}ms", latency_ms), Color::Rgb(140, 140, 150)),
+        MemoryEventKind::SidecarNotRelevant => {
+            ("✗", "Not relevant".to_string(), Color::Rgb(150, 150, 160))
+        }
+        MemoryEventKind::SidecarComplete { latency_ms } => {
+            ("⏱", format!("{}ms", latency_ms), Color::Rgb(140, 140, 150))
+        }
         MemoryEventKind::MemorySurfaced { memory_preview } => {
             let preview = truncate_smart(memory_preview, max_width.saturating_sub(2));
             ("★", preview, Color::Rgb(255, 220, 100))
         }
         MemoryEventKind::ExtractionStarted { reason } => {
             let msg = truncate_smart(reason, max_width.saturating_sub(2));
-            ("🧠", format!("Extracting: {}", msg), Color::Rgb(200, 150, 255))
+            (
+                "🧠",
+                format!("Extracting: {}", msg),
+                Color::Rgb(200, 150, 255),
+            )
         }
-        MemoryEventKind::ExtractionComplete { count } => {
-            ("✓", format!("Saved {} memories", count), Color::Rgb(100, 200, 100))
-        }
+        MemoryEventKind::ExtractionComplete { count } => (
+            "✓",
+            format!("Saved {} memories", count),
+            Color::Rgb(100, 200, 100),
+        ),
         MemoryEventKind::Error { message } => {
             let msg = truncate_smart(message, max_width.saturating_sub(2));
             ("!", msg, Color::Rgb(255, 100, 100))
@@ -1043,7 +1096,10 @@ fn render_swarm_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
     }
     if let Some(clients) = info.client_count {
         if info.session_count > 0 {
-            stats_parts.push(Span::styled(" · ", Style::default().fg(Color::Rgb(100, 100, 110))));
+            stats_parts.push(Span::styled(
+                " · ",
+                Style::default().fg(Color::Rgb(100, 100, 110)),
+            ));
         }
         stats_parts.push(Span::styled(
             format!("{}c", clients),
@@ -1138,12 +1194,14 @@ fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
                         Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
                     ),
                 ]),
-                Line::from(vec![
-                    Span::styled(
-                        format!("{} in + {} out", format_tokens(info.input_tokens), format_tokens(info.output_tokens)),
-                        Style::default().fg(Color::Rgb(140, 140, 150)),
+                Line::from(vec![Span::styled(
+                    format!(
+                        "{} in + {} out",
+                        format_tokens(info.input_tokens),
+                        format_tokens(info.output_tokens)
                     ),
-                ]),
+                    Style::default().fg(Color::Rgb(140, 140, 150)),
+                )]),
             ]
         }
         _ => {
@@ -1220,7 +1278,7 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
 
     lines.push(Line::from(spans));
 
-    // Auth method line
+    // Auth method line (with upstream provider if available)
     if data.auth_method != AuthMethod::Unknown {
         let (icon, label, color) = match data.auth_method {
             AuthMethod::AnthropicOAuth => ("🔐", "OAuth", Color::Rgb(255, 160, 100)),
@@ -1230,10 +1288,24 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
             AuthMethod::OpenRouterApiKey => ("🔑", "API Key", Color::Rgb(140, 180, 255)),
             AuthMethod::Unknown => unreachable!(),
         };
-        lines.push(Line::from(vec![
-            Span::styled(format!("{} ", icon), Style::default().fg(color)),
-            Span::styled(label, Style::default().fg(Color::Rgb(140, 140, 150))),
-        ]));
+
+        // Show auth method with upstream provider if available
+        if let Some(ref upstream) = data.upstream_provider {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", icon), Style::default().fg(color)),
+                Span::styled(label, Style::default().fg(Color::Rgb(140, 140, 150))),
+                Span::styled(" via ", Style::default().fg(Color::Rgb(100, 100, 110))),
+                Span::styled(
+                    upstream.clone(),
+                    Style::default().fg(Color::Rgb(200, 180, 100)),
+                ),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", icon), Style::default().fg(color)),
+                Span::styled(label, Style::default().fg(Color::Rgb(140, 140, 150))),
+            ]));
+        }
     }
 
     // Usage info (combined from UsageLimits widget)
@@ -1249,10 +1321,31 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
                             Style::default().fg(Color::Rgb(180, 180, 190)),
                         ),
                         Span::styled(
-                            format!(" ({}↑ {}↓)", format_tokens(info.input_tokens), format_tokens(info.output_tokens)),
+                            format!(
+                                " ({}↑ {}↓)",
+                                format_tokens(info.input_tokens),
+                                format_tokens(info.output_tokens)
+                            ),
                             Style::default().fg(Color::Rgb(120, 120, 130)),
                         ),
                     ]));
+
+                    // Cache info if available
+                    if info.cache_read_tokens.is_some() || info.cache_write_tokens.is_some() {
+                        let cache_read = info.cache_read_tokens.unwrap_or(0);
+                        let cache_write = info.cache_write_tokens.unwrap_or(0);
+                        lines.push(Line::from(vec![
+                            Span::styled("🗄 ", Style::default().fg(Color::Rgb(100, 180, 100))),
+                            Span::styled(
+                                format!("hit: {}", format_tokens(cache_read)),
+                                Style::default().fg(Color::Rgb(100, 180, 100)),
+                            ),
+                            Span::styled(
+                                format!(" write: {}", format_tokens(cache_write)),
+                                Style::default().fg(Color::Rgb(255, 160, 80)),
+                            ),
+                        ]));
+                    }
                 }
                 _ => {
                     // Subscription usage bars
@@ -1261,8 +1354,20 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
                     let five_hr_left = 100u8.saturating_sub(five_hr_used);
                     let seven_day_left = 100u8.saturating_sub(seven_day_used);
 
-                    lines.push(render_labeled_bar("5hr", five_hr_used, five_hr_left, None, inner.width));
-                    lines.push(render_labeled_bar("7d", seven_day_used, seven_day_left, None, inner.width));
+                    lines.push(render_labeled_bar(
+                        "5hr",
+                        five_hr_used,
+                        five_hr_left,
+                        None,
+                        inner.width,
+                    ));
+                    lines.push(render_labeled_bar(
+                        "7d",
+                        seven_day_used,
+                        seven_day_left,
+                        None,
+                        inner.width,
+                    ));
                 }
             }
         }
@@ -2061,11 +2166,17 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
                     } else {
                         reason.clone()
                     };
-                    ("🧠", format!("Extracting: {}", msg), Color::Rgb(200, 150, 255))
+                    (
+                        "🧠",
+                        format!("Extracting: {}", msg),
+                        Color::Rgb(200, 150, 255),
+                    )
                 }
-                MemoryEventKind::ExtractionComplete { count } => {
-                    ("✓", format!("Saved {} memories", count), Color::Rgb(100, 200, 100))
-                }
+                MemoryEventKind::ExtractionComplete { count } => (
+                    "✓",
+                    format!("Saved {} memories", count),
+                    Color::Rgb(100, 200, 100),
+                ),
                 MemoryEventKind::Error { message } => {
                     let msg = if message.len() > max_width.saturating_sub(4) {
                         format!("{}…", &message[..max_width.saturating_sub(5)])
@@ -2507,7 +2618,13 @@ fn render_context_compact(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'stati
         .clamp(0.0, 100.0) as u8;
     let left_pct = 100u8.saturating_sub(used_pct);
 
-    vec![render_labeled_bar("Context", used_pct, left_pct, None, inner.width)]
+    vec![render_labeled_bar(
+        "Context",
+        used_pct,
+        left_pct,
+        None,
+        inner.width,
+    )]
 }
 
 fn render_usage_bar(used_tokens: usize, limit_tokens: usize, width: u16) -> Line<'static> {

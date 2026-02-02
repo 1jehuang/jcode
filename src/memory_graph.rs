@@ -689,9 +689,8 @@ mod tests {
         graph.link_memories(&id1, &id2, 0.8);
 
         let edges = graph.get_edges(&id1);
-        assert!(edges
-            .iter()
-            .any(|e| e.target == id2 && matches!(e.kind, EdgeKind::RelatesTo { weight } if weight == 0.8)));
+        assert!(edges.iter().any(|e| e.target == id2
+            && matches!(e.kind, EdgeKind::RelatesTo { weight } if weight == 0.8)));
     }
 
     #[test]
@@ -750,7 +749,9 @@ mod tests {
 
         // Create: A --HasTag--> tag:rust <--HasTag-- B
         //         A --HasTag--> tag:async <--HasTag-- C
-        let id_a = graph.add_memory(make_test_memory("Memory A").with_tags(vec!["rust".into(), "async".into()]));
+        let id_a = graph.add_memory(
+            make_test_memory("Memory A").with_tags(vec!["rust".into(), "async".into()]),
+        );
         let id_b = graph.add_memory(make_test_memory("Memory B").with_tags(vec!["rust".into()]));
         let id_c = graph.add_memory(make_test_memory("Memory C").with_tags(vec!["async".into()]));
 
@@ -763,8 +764,16 @@ mod tests {
         assert!(results.iter().any(|(id, _)| id == &id_c));
 
         // A should have highest score (seed)
-        let a_score = results.iter().find(|(id, _)| id == &id_a).map(|(_, s)| *s).unwrap();
-        let b_score = results.iter().find(|(id, _)| id == &id_b).map(|(_, s)| *s).unwrap();
+        let a_score = results
+            .iter()
+            .find(|(id, _)| id == &id_a)
+            .map(|(_, s)| *s)
+            .unwrap();
+        let b_score = results
+            .iter()
+            .find(|(id, _)| id == &id_b)
+            .map(|(_, s)| *s)
+            .unwrap();
         assert!(a_score > b_score);
     }
 
@@ -774,8 +783,10 @@ mod tests {
 
         // Create chain: A --tag:t1--> B --tag:t2--> C --tag:t3--> D
         let id_a = graph.add_memory(make_test_memory("A").with_tags(vec!["t1".into()]));
-        let id_b = graph.add_memory(make_test_memory("B").with_tags(vec!["t1".into(), "t2".into()]));
-        let id_c = graph.add_memory(make_test_memory("C").with_tags(vec!["t2".into(), "t3".into()]));
+        let id_b =
+            graph.add_memory(make_test_memory("B").with_tags(vec!["t1".into(), "t2".into()]));
+        let id_c =
+            graph.add_memory(make_test_memory("C").with_tags(vec!["t2".into(), "t3".into()]));
         let id_d = graph.add_memory(make_test_memory("D").with_tags(vec!["t3".into()]));
 
         // Depth 1: should find A, B (via t1)
@@ -812,14 +823,8 @@ mod tests {
     fn test_migration_from_legacy() {
         // Create a legacy MemoryStore
         let mut old_store = MemoryStore::new();
-        old_store.add(
-            make_test_memory("Memory 1")
-                .with_tags(vec!["tag1".into(), "tag2".into()])
-        );
-        old_store.add(
-            make_test_memory("Memory 2")
-                .with_tags(vec!["tag1".into()])
-        );
+        old_store.add(make_test_memory("Memory 1").with_tags(vec!["tag1".into(), "tag2".into()]));
+        old_store.add(make_test_memory("Memory 2").with_tags(vec!["tag1".into()]));
 
         // Migrate
         let graph = MemoryGraph::from_legacy_store(old_store);
@@ -857,10 +862,7 @@ mod tests {
         eprintln!("Serialized graph:\n{}", json);
 
         // Check edges appear in JSON
-        assert!(
-            json.contains("\"edges\""),
-            "JSON should contain edges key"
-        );
+        assert!(json.contains("\"edges\""), "JSON should contain edges key");
         assert!(
             json.contains("tag:rust") || json.contains("tag:extra"),
             "JSON should contain tag references"

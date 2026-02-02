@@ -135,14 +135,20 @@ impl Tool for MemoryTool {
             "recall" => {
                 let limit = input.limit.unwrap_or(10);
                 let mode = input.mode.as_deref().unwrap_or_else(|| {
-                    if input.query.is_some() { "cascade" } else { "recent" }
+                    if input.query.is_some() {
+                        "cascade"
+                    } else {
+                        "recent"
+                    }
                 });
 
                 match mode {
                     "recent" => {
                         // Original behavior: most recent memories
                         match self.manager.get_prompt_memories(limit) {
-                            Some(memories) => Ok(ToolOutput::new(format!("Recent memories:\n{}", memories))),
+                            Some(memories) => {
+                                Ok(ToolOutput::new(format!("Recent memories:\n{}", memories)))
+                            }
                             None => Ok(ToolOutput::new("No memories stored yet.")),
                         }
                     }
@@ -150,7 +156,11 @@ impl Tool for MemoryTool {
                         // Semantic search with optional cascade
                         let query = match &input.query {
                             Some(q) => q.clone(),
-                            None => return Err(anyhow::anyhow!("query required for semantic/cascade mode")),
+                            None => {
+                                return Err(anyhow::anyhow!(
+                                    "query required for semantic/cascade mode"
+                                ))
+                            }
                         };
 
                         let results = if mode == "cascade" {
@@ -165,7 +175,11 @@ impl Tool for MemoryTool {
                                 query
                             )))
                         } else {
-                            let mut out = format!("Found {} relevant memories for '{}':\n\n", results.len(), query);
+                            let mut out = format!(
+                                "Found {} relevant memories for '{}':\n\n",
+                                results.len(),
+                                query
+                            );
                             for (entry, score) in results {
                                 let tags_str = if entry.tags.is_empty() {
                                     String::new()
@@ -174,13 +188,20 @@ impl Tool for MemoryTool {
                                 };
                                 out.push_str(&format!(
                                     "- [{}] {}{}\n  id: {} (relevance: {:.0}%)\n\n",
-                                    entry.category, entry.content, tags_str, entry.id, score * 100.0
+                                    entry.category,
+                                    entry.content,
+                                    tags_str,
+                                    entry.id,
+                                    score * 100.0
                                 ));
                             }
                             Ok(ToolOutput::new(out))
                         }
                     }
-                    other => Err(anyhow::anyhow!("Unknown mode: {}. Use recent, semantic, or cascade", other)),
+                    other => Err(anyhow::anyhow!(
+                        "Unknown mode: {}. Use recent, semantic, or cascade",
+                        other
+                    )),
                 }
             }
             "search" => {

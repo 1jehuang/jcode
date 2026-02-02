@@ -288,9 +288,10 @@ impl ClientApp {
                     reconnect_attempts += 1;
                     if reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
                         // Build disconnect message with session resume hint
-                        let session_name = self.session_id.as_ref().and_then(|id| {
-                            crate::id::extract_session_name(id)
-                        });
+                        let session_name = self
+                            .session_id
+                            .as_ref()
+                            .and_then(|id| crate::id::extract_session_name(id));
 
                         let error_reason = format!("Connection error: {}", e);
                         let resume_hint = if let Some(name) = session_name {
@@ -1143,10 +1144,12 @@ impl TuiState for ClientApp {
                 total_cost: 0.0,
                 input_tokens: 0,
                 output_tokens: 0,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
                 available: true,
             })
-        } else if is_api_key_provider || self.total_input_tokens > 0 || self.total_output_tokens > 0 {
-            // API-key providers or if we have token counts
+        } else if is_api_key_provider {
+            // API-key providers - always show cost widget
             Some(super::info_widget::UsageInfo {
                 provider: super::info_widget::UsageProvider::CostBased,
                 five_hour: 0.0,
@@ -1154,14 +1157,17 @@ impl TuiState for ClientApp {
                 total_cost: self.total_cost,
                 input_tokens: self.total_input_tokens,
                 output_tokens: self.total_output_tokens,
-                available: self.total_input_tokens > 0 || self.total_output_tokens > 0,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                available: true,
             })
         } else {
             None
         };
 
         // Determine authentication method for client mode
-        let auth_method = if provider_name.contains("claude") || provider_name.contains("anthropic") {
+        let auth_method = if provider_name.contains("claude") || provider_name.contains("anthropic")
+        {
             if has_creds {
                 super::info_widget::AuthMethod::AnthropicOAuth
             } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
@@ -1178,6 +1184,7 @@ impl TuiState for ClientApp {
         super::info_widget::InfoWidgetData {
             usage_info,
             auth_method,
+            upstream_provider: None, // Client mode doesn't have upstream provider info
             ..Default::default()
         }
     }

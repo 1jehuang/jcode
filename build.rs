@@ -56,7 +56,9 @@ fn main() {
     };
 
     // Get actual build timestamp
-    let build_time = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S %z").to_string();
+    let build_time = chrono::Utc::now()
+        .format("%Y-%m-%d %H:%M:%S %z")
+        .to_string();
 
     // Set environment variables for compilation
     println!("cargo:rustc-env=JCODE_GIT_HASH={}", git_hash);

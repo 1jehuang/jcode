@@ -144,7 +144,17 @@ pub trait Provider: Send + Sync {
 /// Available models (shown in /model list)
 pub const ALL_CLAUDE_MODELS: &[&str] = &["claude-opus-4-5-20251101"];
 
-pub const ALL_OPENAI_MODELS: &[&str] = &["gpt-5.2-codex"];
+pub const ALL_OPENAI_MODELS: &[&str] = &[
+    "gpt-5.2-codex",
+    "gpt-5.1-codex-mini",
+    "gpt-5.1-codex-max",
+    "gpt-5.2",
+    "gpt-5.1",
+    "gpt-5.1-codex",
+    "gpt-5-codex",
+    "gpt-5-codex-mini",
+    "gpt-5",
+];
 
 /// Default context window size when model-specific data isn't known.
 pub const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
@@ -368,12 +378,24 @@ impl Provider for MultiProvider {
                 // Prefer direct Anthropic API for best caching support
                 if let Some(ref anthropic) = self.anthropic {
                     anthropic
-                        .complete_split(messages, tools, system_static, system_dynamic, resume_session_id)
+                        .complete_split(
+                            messages,
+                            tools,
+                            system_static,
+                            system_dynamic,
+                            resume_session_id,
+                        )
                         .await
                 } else if let Some(ref claude) = self.claude {
                     // Claude CLI doesn't support split, fall back to combined
                     claude
-                        .complete_split(messages, tools, system_static, system_dynamic, resume_session_id)
+                        .complete_split(
+                            messages,
+                            tools,
+                            system_static,
+                            system_dynamic,
+                            resume_session_id,
+                        )
                         .await
                 } else {
                     Err(anyhow::anyhow!(
@@ -385,7 +407,13 @@ impl Provider for MultiProvider {
                 if let Some(ref openai) = self.openai {
                     // OpenAI doesn't support split caching, use default combined
                     openai
-                        .complete_split(messages, tools, system_static, system_dynamic, resume_session_id)
+                        .complete_split(
+                            messages,
+                            tools,
+                            system_static,
+                            system_dynamic,
+                            resume_session_id,
+                        )
                         .await
                 } else {
                     Err(anyhow::anyhow!("OpenAI credentials not available. Run `jcode login --provider openai` to log in."))
@@ -395,7 +423,13 @@ impl Provider for MultiProvider {
                 if let Some(ref openrouter) = self.openrouter {
                     // OpenRouter doesn't support split caching, use default combined
                     openrouter
-                        .complete_split(messages, tools, system_static, system_dynamic, resume_session_id)
+                        .complete_split(
+                            messages,
+                            tools,
+                            system_static,
+                            system_dynamic,
+                            resume_session_id,
+                        )
                         .await
                 } else {
                     Err(anyhow::anyhow!("OpenRouter credentials not available. Set OPENROUTER_API_KEY environment variable."))
@@ -599,7 +633,7 @@ impl Provider for MultiProvider {
         let provider = MultiProvider::new();
         // Set the active provider based on what was active before
         match active {
-            ActiveProvider::Claude => {}  // Default
+            ActiveProvider::Claude => {} // Default
             ActiveProvider::OpenAI => {
                 if provider.openai.is_some() {
                     *provider.active.write().unwrap() = ActiveProvider::OpenAI;
@@ -637,7 +671,10 @@ mod tests {
 
     #[test]
     fn test_provider_for_model_claude() {
-        assert_eq!(provider_for_model("claude-opus-4-5-20251101"), Some("claude"));
+        assert_eq!(
+            provider_for_model("claude-opus-4-5-20251101"),
+            Some("claude")
+        );
     }
 
     #[test]
@@ -648,10 +685,19 @@ mod tests {
     #[test]
     fn test_provider_for_model_openrouter() {
         // OpenRouter uses provider/model format
-        assert_eq!(provider_for_model("anthropic/claude-sonnet-4"), Some("openrouter"));
+        assert_eq!(
+            provider_for_model("anthropic/claude-sonnet-4"),
+            Some("openrouter")
+        );
         assert_eq!(provider_for_model("openai/gpt-4o"), Some("openrouter"));
-        assert_eq!(provider_for_model("google/gemini-2.0-flash"), Some("openrouter"));
-        assert_eq!(provider_for_model("meta-llama/llama-3.1-405b"), Some("openrouter"));
+        assert_eq!(
+            provider_for_model("google/gemini-2.0-flash"),
+            Some("openrouter")
+        );
+        assert_eq!(
+            provider_for_model("meta-llama/llama-3.1-405b"),
+            Some("openrouter")
+        );
     }
 
     #[test]

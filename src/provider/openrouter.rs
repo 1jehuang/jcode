@@ -8,7 +8,7 @@
 //! - Cache token parsing: Parses cached_tokens from OpenRouter responses for cache hit detection
 
 use super::{EventStream, Provider};
-use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
+use crate::message::{CacheControl, ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -16,11 +16,12 @@ use futures::Stream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
+use std::time::Instant;
 use tokio::sync::RwLock;
 
 /// OpenRouter API base URL
@@ -46,6 +47,10 @@ pub struct ModelInfo {
 pub struct ModelPricing {
     pub prompt: Option<String>,
     pub completion: Option<String>,
+    #[serde(rename = "input_cache_read")]
+    pub input_cache_read: Option<String>,
+    #[serde(rename = "input_cache_write")]
+    pub input_cache_write: Option<String>,
 }
 
 /// Disk cache structure
@@ -62,6 +67,20 @@ struct DiskCache {
 struct ModelsCache {
     models: Vec<ModelInfo>,
     fetched: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProviderStats {
+    avg_throughput: f64,
+    avg_cache_hit_rate: f64,
+    throughput_samples: u64,
+    cache_samples: u64,
+}
+
+#[derive(Debug, Default)]
+struct RoutingState {
+    pinned_provider: HashMap<String, String>,
+    provider_stats: HashMap<String, HashMap<String, ProviderStats>>,
 }
 
 /// Get the cache file path
@@ -117,12 +136,114 @@ fn save_disk_cache(models: &[ModelInfo]) {
 }
 
 /// Provider routing configuration
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ProviderRouting {
     /// List of provider slugs to try in order (e.g., ["Fireworks", "Together"])
     pub order: Option<Vec<String>>,
     /// Whether to allow fallbacks to other providers (default: true)
     pub allow_fallbacks: bool,
+    /// Restrict to only these providers
+    pub only: Option<Vec<String>>,
+    /// Ignore these providers
+    pub ignore: Option<Vec<String>>,
+    /// Sort providers by "throughput", "price", or "latency"
+    pub sort: Option<String>,
+    /// Prefer providers with at least this throughput (OpenRouter will try)
+    pub preferred_min_throughput: Option<f64>,
+    /// Prefer providers with latency below this threshold (OpenRouter will try)
+    pub preferred_max_latency: Option<f64>,
+    /// Maximum price per 1M tokens for prompt/completion
+    pub max_price: Option<ProviderMaxPrice>,
+    /// Require providers to support all parameters present in the request
+    pub require_parameters: bool,
+}
+
+impl Default for ProviderRouting {
+    fn default() -> Self {
+        Self {
+            order: None,
+            allow_fallbacks: true,
+            only: None,
+            ignore: None,
+            sort: None,
+            preferred_min_throughput: None,
+            preferred_max_latency: None,
+            max_price: None,
+            require_parameters: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderMaxPrice {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion: Option<f64>,
+}
+
+#[derive(Debug, Default)]
+struct RoutingDecision {
+    order: Option<Vec<String>>,
+    allow_fallbacks: bool,
+    only: Option<Vec<String>>,
+    ignore: Option<Vec<String>>,
+    sort: Option<String>,
+    preferred_min_throughput: Option<f64>,
+    preferred_max_latency: Option<f64>,
+    max_price: Option<ProviderMaxPrice>,
+    require_parameters: bool,
+}
+
+impl RoutingDecision {
+    fn to_json(&self) -> Option<Value> {
+        let mut obj = serde_json::Map::new();
+        if let Some(ref order) = self.order {
+            if !order.is_empty() {
+                obj.insert("order".to_string(), serde_json::json!(order));
+            }
+        }
+        if let Some(ref only) = self.only {
+            if !only.is_empty() {
+                obj.insert("only".to_string(), serde_json::json!(only));
+            }
+        }
+        if let Some(ref ignore) = self.ignore {
+            if !ignore.is_empty() {
+                obj.insert("ignore".to_string(), serde_json::json!(ignore));
+            }
+        }
+        if let Some(ref sort) = self.sort {
+            obj.insert("sort".to_string(), serde_json::json!(sort));
+        }
+        if let Some(ref max_price) = self.max_price {
+            obj.insert("max_price".to_string(), serde_json::json!(max_price));
+        }
+        if let Some(min_throughput) = self.preferred_min_throughput {
+            obj.insert(
+                "preferred_min_throughput".to_string(),
+                serde_json::json!(min_throughput),
+            );
+        }
+        if let Some(max_latency) = self.preferred_max_latency {
+            obj.insert(
+                "preferred_max_latency".to_string(),
+                serde_json::json!(max_latency),
+            );
+        }
+        if !self.allow_fallbacks {
+            obj.insert("allow_fallbacks".to_string(), serde_json::json!(false));
+        }
+        if self.require_parameters {
+            obj.insert("require_parameters".to_string(), serde_json::json!(true));
+        }
+
+        if obj.is_empty() {
+            None
+        } else {
+            Some(Value::Object(obj))
+        }
+    }
 }
 
 pub struct OpenRouterProvider {
@@ -132,6 +253,10 @@ pub struct OpenRouterProvider {
     models_cache: Arc<RwLock<ModelsCache>>,
     /// Provider routing preferences
     provider_routing: Arc<RwLock<ProviderRouting>>,
+    /// Session override for provider order (set via /model@provider)
+    session_provider_order: Arc<RwLock<Option<Vec<String>>>>,
+    /// Dynamic routing state (pinning + stats)
+    routing_state: Arc<RwLock<RoutingState>>,
 }
 
 impl OpenRouterProvider {
@@ -154,15 +279,14 @@ impl OpenRouterProvider {
             api_key,
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             provider_routing: Arc::new(RwLock::new(provider_routing)),
+            session_provider_order: Arc::new(RwLock::new(None)),
+            routing_state: Arc::new(RwLock::new(RoutingState::default())),
         })
     }
 
     /// Parse provider routing configuration from environment variables
     fn parse_provider_routing() -> ProviderRouting {
-        let mut routing = ProviderRouting {
-            order: None,
-            allow_fallbacks: true,
-        };
+        let mut routing = ProviderRouting::default();
 
         // JCODE_OPENROUTER_PROVIDER: comma-separated list of providers to prefer
         // e.g., "Fireworks" or "Fireworks,Together"
@@ -194,6 +318,235 @@ impl OpenRouterProvider {
     /// Get current provider routing
     pub async fn get_provider_routing(&self) -> ProviderRouting {
         self.provider_routing.read().await.clone()
+    }
+
+    fn parse_model_and_provider(model: &str) -> (String, Option<Vec<String>>) {
+        let trimmed = model.trim();
+        if let Some((base, provider_part)) = trimmed.split_once('@') {
+            let base = base.trim().to_string();
+            let provider_part = provider_part.trim();
+            if provider_part.is_empty() {
+                return (base, None);
+            }
+            let normalized = provider_part.to_lowercase();
+            if matches!(normalized.as_str(), "auto" | "default" | "any" | "none") {
+                return (base, None);
+            }
+            let order: Vec<String> = provider_part
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if order.is_empty() {
+                return (base, None);
+            }
+            return (base, Some(order));
+        }
+        (trimmed.to_string(), None)
+    }
+
+    async fn model_pricing(&self, model_id: &str) -> Option<ModelPricing> {
+        let cache = self.models_cache.read().await;
+        if cache.fetched {
+            if let Some(model) = cache.models.iter().find(|m| m.id == model_id) {
+                return Some(model.pricing.clone());
+            }
+        }
+
+        if let Some(models) = load_disk_cache() {
+            let pricing = models
+                .iter()
+                .find(|m| m.id == model_id)
+                .map(|m| m.pricing.clone());
+            if pricing.is_some() {
+                if let Ok(mut cache) = self.models_cache.try_write() {
+                    cache.models = models;
+                    cache.fetched = true;
+                }
+                return pricing;
+            }
+        }
+
+        if let Ok(models) = self.fetch_models().await {
+            if let Some(model) = models.iter().find(|m| m.id == model_id) {
+                return Some(model.pricing.clone());
+            }
+        }
+
+        None
+    }
+
+    async fn model_supports_cache(&self, model_id: &str) -> bool {
+        let Some(pricing) = self.model_pricing(model_id).await else {
+            return false;
+        };
+
+        let has_cache_read = pricing
+            .input_cache_read
+            .as_deref()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            > 0.0;
+        let has_cache_write = pricing
+            .input_cache_write
+            .as_deref()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            > 0.0;
+
+        has_cache_read || has_cache_write
+    }
+
+    fn max_price_from_pricing(pricing: &ModelPricing, slack: f64) -> Option<ProviderMaxPrice> {
+        let to_per_million = |value: &Option<String>| -> Option<f64> {
+            value
+                .as_deref()
+                .and_then(|v| v.parse::<f64>().ok())
+                .map(|v| v * 1_000_000.0)
+        };
+
+        let prompt = to_per_million(&pricing.prompt).map(|v| v * slack);
+        let completion = to_per_million(&pricing.completion).map(|v| v * slack);
+
+        if prompt.is_none() && completion.is_none() {
+            None
+        } else {
+            Some(ProviderMaxPrice { prompt, completion })
+        }
+    }
+
+    fn add_cache_breakpoint(messages: &mut [Message]) -> bool {
+        if messages.len() < 3 {
+            return false;
+        }
+
+        let mut cache_index = None;
+        for (i, msg) in messages.iter().enumerate().rev() {
+            if msg.role == Role::Assistant {
+                cache_index = Some(i);
+                break;
+            }
+        }
+
+        let Some(idx) = cache_index else {
+            return false;
+        };
+
+        let Some(msg) = messages.get_mut(idx) else {
+            return false;
+        };
+
+        for block in msg.content.iter_mut().rev() {
+            if let ContentBlock::Text { cache_control, .. } = block {
+                if cache_control.is_none() {
+                    *cache_control = Some(CacheControl::ephemeral(None));
+                }
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn best_cache_provider(stats: &HashMap<String, ProviderStats>) -> Option<String> {
+        stats
+            .iter()
+            .filter(|(_, stat)| stat.cache_samples > 0 && stat.avg_cache_hit_rate > 0.0)
+            .max_by(|a, b| {
+                a.1.avg_cache_hit_rate
+                    .partial_cmp(&b.1.avg_cache_hit_rate)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(name, _)| name.clone())
+    }
+
+    fn throughput_similarity(
+        stats: &HashMap<String, ProviderStats>,
+        threshold: f64,
+    ) -> Option<bool> {
+        let mut throughputs: Vec<f64> = stats
+            .values()
+            .filter(|stat| stat.throughput_samples > 0)
+            .map(|stat| stat.avg_throughput)
+            .collect();
+        if throughputs.len() < 2 {
+            return None;
+        }
+        throughputs.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        let fastest = throughputs[0].max(1e-6);
+        let second = throughputs[1].max(1e-6);
+        Some((fastest / second) <= threshold)
+    }
+
+    async fn build_routing_decision(
+        &self,
+        model_id: &str,
+        cache_supported: bool,
+        cache_control_added: bool,
+    ) -> RoutingDecision {
+        let config = self.provider_routing.read().await.clone();
+        let session_order = self.session_provider_order.read().await.clone();
+        let manual_order = session_order.or_else(|| config.order.clone());
+
+        let mut decision = RoutingDecision {
+            order: None,
+            allow_fallbacks: config.allow_fallbacks,
+            only: config.only.clone(),
+            ignore: config.ignore.clone(),
+            sort: config.sort.clone(),
+            preferred_min_throughput: config.preferred_min_throughput,
+            preferred_max_latency: config.preferred_max_latency,
+            max_price: config.max_price.clone(),
+            require_parameters: cache_control_added || config.require_parameters,
+        };
+
+        if let Some(order) = manual_order {
+            decision.order = Some(order);
+            return decision;
+        }
+
+        let (pinned, stats_snapshot) = {
+            let state = self.routing_state.read().await;
+            (
+                state.pinned_provider.get(model_id).cloned(),
+                state.provider_stats.get(model_id).cloned(),
+            )
+        };
+
+        if cache_supported {
+            if let Some(provider) = pinned {
+                decision.order = Some(vec![provider]);
+                return decision;
+            }
+            if let Some(ref stats) = stats_snapshot {
+                if let Some(provider) = Self::best_cache_provider(stats) {
+                    decision.order = Some(vec![provider]);
+                    return decision;
+                }
+            }
+        }
+
+        let throughput_similar = stats_snapshot
+            .as_ref()
+            .and_then(|stats| Self::throughput_similarity(stats, 1.1))
+            .unwrap_or(false);
+
+        if decision.sort.is_none() {
+            decision.sort = Some(if throughput_similar {
+                "price".to_string()
+            } else {
+                "throughput".to_string()
+            });
+        }
+
+        if decision.max_price.is_none() {
+            if let Some(pricing) = self.model_pricing(model_id).await {
+                let slack = if throughput_similar { 1.1 } else { 1.5 };
+                decision.max_price = Self::max_price_from_pricing(&pricing, slack);
+            }
+        }
+
+        decision
     }
 
     /// Check if OPENROUTER_API_KEY is available (env var or config file)
@@ -320,6 +673,13 @@ impl Provider for OpenRouterProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let model = self.model.read().await.clone();
+        let mut effective_messages: Vec<Message> = messages.to_vec();
+        let cache_supported = self.model_supports_cache(&model).await;
+        let cache_control_added = if cache_supported {
+            Self::add_cache_breakpoint(&mut effective_messages)
+        } else {
+            false
+        };
 
         // Build messages in OpenAI format
         let mut api_messages = Vec::new();
@@ -332,48 +692,84 @@ impl Provider for OpenRouterProvider {
             }));
         }
 
+        let build_content_parts = |blocks: &[ContentBlock]| -> Vec<Value> {
+            let mut parts = Vec::new();
+            for block in blocks {
+                if let ContentBlock::Text {
+                    text,
+                    cache_control,
+                } = block
+                {
+                    let mut part = serde_json::json!({
+                        "type": "text",
+                        "text": text
+                    });
+                    if let Some(cache_control) = cache_control {
+                        part["cache_control"] =
+                            serde_json::to_value(cache_control).unwrap_or(Value::Null);
+                    }
+                    parts.push(part);
+                }
+            }
+            parts
+        };
+
+        let content_from_parts = |parts: Vec<Value>| -> Option<Value> {
+            if parts.is_empty() {
+                return None;
+            }
+            if parts.len() == 1 {
+                let part = &parts[0];
+                let has_cache = part.get("cache_control").is_some();
+                if !has_cache {
+                    if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                        return Some(serde_json::json!(text));
+                    }
+                }
+            }
+            Some(Value::Array(parts))
+        };
+
         // Convert messages
-        for msg in messages {
+        for msg in &effective_messages {
             match msg.role {
                 Role::User => {
+                    let parts = build_content_parts(&msg.content);
+                    if let Some(content) = content_from_parts(parts) {
+                        api_messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": content
+                        }));
+                    }
+
                     for block in &msg.content {
-                        match block {
-                            ContentBlock::Text { text, .. } => {
-                                api_messages.push(serde_json::json!({
-                                    "role": "user",
-                                    "content": text
-                                }));
-                            }
-                            ContentBlock::ToolResult {
-                                tool_use_id,
-                                content,
-                                is_error,
-                            } => {
-                                let output = if is_error == &Some(true) {
-                                    format!("[Error] {}", content)
-                                } else {
-                                    content.clone()
-                                };
-                                api_messages.push(serde_json::json!({
-                                    "role": "tool",
-                                    "tool_call_id": tool_use_id,
-                                    "content": output
-                                }));
-                            }
-                            _ => {}
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } = block
+                        {
+                            let output = if is_error == &Some(true) {
+                                format!("[Error] {}", content)
+                            } else {
+                                content.clone()
+                            };
+                            api_messages.push(serde_json::json!({
+                                "role": "tool",
+                                "tool_call_id": tool_use_id,
+                                "content": output
+                            }));
                         }
                     }
                 }
                 Role::Assistant => {
-                    let mut text_content = String::new();
+                    let parts = build_content_parts(&msg.content);
                     let mut tool_calls = Vec::new();
                     let mut reasoning_content = String::new();
 
                     for block in &msg.content {
                         match block {
-                            ContentBlock::Text { text, .. } => {
-                                text_content.push_str(text);
-                            }
+                            ContentBlock::Text { .. } => {}
                             ContentBlock::Reasoning { text } => {
                                 reasoning_content.push_str(text);
                             }
@@ -395,8 +791,8 @@ impl Provider for OpenRouterProvider {
                         "role": "assistant",
                     });
 
-                    if !text_content.is_empty() {
-                        assistant_msg["content"] = serde_json::json!(text_content);
+                    if let Some(content) = content_from_parts(parts) {
+                        assistant_msg["content"] = content;
                     }
 
                     if !tool_calls.is_empty() {
@@ -407,7 +803,7 @@ impl Provider for OpenRouterProvider {
                         assistant_msg["reasoning_content"] = serde_json::json!(reasoning_content);
                     }
 
-                    if !text_content.is_empty() || !tool_calls.is_empty() {
+                    if assistant_msg.get("content").is_some() || !tool_calls.is_empty() {
                         api_messages.push(assistant_msg);
                     }
                 }
@@ -441,19 +837,16 @@ impl Provider for OpenRouterProvider {
             request["tool_choice"] = serde_json::json!("auto");
         }
 
-        // Add provider routing if configured
-        let routing = self.provider_routing.read().await;
-        if routing.order.is_some() || !routing.allow_fallbacks {
-            let mut provider_obj = serde_json::json!({});
-            if let Some(ref order) = routing.order {
-                provider_obj["order"] = serde_json::json!(order);
-            }
-            if !routing.allow_fallbacks {
-                provider_obj["allow_fallbacks"] = serde_json::json!(false);
-            }
+        let session_order = self.session_provider_order.read().await.clone();
+        let config_order = self.provider_routing.read().await.order.clone();
+        let manual_order_active = session_order.is_some() || config_order.is_some();
+
+        let routing_decision = self
+            .build_routing_decision(&model, cache_supported, cache_control_added)
+            .await;
+        if let Some(provider_obj) = routing_decision.to_json() {
             request["provider"] = provider_obj;
         }
-        drop(routing);
 
         // Send request
         let url = format!("{}/chat/completions", API_BASE);
@@ -475,7 +868,13 @@ impl Provider for OpenRouterProvider {
             anyhow::bail!("OpenRouter API error ({}): {}", status, body);
         }
 
-        let stream = OpenRouterStream::new(response.bytes_stream());
+        let stream = OpenRouterStream::new(
+            response.bytes_stream(),
+            Arc::clone(&self.routing_state),
+            model.clone(),
+            cache_supported,
+            manual_order_active,
+        );
         Ok(Box::pin(stream))
     }
 
@@ -493,8 +892,25 @@ impl Provider for OpenRouterProvider {
     fn set_model(&self, model: &str) -> Result<()> {
         // OpenRouter accepts any model ID - validation happens at API call time
         // This allows using any model without needing to pre-fetch the list
+        let (base_model, provider_order) = Self::parse_model_and_provider(model);
+        if base_model.is_empty() {
+            return Err(anyhow::anyhow!("Model name cannot be empty"));
+        }
+
+        if let Ok(mut order_guard) = self.session_provider_order.try_write() {
+            *order_guard = provider_order;
+        } else {
+            return Err(anyhow::anyhow!(
+                "Cannot change provider routing while a request is in progress"
+            ));
+        }
+
+        if let Ok(mut state) = self.routing_state.try_write() {
+            state.pinned_provider.remove(&base_model);
+        }
+
         if let Ok(mut current) = self.model.try_write() {
-            *current = model.to_string();
+            *current = base_model;
             Ok(())
         } else {
             Err(anyhow::anyhow!(
@@ -550,6 +966,8 @@ impl Provider for OpenRouterProvider {
                     .map(|r| r.clone())
                     .unwrap_or_default(),
             )),
+            session_provider_order: Arc::new(RwLock::new(None)),
+            routing_state: Arc::new(RwLock::new(RoutingState::default())),
         })
     }
 }
@@ -565,6 +983,14 @@ struct OpenRouterStream {
     current_tool_call: Option<ToolCallAccumulator>,
     /// Track if we've emitted the provider info (only emit once)
     provider_emitted: bool,
+    routing_state: Arc<RwLock<RoutingState>>,
+    model_id: String,
+    cache_supported: bool,
+    manual_order_active: bool,
+    started_at: Instant,
+    seen_provider: Option<String>,
+    latest_usage: Option<UsageSnapshot>,
+    finalized: bool,
 }
 
 #[derive(Default)]
@@ -574,14 +1000,118 @@ struct ToolCallAccumulator {
     arguments: String,
 }
 
+#[derive(Clone, Default)]
+struct UsageSnapshot {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+}
+
 impl OpenRouterStream {
-    fn new(stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static) -> Self {
+    fn new(
+        stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+        routing_state: Arc<RwLock<RoutingState>>,
+        model_id: String,
+        cache_supported: bool,
+        manual_order_active: bool,
+    ) -> Self {
         Self {
             inner: Box::pin(stream),
             buffer: String::new(),
             pending: VecDeque::new(),
             current_tool_call: None,
             provider_emitted: false,
+            routing_state,
+            model_id,
+            cache_supported,
+            manual_order_active,
+            started_at: Instant::now(),
+            seen_provider: None,
+            latest_usage: None,
+            finalized: false,
+        }
+    }
+
+    fn record_provider(&mut self, provider: &str) {
+        if self.seen_provider.is_none() {
+            self.seen_provider = Some(provider.to_string());
+        }
+    }
+
+    fn record_usage(
+        &mut self,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        cache_read_input_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
+    ) {
+        self.latest_usage = Some(UsageSnapshot {
+            input_tokens,
+            output_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+        });
+    }
+
+    fn finalize(&mut self) {
+        if self.finalized {
+            return;
+        }
+        self.finalized = true;
+
+        let Some(provider) = self.seen_provider.clone() else {
+            return;
+        };
+
+        let usage = self.latest_usage.clone();
+        let elapsed = self.started_at.elapsed().as_secs_f64().max(0.001);
+
+        if let Ok(mut state) = self.routing_state.try_write() {
+            let stats_map = state
+                .provider_stats
+                .entry(self.model_id.clone())
+                .or_default();
+            let stats = stats_map.entry(provider.clone()).or_default();
+
+            if let Some(output_tokens) = usage.as_ref().and_then(|u| u.output_tokens) {
+                if output_tokens > 0 {
+                    let throughput = output_tokens as f64 / elapsed;
+                    let total = stats.throughput_samples + 1;
+                    stats.avg_throughput = if stats.throughput_samples == 0 {
+                        throughput
+                    } else {
+                        (stats.avg_throughput * stats.throughput_samples as f64 + throughput)
+                            / total as f64
+                    };
+                    stats.throughput_samples = total;
+                }
+            }
+
+            if let Some(input_tokens) = usage.as_ref().and_then(|u| u.input_tokens) {
+                if input_tokens > 0 {
+                    let cache_read = usage
+                        .as_ref()
+                        .and_then(|u| u.cache_read_input_tokens)
+                        .unwrap_or(0);
+                    let rate = cache_read as f64 / input_tokens as f64;
+                    let total = stats.cache_samples + 1;
+                    stats.avg_cache_hit_rate = if stats.cache_samples == 0 {
+                        rate
+                    } else {
+                        (stats.avg_cache_hit_rate * stats.cache_samples as f64 + rate)
+                            / total as f64
+                    };
+                    stats.cache_samples = total;
+                }
+            }
+
+            if self.cache_supported && !self.manual_order_active {
+                state
+                    .pinned_provider
+                    .entry(self.model_id.clone())
+                    .or_insert(provider);
+            }
         }
     }
 
@@ -608,6 +1138,7 @@ impl OpenRouterStream {
             };
 
             if data == "[DONE]" {
+                self.finalize();
                 return Some(StreamEvent::MessageEnd { stop_reason: None });
             }
 
@@ -621,6 +1152,7 @@ impl OpenRouterStream {
             if !self.provider_emitted {
                 if let Some(provider) = parsed.get("provider").and_then(|p| p.as_str()) {
                     self.provider_emitted = true;
+                    self.record_provider(provider);
                     self.pending.push_back(StreamEvent::UpstreamProvider {
                         provider: provider.to_string(),
                     });
@@ -770,6 +1302,12 @@ impl OpenRouterStream {
                     || output_tokens.is_some()
                     || cache_read_input_tokens.is_some()
                 {
+                    self.record_usage(
+                        input_tokens,
+                        output_tokens,
+                        cache_read_input_tokens,
+                        cache_creation_input_tokens,
+                    );
                     self.pending.push_back(StreamEvent::TokenUsage {
                         input_tokens,
                         output_tokens,
@@ -808,6 +1346,7 @@ impl Stream for OpenRouterStream {
                 }
                 Poll::Ready(None) => {
                     // Stream ended - emit any pending tool call
+                    self.finalize();
                     if let Some(tc) = self.current_tool_call.take() {
                         if !tc.id.is_empty() {
                             self.pending.push_back(StreamEvent::ToolUseStart {
