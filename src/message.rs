@@ -11,6 +11,10 @@ pub enum Role {
     Assistant,
 }
 
+/// Plain-text tool output placeholder when execution was interrupted.
+pub const TOOL_OUTPUT_MISSING_TEXT: &str =
+    "Tool output missing (session interrupted before tool execution completed)";
+
 /// A message in the conversation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {

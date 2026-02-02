@@ -29,11 +29,6 @@ const API_BASE: &str = "https://openrouter.ai/api/v1";
 /// Default model (Claude Sonnet via OpenRouter)
 const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
 
-fn model_requires_reasoning_content(model: &str) -> bool {
-    let lower = model.to_lowercase();
-    lower.contains("moonshot") || lower.contains("kimi")
-}
-
 /// Cache TTL in seconds (24 hours)
 const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 
@@ -325,7 +320,6 @@ impl Provider for OpenRouterProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let model = self.model.read().await.clone();
-        let needs_reasoning_content = model_requires_reasoning_content(&model);
 
         // Build messages in OpenAI format
         let mut api_messages = Vec::new();
@@ -409,9 +403,7 @@ impl Provider for OpenRouterProvider {
                         assistant_msg["tool_calls"] = serde_json::json!(tool_calls);
                     }
 
-                    if !reasoning_content.is_empty()
-                        || (needs_reasoning_content && !tool_calls.is_empty())
-                    {
+                    if !reasoning_content.is_empty() || !tool_calls.is_empty() {
                         assistant_msg["reasoning_content"] = serde_json::json!(reasoning_content);
                     }
 
