@@ -145,7 +145,10 @@ pub trait Provider: Send + Sync {
 pub const ALL_CLAUDE_MODELS: &[&str] = &["claude-opus-4-5-20251101"];
 
 pub const ALL_OPENAI_MODELS: &[&str] = &[
+    "codex-mini-latest",
+    "gpt-5.2-chat-latest",
     "gpt-5.2-codex",
+    "gpt-5.2-pro",
     "gpt-5.1-codex-mini",
     "gpt-5.1-codex-max",
     "gpt-5.2",
@@ -153,6 +156,8 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
     "gpt-5.1-codex",
     "gpt-5-codex",
     "gpt-5-codex-mini",
+    "gpt-5-mini",
+    "gpt-5-nano",
     "gpt-5",
 ];
 
