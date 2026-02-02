@@ -3197,7 +3197,7 @@ impl App {
 
                         if self.remote_available_models.is_empty() {
                             self.push_display_message(DisplayMessage::system(format!(
-                                "**Available models:**\n  • {} (current)\n\nUse `/model <name>` to switch.",
+                                "**Available models:**\n  • {} (current)\n\nUse `/model <name>` to switch.\nOpenRouter: `/model <name>@<provider>` to pin provider.",
                                 current
                             )));
                             return Ok(());
@@ -3217,7 +3217,7 @@ impl App {
                             .join("\n");
 
                         self.push_display_message(DisplayMessage::system(format!(
-                            "**Available models:**\n{}\n\nUse `/model <name>` to switch.",
+                            "**Available models:**\n{}\n\nUse `/model <name>` to switch.\nOpenRouter: `/model <name>@<provider>` to pin provider.",
                             model_list
                         )));
                         return Ok(());
@@ -3768,6 +3768,7 @@ impl App {
                      • `/config edit` - Open config file in $EDITOR\n\
                      • `/model` - List available models\n\
                      • `/model <name>` - Switch to a different model\n\
+                     • `/model <name>@<provider>` - Pin OpenRouter provider\n\
                      • `/reload` - Smart reload (client/server if newer binary exists)\n\
                      • `/rebuild` - Full rebuild (git pull + cargo build + tests){}\n\
                      • `/clear` - Clear conversation (Ctrl+L)\n\
@@ -4378,7 +4379,7 @@ impl App {
             self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: format!(
-                    "**Available models:**\n{}\n\nUse `/model <name>` to switch.",
+                    "**Available models:**\n{}\n\nUse `/model <name>` to switch.\nOpenRouter: `/model <name>@<provider>` to pin provider.",
                     model_list
                 ),
                 tool_calls: vec![],
@@ -6282,6 +6283,56 @@ impl App {
         &self.input
     }
 
+    fn fuzzy_score(query: &str, candidate: &str) -> Option<i32> {
+        if query.is_empty() {
+            return Some(0);
+        }
+
+        let mut score: i32 = 0;
+        let mut last_idx: Option<usize> = None;
+        let mut first_idx: Option<usize> = None;
+        let mut iter = candidate.chars().enumerate();
+
+        for q in query.chars() {
+            let mut found = None;
+            while let Some((idx, ch)) = iter.next() {
+                if ch == q {
+                    found = Some(idx);
+                    break;
+                }
+            }
+            let idx = match found {
+                Some(i) => i,
+                None => return None,
+            };
+
+            if first_idx.is_none() {
+                first_idx = Some(idx);
+            }
+
+            score += 10;
+            if let Some(prev) = last_idx {
+                if idx == prev + 1 {
+                    score += 5;
+                }
+            }
+            last_idx = Some(idx);
+        }
+
+        if candidate.starts_with(query) {
+            score += 20;
+        }
+
+        let cand_len = candidate.chars().count() as i32;
+        let query_len = query.chars().count() as i32;
+        if let Some(first) = first_idx {
+            score += (cand_len - first as i32).max(0);
+        }
+        score -= (cand_len - query_len).max(0);
+
+        Some(score)
+    }
+
     /// Get command suggestions based on current input (or base input for cycling)
     fn get_suggestions_for(&self, input: &str) -> Vec<(String, &'static str)> {
         let input = input.trim();
@@ -6310,10 +6361,37 @@ impl App {
 
         // Check if this is a "/model " command with a partial model name
         if let Some(model_prefix) = prefix.strip_prefix("/model ") {
-            return models
+            let (model_query, provider_suffix) = if let Some((left, right)) = model_prefix.split_once('@') {
+                (left.trim(), Some(right.trim()))
+            } else {
+                (model_prefix.trim(), None)
+            };
+            let query = model_query.trim();
+            let suffix = provider_suffix
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("@{}", s))
+                .unwrap_or_default();
+            let mut scored: Vec<(i32, String)> = models
                 .into_iter()
-                .filter(|m| model_prefix.is_empty() || m.to_lowercase().starts_with(model_prefix))
-                .map(|m| (format!("/model {}", m), "Switch to this model"))
+                .filter_map(|m| {
+                    if query.is_empty() {
+                        Some((0, m))
+                    } else {
+                        let score = Self::fuzzy_score(query, &m.to_lowercase())?;
+                        Some((score, m))
+                    }
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            return scored
+                .into_iter()
+                .take(50)
+                .map(|(_, m)| {
+                    (
+                        format!("/model {}{}", m, suffix),
+                        "Switch to this model",
+                    )
+                })
                 .collect();
         }
 
@@ -6350,11 +6428,21 @@ impl App {
             commands.push((format!("/{}", skill.name), "Activate skill"));
         }
 
-        // Filter by prefix match
-        commands
+        // Fuzzy filter by command name
+        let query = prefix.trim_start_matches('/').trim();
+        let mut scored: Vec<(i32, (String, &'static str))> = commands
             .into_iter()
-            .filter(|(cmd, _)| cmd.to_lowercase().starts_with(&prefix))
-            .collect()
+            .filter_map(|(cmd, desc)| {
+                if query.is_empty() {
+                    return Some((0, (cmd, desc)));
+                }
+                let hay = cmd.trim_start_matches('/').to_lowercase();
+                let score = Self::fuzzy_score(query, &hay)?;
+                Some((score, (cmd, desc)))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.into_iter().take(20).map(|(_, v)| v).collect()
     }
 
     /// Get command suggestions based on current input
@@ -7557,6 +7645,13 @@ mod tests {
 
         assert_eq!(app.input(), "a");
         assert_eq!(app.cursor_pos(), 1);
+    }
+
+    #[test]
+    fn test_fuzzy_command_suggestions() {
+        let app = create_test_app();
+        let suggestions = app.get_suggestions_for("/mdl");
+        assert!(suggestions.iter().any(|(cmd, _)| cmd == "/model"));
     }
 
     #[test]
