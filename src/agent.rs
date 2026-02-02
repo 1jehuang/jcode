@@ -4,11 +4,14 @@
 use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
 use crate::cache_tracker::CacheTracker;
 use crate::compaction::CompactionEvent;
+use crate::id;
 use crate::logging;
-use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall, ToolDefinition};
+use crate::message::{
+    ContentBlock, Message, Role, StreamEvent, ToolCall, ToolDefinition, TOOL_OUTPUT_MISSING_TEXT,
+};
 use crate::protocol::{HistoryMessage, ServerEvent};
 use crate::provider::{NativeToolResult, Provider};
-use crate::session::Session;
+use crate::session::{Session, StoredMessage};
 use crate::skill::SkillRegistry;
 use crate::tool::{Registry, ToolContext};
 use anyhow::Result;
@@ -41,6 +44,8 @@ pub struct Agent {
     allowed_tools: Option<HashSet<String>>,
     /// Provider-specific session ID for conversation resume (e.g., Claude Code CLI session)
     provider_session_id: Option<String>,
+    /// Last upstream provider (OpenRouter) observed for this session
+    last_upstream_provider: Option<String>,
     /// Pending swarm alerts to inject into the next turn
     pending_alerts: Vec<String>,
     /// Soft interrupt queue: messages to inject at next safe point without cancelling
@@ -61,6 +66,7 @@ impl Agent {
             active_skill: None,
             allowed_tools: None,
             provider_session_id: None,
+            last_upstream_provider: None,
             pending_alerts: Vec::new(),
             soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             cache_tracker: CacheTracker::new(),
@@ -85,6 +91,7 @@ impl Agent {
             active_skill: None,
             allowed_tools,
             provider_session_id: None,
+            last_upstream_provider: None,
             pending_alerts: Vec::new(),
             soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             cache_tracker: CacheTracker::new(),
@@ -163,6 +170,65 @@ impl Agent {
                 .collect::<Vec<_>>()
         ));
         (messages, None)
+    }
+
+    fn repair_missing_tool_outputs(&mut self) -> usize {
+        let mut known_results = HashSet::new();
+        for msg in &self.session.messages {
+            if let Role::User = msg.role {
+                for block in &msg.content {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                        known_results.insert(tool_use_id.clone());
+                    }
+                }
+            }
+        }
+
+        let mut repaired = 0usize;
+        let mut index = 0usize;
+        while index < self.session.messages.len() {
+            let mut missing_for_message: Vec<String> = Vec::new();
+            if let Role::Assistant = self.session.messages[index].role {
+                for block in &self.session.messages[index].content {
+                    if let ContentBlock::ToolUse { id, .. } = block {
+                        if !known_results.contains(id) {
+                            known_results.insert(id.clone());
+                            missing_for_message.push(id.clone());
+                        }
+                    }
+                }
+            }
+
+            if !missing_for_message.is_empty() {
+                for (offset, id) in missing_for_message.iter().enumerate() {
+                    let tool_block = ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: TOOL_OUTPUT_MISSING_TEXT.to_string(),
+                        is_error: Some(true),
+                    };
+                    let stored_message = StoredMessage {
+                        id: id::new_id("message"),
+                        role: Role::User,
+                        content: vec![tool_block],
+                    };
+                    self.session
+                        .messages
+                        .insert(index + 1 + offset, stored_message);
+                    repaired += 1;
+                }
+                index += missing_for_message.len();
+            }
+
+            index += 1;
+        }
+
+        if repaired > 0 {
+            let _ = self.session.save();
+            self.seed_compaction_from_session();
+            self.cache_tracker.reset();
+        }
+
+        repaired
     }
 
     /// Add a swarm alert to be injected into the next turn
@@ -303,6 +369,10 @@ impl Agent {
                     .collect::<Vec<_>>()
                     .join("\n")
             })
+    }
+
+    pub fn last_upstream_provider(&self) -> Option<String> {
+        self.last_upstream_provider.clone()
     }
 
     pub fn provider_name(&self) -> String {
@@ -826,6 +896,13 @@ impl Agent {
         let trace = trace_enabled();
 
         loop {
+            let repaired = self.repair_missing_tool_outputs();
+            if repaired > 0 {
+                logging::warn(&format!(
+                    "Recovered {} missing tool output(s) before API call",
+                    repaired
+                ));
+            }
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
                 // Reset cache tracker on compaction since the message history changes
@@ -1061,6 +1138,7 @@ impl Agent {
                         if trace {
                             eprintln!("[trace] upstream_provider={}", provider);
                         }
+                        self.last_upstream_provider = Some(provider);
                     }
                     StreamEvent::Compaction {
                         trigger,
@@ -1385,6 +1463,13 @@ impl Agent {
         let trace = trace_enabled();
 
         loop {
+            let repaired = self.repair_missing_tool_outputs();
+            if repaired > 0 {
+                logging::warn(&format!(
+                    "Recovered {} missing tool output(s) before API call",
+                    repaired
+                ));
+            }
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
                 // Reset cache tracker on compaction since the message history changes
@@ -1576,6 +1661,7 @@ impl Agent {
                         }
                     }
                     StreamEvent::UpstreamProvider { provider } => {
+                        self.last_upstream_provider = Some(provider.clone());
                         let _ = event_tx.send(ServerEvent::UpstreamProvider { provider });
                     }
                     StreamEvent::Error { message, .. } => {
@@ -1823,6 +1909,13 @@ impl Agent {
         let trace = trace_enabled();
 
         loop {
+            let repaired = self.repair_missing_tool_outputs();
+            if repaired > 0 {
+                logging::warn(&format!(
+                    "Recovered {} missing tool output(s) before API call",
+                    repaired
+                ));
+            }
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
                 // Reset cache tracker on compaction since the message history changes
@@ -2011,6 +2104,7 @@ impl Agent {
                         }
                     }
                     StreamEvent::UpstreamProvider { provider } => {
+                        self.last_upstream_provider = Some(provider.clone());
                         let _ = event_tx.send(ServerEvent::UpstreamProvider { provider });
                     }
                     StreamEvent::Error { message, .. } => {

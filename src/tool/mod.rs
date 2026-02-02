@@ -373,8 +373,8 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{EventStream, Provider};
     use crate::message::{Message, ToolDefinition};
+    use crate::provider::{EventStream, Provider};
     use async_trait::async_trait;
 
     struct MockProvider;
@@ -420,6 +420,9 @@ mod tests {
         let names: Vec<&str> = defs1.iter().map(|d| d.name.as_str()).collect();
         let mut sorted_names = names.clone();
         sorted_names.sort();
-        assert_eq!(names, sorted_names, "Tool definitions should be sorted alphabetically");
+        assert_eq!(
+            names, sorted_names,
+            "Tool definitions should be sorted alphabetically"
+        );
     }
 }

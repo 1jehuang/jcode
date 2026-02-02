@@ -216,7 +216,7 @@ impl MemoryAgent {
                     "Topic change detected (sim={:.2}), resetting memory agent state",
                     similarity
                 ));
-                
+
                 // Extract memories from the PREVIOUS topic before moving on
                 // Only if we have enough turns and haven't extracted recently
                 if self.turns_since_extraction >= MIN_TURNS_FOR_EXTRACTION {
@@ -229,11 +229,11 @@ impl MemoryAgent {
                         self.turns_since_extraction = 0;
                     }
                 }
-                
+
                 self.surfaced_memories.clear();
             }
         }
-        
+
         // Store current context for potential future extraction
         self.last_context_embedding = Some(context_embedding.clone());
         self.last_context_string = Some(context.clone());
@@ -410,7 +410,7 @@ impl MemoryAgent {
     }
 
     /// Extract memories from a context string (called on topic change)
-    /// 
+    ///
     /// This is an incremental extraction - we extract from a portion of the
     /// conversation when the topic changes, rather than waiting for session end.
     async fn extract_from_context(&self, context: &str) {
@@ -420,11 +420,11 @@ impl MemoryAgent {
         }
 
         // Update UI state
-        memory::set_state(MemoryState::Extracting { 
-            reason: "topic change".to_string() 
+        memory::set_state(MemoryState::Extracting {
+            reason: "topic change".to_string(),
         });
-        memory::add_event(MemoryEventKind::ExtractionStarted { 
-            reason: "topic change".to_string() 
+        memory::add_event(MemoryEventKind::ExtractionStarted {
+            reason: "topic change".to_string(),
         });
 
         let sidecar = self.sidecar.clone();
@@ -465,7 +465,9 @@ impl MemoryAgent {
                             "Incremental extraction: stored {} memories on topic change",
                             stored_count
                         ));
-                        memory::add_event(MemoryEventKind::ExtractionComplete { count: stored_count });
+                        memory::add_event(MemoryEventKind::ExtractionComplete {
+                            count: stored_count,
+                        });
                     }
                     memory::set_state(MemoryState::Idle);
                 }
@@ -475,7 +477,9 @@ impl MemoryAgent {
                 }
                 Err(e) => {
                     crate::logging::info(&format!("Incremental extraction failed: {}", e));
-                    memory::add_event(MemoryEventKind::Error { message: e.to_string() });
+                    memory::add_event(MemoryEventKind::Error {
+                        message: e.to_string(),
+                    });
                     memory::set_state(MemoryState::Idle);
                 }
             }

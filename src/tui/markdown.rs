@@ -3,12 +3,12 @@
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::prelude::*;
 use std::collections::HashMap;
-use unicode_width::UnicodeWidthStr;
 use std::hash::{Hash, Hasher};
 use std::sync::{LazyLock, Mutex};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style as SynStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
+use unicode_width::UnicodeWidthStr;
 
 use crate::tui::mermaid;
 
@@ -322,7 +322,13 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     let header_width = 3 + lang_label.len(); // "┌─ " + lang
                     let code_widths: Vec<usize> = highlighted
                         .iter()
-                        .map(|l| 2 + l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>()) // "│ " + content
+                        .map(|l| {
+                            2 + l
+                                .spans
+                                .iter()
+                                .map(|s| s.content.chars().count())
+                                .sum::<usize>()
+                        }) // "│ " + content
                         .collect();
                     let max_code_width = code_widths.iter().copied().max().unwrap_or(0);
                     let block_width = header_width.max(max_code_width).max(2); // at least "└─"
@@ -340,16 +346,20 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     let pad_str: String = " ".repeat(padding);
 
                     // Add header with padding
-                    lines.push(Line::from(Span::styled(
-                        format!("{}┌─ {} ", pad_str, lang_label),
-                        Style::default().fg(DIM_COLOR),
-                    )).left_aligned());
+                    lines.push(
+                        Line::from(Span::styled(
+                            format!("{}┌─ {} ", pad_str, lang_label),
+                            Style::default().fg(DIM_COLOR),
+                        ))
+                        .left_aligned(),
+                    );
 
                     // Add code lines with padding
                     for hl_line in highlighted {
-                        let mut spans = vec![
-                            Span::styled(format!("{}│ ", pad_str), Style::default().fg(DIM_COLOR))
-                        ];
+                        let mut spans = vec![Span::styled(
+                            format!("{}│ ", pad_str),
+                            Style::default().fg(DIM_COLOR),
+                        )];
                         spans.extend(hl_line.spans);
                         lines.push(Line::from(spans).left_aligned());
                     }
@@ -837,15 +847,25 @@ pub fn render_markdown_lazy(
                     let header_width = 3 + lang_label.len();
 
                     let (highlighted, code_widths) = if is_visible {
-                        let hl = highlight_code_cached(&code_block_content, code_block_lang.as_deref());
+                        let hl =
+                            highlight_code_cached(&code_block_content, code_block_lang.as_deref());
                         let widths: Vec<usize> = hl
                             .iter()
-                            .map(|l| 2 + l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>())
+                            .map(|l| {
+                                2 + l
+                                    .spans
+                                    .iter()
+                                    .map(|s| s.content.chars().count())
+                                    .sum::<usize>()
+                            })
                             .collect();
                         (Some(hl), widths)
                     } else {
                         // Estimate widths from raw content for placeholder
-                        let widths: Vec<usize> = code_block_content.lines().map(|l| 2 + l.chars().count()).collect();
+                        let widths: Vec<usize> = code_block_content
+                            .lines()
+                            .map(|l| 2 + l.chars().count())
+                            .collect();
                         (None, widths)
                     };
 
@@ -864,17 +884,21 @@ pub fn render_markdown_lazy(
                     let pad_str: String = " ".repeat(padding);
 
                     // Add header with padding
-                    lines.push(Line::from(Span::styled(
-                        format!("{}┌─ {} ", pad_str, lang_label),
-                        Style::default().fg(DIM_COLOR),
-                    )).left_aligned());
+                    lines.push(
+                        Line::from(Span::styled(
+                            format!("{}┌─ {} ", pad_str, lang_label),
+                            Style::default().fg(DIM_COLOR),
+                        ))
+                        .left_aligned(),
+                    );
 
                     if let Some(hl_lines) = highlighted {
                         // Render highlighted code
                         for hl_line in hl_lines {
-                            let mut spans = vec![
-                                Span::styled(format!("{}│ ", pad_str), Style::default().fg(DIM_COLOR))
-                            ];
+                            let mut spans = vec![Span::styled(
+                                format!("{}│ ", pad_str),
+                                Style::default().fg(DIM_COLOR),
+                            )];
                             spans.extend(hl_line.spans);
                             lines.push(Line::from(spans).left_aligned());
                         }
@@ -883,19 +907,23 @@ pub fn render_markdown_lazy(
                         let placeholder =
                             placeholder_code_block(&code_block_content, code_block_lang.as_deref());
                         for pl_line in placeholder {
-                            let mut spans = vec![
-                                Span::styled(format!("{}│ ", pad_str), Style::default().fg(DIM_COLOR))
-                            ];
+                            let mut spans = vec![Span::styled(
+                                format!("{}│ ", pad_str),
+                                Style::default().fg(DIM_COLOR),
+                            )];
                             spans.extend(pl_line.spans);
                             lines.push(Line::from(spans).left_aligned());
                         }
                     }
 
                     // Add footer with padding
-                    lines.push(Line::from(Span::styled(
-                        format!("{}└─", pad_str),
-                        Style::default().fg(DIM_COLOR),
-                    )).left_aligned());
+                    lines.push(
+                        Line::from(Span::styled(
+                            format!("{}└─", pad_str),
+                            Style::default().fg(DIM_COLOR),
+                        ))
+                        .left_aligned(),
+                    );
                 }
                 in_code_block = false;
                 code_block_lang = None;
@@ -1084,7 +1112,9 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
                     let char_width = c.to_string().width();
 
                     // Would this char overflow the available width?
-                    if current_width + part_width + char_width > width && (current_width + part_width) > 0 {
+                    if current_width + part_width + char_width > width
+                        && (current_width + part_width) > 0
+                    {
                         // Push current part if non-empty
                         if !part.is_empty() {
                             current_spans.push(Span::styled(std::mem::take(&mut part), style));

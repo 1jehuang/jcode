@@ -160,11 +160,11 @@ pub fn render_mermaid(content: &str) -> RenderResult {
 
         // Configure theme for terminal (dark background friendly)
         let theme = terminal_theme();
-        
+
         // Use larger spacing for better readability in terminal
         let layout_config = LayoutConfig {
-            node_spacing: 80.0,  // Default is 50
-            rank_spacing: 80.0,  // Default is 50
+            node_spacing: 80.0,   // Default is 50
+            rank_spacing: 80.0,   // Default is 50
             node_padding_x: 40.0, // Default is 30
             node_padding_y: 20.0, // Default is 15
             ..Default::default()
@@ -286,14 +286,39 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
     // Manual clearing causes flicker during scroll because it wipes the
     // Unicode placeholders before ratatui-image can redraw them.
 
-    // Use Crop instead of Fit so images clip rather than rescale when space is limited
-    // clip_top: false means clip the bottom when image is too tall
-    // clip_left: false means clip the right side when image is too wide
+    // Get image dimensions from cache
+    let (img_width, img_height) = {
+        let cache = RENDER_CACHE.lock().unwrap();
+        cache
+            .get(hash)
+            .map(|c| (c.width, c.height))
+            .unwrap_or((0, 0))
+    };
+
+    // Calculate image dimensions in terminal cells
+    let (img_cols, img_rows) = if let Some(Some(picker)) = PICKER.get() {
+        let font_size = picker.font_size();
+        let cols = (img_width as f32 / font_size.0 as f32).ceil() as u16;
+        let rows = (img_height as f32 / font_size.1 as f32).ceil() as u16;
+        (cols, rows)
+    } else {
+        (render_area.width, render_area.height)
+    };
+
+    // Use Fit to scale down if image is larger than available area
+    // Use Crop to clip if the available area is smaller than the scaled image
+    // This ensures diagrams always fit within the terminal width while preserving aspect ratio
     let make_resize = || {
-        Resize::Crop(Some(CropOptions {
-            clip_top: false,
-            clip_left: false,
-        }))
+        if img_cols > render_area.width || img_rows > render_area.height {
+            // Image is larger than available area - scale to fit
+            Resize::Fit(None)
+        } else {
+            // Image fits - use crop to prevent upscaling
+            Resize::Crop(Some(CropOptions {
+                clip_top: false,
+                clip_left: false,
+            }))
+        }
     };
 
     // First try to render from existing state
@@ -502,10 +527,16 @@ pub fn error_to_lines(error: &str) -> Vec<Line<'static>> {
         )),
         Line::from(vec![
             Span::styled("│ ", dim),
-            Span::styled(format!("{:<width$}", error, width = content_width), err_style),
+            Span::styled(
+                format!("{:<width$}", error, width = content_width),
+                err_style,
+            ),
             Span::styled("│", dim),
         ]),
-        Line::from(Span::styled(format!("└─{}─┘", "─".repeat(bottom_width)), dim)),
+        Line::from(Span::styled(
+            format!("└─{}─┘", "─".repeat(bottom_width)),
+            dim,
+        )),
     ]
 }
 
@@ -520,7 +551,7 @@ fn terminal_theme() -> Theme {
         secondary_color: "#45475a".to_string(),
         tertiary_color: "#313244".to_string(),
         edge_label_background: "#00000000".to_string(), // Transparent edge labels
-        cluster_background: "#18182580".to_string(), // Semi-transparent cluster bg
+        cluster_background: "#18182580".to_string(),    // Semi-transparent cluster bg
         cluster_border: "#45475a".to_string(),
         font_family: "monospace".to_string(),
         font_size: 18.0, // Larger font for terminal readability (default was 13)
