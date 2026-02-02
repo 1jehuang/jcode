@@ -7,7 +7,9 @@ use crate::bus::{BackgroundTaskStatus, Bus, BusEvent, ToolEvent, ToolStatus};
 use crate::config::config;
 use crate::id;
 use crate::mcp::McpManager;
-use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall};
+use crate::message::{
+    ContentBlock, Message, Role, StreamEvent, ToolCall, TOOL_OUTPUT_MISSING_TEXT,
+};
 use crate::provider::Provider;
 use crate::session::Session;
 use crate::skill::SkillRegistry;
@@ -4770,25 +4772,37 @@ impl App {
         false
     }
 
-    fn summarize_tool_results_missing(&self) -> Option<String> {
-        if self.tool_result_ids.is_empty() {
-            return None;
-        }
-        let mut known_ids = HashSet::new();
+    fn missing_tool_result_ids(&self) -> Vec<String> {
+        let mut tool_calls = HashSet::new();
+        let mut tool_results = HashSet::new();
+
         for msg in &self.messages {
-            if let Role::User = msg.role {
-                for block in &msg.content {
-                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                        known_ids.insert(tool_use_id.clone());
+            match msg.role {
+                Role::Assistant => {
+                    for block in &msg.content {
+                        if let ContentBlock::ToolUse { id, .. } = block {
+                            tool_calls.insert(id.clone());
+                        }
+                    }
+                }
+                Role::User => {
+                    for block in &msg.content {
+                        if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                            tool_results.insert(tool_use_id.clone());
+                        }
                     }
                 }
             }
         }
-        let missing: Vec<String> = self
-            .tool_result_ids
-            .difference(&known_ids)
+
+        tool_calls
+            .difference(&tool_results)
             .cloned()
-            .collect();
+            .collect::<Vec<_>>()
+    }
+
+    fn summarize_tool_results_missing(&self) -> Option<String> {
+        let missing = self.missing_tool_result_ids();
         if missing.is_empty() {
             return None;
         }
@@ -4804,6 +4818,67 @@ impl App {
             "Missing tool outputs for {} call(s): {}{}",
             count, sample, suffix
         ))
+    }
+
+    fn repair_missing_tool_outputs(&mut self) -> usize {
+        let mut known_results = HashSet::new();
+        for msg in &self.messages {
+            if let Role::User = msg.role {
+                for block in &msg.content {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                        known_results.insert(tool_use_id.clone());
+                    }
+                }
+            }
+        }
+
+        let mut repaired = 0usize;
+        let mut index = 0usize;
+        while index < self.messages.len() {
+            let mut missing_for_message: Vec<String> = Vec::new();
+            if let Role::Assistant = self.messages[index].role {
+                for block in &self.messages[index].content {
+                    if let ContentBlock::ToolUse { id, .. } = block {
+                        if !known_results.contains(id) {
+                            known_results.insert(id.clone());
+                            missing_for_message.push(id.clone());
+                        }
+                    }
+                }
+            }
+
+            if !missing_for_message.is_empty() {
+                for (offset, id) in missing_for_message.iter().enumerate() {
+                    let tool_block = ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: TOOL_OUTPUT_MISSING_TEXT.to_string(),
+                        is_error: Some(true),
+                    };
+                    let inserted_message = Message {
+                        role: Role::User,
+                        content: vec![tool_block.clone()],
+                    };
+                    let stored_message = crate::session::StoredMessage {
+                        id: id::new_id("message"),
+                        role: Role::User,
+                        content: vec![tool_block],
+                    };
+                    self.messages.insert(index + 1 + offset, inserted_message);
+                    self.session.messages.insert(index + 1 + offset, stored_message);
+                    self.tool_result_ids.insert(id.clone());
+                    repaired += 1;
+                }
+                index += missing_for_message.len();
+            }
+
+            index += 1;
+        }
+
+        if repaired > 0 {
+            let _ = self.session.save();
+        }
+
+        repaired
     }
 
     /// Rebuild current session into a new one without tool calls
@@ -4872,6 +4947,15 @@ impl App {
 
     async fn run_turn(&mut self) -> Result<()> {
         loop {
+            let repaired = self.repair_missing_tool_outputs();
+            if repaired > 0 {
+                let message = format!(
+                    "Recovered {} missing tool output(s) from an interrupted turn.",
+                    repaired
+                );
+                self.push_display_message(DisplayMessage::system(message));
+                self.set_status_notice("Recovered missing tool outputs");
+            }
             if let Some(summary) = self.summarize_tool_results_missing() {
                 let message = format!(
                     "Tool outputs are missing for this turn. {}\n\nPress Ctrl+R to recover into a new session with context copied.",
@@ -5314,6 +5398,15 @@ impl App {
         let mut redraw_interval = interval(Duration::from_millis(50));
 
         loop {
+            let repaired = self.repair_missing_tool_outputs();
+            if repaired > 0 {
+                let message = format!(
+                    "Recovered {} missing tool output(s) from an interrupted turn.",
+                    repaired
+                );
+                self.push_display_message(DisplayMessage::system(message));
+                self.set_status_notice("Recovered missing tool outputs");
+            }
             if let Some(summary) = self.summarize_tool_results_missing() {
                 let message = format!(
                     "Tool outputs are missing for this turn. {}\n\nPress Ctrl+R to recover into a new session with context copied.",
