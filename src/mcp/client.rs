@@ -63,7 +63,10 @@ impl McpClient {
                     Ok(_) => {
                         let trimmed = line.trim();
                         if !trimmed.is_empty() {
-                            crate::logging::warn(&format!("MCP [{}] stderr: {}", server_name, trimmed));
+                            crate::logging::warn(&format!(
+                                "MCP [{}] stderr: {}",
+                                server_name, trimmed
+                            ));
                         }
                     }
                     Err(_) => break,
@@ -141,14 +144,16 @@ impl McpClient {
         };
 
         // Initialize
-        client.initialize().await.with_context(|| {
-            format!("MCP server '{}' failed to initialize", name)
-        })?;
+        client
+            .initialize()
+            .await
+            .with_context(|| format!("MCP server '{}' failed to initialize", name))?;
 
         // Get tools
-        client.refresh_tools().await.with_context(|| {
-            format!("MCP server '{}' failed to list tools", name)
-        })?;
+        client
+            .refresh_tools()
+            .await
+            .with_context(|| format!("MCP server '{}' failed to list tools", name))?;
 
         crate::logging::info(&format!(
             "MCP: Connected to '{}' with {} tools",

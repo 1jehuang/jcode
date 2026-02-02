@@ -202,9 +202,10 @@ impl AnthropicProvider {
         blocks
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::Text { text, .. } => {
-                    Some(ApiContentBlock::Text { text: text.clone(), cache_control: None })
-                }
+                ContentBlock::Text { text, .. } => Some(ApiContentBlock::Text {
+                    text: text.clone(),
+                    cache_control: None,
+                }),
                 ContentBlock::ToolUse { id, name, input } => Some(ApiContentBlock::ToolUse {
                     id: id.clone(),
                     name: if is_oauth {
@@ -790,7 +791,11 @@ fn build_system_param(system: &str, is_oauth: bool) -> Option<ApiSystem> {
 }
 
 /// Build system param with split static/dynamic content for better caching
-fn build_system_param_split(static_part: &str, dynamic_part: &str, is_oauth: bool) -> Option<ApiSystem> {
+fn build_system_param_split(
+    static_part: &str,
+    dynamic_part: &str,
+    is_oauth: bool,
+) -> Option<ApiSystem> {
     if is_oauth {
         let mut blocks = Vec::new();
         blocks.push(ApiSystemBlock {
@@ -1244,7 +1249,11 @@ mod tests {
             }
             for block in &msg.content {
                 if let ApiContentBlock::Text { cache_control, .. } = block {
-                    assert!(cache_control.is_none(), "Message {} should not have cache_control", i);
+                    assert!(
+                        cache_control.is_none(),
+                        "Message {} should not have cache_control",
+                        i
+                    );
                 }
             }
         }
@@ -1297,9 +1306,18 @@ mod tests {
         // (we look for any text block, preferring the last one but accepting any)
         let assistant_msg = &messages[2];
         let has_cached_text = assistant_msg.content.iter().any(|block| {
-            matches!(block, ApiContentBlock::Text { cache_control: Some(_), .. })
+            matches!(
+                block,
+                ApiContentBlock::Text {
+                    cache_control: Some(_),
+                    ..
+                }
+            )
         });
-        assert!(has_cached_text, "Should have added cache_control to text block in assistant message");
+        assert!(
+            has_cached_text,
+            "Should have added cache_control to text block in assistant message"
+        );
     }
 
     #[test]

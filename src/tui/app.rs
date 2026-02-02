@@ -670,10 +670,10 @@ impl App {
         let server_count = manager.config().servers.len();
         if server_count > 0 {
             drop(manager);
-            
+
             // Log configured servers
             crate::logging::info(&format!("MCP: Found {} server(s) in config", server_count));
-            
+
             let (successes, failures) = {
                 let manager = self.mcp_manager.write().await;
                 let result = manager.connect_all().await.unwrap_or((0, Vec::new()));
@@ -681,14 +681,14 @@ impl App {
                 self.mcp_server_names = manager.connected_servers().await;
                 result
             };
-            
+
             // Show connection results
             if successes > 0 {
                 let msg = format!("MCP: Connected to {} server(s)", successes);
                 crate::logging::info(&msg);
                 self.set_status_notice(&format!("mcp: {} connected", successes));
             }
-            
+
             if !failures.is_empty() {
                 for (name, error) in &failures {
                     let msg = format!("MCP '{}' failed: {}", name, error);
@@ -956,7 +956,10 @@ impl App {
                     self.queue_message();
                     self.debug_trace
                         .record("message", format!("queued:{}", msg));
-                    format!("OK: queued message '{}' (will send after current turn)", msg)
+                    format!(
+                        "OK: queued message '{}' (will send after current turn)",
+                        msg
+                    )
                 }
                 SendAction::Interleave => {
                     let expanded = self.expand_paste_placeholders(&self.input.clone());
@@ -2242,19 +2245,22 @@ impl App {
                                         break 'outer;
                                     }
                                     // Handle scroll keys in disconnected state
-                                    if let Some(amount) =
-                                        self.scroll_keys.scroll_amount(key.code.clone(), key.modifiers)
+                                    if let Some(amount) = self
+                                        .scroll_keys
+                                        .scroll_amount(key.code.clone(), key.modifiers)
                                     {
-                                        let max_estimate =
-                                            self.display_messages.len() * 100 + self.streaming_text.len();
+                                        let max_estimate = self.display_messages.len() * 100
+                                            + self.streaming_text.len();
                                         if amount < 0 {
-                                            self.scroll_offset =
-                                                (self.scroll_offset + (-amount) as usize).min(max_estimate);
+                                            self.scroll_offset = (self.scroll_offset
+                                                + (-amount) as usize)
+                                                .min(max_estimate);
                                         } else {
                                             self.scroll_offset =
                                                 self.scroll_offset.saturating_sub(amount as usize);
                                         }
-                                        terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
+                                        terminal
+                                            .draw(|frame| crate::tui::ui::draw(frame, &self))?;
                                     }
                                 }
                             }
@@ -3035,7 +3041,8 @@ impl App {
                         // Send soft interrupt immediately
                         if let Err(e) = remote.soft_interrupt(expanded, false).await {
                             self.push_display_message(DisplayMessage::error(format!(
-                                "Failed to queue soft interrupt: {}", e
+                                "Failed to queue soft interrupt: {}",
+                                e
                             )));
                         } else {
                             self.set_status_notice("⏭ Queued for injection");
@@ -3184,7 +3191,7 @@ impl App {
 
                         if self.remote_available_models.is_empty() {
                             self.push_display_message(DisplayMessage::system(format!(
-                                "**Available models:**\n  • {} (current)\n\nUse `/model <name>` to switch.",
+                                "**Available models:**\n  • {} (current)\n\nUse `/model <name>` to switch.\nOpenRouter: `/model <name>@<provider>` pins a provider (`@auto` clears).",
                                 current
                             )));
                             return Ok(());
@@ -3204,7 +3211,7 @@ impl App {
                             .join("\n");
 
                         self.push_display_message(DisplayMessage::system(format!(
-                            "**Available models:**\n{}\n\nUse `/model <name>` to switch.",
+                            "**Available models:**\n{}\n\nUse `/model <name>` to switch.\nOpenRouter: `/model <name>@<provider>` pins a provider (`@auto` clears).",
                             model_list
                         )));
                         return Ok(());
@@ -3258,7 +3265,8 @@ impl App {
                             // Send soft interrupt immediately
                             if let Err(e) = remote.soft_interrupt(expanded, false).await {
                                 self.push_display_message(DisplayMessage::error(format!(
-                                    "Failed to queue soft interrupt: {}", e
+                                    "Failed to queue soft interrupt: {}",
+                                    e
                                 )));
                             } else {
                                 self.set_status_notice("⏭ Queued for injection");
@@ -3754,6 +3762,7 @@ impl App {
                      • `/config edit` - Open config file in $EDITOR\n\
                      • `/model` - List available models\n\
                      • `/model <name>` - Switch to a different model\n\
+                     • `/model <name>@<provider>` - Pin OpenRouter provider (`@auto` clears)\n\
                      • `/reload` - Smart reload (client/server if newer binary exists)\n\
                      • `/rebuild` - Full rebuild (git pull + cargo build + tests){}\n\
                      • `/clear` - Clear conversation (Ctrl+L)\n\
@@ -3828,7 +3837,11 @@ impl App {
                         manager.token_budget() / 1000,
                         stats.context_usage * 100.0,
                         if stats.has_summary { "yes" } else { "no" },
-                        if stats.is_compacting { "in progress..." } else { "no" }
+                        if stats.is_compacting {
+                            "in progress..."
+                        } else {
+                            "no"
+                        }
                     );
 
                     match manager.force_compact(self.provider.clone()) {
@@ -3878,7 +3891,7 @@ impl App {
         // Handle /remember command - extract memories from current conversation
         if trimmed == "/remember" {
             use crate::tui::info_widget::{MemoryEventKind, MemoryState};
-            
+
             // Format context for extraction
             let context = crate::memory::format_context_for_relevance(&self.messages);
             if context.len() < 100 {
@@ -3903,11 +3916,11 @@ impl App {
             });
 
             // Update memory state for UI
-            crate::memory::set_state(MemoryState::Extracting { 
-                reason: "manual".to_string() 
+            crate::memory::set_state(MemoryState::Extracting {
+                reason: "manual".to_string(),
             });
-            crate::memory::add_event(MemoryEventKind::ExtractionStarted { 
-                reason: "/remember command".to_string() 
+            crate::memory::add_event(MemoryEventKind::ExtractionStarted {
+                reason: "/remember command".to_string(),
             });
 
             // Spawn extraction in background
@@ -3946,7 +3959,9 @@ impl App {
                             "/remember: extracted {} memories",
                             stored_count
                         ));
-                        crate::memory::add_event(MemoryEventKind::ExtractionComplete { count: stored_count });
+                        crate::memory::add_event(MemoryEventKind::ExtractionComplete {
+                            count: stored_count,
+                        });
                         crate::memory::set_state(MemoryState::Idle);
                     }
                     Ok(_) => {
@@ -3955,7 +3970,9 @@ impl App {
                     }
                     Err(e) => {
                         crate::logging::error(&format!("/remember failed: {}", e));
-                        crate::memory::add_event(MemoryEventKind::Error { message: e.to_string() });
+                        crate::memory::add_event(MemoryEventKind::Error {
+                            message: e.to_string(),
+                        });
                         crate::memory::set_state(MemoryState::Idle);
                     }
                 }
@@ -4356,7 +4373,7 @@ impl App {
             self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: format!(
-                    "**Available models:**\n{}\n\nUse `/model <name>` to switch.",
+                    "**Available models:**\n{}\n\nUse `/model <name>` to switch.\nOpenRouter: `/model <name>@<provider>` pins a provider (`@auto` clears).",
                     model_list
                 ),
                 tool_calls: vec![],
@@ -4864,7 +4881,9 @@ impl App {
                         content: vec![tool_block],
                     };
                     self.messages.insert(index + 1 + offset, inserted_message);
-                    self.session.messages.insert(index + 1 + offset, stored_message);
+                    self.session
+                        .messages
+                        .insert(index + 1 + offset, stored_message);
                     self.tool_result_ids.insert(id.clone());
                     repaired += 1;
                 }
@@ -6141,7 +6160,10 @@ impl App {
     }
 
     /// Build split system prompt for better caching
-    fn build_system_prompt_split(&mut self, memory_prompt: Option<&str>) -> crate::prompt::SplitSystemPrompt {
+    fn build_system_prompt_split(
+        &mut self,
+        memory_prompt: Option<&str>,
+    ) -> crate::prompt::SplitSystemPrompt {
         let skill_prompt = self
             .active_skill
             .as_ref()
@@ -6375,6 +6397,76 @@ impl App {
         &self.input
     }
 
+    fn fuzzy_score(needle: &str, haystack: &str) -> Option<usize> {
+        if needle.is_empty() {
+            return Some(0);
+        }
+        let mut score = 0usize;
+        let mut pos = 0usize;
+        for ch in needle.chars() {
+            let Some(idx) = haystack[pos..].find(ch) else {
+                return None;
+            };
+            score += idx;
+            pos += idx + ch.len_utf8();
+        }
+        Some(score)
+    }
+
+    fn rank_suggestions(
+        &self,
+        needle: &str,
+        candidates: Vec<(String, &'static str)>,
+    ) -> Vec<(String, &'static str)> {
+        let needle = needle.to_lowercase();
+        let mut scored: Vec<(bool, usize, String, &'static str)> = Vec::new();
+        for (cmd, help) in candidates {
+            let lower = cmd.to_lowercase();
+            if lower.starts_with(&needle) {
+                scored.push((true, 0, cmd, help));
+            } else if let Some(score) = Self::fuzzy_score(&needle, &lower) {
+                scored.push((false, score, cmd, help));
+            }
+        }
+        scored.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.len().cmp(&b.2.len()))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        scored
+            .into_iter()
+            .map(|(_, _, cmd, help)| (cmd, help))
+            .collect()
+    }
+
+    fn rank_model_suggestions(
+        &self,
+        model_prefix: &str,
+        models: Vec<String>,
+    ) -> Vec<(String, &'static str)> {
+        let needle = model_prefix.to_lowercase();
+        let mut scored: Vec<(bool, usize, String)> = Vec::new();
+        for model in models {
+            let lower = model.to_lowercase();
+            if needle.is_empty() || lower.starts_with(&needle) {
+                scored.push((true, 0, model));
+            } else if let Some(score) = Self::fuzzy_score(&needle, &lower) {
+                scored.push((false, score, model));
+            }
+        }
+        scored.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.len().cmp(&b.2.len()))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        scored
+            .into_iter()
+            .map(|(_, _, model)| (format!("/model {}", model), "Switch to this model"))
+            .collect()
+    }
+
     /// Get command suggestions based on current input (or base input for cycling)
     fn get_suggestions_for(&self, input: &str) -> Vec<(String, &'static str)> {
         let input = input.trim();
@@ -6395,19 +6487,12 @@ impl App {
 
         // If input is exactly "/model", show all model options for cycling
         if prefix == "/model" {
-            return models
-                .into_iter()
-                .map(|m| (format!("/model {}", m), "Switch to this model"))
-                .collect();
+            return self.rank_model_suggestions("", models);
         }
 
         // Check if this is a "/model " command with a partial model name
         if let Some(model_prefix) = prefix.strip_prefix("/model ") {
-            return models
-                .into_iter()
-                .filter(|m| model_prefix.is_empty() || m.to_lowercase().starts_with(model_prefix))
-                .map(|m| (format!("/model {}", m), "Switch to this model"))
-                .collect();
+            return self.rank_model_suggestions(model_prefix, models);
         }
 
         // Built-in commands
@@ -6416,8 +6501,14 @@ impl App {
             ("/model".into(), "List or switch models"),
             ("/clear".into(), "Clear conversation history"),
             ("/rewind".into(), "Rewind conversation to previous message"),
-            ("/compact".into(), "Compact context (summarize old messages)"),
-            ("/remember".into(), "Extract and save memories from conversation"),
+            (
+                "/compact".into(),
+                "Compact context (summarize old messages)",
+            ),
+            (
+                "/remember".into(),
+                "Extract and save memories from conversation",
+            ),
             ("/version".into(), "Show current version"),
             ("/info".into(), "Show session info and tokens"),
             ("/reload".into(), "Smart reload (if newer binary exists)"),
@@ -6438,10 +6529,7 @@ impl App {
         }
 
         // Filter by prefix match
-        commands
-            .into_iter()
-            .filter(|(cmd, _)| cmd.to_lowercase().starts_with(&prefix))
-            .collect()
+        self.rank_suggestions(&prefix, commands)
     }
 
     /// Get command suggestions based on current input
@@ -6952,7 +7040,8 @@ impl App {
         // Only calculate cost for API-key providers
         if !provider_name.contains("openrouter")
             && !provider_name.contains("anthropic")
-            && !provider_name.contains("openai") {
+            && !provider_name.contains("openai")
+        {
             return;
         }
 
@@ -6964,12 +7053,13 @@ impl App {
         }
 
         // Default pricing (will be cached after first turn)
-        let prompt_price = *self.cached_prompt_price.get_or_insert(15.0);  // $15/1M tokens default
-        let completion_price = *self.cached_completion_price.get_or_insert(60.0);  // $60/1M tokens default
+        let prompt_price = *self.cached_prompt_price.get_or_insert(15.0); // $15/1M tokens default
+        let completion_price = *self.cached_completion_price.get_or_insert(60.0); // $60/1M tokens default
 
         // Calculate cost for this turn
         let prompt_cost = (self.streaming_input_tokens as f32 * prompt_price) / 1_000_000.0;
-        let completion_cost = (self.streaming_output_tokens as f32 * completion_price) / 1_000_000.0;
+        let completion_cost =
+            (self.streaming_output_tokens as f32 * completion_price) / 1_000_000.0;
         self.total_cost += prompt_cost + completion_cost;
     }
 }
@@ -7421,11 +7511,13 @@ impl super::TuiState for App {
                     total_cost: 0.0,
                     input_tokens: 0,
                     output_tokens: 0,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
                     available: true,
                 })
-            } else if is_api_key_provider || self.total_input_tokens > 0 || self.total_output_tokens > 0 {
-                // Show costs for API-key providers (OpenRouter, direct API key)
-                // Also show if we have any token usage
+            } else if is_api_key_provider {
+                // Show costs for API-key providers like OpenRouter
+                // Always available to show $0.00 until tokens are used
                 Some(super::info_widget::UsageInfo {
                     provider: super::info_widget::UsageProvider::CostBased,
                     five_hour: 0.0,
@@ -7433,7 +7525,9 @@ impl super::TuiState for App {
                     total_cost: self.total_cost,
                     input_tokens: self.total_input_tokens,
                     output_tokens: self.total_output_tokens,
-                    available: self.total_input_tokens > 0 || self.total_output_tokens > 0,
+                    cache_read_tokens: self.streaming_cache_read_tokens,
+                    cache_write_tokens: self.streaming_cache_creation_tokens,
+                    available: true,
                 })
             } else {
                 None
@@ -7489,6 +7583,7 @@ impl super::TuiState for App {
             background_info,
             usage_info,
             auth_method,
+            upstream_provider: self.upstream_provider.clone(),
         }
     }
 
@@ -7937,7 +8032,8 @@ mod tests {
             app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
                 .unwrap();
         }
-        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
 
         // Should be in interleave_message, not queued
         assert_eq!(app.interleave_message.as_deref(), Some("urgent"));
@@ -8175,7 +8271,11 @@ mod tests {
         // Test 1: When not processing, should submit directly
         app.is_processing = false;
         let result = app.handle_debug_command("message:hello");
-        assert!(result.starts_with("OK: submitted message"), "Expected submitted, got: {}", result);
+        assert!(
+            result.starts_with("OK: submitted message"),
+            "Expected submitted, got: {}",
+            result
+        );
         // The message should be processed (added to messages and pending_turn set)
         assert!(app.pending_turn);
         assert_eq!(app.messages.len(), 1);
@@ -8188,7 +8288,11 @@ mod tests {
         app.is_processing = true;
         app.queue_mode = true;
         let result = app.handle_debug_command("message:queued_msg");
-        assert!(result.contains("queued"), "Expected queued, got: {}", result);
+        assert!(
+            result.contains("queued"),
+            "Expected queued, got: {}",
+            result
+        );
         assert_eq!(app.queued_count(), 1);
         assert_eq!(app.queued_messages()[0], "queued_msg");
 
@@ -8196,7 +8300,11 @@ mod tests {
         app.queued_messages.clear();
         app.queue_mode = false;
         let result = app.handle_debug_command("message:interleave_msg");
-        assert!(result.contains("interleave"), "Expected interleave, got: {}", result);
+        assert!(
+            result.contains("interleave"),
+            "Expected interleave, got: {}",
+            result
+        );
         assert_eq!(app.interleave_message.as_deref(), Some("interleave_msg"));
     }
 }
