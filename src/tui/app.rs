@@ -4906,6 +4906,8 @@ impl App {
             let mut current_tool_input = String::new();
             let mut first_event = true;
             let mut saw_message_end = false;
+            let store_reasoning_content = self.provider.name() == "openrouter";
+            let mut reasoning_content = String::new();
             // Track tool results from provider (already executed by Claude Code CLI)
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
@@ -5048,6 +5050,9 @@ impl App {
                         }
                         // Insert thinking content as a thought line
                         self.insert_thought_line(format!("💭 {}", thinking_text));
+                        if store_reasoning_content {
+                            reasoning_content.push_str(&thinking_text);
+                        }
                     }
                     StreamEvent::ThinkingEnd => {
                         // Don't display here - ThinkingDone has accurate timing
@@ -5126,6 +5131,11 @@ impl App {
                 content_blocks.push(ContentBlock::Text {
                     text: text_content.clone(),
                     cache_control: None,
+                });
+            }
+            if store_reasoning_content && !reasoning_content.is_empty() {
+                content_blocks.push(ContentBlock::Reasoning {
+                    text: reasoning_content.clone(),
                 });
             }
             for tc in &tool_calls {
@@ -5403,6 +5413,8 @@ impl App {
                                          // Track tool results from provider (already executed by Claude Code CLI)
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
+            let store_reasoning_content = self.provider.name() == "openrouter";
+            let mut reasoning_content = String::new();
 
             // Stream with input handling
             loop {
@@ -5454,6 +5466,11 @@ impl App {
                                                     cache_control: None,
                                                 });
                                             }
+                                            if store_reasoning_content && !reasoning_content.is_empty() {
+                                                content_blocks.push(ContentBlock::Reasoning {
+                                                    text: reasoning_content.clone(),
+                                                });
+                                            }
                                             for tc in &tool_calls {
                                                 content_blocks.push(ContentBlock::ToolUse {
                                                     id: tc.id.clone(),
@@ -5495,6 +5512,7 @@ impl App {
                                         self.streaming_text.clear();
                                         self.streaming_tool_calls.clear();
                                         self.stream_buffer = StreamBuffer::new();
+                                        reasoning_content.clear();
                                         interleaved = true;
                                         // Continue to next iteration of outer loop (new API call)
                                         break;
@@ -5648,6 +5666,9 @@ impl App {
                                             self.streaming_text.push_str(&chunk);
                                         }
                                         self.insert_thought_line(format!("💭 {}", thinking_text));
+                                        if store_reasoning_content {
+                                            reasoning_content.push_str(&thinking_text);
+                                        }
                                     }
                                     StreamEvent::ThinkingEnd => {
                                         self.thinking_start = None;
@@ -5753,6 +5774,11 @@ impl App {
                 content_blocks.push(ContentBlock::Text {
                     text: text_content.clone(),
                     cache_control: None,
+                });
+            }
+            if store_reasoning_content && !reasoning_content.is_empty() {
+                content_blocks.push(ContentBlock::Reasoning {
+                    text: reasoning_content.clone(),
                 });
             }
             for tc in &tool_calls {
@@ -6119,6 +6145,7 @@ impl App {
                         };
                         transcript.push_str(&format!("[Result: {}]\n", preview));
                     }
+                    ContentBlock::Reasoning { .. } => {}
                 }
             }
             transcript.push('\n');
@@ -7098,6 +7125,9 @@ impl super::TuiState for App {
                         ContentBlock::ToolResult { content, .. } => {
                             tool_result_count += 1;
                             tool_result_chars += content.len();
+                        }
+                        ContentBlock::Reasoning { text } => {
+                            asst_chars += text.len();
                         }
                     }
                 }
