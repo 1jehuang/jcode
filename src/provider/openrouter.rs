@@ -16,11 +16,12 @@ use futures::Stream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll};
+use std::time::Instant;
 use tokio::sync::RwLock;
 
 /// OpenRouter API base URL
@@ -31,6 +32,14 @@ const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
 
 /// Cache TTL in seconds (24 hours)
 const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+/// Provider stats TTL (14 days)
+const PROVIDER_STATS_TTL_SECS: u64 = 14 * 24 * 60 * 60;
+/// Pin provider to preserve cache for this long after a cache hit
+const CACHE_PIN_TTL_SECS: u64 = 60 * 60;
+/// If throughput values are within this fraction, rebalance weights toward cost
+const THROUGHPUT_SIMILARITY_THRESHOLD: f64 = 0.10;
+/// EWMA alpha for provider stats
+const PROVIDER_STATS_EWMA_ALPHA: f64 = 0.2;
 
 /// Model info from OpenRouter API
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +55,130 @@ pub struct ModelInfo {
 pub struct ModelPricing {
     pub prompt: Option<String>,
     pub completion: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ProviderStatsStore {
+    models: HashMap<String, HashMap<String, ProviderStats>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ProviderStats {
+    samples: u64,
+    avg_cache_hit: Option<f64>,
+    avg_throughput: Option<f64>,
+    avg_cost_per_mtok: Option<f64>,
+    last_seen: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PinSource {
+    Explicit,
+    Observed,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderPin {
+    model: String,
+    provider: String,
+    source: PinSource,
+    allow_fallbacks: bool,
+    last_cache_read: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderSample {
+    cache_hit: Option<f64>,
+    throughput: Option<f64>,
+    cost_per_mtok: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedProvider {
+    name: String,
+    allow_fallbacks: bool,
+}
+
+fn parse_model_spec(raw: &str) -> (String, Option<ParsedProvider>) {
+    let trimmed = raw.trim();
+    if let Some((model, provider)) = trimmed.rsplit_once('@') {
+        let model = model.trim();
+        let mut provider = provider.trim();
+        if model.is_empty() {
+            return (trimmed.to_string(), None);
+        }
+        if provider.is_empty() {
+            return (model.to_string(), None);
+        }
+        let mut allow_fallbacks = true;
+        if provider.ends_with('!') {
+            provider = provider.trim_end_matches('!').trim();
+            allow_fallbacks = false;
+        }
+        if provider.is_empty() {
+            return (model.to_string(), None);
+        }
+        return (
+            model.to_string(),
+            Some(ParsedProvider {
+                name: provider.to_string(),
+                allow_fallbacks,
+            }),
+        );
+    }
+
+    (trimmed.to_string(), None)
+}
+
+fn update_ewma(prev: Option<f64>, value: f64) -> f64 {
+    let value = value.max(0.0);
+    match prev {
+        Some(p) => p + PROVIDER_STATS_EWMA_ALPHA * (value - p),
+        None => value,
+    }
+}
+
+fn min_max(values: &[f64]) -> (Option<f64>, Option<f64>) {
+    if values.is_empty() {
+        return (None, None);
+    }
+    let mut min_val = values[0];
+    let mut max_val = values[0];
+    for v in values.iter().skip(1) {
+        if *v < min_val {
+            min_val = *v;
+        }
+        if *v > max_val {
+            max_val = *v;
+        }
+    }
+    (Some(min_val), Some(max_val))
+}
+
+fn normalize(value: f64, min: Option<f64>, max: Option<f64>, default: f64) -> f64 {
+    match (min, max) {
+        (Some(min), Some(max)) => {
+            if (max - min).abs() < f64::EPSILON {
+                1.0
+            } else {
+                ((value - min) / (max - min)).clamp(0.0, 1.0)
+            }
+        }
+        _ => default,
+    }
+}
+
+fn normalize_inverse(value: f64, min: Option<f64>, max: Option<f64>, default: f64) -> f64 {
+    match (min, max) {
+        (Some(min), Some(max)) => {
+            if (max - min).abs() < f64::EPSILON {
+                1.0
+            } else {
+                ((max - value) / (max - min)).clamp(0.0, 1.0)
+            }
+        }
+        _ => default,
+    }
 }
 
 /// Disk cache structure
@@ -71,6 +204,22 @@ fn cache_path() -> PathBuf {
         .join(".jcode")
         .join("cache")
         .join("openrouter_models.json")
+}
+
+/// Get provider stats cache file path
+fn provider_stats_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".jcode")
+        .join("cache")
+        .join("openrouter_provider_stats.json")
+}
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Load models from disk cache if valid
@@ -116,13 +265,70 @@ fn save_disk_cache(models: &[ModelInfo]) {
     }
 }
 
+fn load_provider_stats() -> ProviderStatsStore {
+    let path = provider_stats_path();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return ProviderStatsStore::default(),
+    };
+
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn save_provider_stats(stats: &ProviderStatsStore) {
+    let path = provider_stats_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    if let Ok(content) = serde_json::to_string(stats) {
+        let _ = std::fs::write(&path, content);
+    }
+}
+
 /// Provider routing configuration
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ProviderRouting {
     /// List of provider slugs to try in order (e.g., ["Fireworks", "Together"])
     pub order: Option<Vec<String>>,
     /// Whether to allow fallbacks to other providers (default: true)
     pub allow_fallbacks: bool,
+    /// Sort providers by OpenRouter's routing metric (e.g., "throughput", "price", "latency")
+    pub sort: Option<String>,
+    /// Prefer providers with at least this throughput (tokens/sec)
+    pub preferred_min_throughput: Option<u32>,
+    /// Prefer providers with latency below this value (ms)
+    pub preferred_max_latency: Option<u32>,
+    /// Max price per 1M tokens (USD) for providers
+    pub max_price: Option<f64>,
+    /// Require providers to support all request parameters
+    pub require_parameters: Option<bool>,
+}
+
+impl Default for ProviderRouting {
+    fn default() -> Self {
+        Self {
+            order: None,
+            allow_fallbacks: true,
+            sort: None,
+            preferred_min_throughput: None,
+            preferred_max_latency: None,
+            max_price: None,
+            require_parameters: None,
+        }
+    }
+}
+
+impl ProviderRouting {
+    fn is_empty(&self) -> bool {
+        self.order.is_none()
+            && self.sort.is_none()
+            && self.preferred_min_throughput.is_none()
+            && self.preferred_max_latency.is_none()
+            && self.max_price.is_none()
+            && self.require_parameters.is_none()
+            && self.allow_fallbacks
+    }
 }
 
 pub struct OpenRouterProvider {
@@ -132,6 +338,10 @@ pub struct OpenRouterProvider {
     models_cache: Arc<RwLock<ModelsCache>>,
     /// Provider routing preferences
     provider_routing: Arc<RwLock<ProviderRouting>>,
+    /// Observed provider stats (shared across forks)
+    provider_stats: Arc<Mutex<ProviderStatsStore>>,
+    /// Pinned provider for this session (cache-aware)
+    provider_pin: Arc<Mutex<Option<ProviderPin>>>,
 }
 
 impl OpenRouterProvider {
@@ -178,15 +388,14 @@ impl OpenRouterProvider {
             api_key,
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             provider_routing: Arc::new(RwLock::new(provider_routing)),
+            provider_stats: Arc::new(Mutex::new(load_provider_stats())),
+            provider_pin: Arc::new(Mutex::new(None)),
         })
     }
 
     /// Parse provider routing configuration from environment variables
     fn parse_provider_routing() -> ProviderRouting {
-        let mut routing = ProviderRouting {
-            order: None,
-            allow_fallbacks: true,
-        };
+        let mut routing = ProviderRouting::default();
 
         // JCODE_OPENROUTER_PROVIDER: comma-separated list of providers to prefer
         // e.g., "Fireworks" or "Fireworks,Together"
@@ -206,6 +415,147 @@ impl OpenRouterProvider {
             routing.allow_fallbacks = false;
         }
 
+        routing
+    }
+
+    fn set_explicit_pin(&self, model: &str, provider: ParsedProvider) {
+        let mut pin = self.provider_pin.lock().unwrap();
+        *pin = Some(ProviderPin {
+            model: model.to_string(),
+            provider: provider.name,
+            source: PinSource::Explicit,
+            allow_fallbacks: provider.allow_fallbacks,
+            last_cache_read: None,
+        });
+    }
+
+    fn clear_pin_if_model_changed(&self, model: &str, clear_explicit: bool) {
+        let mut pin = self.provider_pin.lock().unwrap();
+        if let Some(existing) = pin.as_ref() {
+            let should_clear = existing.model != model
+                || (clear_explicit && existing.model == model && existing.source == PinSource::Explicit);
+            if should_clear {
+                *pin = None;
+            }
+        }
+    }
+
+    fn rank_providers(&self, model: &str) -> Vec<String> {
+        let stats = self.provider_stats.lock().unwrap();
+        let model_stats = match stats.models.get(model) {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
+        let now = now_epoch_secs();
+        let mut entries: Vec<(String, ProviderStats)> = model_stats
+            .iter()
+            .filter_map(|(provider, stat)| {
+                if now.saturating_sub(stat.last_seen) > PROVIDER_STATS_TTL_SECS {
+                    None
+                } else {
+                    Some((provider.clone(), stat.clone()))
+                }
+            })
+            .collect();
+        drop(stats);
+
+        if entries.is_empty() {
+            return Vec::new();
+        }
+
+        let cache_vals: Vec<f64> = entries
+            .iter()
+            .filter_map(|(_, stat)| stat.avg_cache_hit)
+            .collect();
+        let throughput_vals: Vec<f64> = entries
+            .iter()
+            .filter_map(|(_, stat)| stat.avg_throughput)
+            .collect();
+        let cost_vals: Vec<f64> = entries
+            .iter()
+            .filter_map(|(_, stat)| stat.avg_cost_per_mtok)
+            .collect();
+
+        let (min_cache, max_cache) = min_max(&cache_vals);
+        let (min_tp, max_tp) = min_max(&throughput_vals);
+        let (min_cost, max_cost) = min_max(&cost_vals);
+
+        let throughput_range = match (min_tp, max_tp) {
+            (Some(min), Some(max)) if max > 0.0 => (max - min) / max,
+            _ => 0.0,
+        };
+
+        let (w_cache, w_tp, w_cost) = if throughput_range < THROUGHPUT_SIMILARITY_THRESHOLD {
+            (0.6, 0.2, 0.2)
+        } else {
+            (0.6, 0.3, 0.1)
+        };
+
+        let mut scored: Vec<(f64, String)> = entries
+            .drain(..)
+            .map(|(provider, stat)| {
+                let cache_score = stat
+                    .avg_cache_hit
+                    .map(|v| normalize(v, min_cache, max_cache, 0.0))
+                    .unwrap_or(0.0);
+                let tp_score = stat
+                    .avg_throughput
+                    .map(|v| normalize(v, min_tp, max_tp, 0.5))
+                    .unwrap_or(0.5);
+                let cost_score = stat
+                    .avg_cost_per_mtok
+                    .map(|v| normalize_inverse(v, min_cost, max_cost, 0.5))
+                    .unwrap_or(0.5);
+                let score = w_cache * cache_score + w_tp * tp_score + w_cost * cost_score;
+                (score, provider)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().map(|(_, p)| p).collect()
+    }
+
+    async fn effective_routing(&self, model: &str) -> ProviderRouting {
+        let base = self.provider_routing.read().await.clone();
+        let pin = self.provider_pin.lock().unwrap().clone();
+
+        if let Some(pin) = pin {
+            if pin.model == model {
+                let cache_recent = pin
+                    .last_cache_read
+                    .map(|t| t.elapsed().as_secs() <= CACHE_PIN_TTL_SECS)
+                    .unwrap_or(false);
+                let use_pin = match pin.source {
+                    PinSource::Explicit => true,
+                    PinSource::Observed => cache_recent || base.order.is_none(),
+                };
+
+                if use_pin {
+                    let mut routing = base.clone();
+                    routing.order = Some(vec![pin.provider.clone()]);
+                    if !pin.allow_fallbacks {
+                        routing.allow_fallbacks = false;
+                    }
+                    return routing;
+                }
+            }
+        }
+
+        if base.order.is_some() {
+            return base;
+        }
+
+        let ranked = self.rank_providers(model);
+        if !ranked.is_empty() {
+            let mut routing = base.clone();
+            routing.order = Some(ranked);
+            return routing;
+        }
+
+        let mut routing = base.clone();
+        if routing.sort.is_none() {
+            routing.sort = Some("throughput".to_string());
+        }
         routing
     }
 
@@ -469,8 +819,8 @@ impl Provider for OpenRouterProvider {
         }
 
         // Add provider routing if configured
-        let routing = self.provider_routing.read().await;
-        if routing.order.is_some() || !routing.allow_fallbacks {
+        let routing = self.effective_routing(&model).await;
+        if !routing.is_empty() {
             let mut provider_obj = serde_json::json!({});
             if let Some(ref order) = routing.order {
                 provider_obj["order"] = serde_json::json!(order);
@@ -478,9 +828,23 @@ impl Provider for OpenRouterProvider {
             if !routing.allow_fallbacks {
                 provider_obj["allow_fallbacks"] = serde_json::json!(false);
             }
+            if let Some(ref sort) = routing.sort {
+                provider_obj["sort"] = serde_json::json!(sort);
+            }
+            if let Some(min_tp) = routing.preferred_min_throughput {
+                provider_obj["preferred_min_throughput"] = serde_json::json!(min_tp);
+            }
+            if let Some(max_latency) = routing.preferred_max_latency {
+                provider_obj["preferred_max_latency"] = serde_json::json!(max_latency);
+            }
+            if let Some(max_price) = routing.max_price {
+                provider_obj["max_price"] = serde_json::json!(max_price);
+            }
+            if let Some(require_parameters) = routing.require_parameters {
+                provider_obj["require_parameters"] = serde_json::json!(require_parameters);
+            }
             request["provider"] = provider_obj;
         }
-        drop(routing);
 
         // Send request
         let url = format!("{}/chat/completions", API_BASE);
@@ -502,7 +866,12 @@ impl Provider for OpenRouterProvider {
             anyhow::bail!("OpenRouter API error ({}): {}", status, body);
         }
 
-        let stream = OpenRouterStream::new(response.bytes_stream());
+        let stream = OpenRouterStream::new(
+            response.bytes_stream(),
+            model.clone(),
+            Arc::clone(&self.provider_stats),
+            Arc::clone(&self.provider_pin),
+        );
         Ok(Box::pin(stream))
     }
 
@@ -520,14 +889,22 @@ impl Provider for OpenRouterProvider {
     fn set_model(&self, model: &str) -> Result<()> {
         // OpenRouter accepts any model ID - validation happens at API call time
         // This allows using any model without needing to pre-fetch the list
+        let (model_id, provider) = parse_model_spec(model);
         if let Ok(mut current) = self.model.try_write() {
-            *current = model.to_string();
-            Ok(())
+            *current = model_id.clone();
         } else {
-            Err(anyhow::anyhow!(
+            return Err(anyhow::anyhow!(
                 "Cannot change model while a request is in progress"
-            ))
+            ));
         }
+
+        if let Some(provider) = provider {
+            self.set_explicit_pin(&model_id, provider);
+        } else {
+            self.clear_pin_if_model_changed(&model_id, true);
+        }
+
+        Ok(())
     }
 
     fn available_models(&self) -> Vec<&'static str> {
@@ -577,6 +954,8 @@ impl Provider for OpenRouterProvider {
                     .map(|r| r.clone())
                     .unwrap_or_default(),
             )),
+            provider_stats: Arc::clone(&self.provider_stats),
+            provider_pin: Arc::new(Mutex::new(None)),
         })
     }
 }
@@ -592,6 +971,13 @@ struct OpenRouterStream {
     current_tool_call: Option<ToolCallAccumulator>,
     /// Track if we've emitted the provider info (only emit once)
     provider_emitted: bool,
+    model: String,
+    provider_stats: Arc<Mutex<ProviderStatsStore>>,
+    provider_pin: Arc<Mutex<Option<ProviderPin>>>,
+    provider_name: Option<String>,
+    last_usage: Option<UsageSnapshot>,
+    started_at: Instant,
+    stats_recorded: bool,
 }
 
 #[derive(Default)]
@@ -601,14 +987,142 @@ struct ToolCallAccumulator {
     arguments: String,
 }
 
+#[derive(Debug, Clone)]
+struct UsageSnapshot {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+    cost: Option<f64>,
+}
+
+fn parse_f64(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|s| s.parse::<f64>().ok()))
+}
+
 impl OpenRouterStream {
-    fn new(stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static) -> Self {
+    fn new(
+        stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+        model: String,
+        provider_stats: Arc<Mutex<ProviderStatsStore>>,
+        provider_pin: Arc<Mutex<Option<ProviderPin>>>,
+    ) -> Self {
         Self {
             inner: Box::pin(stream),
             buffer: String::new(),
             pending: VecDeque::new(),
             current_tool_call: None,
             provider_emitted: false,
+            model,
+            provider_stats,
+            provider_pin,
+            provider_name: None,
+            last_usage: None,
+            started_at: Instant::now(),
+            stats_recorded: false,
+        }
+    }
+
+    fn observe_provider(&mut self, provider: &str) {
+        self.provider_name = Some(provider.to_string());
+
+        let mut pin = self.provider_pin.lock().unwrap();
+        if let Some(existing) = pin.as_ref() {
+            if existing.source == PinSource::Explicit && existing.model == self.model {
+                return;
+            }
+            if existing.source == PinSource::Observed
+                && existing.model == self.model
+                && existing.provider == provider
+            {
+                return;
+            }
+        }
+
+        *pin = Some(ProviderPin {
+            model: self.model.clone(),
+            provider: provider.to_string(),
+            source: PinSource::Observed,
+            allow_fallbacks: true,
+            last_cache_read: None,
+        });
+    }
+
+    fn record_stats(&mut self) {
+        if self.stats_recorded {
+            return;
+        }
+        self.stats_recorded = true;
+
+        let provider = match self.provider_name.clone() {
+            Some(p) => p,
+            None => return,
+        };
+        let usage = match self.last_usage.clone() {
+            Some(u) => u,
+            None => return,
+        };
+
+        let duration_secs = self.started_at.elapsed().as_secs_f64().max(0.001);
+        let throughput = usage
+            .output_tokens
+            .map(|tokens| tokens as f64 / duration_secs);
+
+        let cache_hit = match (usage.cache_read_input_tokens, usage.input_tokens) {
+            (Some(cached), Some(total)) if total > 0 => Some(cached as f64 / total as f64),
+            _ => None,
+        };
+
+        let total_tokens = usage.input_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0);
+        let cost_per_mtok = usage.cost.and_then(|cost| {
+            if total_tokens > 0 {
+                Some(cost / total_tokens as f64 * 1_000_000.0)
+            } else {
+                None
+            }
+        });
+
+        let sample = ProviderSample {
+            cache_hit,
+            throughput,
+            cost_per_mtok,
+        };
+
+        let mut stats = self.provider_stats.lock().unwrap();
+        let model_entry = stats
+            .models
+            .entry(self.model.clone())
+            .or_insert_with(HashMap::new);
+        let entry = model_entry
+            .entry(provider.clone())
+            .or_insert_with(ProviderStats::default);
+
+        entry.samples = entry.samples.saturating_add(1);
+        entry.last_seen = now_epoch_secs();
+
+        if let Some(cache_hit) = sample.cache_hit {
+            entry.avg_cache_hit = Some(update_ewma(entry.avg_cache_hit, cache_hit));
+        }
+        if let Some(throughput) = sample.throughput {
+            entry.avg_throughput = Some(update_ewma(entry.avg_throughput, throughput));
+        }
+        if let Some(cost_per_mtok) = sample.cost_per_mtok {
+            entry.avg_cost_per_mtok = Some(update_ewma(entry.avg_cost_per_mtok, cost_per_mtok));
+        }
+
+        let snapshot = stats.clone();
+        drop(stats);
+        save_provider_stats(&snapshot);
+
+        if usage.cache_read_input_tokens.unwrap_or(0) > 0 {
+            let mut pin = self.provider_pin.lock().unwrap();
+            if let Some(existing) = pin.as_mut() {
+                if existing.model == self.model && existing.provider == provider {
+                    existing.last_cache_read = Some(Instant::now());
+                }
+            }
         }
     }
 
@@ -635,6 +1149,7 @@ impl OpenRouterStream {
             };
 
             if data == "[DONE]" {
+                self.record_stats();
                 return Some(StreamEvent::MessageEnd { stop_reason: None });
             }
 
@@ -648,6 +1163,7 @@ impl OpenRouterStream {
             if !self.provider_emitted {
                 if let Some(provider) = parsed.get("provider").and_then(|p| p.as_str()) {
                     self.provider_emitted = true;
+                    self.observe_provider(provider);
                     self.pending.push_back(StreamEvent::UpstreamProvider {
                         provider: provider.to_string(),
                     });
@@ -783,7 +1299,33 @@ impl OpenRouterStream {
                     .get("cache_creation_input_tokens")
                     .and_then(|t| t.as_u64());
 
-                if input_tokens.is_some() || output_tokens.is_some() || cache_read_input_tokens.is_some() {
+                let cost = usage
+                    .get("total_cost")
+                    .and_then(parse_f64)
+                    .or_else(|| usage.get("cost").and_then(parse_f64))
+                    .or_else(|| {
+                        let prompt_cost = usage.get("prompt_cost").and_then(parse_f64);
+                        let completion_cost = usage.get("completion_cost").and_then(parse_f64);
+                        match (prompt_cost, completion_cost) {
+                            (Some(p), Some(c)) => Some(p + c),
+                            (Some(p), None) => Some(p),
+                            (None, Some(c)) => Some(c),
+                            _ => None,
+                        }
+                    });
+
+                self.last_usage = Some(UsageSnapshot {
+                    input_tokens,
+                    output_tokens,
+                    cache_read_input_tokens,
+                    cache_creation_input_tokens,
+                    cost,
+                });
+
+                if input_tokens.is_some()
+                    || output_tokens.is_some()
+                    || cache_read_input_tokens.is_some()
+                {
                     self.pending.push_back(StreamEvent::TokenUsage {
                         input_tokens,
                         output_tokens,
@@ -846,9 +1388,16 @@ impl Stream for OpenRouterStream {
     }
 }
 
+impl Drop for OpenRouterStream {
+    fn drop(&mut self) {
+        self.record_stats();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_has_credentials() {
@@ -856,5 +1405,61 @@ mod tests {
         // So we just verify it returns a boolean without panicking
         let _has_creds = OpenRouterProvider::has_credentials();
         // If we got here, the function works
+    }
+
+    #[test]
+    fn test_parse_model_spec() {
+        let (model, provider) = parse_model_spec("anthropic/claude-sonnet-4@Fireworks");
+        assert_eq!(model, "anthropic/claude-sonnet-4");
+        let provider = provider.expect("provider");
+        assert_eq!(provider.name, "Fireworks");
+        assert!(provider.allow_fallbacks);
+
+        let (model, provider) = parse_model_spec("anthropic/claude-sonnet-4@Fireworks!");
+        assert_eq!(model, "anthropic/claude-sonnet-4");
+        let provider = provider.expect("provider");
+        assert_eq!(provider.name, "Fireworks");
+        assert!(!provider.allow_fallbacks);
+    }
+
+    #[test]
+    fn test_rank_providers_cache_priority() {
+        let now = now_epoch_secs();
+        let mut stats = ProviderStatsStore::default();
+        let mut model_stats = HashMap::new();
+        model_stats.insert(
+            "FastCache".to_string(),
+            ProviderStats {
+                samples: 5,
+                avg_cache_hit: Some(0.5),
+                avg_throughput: Some(50.0),
+                avg_cost_per_mtok: Some(2.0),
+                last_seen: now,
+            },
+        );
+        model_stats.insert(
+            "FasterNoCache".to_string(),
+            ProviderStats {
+                samples: 5,
+                avg_cache_hit: Some(0.1),
+                avg_throughput: Some(60.0),
+                avg_cost_per_mtok: Some(1.0),
+                last_seen: now,
+            },
+        );
+        stats.models.insert("test/model".to_string(), model_stats);
+
+        let provider = OpenRouterProvider {
+            client: Client::new(),
+            model: Arc::new(RwLock::new("test/model".to_string())),
+            api_key: "test".to_string(),
+            models_cache: Arc::new(RwLock::new(ModelsCache::default())),
+            provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
+            provider_stats: Arc::new(Mutex::new(stats)),
+            provider_pin: Arc::new(Mutex::new(None)),
+        };
+
+        let ranked = provider.rank_providers("test/model");
+        assert_eq!(ranked.first().map(|s| s.as_str()), Some("FastCache"));
     }
 }
