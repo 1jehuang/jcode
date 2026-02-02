@@ -348,9 +348,7 @@ impl OpenRouterProvider {
     /// Return true if this model is a Kimi K2/K2.5 variant (Moonshot).
     fn is_kimi_model(model: &str) -> bool {
         let lower = model.to_lowercase();
-        lower.contains("moonshotai/")
-            || lower.contains("kimi-k2")
-            || lower.contains("kimi-k2.5")
+        lower.contains("moonshotai/") || lower.contains("kimi-k2") || lower.contains("kimi-k2.5")
     }
 
     /// Parse thinking override from env. Values: "enabled"/"disabled"/"auto".
@@ -373,11 +371,14 @@ impl OpenRouterProvider {
     }
 
     pub fn new() -> Result<Self> {
-        let api_key = Self::get_api_key()
-            .ok_or_else(|| anyhow::anyhow!("OPENROUTER_API_KEY not found in environment or ~/.config/jcode/openrouter.env"))?;
+        let api_key = Self::get_api_key().ok_or_else(|| {
+            anyhow::anyhow!(
+                "OPENROUTER_API_KEY not found in environment or ~/.config/jcode/openrouter.env"
+            )
+        })?;
 
-        let model = std::env::var("JCODE_OPENROUTER_MODEL")
-            .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let model =
+            std::env::var("JCODE_OPENROUTER_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
         // Parse provider routing from environment
         let provider_routing = Self::parse_provider_routing();
@@ -463,6 +464,15 @@ impl OpenRouterProvider {
             return Vec::new();
         }
 
+        let cache_candidates: Vec<(String, ProviderStats)> = entries
+            .iter()
+            .filter(|(_, stat)| stat.avg_cache_hit.unwrap_or(0.0) > 0.0)
+            .cloned()
+            .collect();
+        if !cache_candidates.is_empty() {
+            entries = cache_candidates;
+        }
+
         let cache_vals: Vec<f64> = entries
             .iter()
             .filter_map(|(_, stat)| stat.avg_cache_hit)
@@ -486,7 +496,7 @@ impl OpenRouterProvider {
         };
 
         let (w_cache, w_tp, w_cost) = if throughput_range < THROUGHPUT_SIMILARITY_THRESHOLD {
-            (0.6, 0.2, 0.2)
+            (0.6, 0.25, 0.15)
         } else {
             (0.6, 0.3, 0.1)
         };
@@ -694,6 +704,9 @@ impl Provider for OpenRouterProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let model = self.model.read().await.clone();
+        let thinking_override = Self::thinking_override();
+        let include_reasoning_content =
+            thinking_override == Some(true) || Self::is_kimi_model(&model);
 
         // Build messages in OpenAI format
         let mut api_messages = Vec::new();
@@ -771,8 +784,9 @@ impl Provider for OpenRouterProvider {
 
                     if !tool_calls.is_empty() {
                         assistant_msg["tool_calls"] = serde_json::json!(tool_calls);
-                        // Moonshot/Kimi requires reasoning_content on tool-call messages when thinking is enabled.
-                        if Self::is_kimi_model(&model) {
+                        // Some providers (e.g., Moonshot/Kimi) require reasoning_content on tool-call messages
+                        // when thinking is enabled. Provide an empty string to satisfy schema.
+                        if include_reasoning_content {
                             assistant_msg["reasoning_content"] = serde_json::json!("");
                         }
                     }
@@ -812,7 +826,7 @@ impl Provider for OpenRouterProvider {
         }
 
         // Optional thinking override for OpenRouter (provider-specific).
-        if let Some(enable) = Self::thinking_override() {
+        if let Some(enable) = thinking_override {
             request["thinking"] = serde_json::json!({
                 "type": if enable { "enabled" } else { "disabled" }
             });
@@ -1116,7 +1130,9 @@ impl OpenRouterStream {
         drop(stats);
         save_provider_stats(&snapshot);
 
-        if usage.cache_read_input_tokens.unwrap_or(0) > 0 {
+        if usage.cache_read_input_tokens.unwrap_or(0) > 0
+            || usage.cache_creation_input_tokens.unwrap_or(0) > 0
+        {
             let mut pin = self.provider_pin.lock().unwrap();
             if let Some(existing) = pin.as_mut() {
                 if existing.model == self.model && existing.provider == provider {
@@ -1246,7 +1262,8 @@ impl OpenRouterStream {
                     }
 
                     // Check for finish reason
-                    if let Some(finish_reason) = choice.get("finish_reason").and_then(|f| f.as_str())
+                    if let Some(finish_reason) =
+                        choice.get("finish_reason").and_then(|f| f.as_str())
                     {
                         // Emit any pending tool call
                         if let Some(tc) = self.current_tool_call.take() {
@@ -1268,12 +1285,8 @@ impl OpenRouterStream {
 
             // Extract usage if present
             if let Some(usage) = parsed.get("usage") {
-                let input_tokens = usage
-                    .get("prompt_tokens")
-                    .and_then(|t| t.as_u64());
-                let output_tokens = usage
-                    .get("completion_tokens")
-                    .and_then(|t| t.as_u64());
+                let input_tokens = usage.get("prompt_tokens").and_then(|t| t.as_u64());
+                let output_tokens = usage.get("completion_tokens").and_then(|t| t.as_u64());
 
                 // OpenRouter returns cached tokens in various formats depending on provider:
                 // - "cached_tokens" (OpenRouter's unified field)
