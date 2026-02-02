@@ -73,7 +73,7 @@ impl Tool for LspTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: LspInput = serde_json::from_value(input)?;
         if !OPERATIONS.contains(&params.operation.as_str()) {
             return Err(anyhow::anyhow!(
@@ -82,7 +82,7 @@ impl Tool for LspTool {
             ));
         }
 
-        let path = Path::new(&params.file_path);
+        let path = ctx.resolve_path(Path::new(&params.file_path));
         if !path.exists() {
             return Err(anyhow::anyhow!("File not found: {}", params.file_path));
         }

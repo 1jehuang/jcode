@@ -5210,6 +5210,7 @@ impl App {
                             session_id: self.session_id().to_string(),
                             message_id: self.session_id().to_string(),
                             tool_call_id: request_id.clone(),
+                            working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
                         };
                         let tool_result = self.registry.execute(&tool_name, input, ctx).await;
                         let native_result = match tool_result {
@@ -5342,6 +5343,7 @@ impl App {
                             session_id: self.session.id.clone(),
                             message_id: message_id.clone(),
                             tool_call_id: tc.id.clone(),
+                            working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
                         };
 
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
@@ -5856,6 +5858,7 @@ impl App {
                                             session_id: self.session_id().to_string(),
                                             message_id: self.session_id().to_string(),
                                             tool_call_id: request_id.clone(),
+                                            working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
                                         };
                                         let tool_result = self.registry.execute(&tool_name, input, ctx).await;
                                         let native_result = match tool_result {
@@ -6024,6 +6027,7 @@ impl App {
                     session_id: self.session.id.clone(),
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
+                    working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
                 };
 
                 Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
