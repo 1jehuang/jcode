@@ -64,12 +64,12 @@ impl Tool for GrepTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: GrepInput = serde_json::from_value(input)?;
 
         let regex = Regex::new(&params.pattern)?;
         let base_path = params.path.as_deref().unwrap_or(".");
-        let base = Path::new(base_path);
+        let base = ctx.resolve_path(Path::new(base_path));
 
         if !base.exists() {
             return Err(anyhow::anyhow!("Directory not found: {}", base_path));
@@ -83,7 +83,7 @@ impl Tool for GrepTool {
 
         let mut results: Vec<GrepResult> = Vec::new();
 
-        let walker = ignore::WalkBuilder::new(base)
+        let walker = ignore::WalkBuilder::new(&base)
             .hidden(false)
             .git_ignore(true)
             .git_global(true)
@@ -119,7 +119,7 @@ impl Tool for GrepTool {
                 for (line_num, line) in content.lines().enumerate() {
                     if regex.is_match(line) {
                         let relative = path
-                            .strip_prefix(base)
+                            .strip_prefix(&base)
                             .unwrap_or(path)
                             .display()
                             .to_string();

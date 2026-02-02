@@ -18,6 +18,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use std::collections::HashSet;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{broadcast, mpsc};
@@ -668,6 +669,7 @@ impl Agent {
             session_id: self.session.id.clone(),
             message_id: self.session.id.clone(),
             tool_call_id: call_id,
+            working_dir: self.working_dir().map(PathBuf::from),
         };
         self.registry.execute(name, input, ctx).await
     }
@@ -1167,6 +1169,7 @@ impl Agent {
                             session_id: self.session.id.clone(),
                             message_id: self.session.id.clone(),
                             tool_call_id: request_id.clone(),
+                            working_dir: self.working_dir().map(PathBuf::from),
                         };
                         let tool_result = self.registry.execute(&tool_name, input, ctx).await;
                         let native_result = match tool_result {
@@ -1349,6 +1352,7 @@ impl Agent {
                     session_id: self.session.id.clone(),
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
+                    working_dir: self.working_dir().map(PathBuf::from),
                 };
 
                 if trace {
@@ -1650,6 +1654,7 @@ impl Agent {
                             session_id: self.session.id.clone(),
                             message_id: self.session.id.clone(),
                             tool_call_id: request_id.clone(),
+                            working_dir: self.working_dir().map(PathBuf::from),
                         };
                         let tool_result = self.registry.execute(&tool_name, input, ctx).await;
                         let native_result = match tool_result {
@@ -1832,6 +1837,7 @@ impl Agent {
                     session_id: self.session.id.clone(),
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
+                    working_dir: self.working_dir().map(PathBuf::from),
                 };
 
                 if trace {
@@ -2093,6 +2099,7 @@ impl Agent {
                             session_id: self.session.id.clone(),
                             message_id: self.session.id.clone(),
                             tool_call_id: request_id.clone(),
+                            working_dir: self.working_dir().map(PathBuf::from),
                         };
                         let tool_result = self.registry.execute(&tool_name, input, ctx).await;
                         let native_result = match tool_result {
@@ -2271,6 +2278,7 @@ impl Agent {
                     session_id: self.session.id.clone(),
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
+                    working_dir: self.working_dir().map(PathBuf::from),
                 };
 
                 if trace {

@@ -52,7 +52,7 @@ impl Tool for WriteTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: WriteInput = serde_json::from_value(input)?;
 
-        let path = Path::new(&params.file_path);
+        let path = ctx.resolve_path(Path::new(&params.file_path));
 
         // Create parent directories if needed
         if let Some(parent) = path.parent() {
@@ -64,13 +64,13 @@ impl Tool for WriteTool {
         // Check if file existed before and read old content for diff
         let existed = path.exists();
         let old_content = if existed {
-            tokio::fs::read_to_string(path).await.ok()
+            tokio::fs::read_to_string(&path).await.ok()
         } else {
             None
         };
 
         // Write the file
-        tokio::fs::write(path, &params.content).await?;
+        tokio::fs::write(&path, &params.content).await?;
 
         let _new_len = params.content.len();
         let line_count = params.content.lines().count();
