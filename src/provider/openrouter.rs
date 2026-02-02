@@ -8,7 +8,10 @@
 //! - Cache token parsing: Parses cached_tokens from OpenRouter responses for cache hit detection
 
 use super::{EventStream, Provider};
-use crate::message::{CacheControl, ContentBlock, Message, Role, StreamEvent, ToolDefinition};
+use crate::message::{
+    CacheControl, ContentBlock, Message, Role, StreamEvent, ToolDefinition,
+    TOOL_OUTPUT_MISSING_TEXT,
+};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -32,6 +35,8 @@ const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
 
 /// Cache TTL in seconds (24 hours)
 const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+/// If throughput values are within this fraction, rebalance weights toward cost
+const THROUGHPUT_SIMILARITY_THRESHOLD: f64 = 0.10;
 
 /// Model info from OpenRouter API
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,8 +78,10 @@ struct ModelsCache {
 struct ProviderStats {
     avg_throughput: f64,
     avg_cache_hit_rate: f64,
+    avg_cost_per_mtok: f64,
     throughput_samples: u64,
     cache_samples: u64,
+    cost_samples: u64,
 }
 
 #[derive(Debug, Default)]
@@ -260,6 +267,31 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    /// Return true if this model is a Kimi K2/K2.5 variant (Moonshot).
+    fn is_kimi_model(model: &str) -> bool {
+        let lower = model.to_lowercase();
+        lower.contains("moonshotai/") || lower.contains("kimi-k2") || lower.contains("kimi-k2.5")
+    }
+
+    /// Parse thinking override from env. Values: "enabled"/"disabled"/"auto".
+    /// Returns Some(true)=force enable, Some(false)=force disable, None=auto.
+    fn thinking_override() -> Option<bool> {
+        let raw = std::env::var("JCODE_OPENROUTER_THINKING").ok()?;
+        let value = raw.trim().to_lowercase();
+        match value.as_str() {
+            "enabled" | "enable" | "on" | "true" | "1" => Some(true),
+            "disabled" | "disable" | "off" | "false" | "0" => Some(false),
+            "auto" | "" => None,
+            other => {
+                crate::logging::info(&format!(
+                    "Warning: Unsupported JCODE_OPENROUTER_THINKING '{}'; expected enabled/disabled/auto",
+                    other
+                ));
+                None
+            }
+        }
+    }
+
     pub fn new() -> Result<Self> {
         let api_key = Self::get_api_key().ok_or_else(|| {
             anyhow::anyhow!(
@@ -448,18 +480,6 @@ impl OpenRouterProvider {
         false
     }
 
-    fn best_cache_provider(stats: &HashMap<String, ProviderStats>) -> Option<String> {
-        stats
-            .iter()
-            .filter(|(_, stat)| stat.cache_samples > 0 && stat.avg_cache_hit_rate > 0.0)
-            .max_by(|a, b| {
-                a.1.avg_cache_hit_rate
-                    .partial_cmp(&b.1.avg_cache_hit_rate)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|(name, _)| name.clone())
-    }
-
     fn throughput_similarity(
         stats: &HashMap<String, ProviderStats>,
         threshold: f64,
@@ -476,6 +496,125 @@ impl OpenRouterProvider {
         let fastest = throughputs[0].max(1e-6);
         let second = throughputs[1].max(1e-6);
         Some((fastest / second) <= threshold)
+    }
+
+    fn min_max(values: &[f64]) -> (Option<f64>, Option<f64>) {
+        if values.is_empty() {
+            return (None, None);
+        }
+        let mut min_val = f64::INFINITY;
+        let mut max_val = f64::NEG_INFINITY;
+        for v in values {
+            if *v < min_val {
+                min_val = *v;
+            }
+            if *v > max_val {
+                max_val = *v;
+            }
+        }
+        (Some(min_val), Some(max_val))
+    }
+
+    fn normalize(value: f64, min: Option<f64>, max: Option<f64>, default: f64) -> f64 {
+        match (min, max) {
+            (Some(min), Some(max)) if (max - min).abs() > 1e-9 => {
+                ((value - min) / (max - min)).clamp(0.0, 1.0)
+            }
+            _ => default,
+        }
+    }
+
+    fn normalize_inverse(value: f64, min: Option<f64>, max: Option<f64>, default: f64) -> f64 {
+        match (min, max) {
+            (Some(min), Some(max)) if (max - min).abs() > 1e-9 => {
+                ((max - value) / (max - min)).clamp(0.0, 1.0)
+            }
+            _ => default,
+        }
+    }
+
+    fn rank_providers(
+        stats: &HashMap<String, ProviderStats>,
+        cache_supported: bool,
+    ) -> Vec<String> {
+        if stats.is_empty() {
+            return Vec::new();
+        }
+
+        let mut entries: Vec<(String, ProviderStats)> = stats
+            .iter()
+            .map(|(provider, stat)| (provider.clone(), stat.clone()))
+            .collect();
+
+        if cache_supported {
+            let cache_candidates: Vec<(String, ProviderStats)> = entries
+                .iter()
+                .filter(|(_, stat)| stat.cache_samples > 0 && stat.avg_cache_hit_rate > 0.0)
+                .cloned()
+                .collect();
+            if !cache_candidates.is_empty() {
+                entries = cache_candidates;
+            }
+        }
+
+        let cache_vals: Vec<f64> = entries
+            .iter()
+            .filter(|(_, stat)| stat.cache_samples > 0)
+            .map(|(_, stat)| stat.avg_cache_hit_rate)
+            .collect();
+        let throughput_vals: Vec<f64> = entries
+            .iter()
+            .filter(|(_, stat)| stat.throughput_samples > 0)
+            .map(|(_, stat)| stat.avg_throughput)
+            .collect();
+        let cost_vals: Vec<f64> = entries
+            .iter()
+            .filter(|(_, stat)| stat.cost_samples > 0)
+            .map(|(_, stat)| stat.avg_cost_per_mtok)
+            .collect();
+
+        let (min_cache, max_cache) = Self::min_max(&cache_vals);
+        let (min_tp, max_tp) = Self::min_max(&throughput_vals);
+        let (min_cost, max_cost) = Self::min_max(&cost_vals);
+
+        let throughput_similar =
+            Self::throughput_similarity(stats, 1.0 + THROUGHPUT_SIMILARITY_THRESHOLD)
+                .unwrap_or(false);
+        let (w_cache, w_tp, w_cost) = if throughput_similar {
+            (0.6, 0.25, 0.15)
+        } else {
+            (0.6, 0.3, 0.1)
+        };
+
+        let mut scored: Vec<(f64, String)> = entries
+            .into_iter()
+            .map(|(provider, stat)| {
+                let cache_score = if cache_supported {
+                    if stat.cache_samples > 0 {
+                        Self::normalize(stat.avg_cache_hit_rate, min_cache, max_cache, 0.0)
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+                let tp_score = if stat.throughput_samples > 0 {
+                    Self::normalize(stat.avg_throughput, min_tp, max_tp, 0.5)
+                } else {
+                    0.5
+                };
+                let cost_score = if stat.cost_samples > 0 {
+                    Self::normalize_inverse(stat.avg_cost_per_mtok, min_cost, max_cost, 0.5)
+                } else {
+                    0.5
+                };
+                let score = w_cache * cache_score + w_tp * tp_score + w_cost * cost_score;
+                (score, provider)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().map(|(_, provider)| provider).collect()
     }
 
     async fn build_routing_decision(
@@ -518,11 +657,20 @@ impl OpenRouterProvider {
                 decision.order = Some(vec![provider]);
                 return decision;
             }
-            if let Some(ref stats) = stats_snapshot {
-                if let Some(provider) = Self::best_cache_provider(stats) {
-                    decision.order = Some(vec![provider]);
-                    return decision;
-                }
+        }
+
+        if let Some(ref stats) = stats_snapshot {
+            let mut ranked = Self::rank_providers(stats, cache_supported);
+            if let Some(ref only) = decision.only {
+                ranked.retain(|p| only.iter().any(|o| o.eq_ignore_ascii_case(p.as_str())));
+            }
+            if let Some(ref ignore) = decision.ignore {
+                ranked.retain(|p| !ignore.iter().any(|o| o.eq_ignore_ascii_case(p.as_str())));
+            }
+            if !ranked.is_empty() {
+                decision.order = Some(ranked);
+                decision.sort = None;
+                return decision;
             }
         }
 
@@ -673,6 +821,9 @@ impl Provider for OpenRouterProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let model = self.model.read().await.clone();
+        let thinking_override = Self::thinking_override();
+        let include_reasoning_content =
+            thinking_override == Some(true) || Self::is_kimi_model(&model);
         let mut effective_messages: Vec<Message> = messages.to_vec();
         let cache_supported = self.model_supports_cache(&model).await;
         let cache_control_added = if cache_supported {
@@ -730,6 +881,21 @@ impl Provider for OpenRouterProvider {
             Some(Value::Array(parts))
         };
 
+        let mut tool_result_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for msg in &effective_messages {
+            if let Role::User = msg.role {
+                for block in &msg.content {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                        tool_result_ids.insert(tool_use_id.clone());
+                    }
+                }
+            }
+        }
+
+        let missing_output = format!("[Error] {}", TOOL_OUTPUT_MISSING_TEXT);
+        let mut injected_missing = 0usize;
+
         // Convert messages
         for msg in &effective_messages {
             match msg.role {
@@ -766,6 +932,7 @@ impl Provider for OpenRouterProvider {
                     let parts = build_content_parts(&msg.content);
                     let mut tool_calls = Vec::new();
                     let mut reasoning_content = String::new();
+                    let mut missing_tool_outputs: Vec<String> = Vec::new();
 
                     for block in &msg.content {
                         match block {
@@ -782,6 +949,10 @@ impl Provider for OpenRouterProvider {
                                         "arguments": serde_json::to_string(input).unwrap_or_default()
                                     }
                                 }));
+                                if !tool_result_ids.contains(id) {
+                                    tool_result_ids.insert(id.clone());
+                                    missing_tool_outputs.push(id.clone());
+                                }
                             }
                             _ => {}
                         }
@@ -799,15 +970,42 @@ impl Provider for OpenRouterProvider {
                         assistant_msg["tool_calls"] = serde_json::json!(tool_calls);
                     }
 
-                    if !reasoning_content.is_empty() || !tool_calls.is_empty() {
-                        assistant_msg["reasoning_content"] = serde_json::json!(reasoning_content);
+                    if include_reasoning_content || !reasoning_content.is_empty() {
+                        if !reasoning_content.is_empty() || !tool_calls.is_empty() {
+                            let reasoning_payload =
+                                if reasoning_content.is_empty() && !tool_calls.is_empty() {
+                                    // Some providers require reasoning_content to be present and non-empty
+                                    // when thinking is enabled and tool calls are present.
+                                    " ".to_string()
+                                } else {
+                                    reasoning_content
+                                };
+                            assistant_msg["reasoning_content"] =
+                                serde_json::json!(reasoning_payload);
+                        }
                     }
 
                     if assistant_msg.get("content").is_some() || !tool_calls.is_empty() {
                         api_messages.push(assistant_msg);
+                        if !missing_tool_outputs.is_empty() {
+                            injected_missing += missing_tool_outputs.len();
+                            for missing_id in missing_tool_outputs {
+                                api_messages.push(serde_json::json!({
+                                    "role": "tool",
+                                    "tool_call_id": missing_id,
+                                    "content": missing_output.clone()
+                                }));
+                            }
+                        }
                     }
                 }
             }
+        }
+        if injected_missing > 0 {
+            crate::logging::info(&format!(
+                "[openrouter] Injected {} synthetic tool output(s) to prevent API error",
+                injected_missing
+            ));
         }
 
         // Build tools in OpenAI format
@@ -1006,6 +1204,17 @@ struct UsageSnapshot {
     output_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
     cache_creation_input_tokens: Option<u64>,
+    cost: Option<f64>,
+}
+
+fn parse_f64(value: &Value) -> Option<f64> {
+    if let Some(v) = value.as_f64() {
+        return Some(v);
+    }
+    if let Some(s) = value.as_str() {
+        return s.parse::<f64>().ok();
+    }
+    None
 }
 
 impl OpenRouterStream {
@@ -1045,12 +1254,14 @@ impl OpenRouterStream {
         output_tokens: Option<u64>,
         cache_read_input_tokens: Option<u64>,
         cache_creation_input_tokens: Option<u64>,
+        cost: Option<f64>,
     ) {
         self.latest_usage = Some(UsageSnapshot {
             input_tokens,
             output_tokens,
             cache_read_input_tokens,
             cache_creation_input_tokens,
+            cost,
         });
     }
 
@@ -1103,6 +1314,24 @@ impl OpenRouterStream {
                             / total as f64
                     };
                     stats.cache_samples = total;
+                }
+            }
+
+            if let Some(cost) = usage.as_ref().and_then(|u| u.cost) {
+                let total_tokens = usage
+                    .as_ref()
+                    .map(|u| u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0))
+                    .unwrap_or(0);
+                if total_tokens > 0 {
+                    let per_mtok = cost / total_tokens as f64 * 1_000_000.0;
+                    let total = stats.cost_samples + 1;
+                    stats.avg_cost_per_mtok = if stats.cost_samples == 0 {
+                        per_mtok
+                    } else {
+                        (stats.avg_cost_per_mtok * stats.cost_samples as f64 + per_mtok)
+                            / total as f64
+                    };
+                    stats.cost_samples = total;
                 }
             }
 
@@ -1298,6 +1527,21 @@ impl OpenRouterStream {
                     .get("cache_creation_input_tokens")
                     .and_then(|t| t.as_u64());
 
+                let cost = usage
+                    .get("total_cost")
+                    .and_then(parse_f64)
+                    .or_else(|| usage.get("cost").and_then(parse_f64))
+                    .or_else(|| {
+                        let prompt_cost = usage.get("prompt_cost").and_then(parse_f64);
+                        let completion_cost = usage.get("completion_cost").and_then(parse_f64);
+                        match (prompt_cost, completion_cost) {
+                            (Some(p), Some(c)) => Some(p + c),
+                            (Some(p), None) => Some(p),
+                            (None, Some(c)) => Some(c),
+                            _ => None,
+                        }
+                    });
+
                 if input_tokens.is_some()
                     || output_tokens.is_some()
                     || cache_read_input_tokens.is_some()
@@ -1307,6 +1551,7 @@ impl OpenRouterStream {
                         output_tokens,
                         cache_read_input_tokens,
                         cache_creation_input_tokens,
+                        cost,
                     );
                     self.pending.push_back(StreamEvent::TokenUsage {
                         input_tokens,
