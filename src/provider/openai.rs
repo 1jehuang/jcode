@@ -32,7 +32,17 @@ const MAX_RETRIES: u32 = 3;
 const RETRY_BASE_DELAY_MS: u64 = 1000;
 
 /// Available OpenAI/Codex models
-const AVAILABLE_MODELS: &[&str] = &["gpt-5.2-codex"];
+const AVAILABLE_MODELS: &[&str] = &[
+    "gpt-5.2-codex",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex",
+    "gpt-5.1-codex-mini",
+    "gpt-5-codex",
+    "gpt-5-codex-mini",
+    "gpt-5.2",
+    "gpt-5.1",
+    "gpt-5",
+];
 
 pub struct OpenAIProvider {
     client: Client,
@@ -230,8 +240,10 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
         }
     }
 
-    let missing_tool_outputs: HashSet<_> =
-        tool_call_ids.difference(&tool_result_ids).cloned().collect();
+    let missing_tool_outputs: HashSet<_> = tool_call_ids
+        .difference(&tool_result_ids)
+        .cloned()
+        .collect();
     if !missing_tool_outputs.is_empty() {
         crate::logging::info(&format!(
             "[openai] Injecting synthetic tool outputs for {} dangling call(s)",
@@ -305,7 +317,8 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
                                 "arguments": arguments,
                                 "call_id": id
                             }));
-                            if missing_tool_outputs.contains(id) && injected_ids.insert(id.clone()) {
+                            if missing_tool_outputs.contains(id) && injected_ids.insert(id.clone())
+                            {
                                 injected_missing += 1;
                                 items.push(serde_json::json!({
                                     "type": "function_call_output",
@@ -791,9 +804,17 @@ async fn stream_response(
     let creds = credentials.read().await;
     let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
     let url = if is_chatgpt_mode {
-        format!("{}/{}", CHATGPT_API_BASE.trim_end_matches('/'), RESPONSES_PATH)
+        format!(
+            "{}/{}",
+            CHATGPT_API_BASE.trim_end_matches('/'),
+            RESPONSES_PATH
+        )
     } else {
-        format!("{}/{}", OPENAI_API_BASE.trim_end_matches('/'), RESPONSES_PATH)
+        format!(
+            "{}/{}",
+            OPENAI_API_BASE.trim_end_matches('/'),
+            RESPONSES_PATH
+        )
     };
 
     let mut builder = client
@@ -933,7 +954,7 @@ mod tests {
     use crate::auth::codex::CodexCredentials;
 
     #[test]
-    fn test_openai_supports_codex_52_model() {
+    fn test_openai_supports_codex_models() {
         let creds = CodexCredentials {
             access_token: "test".to_string(),
             refresh_token: String::new(),
@@ -944,9 +965,15 @@ mod tests {
 
         let provider = OpenAIProvider::new(creds);
         assert!(provider.available_models().contains(&"gpt-5.2-codex"));
+        assert!(provider.available_models().contains(&"gpt-5.1-codex"));
+        assert!(provider.available_models().contains(&"gpt-5.1-codex-mini"));
+        assert!(provider.available_models().contains(&"gpt-5.1-codex-max"));
 
-        provider.set_model("gpt-5.2-codex").unwrap();
-        assert_eq!(provider.model(), "gpt-5.2-codex");
+        provider.set_model("gpt-5.1-codex").unwrap();
+        assert_eq!(provider.model(), "gpt-5.1-codex");
+
+        provider.set_model("gpt-5.1-codex-mini").unwrap();
+        assert_eq!(provider.model(), "gpt-5.1-codex-mini");
     }
 
     #[test]
@@ -1057,10 +1084,16 @@ mod tests {
             if item.get("type").and_then(|v| v.as_str()) == Some("function_call_output") {
                 match item.get("call_id").and_then(|v| v.as_str()) {
                     Some("call_a") => {
-                        output_a = item.get("output").and_then(|v| v.as_str()).map(|v| v.to_string());
+                        output_a = item
+                            .get("output")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string());
                     }
                     Some("call_b") => {
-                        output_b = item.get("output").and_then(|v| v.as_str()).map(|v| v.to_string());
+                        output_b = item
+                            .get("output")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string());
                     }
                     _ => {}
                 }
