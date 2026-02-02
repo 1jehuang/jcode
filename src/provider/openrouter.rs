@@ -29,6 +29,11 @@ const API_BASE: &str = "https://openrouter.ai/api/v1";
 /// Default model (Claude Sonnet via OpenRouter)
 const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
 
+fn model_requires_reasoning_content(model: &str) -> bool {
+    let lower = model.to_lowercase();
+    lower.contains("moonshot") || lower.contains("kimi")
+}
+
 /// Cache TTL in seconds (24 hours)
 const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 
@@ -136,11 +141,14 @@ pub struct OpenRouterProvider {
 
 impl OpenRouterProvider {
     pub fn new() -> Result<Self> {
-        let api_key = Self::get_api_key()
-            .ok_or_else(|| anyhow::anyhow!("OPENROUTER_API_KEY not found in environment or ~/.config/jcode/openrouter.env"))?;
+        let api_key = Self::get_api_key().ok_or_else(|| {
+            anyhow::anyhow!(
+                "OPENROUTER_API_KEY not found in environment or ~/.config/jcode/openrouter.env"
+            )
+        })?;
 
-        let model = std::env::var("JCODE_OPENROUTER_MODEL")
-            .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let model =
+            std::env::var("JCODE_OPENROUTER_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
         // Parse provider routing from environment
         let provider_routing = Self::parse_provider_routing();
@@ -317,6 +325,7 @@ impl Provider for OpenRouterProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let model = self.model.read().await.clone();
+        let needs_reasoning_content = model_requires_reasoning_content(&model);
 
         // Build messages in OpenAI format
         let mut api_messages = Vec::new();
@@ -364,11 +373,15 @@ impl Provider for OpenRouterProvider {
                 Role::Assistant => {
                     let mut text_content = String::new();
                     let mut tool_calls = Vec::new();
+                    let mut reasoning_content = String::new();
 
                     for block in &msg.content {
                         match block {
                             ContentBlock::Text { text, .. } => {
                                 text_content.push_str(text);
+                            }
+                            ContentBlock::Reasoning { text } => {
+                                reasoning_content.push_str(text);
                             }
                             ContentBlock::ToolUse { id, name, input } => {
                                 tool_calls.push(serde_json::json!({
@@ -394,6 +407,12 @@ impl Provider for OpenRouterProvider {
 
                     if !tool_calls.is_empty() {
                         assistant_msg["tool_calls"] = serde_json::json!(tool_calls);
+                    }
+
+                    if !reasoning_content.is_empty()
+                        || (needs_reasoning_content && !tool_calls.is_empty())
+                    {
+                        assistant_msg["reasoning_content"] = serde_json::json!(reasoning_content);
                     }
 
                     if !text_content.is_empty() || !tool_calls.is_empty() {
@@ -637,6 +656,19 @@ impl OpenRouterStream {
                         None => continue,
                     };
 
+                    // Reasoning/thinking content (provider-specific)
+                    let reasoning_delta = delta
+                        .get("reasoning_content")
+                        .and_then(|c| c.as_str())
+                        .or_else(|| delta.get("reasoning").and_then(|c| c.as_str()))
+                        .or_else(|| delta.get("thinking").and_then(|c| c.as_str()));
+                    if let Some(reasoning) = reasoning_delta {
+                        if !reasoning.is_empty() {
+                            self.pending
+                                .push_back(StreamEvent::ThinkingDelta(reasoning.to_string()));
+                        }
+                    }
+
                     // Text content
                     if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                         if !content.is_empty() {
@@ -692,7 +724,8 @@ impl OpenRouterStream {
                     }
 
                     // Check for finish reason
-                    if let Some(finish_reason) = choice.get("finish_reason").and_then(|f| f.as_str())
+                    if let Some(finish_reason) =
+                        choice.get("finish_reason").and_then(|f| f.as_str())
                     {
                         // Emit any pending tool call
                         if let Some(tc) = self.current_tool_call.take() {
@@ -714,12 +747,8 @@ impl OpenRouterStream {
 
             // Extract usage if present
             if let Some(usage) = parsed.get("usage") {
-                let input_tokens = usage
-                    .get("prompt_tokens")
-                    .and_then(|t| t.as_u64());
-                let output_tokens = usage
-                    .get("completion_tokens")
-                    .and_then(|t| t.as_u64());
+                let input_tokens = usage.get("prompt_tokens").and_then(|t| t.as_u64());
+                let output_tokens = usage.get("completion_tokens").and_then(|t| t.as_u64());
 
                 // OpenRouter returns cached tokens in various formats depending on provider:
                 // - "cached_tokens" (OpenRouter's unified field)
@@ -745,7 +774,10 @@ impl OpenRouterStream {
                     .get("cache_creation_input_tokens")
                     .and_then(|t| t.as_u64());
 
-                if input_tokens.is_some() || output_tokens.is_some() || cache_read_input_tokens.is_some() {
+                if input_tokens.is_some()
+                    || output_tokens.is_some()
+                    || cache_read_input_tokens.is_some()
+                {
                     self.pending.push_back(StreamEvent::TokenUsage {
                         input_tokens,
                         output_tokens,

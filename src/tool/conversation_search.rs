@@ -181,6 +181,7 @@ impl Tool for ConversationSearchTool {
                                 };
                                 output.push_str(&format!("[Tool result: {}]\n", preview));
                             }
+                            crate::message::ContentBlock::Reasoning { .. } => {}
                         }
                     }
                     output.push('\n');

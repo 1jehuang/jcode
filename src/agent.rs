@@ -141,7 +141,10 @@ impl Agent {
                     logging::info(&format!(
                         "messages_for_provider (compaction): returning {} messages, roles: {:?}",
                         messages.len(),
-                        messages.iter().map(|m| format!("{:?}", m.role)).collect::<Vec<_>>()
+                        messages
+                            .iter()
+                            .map(|m| format!("{:?}", m.role))
+                            .collect::<Vec<_>>()
                     ));
                     return (messages, event);
                 }
@@ -154,7 +157,10 @@ impl Agent {
         logging::info(&format!(
             "messages_for_provider (session): returning {} messages, roles: {:?}",
             messages.len(),
-            messages.iter().map(|m| format!("{:?}", m.role)).collect::<Vec<_>>()
+            messages
+                .iter()
+                .map(|m| format!("{:?}", m.role))
+                .collect::<Vec<_>>()
         ));
         (messages, None)
     }
@@ -270,6 +276,7 @@ impl Agent {
                         };
                         transcript.push_str(&format!("[Result: {}]\n", preview));
                     }
+                    ContentBlock::Reasoning { .. } => {}
                 }
             }
             transcript.push('\n');
@@ -467,7 +474,10 @@ impl Agent {
 
     /// Build split system prompt for better caching
     /// Returns static (cacheable) and dynamic (not cached) parts separately
-    fn build_system_prompt_split(&self, memory_prompt: Option<&str>) -> crate::prompt::SplitSystemPrompt {
+    fn build_system_prompt_split(
+        &self,
+        memory_prompt: Option<&str>,
+    ) -> crate::prompt::SplitSystemPrompt {
         // Get skill prompt if active
         let skill_prompt = self
             .active_skill
@@ -760,6 +770,7 @@ impl Agent {
                         };
                         transcript.push_str(&format!("[Result: {}]\n", preview));
                     }
+                    ContentBlock::Reasoning { .. } => {}
                 }
             }
             transcript.push('\n');
@@ -796,10 +807,7 @@ impl Agent {
                 }
 
                 if stored_count > 0 {
-                    logging::info(&format!(
-                        "Extracted {} memories from session",
-                        stored_count
-                    ));
+                    logging::info(&format!("Extracted {} memories from session", stored_count));
                 }
                 return stored_count;
             }
@@ -844,10 +852,7 @@ impl Agent {
                     "Memory injected as message ({} chars)",
                     memory.len()
                 ));
-                let memory_msg = format!(
-                    "<system-reminder>\n{}\n</system-reminder>",
-                    memory
-                );
+                let memory_msg = format!("<system-reminder>\n{}\n</system-reminder>", memory);
                 messages_with_memory.push(Message::user(&memory_msg));
             }
 
@@ -903,6 +908,8 @@ impl Agent {
             let mut usage_cache_creation: Option<u64> = None;
             let mut saw_message_end = false;
             let mut _thinking_start: Option<Instant> = None;
+            let store_reasoning_content = self.provider.name() == "openrouter";
+            let mut reasoning_content = String::new();
             // Track tool results from provider (already executed by Claude Code CLI)
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
@@ -917,6 +924,9 @@ impl Agent {
                         // Display reasoning content
                         if print_output {
                             println!("💭 {}", thinking_text);
+                        }
+                        if store_reasoning_content {
+                            reasoning_content.push_str(&thinking_text);
                         }
                     }
                     StreamEvent::ThinkingEnd => {
@@ -1130,6 +1140,11 @@ impl Agent {
                 content_blocks.push(ContentBlock::Text {
                     text: text_content.clone(),
                     cache_control: None,
+                });
+            }
+            if store_reasoning_content && !reasoning_content.is_empty() {
+                content_blocks.push(ContentBlock::Reasoning {
+                    text: reasoning_content.clone(),
                 });
             }
             for tc in &tool_calls {
@@ -1394,11 +1409,10 @@ impl Agent {
             let mut messages_with_memory = messages;
             if let Some(ref memory) = memory_prompt {
                 let memory_count = memory.matches("\n-").count().max(1);
-                let _ = event_tx.send(ServerEvent::MemoryInjected { count: memory_count });
-                let memory_msg = format!(
-                    "<system-reminder>\n{}\n</system-reminder>",
-                    memory
-                );
+                let _ = event_tx.send(ServerEvent::MemoryInjected {
+                    count: memory_count,
+                });
+                let memory_msg = format!("<system-reminder>\n{}\n</system-reminder>", memory);
                 messages_with_memory.push(Message::user(&memory_msg));
             }
 
@@ -1431,6 +1445,8 @@ impl Agent {
             let mut usage_cache_creation: Option<u64> = None;
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
+            let store_reasoning_content = self.provider.name() == "openrouter";
+            let mut reasoning_content = String::new();
             // Track tool_use_id -> name for tool results
             let mut tool_id_to_name: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
@@ -1442,6 +1458,9 @@ impl Agent {
                         let _ = event_tx.send(ServerEvent::TextDelta {
                             text: format!("💭 {}\n", thinking_text),
                         });
+                        if store_reasoning_content {
+                            reasoning_content.push_str(&thinking_text);
+                        }
                     }
                     StreamEvent::ThinkingDone { duration_secs } => {
                         let _ = event_tx.send(ServerEvent::TextDelta {
@@ -1585,6 +1604,11 @@ impl Agent {
                 content_blocks.push(ContentBlock::Text {
                     text: text_content.clone(),
                     cache_control: None,
+                });
+            }
+            if store_reasoning_content && !reasoning_content.is_empty() {
+                content_blocks.push(ContentBlock::Reasoning {
+                    text: reasoning_content.clone(),
                 });
             }
             for tc in &tool_calls {
@@ -1823,11 +1847,10 @@ impl Agent {
             let mut messages_with_memory = messages;
             if let Some(ref memory) = memory_prompt {
                 let memory_count = memory.matches("\n-").count().max(1);
-                let _ = event_tx.send(ServerEvent::MemoryInjected { count: memory_count });
-                let memory_msg = format!(
-                    "<system-reminder>\n{}\n</system-reminder>",
-                    memory
-                );
+                let _ = event_tx.send(ServerEvent::MemoryInjected {
+                    count: memory_count,
+                });
+                let memory_msg = format!("<system-reminder>\n{}\n</system-reminder>", memory);
                 messages_with_memory.push(Message::user(&memory_msg));
             }
 
@@ -1860,6 +1883,8 @@ impl Agent {
             let mut usage_cache_creation: Option<u64> = None;
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
+            let store_reasoning_content = self.provider.name() == "openrouter";
+            let mut reasoning_content = String::new();
             let mut tool_id_to_name: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
 
@@ -1870,6 +1895,9 @@ impl Agent {
                         let _ = event_tx.send(ServerEvent::TextDelta {
                             text: format!("💭 {}\n", thinking_text),
                         });
+                        if store_reasoning_content {
+                            reasoning_content.push_str(&thinking_text);
+                        }
                     }
                     StreamEvent::ThinkingDone { duration_secs } => {
                         let _ = event_tx.send(ServerEvent::TextDelta {
@@ -2010,6 +2038,11 @@ impl Agent {
                 content_blocks.push(ContentBlock::Text {
                     text: text_content.clone(),
                     cache_control: None,
+                });
+            }
+            if store_reasoning_content && !reasoning_content.is_empty() {
+                content_blocks.push(ContentBlock::Reasoning {
+                    text: reasoning_content.clone(),
                 });
             }
             for tc in &tool_calls {
