@@ -44,7 +44,8 @@ impl Tool for TaskTool {
     }
 
     fn description(&self) -> &str {
-        "Run a sub-task using a dedicated subagent session. Returns the subagent output and a task session id."
+        "Run a sub-task using a dedicated subagent session. Returns the subagent output and a task session id. \
+         After receiving the result, continue the main task (do not treat the subagent output as the final answer)."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -171,6 +172,8 @@ impl Tool for TaskTool {
         if !output.ends_with('\n') {
             output.push('\n');
         }
+        output.push('\n');
+        output.push_str("Next step: integrate this result into the main task and continue.\n");
         output.push('\n');
         output.push_str("<task_metadata>\n");
         output.push_str(&format!("session_id: {}\n", sub_session_id));

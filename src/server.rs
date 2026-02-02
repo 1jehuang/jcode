@@ -14,6 +14,7 @@ use crate::registry::{server_debug_socket_path, server_socket_path};
 use crate::todo::{save_todos, TodoItem};
 use crate::tool::Registry;
 use anyhow::Result;
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
@@ -588,47 +589,51 @@ impl Server {
 
         // Note: No default session created here - each client creates its own session
 
-        // Spawn idle timeout monitor (for self-dev mode)
-        // Server exits after IDLE_TIMEOUT_SECS with no connected clients
-        let idle_client_count = Arc::clone(&self.client_count);
-        tokio::spawn(async move {
-            let mut idle_since: Option<std::time::Instant> = None;
-            let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        if debug_control_allowed() {
+            crate::logging::info("Debug control enabled; idle timeout monitor disabled.");
+        } else {
+            // Spawn idle timeout monitor
+            // Server exits after IDLE_TIMEOUT_SECS with no connected clients
+            let idle_client_count = Arc::clone(&self.client_count);
+            tokio::spawn(async move {
+                let mut idle_since: Option<std::time::Instant> = None;
+                let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(10));
 
-            loop {
-                check_interval.tick().await;
+                loop {
+                    check_interval.tick().await;
 
-                let count = *idle_client_count.read().await;
+                    let count = *idle_client_count.read().await;
 
-                if count == 0 {
-                    // No clients connected
-                    if idle_since.is_none() {
-                        idle_since = Some(std::time::Instant::now());
-                        crate::logging::info(&format!(
-                            "No clients connected. Server will exit after {} minutes of idle.",
-                            IDLE_TIMEOUT_SECS / 60
-                        ));
-                    }
-
-                    if let Some(since) = idle_since {
-                        let idle_duration = since.elapsed().as_secs();
-                        if idle_duration >= IDLE_TIMEOUT_SECS {
+                    if count == 0 {
+                        // No clients connected
+                        if idle_since.is_none() {
+                            idle_since = Some(std::time::Instant::now());
                             crate::logging::info(&format!(
-                                "Server idle for {} minutes with no clients. Shutting down.",
-                                idle_duration / 60
+                                "No clients connected. Server will exit after {} minutes of idle.",
+                                IDLE_TIMEOUT_SECS / 60
                             ));
-                            std::process::exit(EXIT_IDLE_TIMEOUT);
                         }
+
+                        if let Some(since) = idle_since {
+                            let idle_duration = since.elapsed().as_secs();
+                            if idle_duration >= IDLE_TIMEOUT_SECS {
+                                crate::logging::info(&format!(
+                                    "Server idle for {} minutes with no clients. Shutting down.",
+                                    idle_duration / 60
+                                ));
+                                std::process::exit(EXIT_IDLE_TIMEOUT);
+                            }
+                        }
+                    } else {
+                        // Clients connected - reset idle timer
+                        if idle_since.is_some() {
+                            crate::logging::info("Client connected. Idle timer cancelled.");
+                        }
+                        idle_since = None;
                     }
-                } else {
-                    // Clients connected - reset idle timer
-                    if idle_since.is_some() {
-                        crate::logging::info("Client connected. Idle timer cancelled.");
-                    }
-                    idle_since = None;
                 }
-            }
-        });
+            });
+        }
 
         // Spawn main socket handler
         let main_sessions = Arc::clone(&self.sessions);
@@ -1802,6 +1807,14 @@ async fn create_headless_session(
     // Mark as debug/test session (created via debug socket)
     new_agent.set_debug(true);
 
+    if let Some(ref dir) = working_dir {
+        if let Some(dir_str) = dir.to_str() {
+            new_agent.set_working_dir(dir_str);
+        } else {
+            new_agent.set_working_dir(&dir.display().to_string());
+        }
+    }
+
     // Enable self-dev mode if determined above
     if should_selfdev {
         new_agent.set_canary("self-dev");
@@ -1831,6 +1844,57 @@ async fn create_headless_session(
 
 async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Result<String> {
     let trimmed = command.trim();
+
+    if trimmed.starts_with("swarm_message:") {
+        let msg = trimmed.strip_prefix("swarm_message:").unwrap_or("").trim();
+        if msg.is_empty() {
+            return Err(anyhow::anyhow!("swarm_message: requires content"));
+        }
+
+        let mut agent = agent.lock().await;
+        let planner_prompt = format!(
+            "You are a task planner. Break the request into 2-4 subtasks. \
+Return ONLY a JSON array of objects with keys: description, prompt, subagent_type. \
+No extra text.\n\nRequest:\n{}",
+            msg
+        );
+
+        let plan_text = agent.run_once_capture(&planner_prompt).await?;
+        let mut tasks = parse_swarm_tasks(&plan_text);
+        if tasks.is_empty() {
+            tasks.push(SwarmTaskSpec {
+                description: "Main task".to_string(),
+                prompt: msg.to_string(),
+                subagent_type: Some("general".to_string()),
+            });
+        }
+
+        let mut task_outputs: Vec<(String, String)> = Vec::new();
+        for task in &tasks {
+            let input = serde_json::json!({
+                "description": task.description,
+                "prompt": task.prompt,
+                "subagent_type": task.subagent_type.clone().unwrap_or_else(|| "general".to_string()),
+            });
+            let output = agent.execute_tool("task", input).await?;
+            task_outputs.push((task.description.clone(), output.output));
+        }
+
+        let mut integration_prompt = String::new();
+        integration_prompt.push_str("You are the coordinator. Complete the original request using the subagent outputs below. ");
+        integration_prompt
+            .push_str("Do not stop early; run any requested tests and fix failures.\n\n");
+        integration_prompt.push_str("Original request:\n");
+        integration_prompt.push_str(msg);
+        integration_prompt.push_str("\n\nSubagent outputs:\n");
+        for (desc, output) in &task_outputs {
+            integration_prompt.push_str(&format!("\n--- {} ---\n{}\n", desc, output));
+        }
+        integration_prompt.push_str("\nNow complete the task.\n");
+
+        let final_text = agent.run_once_capture(&integration_prompt).await?;
+        return Ok(final_text);
+    }
 
     if trimmed.starts_with("message:") {
         let msg = trimmed.strip_prefix("message:").unwrap_or("").trim();
@@ -1925,7 +1989,7 @@ async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Resul
 
     if trimmed == "help" {
         return Ok(
-            "debug commands: state, history, tools, last_response, message:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
+            "debug commands: state, history, tools, last_response, message:<text>, swarm_message:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
         );
     }
 
@@ -2030,6 +2094,30 @@ async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Resul
     }
 
     Err(anyhow::anyhow!("Unknown debug command '{}'", trimmed))
+}
+
+#[derive(Debug, Deserialize)]
+struct SwarmTaskSpec {
+    description: String,
+    prompt: String,
+    #[serde(default)]
+    subagent_type: Option<String>,
+}
+
+fn parse_swarm_tasks(text: &str) -> Vec<SwarmTaskSpec> {
+    if let Ok(tasks) = serde_json::from_str::<Vec<SwarmTaskSpec>>(text) {
+        return tasks;
+    }
+
+    if let (Some(start), Some(end)) = (text.find('['), text.rfind(']')) {
+        if start < end {
+            if let Ok(tasks) = serde_json::from_str::<Vec<SwarmTaskSpec>>(&text[start..=end]) {
+                return tasks;
+            }
+        }
+    }
+
+    Vec::new()
 }
 
 /// Execute a client debug command (visual debug, TUI state, etc.)
@@ -2311,6 +2399,7 @@ SERVER COMMANDS (server: prefix or no prefix):
   tools                    - List available tools
   last_response            - Get last assistant response
   message:<text>           - Send message to agent
+  swarm_message:<text>     - Plan and run subtasks via task tool, then integrate
   tool:<name> <json>       - Execute tool directly
   sessions                 - List all sessions
   create_session           - Create headless session
