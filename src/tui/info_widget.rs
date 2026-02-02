@@ -1083,6 +1083,8 @@ fn swarm_member_label(member: &SwarmMemberStatus) -> String {
 
 fn swarm_status_style(status: &str) -> (Color, &'static str) {
     match status {
+        "spawned" => (Color::Rgb(140, 140, 150), "○"),
+        "ready" => (Color::Rgb(120, 180, 120), "●"),
         "running" => (Color::Rgb(255, 200, 100), "▶"),
         "blocked" => (Color::Rgb(255, 170, 80), "⏸"),
         "failed" => (Color::Rgb(255, 100, 100), "✗"),

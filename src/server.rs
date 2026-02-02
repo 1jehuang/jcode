@@ -409,6 +409,8 @@ pub struct Server {
     shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
     /// Shared plan/todos by swarm (swarm_id -> todos)
     swarm_plans: Arc<RwLock<HashMap<String, Vec<TodoItem>>>>,
+    /// Coordinator per swarm (swarm_id -> session_id)
+    swarm_coordinators: Arc<RwLock<HashMap<String, String>>>,
     /// Active and available TUI debug channels (request_id, command)
     client_debug_state: Arc<RwLock<ClientDebugState>>,
     /// Channel to receive client debug responses from TUI (request_id, response)
@@ -438,6 +440,7 @@ impl Server {
             swarms_by_id: Arc::new(RwLock::new(HashMap::new())),
             shared_context: Arc::new(RwLock::new(HashMap::new())),
             swarm_plans: Arc::new(RwLock::new(HashMap::new())),
+            swarm_coordinators: Arc::new(RwLock::new(HashMap::new())),
             client_debug_state: Arc::new(RwLock::new(ClientDebugState::default())),
             client_debug_response_tx,
             debug_jobs: Arc::new(RwLock::new(HashMap::new())),
@@ -482,6 +485,7 @@ impl Server {
             swarms_by_id: Arc::new(RwLock::new(HashMap::new())),
             shared_context: Arc::new(RwLock::new(HashMap::new())),
             swarm_plans: Arc::new(RwLock::new(HashMap::new())),
+            swarm_coordinators: Arc::new(RwLock::new(HashMap::new())),
             client_debug_state: Arc::new(RwLock::new(ClientDebugState::default())),
             client_debug_response_tx,
             debug_jobs: Arc::new(RwLock::new(HashMap::new())),
@@ -511,6 +515,8 @@ impl Server {
         swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
         swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
         swarm_plans: Arc<RwLock<HashMap<String, Vec<TodoItem>>>>,
+        swarm_coordinators: Arc<RwLock<HashMap<String, String>>>,
+        shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
         sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
     ) {
         let mut receiver = Bus::global().subscribe();
@@ -605,8 +611,8 @@ impl Server {
 
                                 // Also push to the agent's pending alerts
                                 if let Some(agent) = agent_sessions.get(&session_id) {
-                                    if let Ok(mut agent) = agent.try_lock() {
-                                        agent.push_alert(alert_msg);
+                                    if let Ok(agent) = agent.try_lock() {
+                                        agent.queue_soft_interrupt(alert_msg.clone(), false);
                                     }
                                 }
                             }
@@ -639,8 +645,8 @@ impl Server {
 
                                 // Also push to the agent's pending alerts
                                 if let Some(agent) = agent_sessions.get(&prev.session_id) {
-                                    if let Ok(mut agent) = agent.try_lock() {
-                                        agent.push_alert(alert_msg);
+                                    if let Ok(agent) = agent.try_lock() {
+                                        agent.queue_soft_interrupt(alert_msg.clone(), false);
                                     }
                                 }
                             }
@@ -657,6 +663,96 @@ impl Server {
 
                     if let Some(swarm_id) = swarm_id {
                         let todos = todo_event.todos;
+                        let members = swarm_members.read().await;
+                        let from_name = members
+                            .get(&todo_event.session_id)
+                            .and_then(|m| m.friendly_name.clone());
+                        let from_label = from_name
+                            .clone()
+                            .unwrap_or_else(|| todo_event.session_id.chars().take(8).collect());
+                        drop(members);
+
+                        let coordinator = {
+                            let coordinators = swarm_coordinators.read().await;
+                            coordinators.get(&swarm_id).cloned()
+                        };
+
+                        if let Some(ref coordinator_id) = coordinator {
+                            if coordinator_id != &todo_event.session_id {
+                                let proposal_key =
+                                    format!("plan_proposal:{}", todo_event.session_id);
+                                let proposal_value = serde_json::to_string(&todos)
+                                    .unwrap_or_else(|_| "[]".to_string());
+
+                                {
+                                    let mut ctx = shared_context.write().await;
+                                    let swarm_ctx =
+                                        ctx.entry(swarm_id.clone()).or_insert_with(HashMap::new);
+                                    swarm_ctx.insert(
+                                        proposal_key.clone(),
+                                        SharedContext {
+                                            key: proposal_key.clone(),
+                                            value: proposal_value,
+                                            from_session: todo_event.session_id.clone(),
+                                            from_name: from_name.clone(),
+                                        },
+                                    );
+                                }
+
+                                let summary = summarize_todos(&todos, 3);
+                                let notification_msg = format!(
+                                    "Plan proposal from {} ({} items). Summary: {}. Review with communicate read key '{}'.",
+                                    from_label,
+                                    todos.len(),
+                                    summary,
+                                    proposal_key
+                                );
+
+                                let members = swarm_members.read().await;
+                                let agent_sessions = sessions.read().await;
+
+                                if let Some(member) = members.get(coordinator_id) {
+                                    let _ = member.event_tx.send(ServerEvent::Notification {
+                                        from_session: todo_event.session_id.clone(),
+                                        from_name: from_name.clone(),
+                                        notification_type: NotificationType::Message {
+                                            scope: Some("plan_proposal".to_string()),
+                                            channel: None,
+                                        },
+                                        message: notification_msg.clone(),
+                                    });
+                                }
+                                if let Some(agent) = agent_sessions.get(coordinator_id) {
+                                    if let Ok(agent) = agent.try_lock() {
+                                        agent.queue_soft_interrupt(notification_msg.clone(), false);
+                                    }
+                                }
+
+                                if let Some(member) = members.get(&todo_event.session_id) {
+                                    let _ = member.event_tx.send(ServerEvent::Notification {
+                                        from_session: todo_event.session_id.clone(),
+                                        from_name: from_name.clone(),
+                                        notification_type: NotificationType::Message {
+                                            scope: Some("plan_proposal".to_string()),
+                                            channel: None,
+                                        },
+                                        message:
+                                            "Plan proposal sent to coordinator (not yet applied)."
+                                                .to_string(),
+                                    });
+                                }
+                                if let Some(agent) = agent_sessions.get(&todo_event.session_id) {
+                                    if let Ok(agent) = agent.try_lock() {
+                                        agent.queue_soft_interrupt(
+                                            "Plan proposal sent to coordinator (not yet applied)."
+                                                .to_string(),
+                                            false,
+                                        );
+                                    }
+                                }
+                                continue;
+                            }
+                        }
 
                         // Record the latest plan for this swarm
                         {
@@ -711,8 +807,8 @@ impl Server {
                             }
 
                             if let Some(agent) = agent_sessions.get(sid) {
-                                if let Ok(mut agent) = agent.try_lock() {
-                                    agent.push_alert(notification_msg.clone());
+                                if let Ok(agent) = agent.try_lock() {
+                                    agent.queue_soft_interrupt(notification_msg.clone(), false);
                                 }
                             }
                         }
@@ -777,6 +873,8 @@ impl Server {
         let monitor_swarm_members = Arc::clone(&self.swarm_members);
         let monitor_swarms_by_id = Arc::clone(&self.swarms_by_id);
         let monitor_swarm_plans = Arc::clone(&self.swarm_plans);
+        let monitor_swarm_coordinators = Arc::clone(&self.swarm_coordinators);
+        let monitor_shared_context = Arc::clone(&self.shared_context);
         let monitor_sessions = Arc::clone(&self.sessions);
         tokio::spawn(async move {
             Self::monitor_bus(
@@ -784,6 +882,8 @@ impl Server {
                 monitor_swarm_members,
                 monitor_swarms_by_id,
                 monitor_swarm_plans,
+                monitor_swarm_coordinators,
+                monitor_shared_context,
                 monitor_sessions,
             )
             .await;
@@ -791,47 +891,51 @@ impl Server {
 
         // Note: No default session created here - each client creates its own session
 
-        // Spawn idle timeout monitor (for self-dev mode)
+        // Spawn idle timeout monitor (disabled when debug control is enabled)
         // Server exits after IDLE_TIMEOUT_SECS with no connected clients
-        let idle_client_count = Arc::clone(&self.client_count);
-        tokio::spawn(async move {
-            let mut idle_since: Option<std::time::Instant> = None;
-            let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        if !debug_control_allowed() {
+            let idle_client_count = Arc::clone(&self.client_count);
+            tokio::spawn(async move {
+                let mut idle_since: Option<std::time::Instant> = None;
+                let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(10));
 
-            loop {
-                check_interval.tick().await;
+                loop {
+                    check_interval.tick().await;
 
-                let count = *idle_client_count.read().await;
+                    let count = *idle_client_count.read().await;
 
-                if count == 0 {
-                    // No clients connected
-                    if idle_since.is_none() {
-                        idle_since = Some(std::time::Instant::now());
-                        crate::logging::info(&format!(
-                            "No clients connected. Server will exit after {} minutes of idle.",
-                            IDLE_TIMEOUT_SECS / 60
-                        ));
-                    }
-
-                    if let Some(since) = idle_since {
-                        let idle_duration = since.elapsed().as_secs();
-                        if idle_duration >= IDLE_TIMEOUT_SECS {
+                    if count == 0 {
+                        // No clients connected
+                        if idle_since.is_none() {
+                            idle_since = Some(std::time::Instant::now());
                             crate::logging::info(&format!(
-                                "Server idle for {} minutes with no clients. Shutting down.",
-                                idle_duration / 60
+                                "No clients connected. Server will exit after {} minutes of idle.",
+                                IDLE_TIMEOUT_SECS / 60
                             ));
-                            std::process::exit(EXIT_IDLE_TIMEOUT);
                         }
+
+                        if let Some(since) = idle_since {
+                            let idle_duration = since.elapsed().as_secs();
+                            if idle_duration >= IDLE_TIMEOUT_SECS {
+                                crate::logging::info(&format!(
+                                    "Server idle for {} minutes with no clients. Shutting down.",
+                                    idle_duration / 60
+                                ));
+                                std::process::exit(EXIT_IDLE_TIMEOUT);
+                            }
+                        }
+                    } else {
+                        // Clients connected - reset idle timer
+                        if idle_since.is_some() {
+                            crate::logging::info("Client connected. Idle timer cancelled.");
+                        }
+                        idle_since = None;
                     }
-                } else {
-                    // Clients connected - reset idle timer
-                    if idle_since.is_some() {
-                        crate::logging::info("Client connected. Idle timer cancelled.");
-                    }
-                    idle_since = None;
                 }
-            }
-        });
+            });
+        } else {
+            crate::logging::info("Debug control enabled; idle shutdown disabled.");
+        }
 
         // Spawn main socket handler
         let main_sessions = Arc::clone(&self.sessions);
@@ -844,6 +948,7 @@ impl Server {
         let main_swarms_by_id = Arc::clone(&self.swarms_by_id);
         let main_shared_context = Arc::clone(&self.shared_context);
         let main_swarm_plans = Arc::clone(&self.swarm_plans);
+        let main_swarm_coordinators = Arc::clone(&self.swarm_coordinators);
         let main_file_touches = Arc::clone(&self.file_touches);
         let main_client_debug_state = Arc::clone(&self.client_debug_state);
         let main_client_debug_response_tx = self.client_debug_response_tx.clone();
@@ -864,6 +969,7 @@ impl Server {
                         let swarms_by_id = Arc::clone(&main_swarms_by_id);
                         let shared_context = Arc::clone(&main_shared_context);
                         let swarm_plans = Arc::clone(&main_swarm_plans);
+                        let swarm_coordinators = Arc::clone(&main_swarm_coordinators);
                         let file_touches = Arc::clone(&main_file_touches);
                         let client_debug_state = Arc::clone(&main_client_debug_state);
                         let client_debug_response_tx = main_client_debug_response_tx.clone();
@@ -886,6 +992,7 @@ impl Server {
                                 swarms_by_id,
                                 shared_context,
                                 swarm_plans,
+                                swarm_coordinators,
                                 file_touches,
                                 client_debug_state,
                                 client_debug_response_tx,
@@ -986,6 +1093,7 @@ async fn handle_client(
     swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
     swarm_plans: Arc<RwLock<HashMap<String, Vec<TodoItem>>>>,
+    swarm_coordinators: Arc<RwLock<HashMap<String, String>>>,
     file_touches: Arc<RwLock<HashMap<PathBuf, Vec<FileAccess>>>>,
     client_debug_state: Arc<RwLock<ClientDebugState>>,
     client_debug_response_tx: broadcast::Sender<(u64, String)>,
@@ -1055,7 +1163,7 @@ async fn handle_client(
                 event_tx: client_event_tx.clone(),
                 working_dir: working_dir.clone(),
                 swarm_id: swarm_id.clone(),
-                status: "ready".to_string(),
+                status: "spawned".to_string(),
                 detail: None,
                 friendly_name: friendly_name.clone(),
             },
@@ -1070,9 +1178,37 @@ async fn handle_client(
                 .insert(client_session_id.clone());
         }
     }
+    let mut is_new_coordinator = false;
+    if let Some(ref id) = swarm_id {
+        let mut coordinators = swarm_coordinators.write().await;
+        if coordinators.get(id).is_none() {
+            coordinators.insert(id.clone(), client_session_id.clone());
+            is_new_coordinator = true;
+        }
+    }
     if let Some(ref id) = swarm_id {
         broadcast_swarm_status(id, &swarm_members, &swarms_by_id).await;
         sync_swarm_plan_to_session(id, &client_session_id, &swarm_plans).await;
+    }
+    update_member_status(
+        &client_session_id,
+        "ready",
+        None,
+        &swarm_members,
+        &swarms_by_id,
+    )
+    .await;
+    if is_new_coordinator {
+        let msg = "You are the coordinator for this swarm.".to_string();
+        let _ = client_event_tx.send(ServerEvent::Notification {
+            from_session: client_session_id.clone(),
+            from_name: friendly_name.clone(),
+            notification_type: NotificationType::Message {
+                scope: Some("swarm".to_string()),
+                channel: None,
+            },
+            message: msg.clone(),
+        });
     }
 
     // Spawn event forwarder for this client only
@@ -1393,14 +1529,66 @@ async fn handle_client(
                         }
                     }
                     if let Some(old_id) = old_swarm_id.clone() {
+                        let was_coordinator = {
+                            let coordinators = swarm_coordinators.read().await;
+                            coordinators
+                                .get(&old_id)
+                                .map(|id| id == &client_session_id)
+                                .unwrap_or(false)
+                        };
+                        if was_coordinator {
+                            let mut new_coordinator: Option<String> = None;
+                            {
+                                let swarms = swarms_by_id.read().await;
+                                if let Some(swarm) = swarms.get(&old_id) {
+                                    new_coordinator = swarm.iter().next().cloned();
+                                }
+                            }
+                            let mut coordinators = swarm_coordinators.write().await;
+                            coordinators.remove(&old_id);
+                            if let Some(new_id) = new_coordinator.clone() {
+                                coordinators.insert(old_id.clone(), new_id.clone());
+                                let members = swarm_members.read().await;
+                                if let Some(member) = members.get(&new_id) {
+                                    let msg =
+                                        "You are now the coordinator for this swarm.".to_string();
+                                    let _ = member.event_tx.send(ServerEvent::Notification {
+                                        from_session: new_id.clone(),
+                                        from_name: member.friendly_name.clone(),
+                                        notification_type: NotificationType::Message {
+                                            scope: Some("swarm".to_string()),
+                                            channel: None,
+                                        },
+                                        message: msg.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    if let Some(new_id) = updated_swarm_id.clone() {
+                        let mut coordinators = swarm_coordinators.write().await;
+                        if coordinators.get(&new_id).is_none() {
+                            coordinators.insert(new_id.clone(), client_session_id.clone());
+                            let msg = "You are the coordinator for this swarm.".to_string();
+                            let _ = client_event_tx.send(ServerEvent::Notification {
+                                from_session: client_session_id.clone(),
+                                from_name: friendly_name.clone(),
+                                notification_type: NotificationType::Message {
+                                    scope: Some("swarm".to_string()),
+                                    channel: None,
+                                },
+                                message: msg.clone(),
+                            });
+                        }
+                    }
+                    if let Some(old_id) = old_swarm_id.clone() {
                         broadcast_swarm_status(&old_id, &swarm_members, &swarms_by_id).await;
                     }
                     if let Some(new_id) = updated_swarm_id {
                         if old_swarm_id.as_ref() != Some(&new_id) {
                             broadcast_swarm_status(&new_id, &swarm_members, &swarms_by_id).await;
                         }
-                        sync_swarm_plan_to_session(&new_id, &client_session_id, &swarm_plans)
-                            .await;
+                        sync_swarm_plan_to_session(&new_id, &client_session_id, &swarm_plans).await;
                     }
                 }
 
@@ -1557,6 +1745,14 @@ async fn handle_client(
                                 members.insert(session_id.clone(), member);
                             }
                         }
+                        {
+                            let mut coordinators = swarm_coordinators.write().await;
+                            for coord in coordinators.values_mut() {
+                                if *coord == old_session_id {
+                                    *coord = session_id.clone();
+                                }
+                            }
+                        }
                         update_member_status(
                             &session_id,
                             "ready",
@@ -1569,8 +1765,7 @@ async fn handle_client(
                             let members = swarm_members.read().await;
                             members.get(&session_id).and_then(|m| m.swarm_id.clone())
                         } {
-                            sync_swarm_plan_to_session(&swarm_id, &session_id, &swarm_plans)
-                                .await;
+                            sync_swarm_plan_to_session(&swarm_id, &session_id, &swarm_plans).await;
                         }
 
                         // Send updated history to client
@@ -1759,7 +1954,7 @@ async fn handle_client(
                     Ok(()) => {
                         update_member_status(
                             &client_session_id,
-                            "ready",
+                            "completed",
                             None,
                             &swarm_members,
                             &swarms_by_id,
@@ -1988,8 +2183,8 @@ async fn handle_client(
 
                             // Also push to the agent's pending alerts
                             if let Some(agent) = sessions.get(sid) {
-                                if let Ok(mut agent) = agent.try_lock() {
-                                    agent.push_alert(notification_msg);
+                                if let Ok(agent) = agent.try_lock() {
+                                    agent.queue_soft_interrupt(notification_msg.clone(), false);
                                 }
                             }
                         }
@@ -2077,20 +2272,78 @@ async fn handle_client(
 
     // Clean up: remove from swarm tracking
     {
+        let crashed = client_is_processing
+            || processing_task
+                .as_ref()
+                .map(|handle| !handle.is_finished())
+                .unwrap_or(false);
+        let (status, detail) = if crashed {
+            ("crashed", Some("disconnect while running".to_string()))
+        } else {
+            ("stopped", Some("disconnected".to_string()))
+        };
+        update_member_status(
+            &client_session_id,
+            status,
+            detail,
+            &swarm_members,
+            &swarms_by_id,
+        )
+        .await;
+
         let swarm_id = {
             let mut members = swarm_members.write().await;
             members
                 .remove(&client_session_id)
                 .and_then(|member| member.swarm_id)
         };
+
         if let Some(ref swarm_id) = swarm_id {
-            let mut swarms = swarms_by_id.write().await;
-            if let Some(swarm) = swarms.get_mut(swarm_id) {
-                swarm.remove(&client_session_id);
-                if swarm.is_empty() {
-                    swarms.remove(swarm_id);
+            let was_coordinator = {
+                let coordinators = swarm_coordinators.read().await;
+                coordinators
+                    .get(swarm_id)
+                    .map(|id| id == &client_session_id)
+                    .unwrap_or(false)
+            };
+
+            let mut new_coordinator: Option<String> = None;
+            {
+                let mut swarms = swarms_by_id.write().await;
+                if let Some(swarm) = swarms.get_mut(swarm_id) {
+                    swarm.remove(&client_session_id);
+                    if swarm.is_empty() {
+                        swarms.remove(swarm_id);
+                    } else if was_coordinator {
+                        new_coordinator = swarm.iter().next().cloned();
+                    }
                 }
             }
+
+            if was_coordinator {
+                let mut coordinators = swarm_coordinators.write().await;
+                coordinators.remove(swarm_id);
+                if let Some(new_id) = new_coordinator.clone() {
+                    coordinators.insert(swarm_id.clone(), new_id);
+                }
+            }
+
+            if let Some(new_id) = new_coordinator {
+                let members = swarm_members.read().await;
+                if let Some(member) = members.get(&new_id) {
+                    let msg = "You are now the coordinator for this swarm.".to_string();
+                    let _ = member.event_tx.send(ServerEvent::Notification {
+                        from_session: new_id.clone(),
+                        from_name: member.friendly_name.clone(),
+                        notification_type: NotificationType::Message {
+                            scope: Some("swarm".to_string()),
+                            channel: None,
+                        },
+                        message: msg.clone(),
+                    });
+                }
+            }
+
             broadcast_swarm_status(swarm_id, &swarm_members, &swarms_by_id).await;
         }
     }
@@ -2226,6 +2479,21 @@ fn truncate_detail(text: &str, max_len: usize) -> String {
     let mut out: String = trimmed.chars().take(max_len - 3).collect();
     out.push_str("...");
     out
+}
+
+fn summarize_todos(todos: &[TodoItem], max_items: usize) -> String {
+    if todos.is_empty() {
+        return "no items".to_string();
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for item in todos.iter().take(max_items.max(1)) {
+        parts.push(item.content.clone());
+    }
+    let mut summary = parts.join("; ");
+    if todos.len() > max_items.max(1) {
+        summary.push_str(&format!(" (+{} more)", todos.len() - max_items.max(1)));
+    }
+    summary
 }
 
 async fn resolve_debug_session(
@@ -2378,6 +2646,69 @@ async fn run_debug_message_with_timeout(
     }
 }
 
+async fn run_swarm_task(
+    agent: Arc<Mutex<Agent>>,
+    description: &str,
+    subagent_type: &str,
+    prompt: &str,
+) -> Result<String> {
+    let input = serde_json::json!({
+        "description": description,
+        "prompt": prompt,
+        "subagent_type": subagent_type,
+    });
+    let output = {
+        let agent = agent.lock().await;
+        agent.execute_tool("task", input).await?
+    };
+    Ok(output.output)
+}
+
+async fn run_swarm_message(agent: Arc<Mutex<Agent>>, message: &str) -> Result<String> {
+    let working_dir = {
+        let agent = agent.lock().await;
+        agent.working_dir().map(|dir| dir.to_string())
+    };
+    let working_dir_hint = working_dir
+        .as_deref()
+        .map(|dir| format!("Working directory: {}\n", dir))
+        .unwrap_or_default();
+
+    let analysis_prompt = format!(
+        "{working_dir_hint}Analyze the task and propose concrete optimization steps.\n\nTask:\n{message}"
+    );
+    let analysis_output =
+        run_swarm_task(agent.clone(), "Analyze task", "analysis", &analysis_prompt).await?;
+
+    let implement_prompt = format!(
+        "{working_dir_hint}Implement improvements based on the analysis below.\n\nTask:\n{message}\n\nAnalysis:\n{analysis_output}"
+    );
+    let implement_output = run_swarm_task(
+        agent.clone(),
+        "Implement changes",
+        "implementation",
+        &implement_prompt,
+    )
+    .await?;
+
+    let test_prompt = format!(
+        "{working_dir_hint}Validate the changes. Run `git diff origin/main tests/` (must be empty) and `python tests/submission_tests.py`.\n\nTask:\n{message}\n\nImplementation summary:\n{implement_output}"
+    );
+    let test_output =
+        run_swarm_task(agent.clone(), "Test and measure", "testing", &test_prompt).await?;
+
+    let integration_prompt = format!(
+        "You are the coordinator. Combine the subtask outputs into a final response.\n\nTask:\n{message}\n\nSubtask outputs:\n\n<analysis>\n{analysis_output}\n</analysis>\n\n<implementation>\n{implement_output}\n</implementation>\n\n<testing>\n{test_output}\n</testing>\n\nDeliverables:\n- Summary of optimizations\n- Best cycle count achieved\n- Confirmation tests/ unchanged\n- List of modified files"
+    );
+
+    let final_output = {
+        let mut agent = agent.lock().await;
+        agent.run_once_capture(&integration_prompt).await?
+    };
+
+    Ok(final_output)
+}
+
 async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Result<String> {
     let trimmed = command.trim();
 
@@ -2492,7 +2823,7 @@ async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Resul
 
     if trimmed == "help" {
         return Ok(
-            "debug commands: state, history, tools, last_response, message:<text>, message_timeout:<s>:<t>, message_async:<text>, job_status:<id>, job_cancel:<id>, jobs, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
+            "debug commands: state, history, tools, last_response, message:<text>, message_timeout:<s>:<t>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, job_status:<id>, job_cancel:<id>, jobs, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
         );
     }
 
@@ -2829,6 +3160,93 @@ async fn handle_debug_client(
                                     Err(anyhow::anyhow!("Unknown session_id '{}'", target_id))
                                 }
                             }
+                        } else if cmd.starts_with("swarm_message_async:") {
+                            let msg = cmd
+                                .strip_prefix("swarm_message_async:")
+                                .unwrap_or("")
+                                .trim();
+                            if msg.is_empty() {
+                                Err(anyhow::anyhow!("swarm_message_async: requires a message"))
+                            } else {
+                                let (target_id, agent) = resolve_debug_session(
+                                    &sessions,
+                                    &session_id,
+                                    requested_session,
+                                )
+                                .await?;
+                                let job_id = format!(
+                                    "job_{}",
+                                    debug_job_counter.fetch_add(1, Ordering::Relaxed)
+                                );
+                                let now = std::time::SystemTime::now();
+                                let job = DebugJob {
+                                    id: job_id.clone(),
+                                    session_id: target_id.clone(),
+                                    status: DebugJobStatus::Running,
+                                    started_at: now,
+                                    finished_at: None,
+                                    output: None,
+                                    error: None,
+                                    handle: None,
+                                };
+
+                                {
+                                    let mut jobs_guard = debug_jobs.write().await;
+                                    jobs_guard.insert(job_id.clone(), job);
+                                }
+
+                                let jobs = Arc::clone(&debug_jobs);
+                                let job_id_clone = job_id.clone();
+                                let msg = msg.to_string();
+                                let handle = tokio::spawn(async move {
+                                    let result = run_swarm_message(agent, &msg).await;
+
+                                    let mut jobs_guard = jobs.write().await;
+                                    if let Some(job) = jobs_guard.get_mut(&job_id_clone) {
+                                        if job.status != DebugJobStatus::Running {
+                                            return;
+                                        }
+                                        match result {
+                                            Ok(output) => {
+                                                job.status = DebugJobStatus::Done;
+                                                job.output = Some(output);
+                                            }
+                                            Err(e) => {
+                                                job.status = DebugJobStatus::Error;
+                                                job.error = Some(e.to_string());
+                                            }
+                                        }
+                                        job.finished_at = Some(std::time::SystemTime::now());
+                                        job.handle = None;
+                                    }
+                                });
+
+                                {
+                                    let mut jobs_guard = debug_jobs.write().await;
+                                    if let Some(job) = jobs_guard.get_mut(&job_id) {
+                                        job.handle = Some(handle);
+                                    }
+                                }
+
+                                Ok(serde_json::to_string_pretty(&serde_json::json!({
+                                    "job_id": job_id,
+                                    "session_id": target_id,
+                                }))
+                                .unwrap_or_else(|_| "{}".to_string()))
+                            }
+                        } else if cmd.starts_with("swarm_message:") {
+                            let msg = cmd.strip_prefix("swarm_message:").unwrap_or("").trim();
+                            if msg.is_empty() {
+                                Err(anyhow::anyhow!("swarm_message: requires a message"))
+                            } else {
+                                let (_target_id, agent) = resolve_debug_session(
+                                    &sessions,
+                                    &session_id,
+                                    requested_session,
+                                )
+                                .await?;
+                                run_swarm_message(agent, msg).await
+                            }
                         } else if cmd.starts_with("message_async:") {
                             let msg = cmd.strip_prefix("message_async:").unwrap_or("").trim();
                             if msg.is_empty() {
@@ -3014,6 +3432,8 @@ SERVER COMMANDS (server: prefix or no prefix):
   message:<text>           - Send message to agent (respects JCODE_DEBUG_MESSAGE_TIMEOUT_SECS if set)
   message_timeout:<s>:<t>  - Send message with timeout (seconds)
   message_async:<text>     - Send message asynchronously (returns job id)
+  swarm_message:<text>     - Run a swarm-style task (analysis/implement/test) and integrate
+  swarm_message_async:<text> - Run swarm task asynchronously (returns job id)
   job_status:<id>          - Check async job status/output
   job_cancel:<id>          - Cancel async job
   jobs                     - List async debug jobs
