@@ -4,11 +4,14 @@
 use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
 use crate::cache_tracker::CacheTracker;
 use crate::compaction::CompactionEvent;
+use crate::id;
 use crate::logging;
-use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolCall, ToolDefinition};
+use crate::message::{
+    ContentBlock, Message, Role, StreamEvent, ToolCall, ToolDefinition, TOOL_OUTPUT_MISSING_TEXT,
+};
 use crate::protocol::{HistoryMessage, ServerEvent};
 use crate::provider::{NativeToolResult, Provider};
-use crate::session::Session;
+use crate::session::{Session, StoredMessage};
 use crate::skill::SkillRegistry;
 use crate::tool::{Registry, ToolContext};
 use anyhow::Result;
@@ -141,7 +144,10 @@ impl Agent {
                     logging::info(&format!(
                         "messages_for_provider (compaction): returning {} messages, roles: {:?}",
                         messages.len(),
-                        messages.iter().map(|m| format!("{:?}", m.role)).collect::<Vec<_>>()
+                        messages
+                            .iter()
+                            .map(|m| format!("{:?}", m.role))
+                            .collect::<Vec<_>>()
                     ));
                     return (messages, event);
                 }
@@ -154,9 +160,69 @@ impl Agent {
         logging::info(&format!(
             "messages_for_provider (session): returning {} messages, roles: {:?}",
             messages.len(),
-            messages.iter().map(|m| format!("{:?}", m.role)).collect::<Vec<_>>()
+            messages
+                .iter()
+                .map(|m| format!("{:?}", m.role))
+                .collect::<Vec<_>>()
         ));
         (messages, None)
+    }
+
+    fn repair_missing_tool_outputs(&mut self) -> usize {
+        let mut known_results = HashSet::new();
+        for msg in &self.session.messages {
+            if let Role::User = msg.role {
+                for block in &msg.content {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                        known_results.insert(tool_use_id.clone());
+                    }
+                }
+            }
+        }
+
+        let mut repaired = 0usize;
+        let mut index = 0usize;
+        while index < self.session.messages.len() {
+            let mut missing_for_message: Vec<String> = Vec::new();
+            if let Role::Assistant = self.session.messages[index].role {
+                for block in &self.session.messages[index].content {
+                    if let ContentBlock::ToolUse { id, .. } = block {
+                        if !known_results.contains(id) {
+                            known_results.insert(id.clone());
+                            missing_for_message.push(id.clone());
+                        }
+                    }
+                }
+            }
+
+            if !missing_for_message.is_empty() {
+                for (offset, id) in missing_for_message.iter().enumerate() {
+                    let tool_block = ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: TOOL_OUTPUT_MISSING_TEXT.to_string(),
+                        is_error: Some(true),
+                    };
+                    let stored_message = StoredMessage {
+                        id: id::new_id("message"),
+                        role: Role::User,
+                        content: vec![tool_block],
+                    };
+                    self.session.messages.insert(index + 1 + offset, stored_message);
+                    repaired += 1;
+                }
+                index += missing_for_message.len();
+            }
+
+            index += 1;
+        }
+
+        if repaired > 0 {
+            let _ = self.session.save();
+            self.seed_compaction_from_session();
+            self.cache_tracker.reset();
+        }
+
+        repaired
     }
 
     /// Add a swarm alert to be injected into the next turn
@@ -467,7 +533,10 @@ impl Agent {
 
     /// Build split system prompt for better caching
     /// Returns static (cacheable) and dynamic (not cached) parts separately
-    fn build_system_prompt_split(&self, memory_prompt: Option<&str>) -> crate::prompt::SplitSystemPrompt {
+    fn build_system_prompt_split(
+        &self,
+        memory_prompt: Option<&str>,
+    ) -> crate::prompt::SplitSystemPrompt {
         // Get skill prompt if active
         let skill_prompt = self
             .active_skill
@@ -796,10 +865,7 @@ impl Agent {
                 }
 
                 if stored_count > 0 {
-                    logging::info(&format!(
-                        "Extracted {} memories from session",
-                        stored_count
-                    ));
+                    logging::info(&format!("Extracted {} memories from session", stored_count));
                 }
                 return stored_count;
             }
@@ -818,6 +884,13 @@ impl Agent {
         let trace = trace_enabled();
 
         loop {
+            let repaired = self.repair_missing_tool_outputs();
+            if repaired > 0 {
+                logging::warn(&format!(
+                    "Recovered {} missing tool output(s) before API call",
+                    repaired
+                ));
+            }
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
                 // Reset cache tracker on compaction since the message history changes
@@ -844,10 +917,7 @@ impl Agent {
                     "Memory injected as message ({} chars)",
                     memory.len()
                 ));
-                let memory_msg = format!(
-                    "<system-reminder>\n{}\n</system-reminder>",
-                    memory
-                );
+                let memory_msg = format!("<system-reminder>\n{}\n</system-reminder>", memory);
                 messages_with_memory.push(Message::user(&memory_msg));
             }
 
@@ -1370,6 +1440,13 @@ impl Agent {
         let trace = trace_enabled();
 
         loop {
+            let repaired = self.repair_missing_tool_outputs();
+            if repaired > 0 {
+                logging::warn(&format!(
+                    "Recovered {} missing tool output(s) before API call",
+                    repaired
+                ));
+            }
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
                 // Reset cache tracker on compaction since the message history changes
@@ -1394,11 +1471,10 @@ impl Agent {
             let mut messages_with_memory = messages;
             if let Some(ref memory) = memory_prompt {
                 let memory_count = memory.matches("\n-").count().max(1);
-                let _ = event_tx.send(ServerEvent::MemoryInjected { count: memory_count });
-                let memory_msg = format!(
-                    "<system-reminder>\n{}\n</system-reminder>",
-                    memory
-                );
+                let _ = event_tx.send(ServerEvent::MemoryInjected {
+                    count: memory_count,
+                });
+                let memory_msg = format!("<system-reminder>\n{}\n</system-reminder>", memory);
                 messages_with_memory.push(Message::user(&memory_msg));
             }
 
@@ -1799,6 +1875,13 @@ impl Agent {
         let trace = trace_enabled();
 
         loop {
+            let repaired = self.repair_missing_tool_outputs();
+            if repaired > 0 {
+                logging::warn(&format!(
+                    "Recovered {} missing tool output(s) before API call",
+                    repaired
+                ));
+            }
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
                 // Reset cache tracker on compaction since the message history changes
@@ -1823,11 +1906,10 @@ impl Agent {
             let mut messages_with_memory = messages;
             if let Some(ref memory) = memory_prompt {
                 let memory_count = memory.matches("\n-").count().max(1);
-                let _ = event_tx.send(ServerEvent::MemoryInjected { count: memory_count });
-                let memory_msg = format!(
-                    "<system-reminder>\n{}\n</system-reminder>",
-                    memory
-                );
+                let _ = event_tx.send(ServerEvent::MemoryInjected {
+                    count: memory_count,
+                });
+                let memory_msg = format!("<system-reminder>\n{}\n</system-reminder>", memory);
                 messages_with_memory.push(Message::user(&memory_msg));
             }
 
