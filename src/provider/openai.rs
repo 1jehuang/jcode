@@ -352,15 +352,18 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
             item.get("type").and_then(|v| v.as_str()),
             Some("function_call") | Some("custom_tool_call")
         );
-        let call_id = item.get("call_id").and_then(|v| v.as_str());
+        let call_id = item
+            .get("call_id")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
 
         normalized.push(item);
 
         if is_call {
             if let Some(call_id) = call_id {
-                if !output_ids.contains(call_id) {
+                if !output_ids.contains(&call_id) {
                     extra_injected += 1;
-                    output_ids.insert(call_id.to_string());
+                    output_ids.insert(call_id.clone());
                     normalized.push(serde_json::json!({
                         "type": "function_call_output",
                         "call_id": call_id,

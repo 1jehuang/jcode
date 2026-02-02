@@ -219,9 +219,7 @@ impl CompactionManager {
         // Adjust cutoff to not split tool call/result pairs
         cutoff = self.safe_cutoff(cutoff);
         if cutoff == 0 {
-            return Err(
-                "Cannot compact - would split tool call/result pairs".to_string()
-            );
+            return Err("Cannot compact - would split tool call/result pairs".to_string());
         }
 
         // Snapshot messages to summarize
@@ -453,6 +451,7 @@ impl CompactionManager {
             .iter()
             .map(|block| match block {
                 ContentBlock::Text { text, .. } => text.len(),
+                ContentBlock::Reasoning { text } => text.len(),
                 ContentBlock::ToolUse { input, .. } => input.to_string().len() + 50,
                 ContentBlock::ToolResult { content, .. } => content.len() + 20,
             })
@@ -558,6 +557,7 @@ async fn generate_summary(
                     };
                     conversation_text.push_str(&format!("[Result: {}]\n", truncated));
                 }
+                ContentBlock::Reasoning { .. } => {}
             }
         }
         conversation_text.push('\n');
