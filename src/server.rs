@@ -2302,6 +2302,13 @@ async fn create_headless_session(
     let mut new_agent = Agent::new(Arc::clone(&provider), registry);
     let client_session_id = new_agent.session_id().to_string();
 
+    // Apply working dir for headless sessions (if provided)
+    if let Some(ref dir) = working_dir {
+        if let Some(path) = dir.to_str() {
+            new_agent.set_working_dir(path);
+        }
+    }
+
     // Mark as debug/test session (created via debug socket)
     new_agent.set_debug(true);
 
