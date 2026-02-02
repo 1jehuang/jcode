@@ -267,6 +267,34 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    fn normalize_provider_name(raw: &str) -> String {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+        let normalized: String = trimmed
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
+        match normalized.as_str() {
+            "moonshot" | "moonshotai" => "Moonshot AI".to_string(),
+            "openai" => "OpenAI".to_string(),
+            "anthropic" => "Anthropic".to_string(),
+            "fireworks" | "fireworksai" => "Fireworks".to_string(),
+            "together" | "togetherai" => "Together".to_string(),
+            "deepinfra" => "DeepInfra".to_string(),
+            _ => trimmed.to_string(),
+        }
+    }
+
+    fn normalize_provider_list(list: Vec<String>) -> Vec<String> {
+        list.into_iter()
+            .map(|value| Self::normalize_provider_name(&value))
+            .filter(|value| !value.is_empty())
+            .collect()
+    }
+
     /// Return true if this model is a Kimi K2/K2.5 variant (Moonshot).
     fn is_kimi_model(model: &str) -> bool {
         let lower = model.to_lowercase();
@@ -323,11 +351,9 @@ impl OpenRouterProvider {
         // JCODE_OPENROUTER_PROVIDER: comma-separated list of providers to prefer
         // e.g., "Fireworks" or "Fireworks,Together"
         if let Some(providers) = Self::openrouter_env_value("JCODE_OPENROUTER_PROVIDER") {
-            let order: Vec<String> = providers
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+            let order = Self::normalize_provider_list(
+                providers.split(',').map(|s| s.trim().to_string()).collect(),
+            );
             if !order.is_empty() {
                 routing.order = Some(order);
             }
@@ -402,7 +428,7 @@ impl OpenRouterProvider {
             }
             let order: Vec<String> = provider_part
                 .split(',')
-                .map(|s| s.trim().to_string())
+                .map(|s| Self::normalize_provider_name(s))
                 .filter(|s| !s.is_empty())
                 .collect();
             if order.is_empty() {
