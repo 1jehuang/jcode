@@ -322,7 +322,7 @@ impl OpenRouterProvider {
 
         // JCODE_OPENROUTER_PROVIDER: comma-separated list of providers to prefer
         // e.g., "Fireworks" or "Fireworks,Together"
-        if let Ok(providers) = std::env::var("JCODE_OPENROUTER_PROVIDER") {
+        if let Some(providers) = Self::openrouter_env_value("JCODE_OPENROUTER_PROVIDER") {
             let order: Vec<String> = providers
                 .split(',')
                 .map(|s| s.trim().to_string())
@@ -334,11 +334,47 @@ impl OpenRouterProvider {
         }
 
         // JCODE_OPENROUTER_NO_FALLBACK: disable fallbacks to other providers
-        if std::env::var("JCODE_OPENROUTER_NO_FALLBACK").is_ok() {
+        if std::env::var("JCODE_OPENROUTER_NO_FALLBACK").is_ok()
+            || Self::openrouter_env_value("JCODE_OPENROUTER_NO_FALLBACK").is_some()
+        {
             routing.allow_fallbacks = false;
         }
 
         routing
+    }
+
+    fn read_openrouter_env_file() -> std::collections::HashMap<String, String> {
+        let mut values = std::collections::HashMap::new();
+        let Some(config_dir) = dirs::config_dir() else {
+            return values;
+        };
+        let path = config_dir.join("jcode").join("openrouter.env");
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return values;
+        };
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, raw_value)) = line.split_once('=') {
+                let value = raw_value.trim().trim_matches('"').trim_matches('\'');
+                if !key.trim().is_empty() && !value.is_empty() {
+                    values.insert(key.trim().to_string(), value.to_string());
+                }
+            }
+        }
+        values
+    }
+
+    fn openrouter_env_value(key: &str) -> Option<String> {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        Self::read_openrouter_env_file().get(key).cloned()
     }
 
     /// Set provider routing at runtime
@@ -1139,6 +1175,60 @@ impl Provider for OpenRouterProvider {
         }
 
         Vec::new()
+    }
+
+    fn available_providers_for_model(&self, model: &str) -> Vec<String> {
+        let mut providers: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut push_provider = |provider: &str| {
+            let trimmed = provider.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            let key = trimmed.to_lowercase();
+            if seen.insert(key) {
+                providers.push(trimmed.to_string());
+            }
+        };
+
+        if let Ok(order) = self.session_provider_order.try_read() {
+            if let Some(ref order) = *order {
+                for provider in order {
+                    push_provider(provider);
+                }
+            }
+        }
+
+        if let Ok(state) = self.routing_state.try_read() {
+            if let Some(provider) = state.pinned_provider.get(model) {
+                push_provider(provider);
+            }
+            if let Some(stats) = state.provider_stats.get(model) {
+                for provider in stats.keys() {
+                    push_provider(provider);
+                }
+            }
+        }
+
+        if let Ok(routing) = self.provider_routing.try_read() {
+            if let Some(ref order) = routing.order {
+                for provider in order {
+                    push_provider(provider);
+                }
+            }
+            if let Some(ref only) = routing.only {
+                for provider in only {
+                    push_provider(provider);
+                }
+            }
+            if let Some(ref ignore) = routing.ignore {
+                for provider in ignore {
+                    push_provider(provider);
+                }
+            }
+        }
+
+        providers
     }
 
     async fn prefetch_models(&self) -> Result<()> {
