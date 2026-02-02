@@ -11,6 +11,7 @@ use crate::protocol::{
 };
 use crate::provider::Provider;
 use crate::registry::{server_debug_socket_path, server_socket_path};
+use crate::todo::{save_todos, TodoItem};
 use crate::tool::Registry;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -349,6 +350,8 @@ pub struct Server {
     swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     /// Shared context by swarm (swarm_id -> key -> SharedContext)
     shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
+    /// Shared plan/todos by swarm (swarm_id -> todos)
+    swarm_plans: Arc<RwLock<HashMap<String, Vec<TodoItem>>>>,
     /// Active and available TUI debug channels (request_id, command)
     client_debug_state: Arc<RwLock<ClientDebugState>>,
     /// Channel to receive client debug responses from TUI (request_id, response)
@@ -373,6 +376,7 @@ impl Server {
             swarm_members: Arc::new(RwLock::new(HashMap::new())),
             swarms_by_id: Arc::new(RwLock::new(HashMap::new())),
             shared_context: Arc::new(RwLock::new(HashMap::new())),
+            swarm_plans: Arc::new(RwLock::new(HashMap::new())),
             client_debug_state: Arc::new(RwLock::new(ClientDebugState::default())),
             client_debug_response_tx,
         }
@@ -414,6 +418,7 @@ impl Server {
             swarm_members: Arc::new(RwLock::new(HashMap::new())),
             swarms_by_id: Arc::new(RwLock::new(HashMap::new())),
             shared_context: Arc::new(RwLock::new(HashMap::new())),
+            swarm_plans: Arc::new(RwLock::new(HashMap::new())),
             client_debug_state: Arc::new(RwLock::new(ClientDebugState::default())),
             client_debug_response_tx,
         }
@@ -440,6 +445,7 @@ impl Server {
         file_touches: Arc<RwLock<HashMap<PathBuf, Vec<FileAccess>>>>,
         swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
         swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+        swarm_plans: Arc<RwLock<HashMap<String, Vec<TodoItem>>>>,
         sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
     ) {
         let mut receiver = Bus::global().subscribe();
@@ -576,6 +582,77 @@ impl Server {
                         }
                     }
                 }
+                Ok(BusEvent::TodoUpdated(todo_event)) => {
+                    let swarm_id = {
+                        let members = swarm_members.read().await;
+                        members
+                            .get(&todo_event.session_id)
+                            .and_then(|m| m.swarm_id.clone())
+                    };
+
+                    if let Some(swarm_id) = swarm_id {
+                        let todos = todo_event.todos;
+
+                        // Record the latest plan for this swarm
+                        {
+                            let mut plans = swarm_plans.write().await;
+                            plans.insert(swarm_id.clone(), todos.clone());
+                        }
+
+                        // Sync todos to all sessions in the swarm
+                        let swarm_session_ids: Vec<String> = {
+                            let swarms = swarms_by_id.read().await;
+                            swarms
+                                .get(&swarm_id)
+                                .map(|s| s.iter().cloned().collect())
+                                .unwrap_or_default()
+                        };
+
+                        for sid in &swarm_session_ids {
+                            if let Err(e) = save_todos(sid, &todos) {
+                                crate::logging::warn(&format!(
+                                    "Failed to sync swarm plan to {}: {}",
+                                    sid, e
+                                ));
+                            }
+                        }
+
+                        // Notify other swarm members
+                        let members = swarm_members.read().await;
+                        let from_name = members
+                            .get(&todo_event.session_id)
+                            .and_then(|m| m.friendly_name.clone());
+                        let from_label = from_name
+                            .clone()
+                            .unwrap_or_else(|| todo_event.session_id.chars().take(8).collect());
+                        let notification_msg =
+                            format!("Plan updated by {} ({} items)", from_label, todos.len());
+
+                        let agent_sessions = sessions.read().await;
+                        for sid in &swarm_session_ids {
+                            if sid == &todo_event.session_id {
+                                continue;
+                            }
+                            if let Some(member) = members.get(sid) {
+                                let _ = member.event_tx.send(ServerEvent::Notification {
+                                    from_session: todo_event.session_id.clone(),
+                                    from_name: from_name.clone(),
+                                    notification_type: NotificationType::Message {
+                                        scope: Some("plan".to_string()),
+                                        channel: None,
+                                    },
+                                    message: notification_msg.clone(),
+                                });
+                            }
+
+                            if let Some(agent) = agent_sessions.get(sid) {
+                                if let Ok(mut agent) = agent.try_lock() {
+                                    agent.push_alert(notification_msg.clone());
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok(_) => {
                     // Ignore other events
                 }
@@ -634,12 +711,14 @@ impl Server {
         let monitor_file_touches = Arc::clone(&self.file_touches);
         let monitor_swarm_members = Arc::clone(&self.swarm_members);
         let monitor_swarms_by_id = Arc::clone(&self.swarms_by_id);
+        let monitor_swarm_plans = Arc::clone(&self.swarm_plans);
         let monitor_sessions = Arc::clone(&self.sessions);
         tokio::spawn(async move {
             Self::monitor_bus(
                 monitor_file_touches,
                 monitor_swarm_members,
                 monitor_swarms_by_id,
+                monitor_swarm_plans,
                 monitor_sessions,
             )
             .await;
@@ -699,6 +778,7 @@ impl Server {
         let main_swarm_members = Arc::clone(&self.swarm_members);
         let main_swarms_by_id = Arc::clone(&self.swarms_by_id);
         let main_shared_context = Arc::clone(&self.shared_context);
+        let main_swarm_plans = Arc::clone(&self.swarm_plans);
         let main_file_touches = Arc::clone(&self.file_touches);
         let main_client_debug_state = Arc::clone(&self.client_debug_state);
         let main_client_debug_response_tx = self.client_debug_response_tx.clone();
@@ -718,6 +798,7 @@ impl Server {
                         let swarm_members = Arc::clone(&main_swarm_members);
                         let swarms_by_id = Arc::clone(&main_swarms_by_id);
                         let shared_context = Arc::clone(&main_shared_context);
+                        let swarm_plans = Arc::clone(&main_swarm_plans);
                         let file_touches = Arc::clone(&main_file_touches);
                         let client_debug_state = Arc::clone(&main_client_debug_state);
                         let client_debug_response_tx = main_client_debug_response_tx.clone();
@@ -739,6 +820,7 @@ impl Server {
                                 swarm_members,
                                 swarms_by_id,
                                 shared_context,
+                                swarm_plans,
                                 file_touches,
                                 client_debug_state,
                                 client_debug_response_tx,
@@ -821,6 +903,7 @@ async fn handle_client(
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
+    swarm_plans: Arc<RwLock<HashMap<String, Vec<TodoItem>>>>,
     file_touches: Arc<RwLock<HashMap<PathBuf, Vec<FileAccess>>>>,
     client_debug_state: Arc<RwLock<ClientDebugState>>,
     client_debug_response_tx: broadcast::Sender<(u64, String)>,
@@ -907,6 +990,7 @@ async fn handle_client(
     }
     if let Some(ref id) = swarm_id {
         broadcast_swarm_status(id, &swarm_members, &swarms_by_id).await;
+        sync_swarm_plan_to_session(id, &client_session_id, &swarm_plans).await;
     }
 
     // Spawn event forwarder for this client only
@@ -1148,6 +1232,12 @@ async fn handle_client(
                     }
                 }
                 update_member_status(&new_id, "ready", None, &swarm_members, &swarms_by_id).await;
+                if let Some(swarm_id) = {
+                    let members = swarm_members.read().await;
+                    members.get(&new_id).and_then(|m| m.swarm_id.clone())
+                } {
+                    sync_swarm_plan_to_session(&swarm_id, &new_id, &swarm_plans).await;
+                }
 
                 client_session_id = new_id.clone();
                 let _ = client_event_tx.send(ServerEvent::SessionId { session_id: new_id });
@@ -1227,6 +1317,8 @@ async fn handle_client(
                         if old_swarm_id.as_ref() != Some(&new_id) {
                             broadcast_swarm_status(&new_id, &swarm_members, &swarms_by_id).await;
                         }
+                        sync_swarm_plan_to_session(&new_id, &client_session_id, &swarm_plans)
+                            .await;
                     }
                 }
 
@@ -1391,6 +1483,13 @@ async fn handle_client(
                             &swarms_by_id,
                         )
                         .await;
+                        if let Some(swarm_id) = {
+                            let members = swarm_members.read().await;
+                            members.get(&session_id).and_then(|m| m.swarm_id.clone())
+                        } {
+                            sync_swarm_plan_to_session(&swarm_id, &session_id, &swarm_plans)
+                                .await;
+                        }
 
                         // Send updated history to client
                         let _ = provider.prefetch_models().await;
@@ -1986,6 +2085,26 @@ async fn broadcast_swarm_status(
     for sid in session_ids {
         if let Some(member) = members_guard.get(&sid) {
             let _ = member.event_tx.send(event.clone());
+        }
+    }
+}
+
+async fn sync_swarm_plan_to_session(
+    swarm_id: &str,
+    session_id: &str,
+    swarm_plans: &Arc<RwLock<HashMap<String, Vec<TodoItem>>>>,
+) {
+    let plan = {
+        let plans = swarm_plans.read().await;
+        plans.get(swarm_id).cloned()
+    };
+
+    if let Some(plan) = plan {
+        if let Err(e) = save_todos(session_id, &plan) {
+            crate::logging::warn(&format!(
+                "Failed to sync plan to session {}: {}",
+                session_id, e
+            ));
         }
     }
 }
