@@ -1,7 +1,9 @@
 use super::{EventStream, Provider};
 use crate::auth::codex::CodexCredentials;
 use crate::auth::oauth;
-use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
+use crate::message::{
+    ContentBlock, Message, Role, StreamEvent, ToolDefinition, TOOL_OUTPUT_MISSING_TEXT,
+};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -22,8 +24,6 @@ const RESPONSES_PATH: &str = "responses";
 const DEFAULT_MODEL: &str = "gpt-5.2-codex";
 const ORIGINATOR: &str = "codex_cli_rs";
 const CHATGPT_INSTRUCTIONS: &str = include_str!("../prompts/gpt-5.1-codex-max_prompt.md");
-const MISSING_TOOL_OUTPUT_MESSAGE: &str =
-    "[Error] Tool output missing (session interrupted before tool execution completed)";
 
 /// Maximum number of retries for transient errors
 const MAX_RETRIES: u32 = 3;
@@ -208,6 +208,8 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
 fn build_responses_input(messages: &[Message]) -> Vec<Value> {
     use std::collections::HashSet;
 
+    let missing_output = format!("[Error] {}", TOOL_OUTPUT_MISSING_TEXT);
+
     // First pass: collect tool call IDs and tool result IDs
     let mut tool_call_ids: HashSet<String> = HashSet::new();
     let mut tool_result_ids: HashSet<String> = HashSet::new();
@@ -307,13 +309,13 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
                             }));
                             if missing_tool_outputs.contains(id) && injected_ids.insert(id.clone()) {
                                 injected_missing += 1;
-                                items.push(serde_json::json!({
-                                    "type": "function_call_output",
-                                    "call_id": id,
-                                    "output": MISSING_TOOL_OUTPUT_MESSAGE
-                                }));
-                            }
+                            items.push(serde_json::json!({
+                                "type": "function_call_output",
+                                "call_id": id,
+                                "output": missing_output.clone()
+                            }));
                         }
+                    }
                         _ => {}
                     }
                 }
@@ -367,7 +369,7 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
                     normalized.push(serde_json::json!({
                         "type": "function_call_output",
                         "call_id": call_id,
-                        "output": MISSING_TOOL_OUTPUT_MESSAGE
+                        "output": missing_output.clone()
                     }));
                 }
             }
@@ -998,6 +1000,7 @@ mod tests {
 
     #[test]
     fn test_build_responses_input_injects_missing_tool_output() {
+        let expected_missing = format!("[Error] {}", TOOL_OUTPUT_MISSING_TEXT);
         let messages = vec![
             Message {
                 role: Role::User,
@@ -1031,7 +1034,7 @@ mod tests {
                 Some("function_call_output") => {
                     if item.get("call_id").and_then(|v| v.as_str()) == Some("call_1") {
                         let output = item.get("output").and_then(|v| v.as_str());
-                        assert_eq!(output, Some(MISSING_TOOL_OUTPUT_MESSAGE));
+                        assert_eq!(output, Some(expected_missing.as_str()));
                         saw_output = true;
                     }
                 }
@@ -1076,6 +1079,7 @@ mod tests {
 
     #[test]
     fn test_build_responses_input_injects_only_missing_outputs() {
+        let expected_missing = format!("[Error] {}", TOOL_OUTPUT_MISSING_TEXT);
         let messages = vec![
             Message {
                 role: Role::Assistant,
@@ -1114,7 +1118,7 @@ mod tests {
             }
         }
 
-        assert_eq!(output_a.as_deref(), Some(MISSING_TOOL_OUTPUT_MESSAGE));
+        assert_eq!(output_a.as_deref(), Some(expected_missing.as_str()));
         assert_eq!(output_b.as_deref(), Some("done"));
     }
 }
