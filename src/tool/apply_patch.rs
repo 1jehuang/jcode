@@ -3,6 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::path::Path;
 
 pub struct ApplyPatchTool;
 
@@ -98,7 +99,8 @@ impl Tool for ApplyPatchTool {
 
         for path in &parsed.deletes {
             let display = path.clone();
-            if std::fs::remove_file(path).is_ok() {
+            let resolved = ctx.resolve_path(Path::new(path));
+            if std::fs::remove_file(&resolved).is_ok() {
                 results.push(format!("✓ {}: deleted", display));
             } else {
                 results.push(format!("✗ {}: failed to delete", display));
@@ -107,7 +109,9 @@ impl Tool for ApplyPatchTool {
 
         for patch in &parsed.updates {
             if let Some(move_to) = &patch.move_to {
-                if let Err(err) = std::fs::rename(&patch.path, move_to) {
+                let from = ctx.resolve_path(Path::new(&patch.path));
+                let to = ctx.resolve_path(Path::new(move_to));
+                if let Err(err) = std::fs::rename(&from, &to) {
                     results.push(format!("✗ {}: move failed ({})", patch.path, err));
                 } else {
                     results.push(format!("✓ {}: moved to {}", patch.path, move_to));

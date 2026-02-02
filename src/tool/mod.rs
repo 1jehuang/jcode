@@ -38,6 +38,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -73,6 +74,7 @@ pub struct ToolContext {
     pub session_id: String,
     pub message_id: String,
     pub tool_call_id: String,
+    pub working_dir: Option<PathBuf>,
 }
 
 impl ToolContext {
@@ -81,6 +83,17 @@ impl ToolContext {
             session_id: self.session_id.clone(),
             message_id: self.message_id.clone(),
             tool_call_id,
+            working_dir: self.working_dir.clone(),
+        }
+    }
+
+    pub fn resolve_path(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else if let Some(ref base) = self.working_dir {
+            base.join(path)
+        } else {
+            path.to_path_buf()
         }
     }
 }

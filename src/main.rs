@@ -2371,6 +2371,7 @@ mod selfdev_e2e_tests {
             session_id: session_id.clone(),
             message_id: "test".to_string(),
             tool_call_id: "test".to_string(),
+            working_dir: None,
         };
         let result = registry
             .execute("selfdev", serde_json::json!({"action": "status"}), ctx)

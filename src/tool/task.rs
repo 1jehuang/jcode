@@ -87,6 +87,10 @@ impl Tool for TaskTool {
             Session::create(Some(ctx.session_id.clone()), Some(task_title(&params)))
         };
 
+        if let Some(ref working_dir) = ctx.working_dir {
+            session.working_dir = Some(working_dir.display().to_string());
+        }
+
         session.save()?;
 
         let mut allowed: HashSet<String> = self.registry.tool_names().await.into_iter().collect();
