@@ -82,6 +82,11 @@ pub trait Provider: Send + Sync {
             .collect()
     }
 
+    /// List known providers for a model (OpenRouter-style @provider autocomplete).
+    fn available_providers_for_model(&self, _model: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Prefetch any dynamic model lists (default: no-op).
     async fn prefetch_models(&self) -> Result<()> {
         Ok(())
@@ -567,6 +572,15 @@ impl Provider for MultiProvider {
             models.extend(openrouter.available_models_display());
         }
         models
+    }
+
+    fn available_providers_for_model(&self, model: &str) -> Vec<String> {
+        if model.contains('/') {
+            if let Some(ref openrouter) = self.openrouter {
+                return openrouter.available_providers_for_model(model);
+            }
+        }
+        Vec::new()
     }
 
     async fn prefetch_models(&self) -> Result<()> {

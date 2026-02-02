@@ -6471,6 +6471,39 @@ impl App {
             .collect()
     }
 
+    fn rank_provider_suggestions(
+        &self,
+        model: &str,
+        provider_prefix: &str,
+        providers: Vec<String>,
+    ) -> Vec<(String, &'static str)> {
+        let needle = provider_prefix.to_lowercase();
+        let mut scored: Vec<(bool, usize, String)> = Vec::new();
+        for provider in providers {
+            let lower = provider.to_lowercase();
+            if needle.is_empty() || lower.starts_with(&needle) {
+                scored.push((true, 0, provider));
+            } else if let Some(score) = Self::fuzzy_score(&needle, &lower) {
+                scored.push((false, score, provider));
+            }
+        }
+        scored.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.len().cmp(&b.2.len()))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        scored
+            .into_iter()
+            .map(|(_, _, provider)| {
+                (
+                    format!("/model {}@{}", model, provider),
+                    "Pin OpenRouter provider",
+                )
+            })
+            .collect()
+    }
+
     /// Get command suggestions based on current input (or base input for cycling)
     fn get_suggestions_for(&self, input: &str) -> Vec<(String, &'static str)> {
         let input = input.trim();
@@ -6495,8 +6528,22 @@ impl App {
         }
 
         // Check if this is a "/model " command with a partial model name
-        if let Some(model_prefix) = prefix.strip_prefix("/model ") {
-            return self.rank_model_suggestions(model_prefix, models);
+        if let Some(model_prefix_raw) = input.strip_prefix("/model ") {
+            let model_prefix_lower = model_prefix_raw.to_lowercase();
+            if let Some((model_raw, provider_raw)) = model_prefix_raw.split_once('@') {
+                let model = model_raw.trim();
+                if model.is_empty() {
+                    return self.rank_model_suggestions("", models);
+                }
+                let mut providers: Vec<String> = if self.is_remote {
+                    Vec::new()
+                } else {
+                    self.provider.available_providers_for_model(model)
+                };
+                providers.insert(0, "auto".to_string());
+                return self.rank_provider_suggestions(model, provider_raw.trim(), providers);
+            }
+            return self.rank_model_suggestions(&model_prefix_lower, models);
         }
 
         // Built-in commands
