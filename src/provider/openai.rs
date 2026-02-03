@@ -436,7 +436,94 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
         ));
     }
 
-    normalized
+    // Final pass: ensure each function_call is immediately followed by its output.
+    let mut output_map: HashMap<String, Value> = HashMap::new();
+    for item in &normalized {
+        if item.get("type").and_then(|v| v.as_str()) == Some("function_call_output") {
+            if let Some(call_id) = item.get("call_id").and_then(|v| v.as_str()) {
+                let is_missing = item
+                    .get("output")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == missing_output)
+                    .unwrap_or(false);
+                match output_map.get(call_id) {
+                    Some(existing) => {
+                        let existing_missing = existing
+                            .get("output")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v == missing_output)
+                            .unwrap_or(false);
+                        if existing_missing && !is_missing {
+                            output_map.insert(call_id.to_string(), item.clone());
+                        }
+                    }
+                    None => {
+                        output_map.insert(call_id.to_string(), item.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut ordered: Vec<Value> = Vec::with_capacity(normalized.len());
+    let mut used_outputs: HashSet<String> = HashSet::new();
+    let mut injected_ordered = 0usize;
+    let mut dropped_orphans = 0usize;
+
+    for item in normalized {
+        let kind = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let is_call = matches!(kind, "function_call" | "custom_tool_call");
+        if is_call {
+            let call_id = item
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string());
+            ordered.push(item);
+            if let Some(call_id) = call_id {
+                if let Some(output_item) = output_map.get(&call_id) {
+                    ordered.push(output_item.clone());
+                    used_outputs.insert(call_id);
+                } else {
+                    injected_ordered += 1;
+                    ordered.push(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": missing_output.clone()
+                    }));
+                    used_outputs.insert(call_id);
+                }
+            }
+            continue;
+        }
+
+        if kind == "function_call_output" {
+            if let Some(call_id) = item.get("call_id").and_then(|v| v.as_str()) {
+                if used_outputs.contains(call_id) {
+                    dropped_orphans += 1;
+                    continue;
+                }
+            }
+            dropped_orphans += 1;
+            continue;
+        }
+
+        ordered.push(item);
+    }
+
+    if injected_ordered > 0 {
+        crate::logging::info(&format!(
+            "[openai] Inserted {} tool output(s) to enforce call ordering",
+            injected_ordered
+        ));
+    }
+    if dropped_orphans > 0 {
+        crate::logging::info(&format!(
+            "[openai] Dropped {} orphaned tool output(s) during re-ordering",
+            dropped_orphans
+        ));
+    }
+
+    ordered
 }
 
 #[derive(Deserialize, Debug)]
