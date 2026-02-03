@@ -347,8 +347,10 @@ impl OpenRouterProvider {
             )
         })?;
 
-        let model =
+        let model_raw =
             std::env::var("JCODE_OPENROUTER_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let (model, provider_order, allow_fallbacks_override) =
+            Self::parse_model_and_provider(&model_raw);
 
         // Parse provider routing from environment
         let provider_routing = Self::parse_provider_routing();
@@ -359,8 +361,8 @@ impl OpenRouterProvider {
             api_key,
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             provider_routing: Arc::new(RwLock::new(provider_routing)),
-            session_provider_order: Arc::new(RwLock::new(None)),
-            session_allow_fallbacks: Arc::new(RwLock::new(None)),
+            session_provider_order: Arc::new(RwLock::new(provider_order)),
+            session_allow_fallbacks: Arc::new(RwLock::new(allow_fallbacks_override)),
             routing_state: Arc::new(RwLock::new(RoutingState::default())),
         })
     }
