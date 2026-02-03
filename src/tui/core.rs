@@ -177,16 +177,22 @@ impl TuiCore {
         // Use generous estimate - UI will clamp to actual content
         let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
         self.scroll_offset = (self.scroll_offset + amount).min(max_estimate);
+        // Clear mermaid render cache to force re-render at new position
+        crate::tui::mermaid::clear_last_render_pos();
     }
 
     /// Scroll down by given amount
     pub fn scroll_down(&mut self, amount: usize) {
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+        // Clear mermaid render cache to force re-render at new position
+        crate::tui::mermaid::clear_last_render_pos();
     }
 
     /// Reset scroll to bottom
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
+        // Clear mermaid render cache to force re-render at new position
+        crate::tui::mermaid::clear_last_render_pos();
     }
 
     /// Handle scroll key, returns true if handled
