@@ -996,6 +996,33 @@ impl App {
                 "version": env!("JCODE_VERSION"),
             })
             .to_string()
+        } else if cmd == "swarm" || cmd == "swarm-status" {
+            // Return swarm status for debug verification
+            if self.is_remote {
+                serde_json::json!({
+                    "session_count": self.remote_sessions.len(),
+                    "client_count": self.remote_client_count,
+                    "members": self.remote_swarm_members,
+                })
+                .to_string()
+            } else {
+                serde_json::json!({
+                    "session_count": 1,
+                    "client_count": null,
+                    "members": vec![crate::protocol::SwarmMemberStatus {
+                        session_id: self.session.id.clone(),
+                        friendly_name: Some(self.session.display_name().to_string()),
+                        status: match &self.status {
+                            ProcessingStatus::Idle => "ready".to_string(),
+                            ProcessingStatus::Sending => "running".to_string(),
+                            ProcessingStatus::Streaming => "running".to_string(),
+                            ProcessingStatus::RunningTool(_) => "running".to_string(),
+                        },
+                        detail: self.subagent_status.clone(),
+                    }],
+                })
+                .to_string()
+            }
         } else if cmd == "snapshot" {
             let snapshot = self.build_debug_snapshot();
             serde_json::to_string_pretty(&snapshot).unwrap_or_else(|_| "{}".to_string())
@@ -4889,7 +4916,9 @@ impl App {
                         content: vec![tool_block],
                     };
                     self.messages.insert(index + 1 + offset, inserted_message);
-                    self.session.messages.insert(index + 1 + offset, stored_message);
+                    self.session
+                        .messages
+                        .insert(index + 1 + offset, stored_message);
                     self.tool_result_ids.insert(id.clone());
                     repaired += 1;
                 }
@@ -5211,6 +5240,7 @@ impl App {
                             session_id: self.session_id().to_string(),
                             message_id: self.session_id().to_string(),
                             tool_call_id: request_id.clone(),
+                            working_dir: self.session.working_dir.as_ref().map(PathBuf::from),
                         };
                         let tool_result = self.registry.execute(&tool_name, input, ctx).await;
                         let native_result = match tool_result {
@@ -5338,6 +5368,7 @@ impl App {
                             session_id: self.session.id.clone(),
                             message_id: message_id.clone(),
                             tool_call_id: tc.id.clone(),
+                            working_dir: self.session.working_dir.as_ref().map(PathBuf::from),
                         };
 
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
@@ -5841,6 +5872,7 @@ impl App {
                                             session_id: self.session_id().to_string(),
                                             message_id: self.session_id().to_string(),
                                             tool_call_id: request_id.clone(),
+                                            working_dir: self.session.working_dir.as_ref().map(PathBuf::from),
                                         };
                                         let tool_result = self.registry.execute(&tool_name, input, ctx).await;
                                         let native_result = match tool_result {
@@ -6004,6 +6036,7 @@ impl App {
                     session_id: self.session.id.clone(),
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
+                    working_dir: self.session.working_dir.as_ref().map(PathBuf::from),
                 };
 
                 Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
@@ -7607,6 +7640,15 @@ impl super::TuiState for App {
             }
         };
 
+        let tokens_per_second = self.processing_started.and_then(|started| {
+            let elapsed = started.elapsed().as_secs_f32();
+            if elapsed >= 0.2 && self.streaming_output_tokens > 0 {
+                Some(self.streaming_output_tokens as f32 / elapsed)
+            } else {
+                None
+            }
+        });
+
         // Determine authentication method
         let auth_method = if self.is_remote {
             super::info_widget::AuthMethod::Unknown
@@ -7655,6 +7697,7 @@ impl super::TuiState for App {
             swarm_info,
             background_info,
             usage_info,
+            tokens_per_second,
             auth_method,
         }
     }
