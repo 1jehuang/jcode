@@ -300,6 +300,8 @@ pub struct InfoWidgetData {
     pub background_info: Option<BackgroundInfo>,
     /// Subscription usage info
     pub usage_info: Option<UsageInfo>,
+    /// Streaming output tokens per second (approximate)
+    pub tokens_per_second: Option<f32>,
     /// Authentication method used to access the model
     pub auth_method: AuthMethod,
 }
@@ -1382,6 +1384,18 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
                     ));
                 }
             }
+        }
+    }
+
+    if let Some(tps) = data.tokens_per_second {
+        if tps.is_finite() && tps > 0.1 {
+            lines.push(Line::from(vec![
+                Span::styled("⏱ ", Style::default().fg(Color::Rgb(140, 180, 255))),
+                Span::styled(
+                    format!("{:.1} t/s", tps),
+                    Style::default().fg(Color::Rgb(140, 140, 150)),
+                ),
+            ]));
         }
     }
 

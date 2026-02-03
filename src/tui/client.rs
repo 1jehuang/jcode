@@ -288,9 +288,10 @@ impl ClientApp {
                     reconnect_attempts += 1;
                     if reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
                         // Build disconnect message with session resume hint
-                        let session_name = self.session_id.as_ref().and_then(|id| {
-                            crate::id::extract_session_name(id)
-                        });
+                        let session_name = self
+                            .session_id
+                            .as_ref()
+                            .and_then(|id| crate::id::extract_session_name(id));
 
                         let error_reason = format!("Connection error: {}", e);
                         let resume_hint = if let Some(name) = session_name {
@@ -1152,7 +1153,8 @@ impl TuiState for ClientApp {
                 output_tokens: 0,
                 available: true,
             })
-        } else if is_api_key_provider || self.total_input_tokens > 0 || self.total_output_tokens > 0 {
+        } else if is_api_key_provider || self.total_input_tokens > 0 || self.total_output_tokens > 0
+        {
             // API-key providers or if we have token counts
             Some(super::info_widget::UsageInfo {
                 provider: super::info_widget::UsageProvider::CostBased,
@@ -1168,7 +1170,8 @@ impl TuiState for ClientApp {
         };
 
         // Determine authentication method for client mode
-        let auth_method = if provider_name.contains("claude") || provider_name.contains("anthropic") {
+        let auth_method = if provider_name.contains("claude") || provider_name.contains("anthropic")
+        {
             if has_creds {
                 super::info_widget::AuthMethod::AnthropicOAuth
             } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
@@ -1182,8 +1185,18 @@ impl TuiState for ClientApp {
             super::info_widget::AuthMethod::Unknown
         };
 
+        let tokens_per_second = self.processing_started.and_then(|started| {
+            let elapsed = started.elapsed().as_secs_f32();
+            if elapsed >= 0.2 && self.streaming_output_tokens > 0 {
+                Some(self.streaming_output_tokens as f32 / elapsed)
+            } else {
+                None
+            }
+        });
+
         super::info_widget::InfoWidgetData {
             usage_info,
+            tokens_per_second,
             auth_method,
             ..Default::default()
         }
