@@ -1971,6 +1971,29 @@ fn truncate_smart(s: &str, max_len: usize) -> String {
     format!("{}...", prefix)
 }
 
+/// Truncate to a maximum character count without splitting UTF-8 codepoints.
+fn truncate_chars(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
+/// Truncate to a maximum character count and append an ellipsis if needed.
+fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    if max_chars == 1 {
+        return "…".to_string();
+    }
+    let truncated = truncate_chars(s, max_chars.saturating_sub(1));
+    format!("{}…", truncated)
+}
+
 fn render_todos_compact(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static>> {
     if data.todos.is_empty() {
         return Vec::new();
@@ -2123,15 +2146,11 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
         let mut cat_parts: Vec<String> = info
             .by_category
             .iter()
-            .map(|(cat, count)| format!("{}:{}", &cat[..3.min(cat.len())], count))
+            .map(|(cat, count)| format!("{}:{}", truncate_chars(cat, 3), count))
             .collect();
         cat_parts.sort();
         let cat_str = cat_parts.join(" ");
-        let cat_display = if cat_str.len() > max_width {
-            format!("{}…", &cat_str[..max_width.saturating_sub(1)])
-        } else {
-            cat_str
-        };
+        let cat_display = truncate_with_ellipsis(&cat_str, max_width);
         lines.push(Line::from(vec![Span::styled(
             cat_display,
             Style::default().fg(Color::Rgb(100, 100, 110)),
@@ -2195,11 +2214,8 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
                     Color::Rgb(255, 200, 100),
                 ),
                 MemoryEventKind::SidecarRelevant { memory_preview } => {
-                    let preview = if memory_preview.len() > max_width.saturating_sub(4) {
-                        format!("{}…", &memory_preview[..max_width.saturating_sub(5)])
-                    } else {
-                        memory_preview.clone()
-                    };
+                    let preview =
+                        truncate_with_ellipsis(memory_preview, max_width.saturating_sub(4));
                     ("✓", preview, Color::Rgb(100, 200, 100))
                 }
                 MemoryEventKind::SidecarNotRelevant => {
@@ -2209,19 +2225,12 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
                     ("⏱", format!("{}ms", latency_ms), Color::Rgb(140, 140, 150))
                 }
                 MemoryEventKind::MemorySurfaced { memory_preview } => {
-                    let preview = if memory_preview.len() > max_width.saturating_sub(4) {
-                        format!("{}…", &memory_preview[..max_width.saturating_sub(5)])
-                    } else {
-                        memory_preview.clone()
-                    };
+                    let preview =
+                        truncate_with_ellipsis(memory_preview, max_width.saturating_sub(4));
                     ("★", preview, Color::Rgb(255, 220, 100))
                 }
                 MemoryEventKind::ExtractionStarted { reason } => {
-                    let msg = if reason.len() > max_width.saturating_sub(4) {
-                        format!("{}…", &reason[..max_width.saturating_sub(5)])
-                    } else {
-                        reason.clone()
-                    };
+                    let msg = truncate_with_ellipsis(reason, max_width.saturating_sub(4));
                     (
                         "🧠",
                         format!("Extracting: {}", msg),
@@ -2234,11 +2243,7 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
                     Color::Rgb(100, 200, 100),
                 ),
                 MemoryEventKind::Error { message } => {
-                    let msg = if message.len() > max_width.saturating_sub(4) {
-                        format!("{}…", &message[..max_width.saturating_sub(5)])
-                    } else {
-                        message.clone()
-                    };
+                    let msg = truncate_with_ellipsis(message, max_width.saturating_sub(4));
                     ("!", msg, Color::Rgb(255, 100, 100))
                 }
             };
@@ -2542,8 +2547,11 @@ fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
     let mut spans = vec![
         Span::styled("⚡ ", Style::default().fg(Color::Rgb(140, 180, 255))),
         Span::styled(
-            if short_name.len() > max_len.saturating_sub(2) {
-                format!("{}...", &short_name[..max_len.saturating_sub(5)])
+            if short_name.chars().count() > max_len.saturating_sub(2) {
+                format!(
+                    "{}...",
+                    truncate_chars(&short_name, max_len.saturating_sub(5))
+                )
             } else {
                 short_name
             },
@@ -2675,9 +2683,9 @@ fn render_context_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'stat
             .round()
             .min(100.0) as usize;
         let mut content = format!("{} {} {} {}%", icon, label, format_token_k(tokens), pct);
-        if content.len() > max_len && max_len > 3 {
-            content.truncate(max_len.saturating_sub(3));
-            content.push_str("...");
+        if content.chars().count() > max_len && max_len > 3 {
+            let truncated = truncate_chars(&content, max_len.saturating_sub(3));
+            content = format!("{}...", truncated);
         }
         lines.push(Line::from(Span::styled(
             content,
