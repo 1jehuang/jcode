@@ -6797,6 +6797,13 @@ impl App {
         if let Some(secs) = duration {
             parts.push(format!("{:.1}s", secs));
         }
+        // Add TPS if we have output tokens and duration
+        if let Some(secs) = duration {
+            if self.streaming_output_tokens > 0 && secs > 0.0 {
+                let tps = self.streaming_output_tokens as f32 / secs;
+                parts.push(format!("{:.1} tps", tps));
+            }
+        }
         if self.streaming_input_tokens > 0 || self.streaming_output_tokens > 0 {
             parts.push(format!(
                 "↑{} ↓{}",
@@ -7308,6 +7315,23 @@ impl super::TuiState for App {
             self.streaming_cache_read_tokens,
             self.streaming_cache_creation_tokens,
         )
+    }
+
+    fn output_tps(&self) -> Option<f32> {
+        if !self.is_processing {
+            return None;
+        }
+        match (self.processing_started, self.streaming_output_tokens) {
+            (Some(start), output) if output > 0 => {
+                let elapsed = start.elapsed().as_secs_f32();
+                if elapsed > 0.0 {
+                    Some(output as f32 / elapsed)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     fn streaming_tool_calls(&self) -> Vec<ToolCall> {

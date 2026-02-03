@@ -1018,6 +1018,23 @@ impl TuiState for ClientApp {
         )
     }
 
+    fn output_tps(&self) -> Option<f32> {
+        if !self.is_processing {
+            return None;
+        }
+        match (self.processing_started, self.streaming_output_tokens) {
+            (Some(start), output) if output > 0 => {
+                let elapsed = start.elapsed().as_secs_f32();
+                if elapsed > 0.0 {
+                    Some(output as f32 / elapsed)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn streaming_tool_calls(&self) -> Vec<ToolCall> {
         self.streaming_tool_calls.clone()
     }

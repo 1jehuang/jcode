@@ -333,6 +333,38 @@ impl Default for MultiProvider {
     }
 }
 
+impl MultiProvider {
+    /// Check if Anthropic OAuth usage is exhausted (both 5hr and 7d at 100%)
+    fn is_claude_usage_exhausted(&self) -> bool {
+        // Only check if we have Anthropic credentials
+        if self.anthropic.is_none() && self.claude.is_none() {
+            return false;
+        }
+
+        let usage = crate::usage::get_sync();
+        // Consider exhausted if both windows are at 99% or higher
+        // (give a small buffer for rounding/display issues)
+        usage.five_hour >= 0.99 && usage.seven_day >= 0.99
+    }
+
+    /// Auto-fallback to OpenRouter with kimi-k2.5 if Claude is exhausted
+    fn try_fallback_to_openrouter(&self) -> Option<&openrouter::OpenRouterProvider> {
+        if self.is_claude_usage_exhausted() {
+            if let Some(ref openrouter) = self.openrouter {
+                // Switch to OpenRouter and set kimi-k2.5 as the model
+                *self.active.write().unwrap() = ActiveProvider::OpenRouter;
+                // Try to set the model to kimi-k2.5
+                let _ = openrouter.set_model("moonshotai/kimi-k2-5");
+                crate::logging::info(
+                    "Auto-switched to OpenRouter (kimi-k2.5) - Claude OAuth usage exhausted"
+                );
+                return Some(openrouter);
+            }
+        }
+        None
+    }
+}
+
 #[async_trait]
 impl Provider for MultiProvider {
     async fn complete(
@@ -344,6 +376,11 @@ impl Provider for MultiProvider {
     ) -> Result<EventStream> {
         match self.active_provider() {
             ActiveProvider::Claude => {
+                // Check if Claude usage is exhausted and fallback is available
+                if let Some(openrouter) = self.try_fallback_to_openrouter() {
+                    return openrouter.complete(messages, tools, system, resume_session_id).await;
+                }
+
                 // Prefer direct Anthropic API if available
                 if let Some(ref anthropic) = self.anthropic {
                     anthropic
@@ -391,6 +428,19 @@ impl Provider for MultiProvider {
     ) -> Result<EventStream> {
         match self.active_provider() {
             ActiveProvider::Claude => {
+                // Check if Claude usage is exhausted and fallback is available
+                if let Some(openrouter) = self.try_fallback_to_openrouter() {
+                    return openrouter
+                        .complete_split(
+                            messages,
+                            tools,
+                            system_static,
+                            system_dynamic,
+                            resume_session_id,
+                        )
+                        .await;
+                }
+
                 // Prefer direct Anthropic API for best caching support
                 if let Some(ref anthropic) = self.anthropic {
                     anthropic

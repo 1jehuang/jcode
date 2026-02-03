@@ -2234,6 +2234,10 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
                     Some(s) if s > 2.0 => format!("(idle {:.0}s) · {}", s, time_str),
                     _ => time_str,
                 };
+                // Add TPS if available
+                if let Some(tps) = app.output_tps() {
+                    status_text = format!("{} · {:.1} tps", status_text, tps);
+                }
                 if unexpected_cache_miss {
                     let miss_tokens = cache_creation.unwrap_or(0);
                     let miss_str = if miss_tokens >= 1000 {
