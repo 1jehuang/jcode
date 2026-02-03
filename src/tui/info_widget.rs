@@ -1995,7 +1995,8 @@ fn render_todos_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
 
 /// Truncate string smartly, trying to break at word boundaries
 fn truncate_smart(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    let char_len = s.chars().count();
+    if char_len <= max_len {
         return s.to_string();
     }
     if max_len <= 3 {
@@ -2003,13 +2004,25 @@ fn truncate_smart(s: &str, max_len: usize) -> String {
     }
 
     let target = max_len - 3;
+    let mut cutoff = s.len();
+    let mut seen = 0usize;
+    for (idx, _) in s.char_indices() {
+        if seen == target {
+            cutoff = idx;
+            break;
+        }
+        seen += 1;
+    }
+    let prefix = &s[..cutoff];
+
     // Try to find a word boundary
-    if let Some(pos) = s[..target].rfind(' ') {
-        if pos > target / 2 {
-            return format!("{}...", &s[..pos]);
+    if let Some(pos) = prefix.rfind(' ') {
+        let pos_chars = prefix[..pos].chars().count();
+        if pos_chars > target / 2 {
+            return format!("{}...", &prefix[..pos]);
         }
     }
-    format!("{}...", &s[..target])
+    format!("{}...", prefix)
 }
 
 fn render_todos_compact(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static>> {
