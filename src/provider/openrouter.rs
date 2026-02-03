@@ -22,7 +22,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -74,130 +74,6 @@ pub struct ModelPricing {
     pub input_cache_write: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct ProviderStatsStore {
-    models: HashMap<String, HashMap<String, ProviderStats>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct ProviderStats {
-    samples: u64,
-    avg_cache_hit: Option<f64>,
-    avg_throughput: Option<f64>,
-    avg_cost_per_mtok: Option<f64>,
-    last_seen: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PinSource {
-    Explicit,
-    Observed,
-}
-
-#[derive(Debug, Clone)]
-struct ProviderPin {
-    model: String,
-    provider: String,
-    source: PinSource,
-    allow_fallbacks: bool,
-    last_cache_read: Option<Instant>,
-}
-
-#[derive(Debug, Clone)]
-struct ProviderSample {
-    cache_hit: Option<f64>,
-    throughput: Option<f64>,
-    cost_per_mtok: Option<f64>,
-}
-
-#[derive(Debug, Clone)]
-struct ParsedProvider {
-    name: String,
-    allow_fallbacks: bool,
-}
-
-fn parse_model_spec(raw: &str) -> (String, Option<ParsedProvider>) {
-    let trimmed = raw.trim();
-    if let Some((model, provider)) = trimmed.rsplit_once('@') {
-        let model = model.trim();
-        let mut provider = provider.trim();
-        if model.is_empty() {
-            return (trimmed.to_string(), None);
-        }
-        if provider.is_empty() {
-            return (model.to_string(), None);
-        }
-        let mut allow_fallbacks = true;
-        if provider.ends_with('!') {
-            provider = provider.trim_end_matches('!').trim();
-            allow_fallbacks = false;
-        }
-        if provider.is_empty() {
-            return (model.to_string(), None);
-        }
-        return (
-            model.to_string(),
-            Some(ParsedProvider {
-                name: provider.to_string(),
-                allow_fallbacks,
-            }),
-        );
-    }
-
-    (trimmed.to_string(), None)
-}
-
-fn update_ewma(prev: Option<f64>, value: f64) -> f64 {
-    let value = value.max(0.0);
-    match prev {
-        Some(p) => p + PROVIDER_STATS_EWMA_ALPHA * (value - p),
-        None => value,
-    }
-}
-
-fn min_max(values: &[f64]) -> (Option<f64>, Option<f64>) {
-    if values.is_empty() {
-        return (None, None);
-    }
-    let mut min_val = values[0];
-    let mut max_val = values[0];
-    for v in values.iter().skip(1) {
-        if *v < min_val {
-            min_val = *v;
-        }
-        if *v > max_val {
-            max_val = *v;
-        }
-    }
-    (Some(min_val), Some(max_val))
-}
-
-fn normalize(value: f64, min: Option<f64>, max: Option<f64>, default: f64) -> f64 {
-    match (min, max) {
-        (Some(min), Some(max)) => {
-            if (max - min).abs() < f64::EPSILON {
-                1.0
-            } else {
-                ((value - min) / (max - min)).clamp(0.0, 1.0)
-            }
-        }
-        _ => default,
-    }
-}
-
-fn normalize_inverse(value: f64, min: Option<f64>, max: Option<f64>, default: f64) -> f64 {
-    match (min, max) {
-        (Some(min), Some(max)) => {
-            if (max - min).abs() < f64::EPSILON {
-                1.0
-            } else {
-                ((max - value) / (max - min)).clamp(0.0, 1.0)
-            }
-        }
-        _ => default,
-    }
-}
-
 /// Disk cache structure
 #[derive(Debug, Serialize, Deserialize)]
 struct DiskCache {
@@ -241,22 +117,6 @@ fn cache_path() -> PathBuf {
         .join("openrouter_models.json")
 }
 
-/// Get provider stats cache file path
-fn provider_stats_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".jcode")
-        .join("cache")
-        .join("openrouter_provider_stats.json")
-}
-
-fn now_epoch_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// Load models from disk cache if valid
 fn load_disk_cache() -> Option<Vec<ModelInfo>> {
     let path = cache_path();
@@ -296,27 +156,6 @@ fn save_disk_cache(models: &[ModelInfo]) {
     };
 
     if let Ok(content) = serde_json::to_string(&cache) {
-        let _ = std::fs::write(&path, content);
-    }
-}
-
-fn load_provider_stats() -> ProviderStatsStore {
-    let path = provider_stats_path();
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return ProviderStatsStore::default(),
-    };
-
-    serde_json::from_str(&content).unwrap_or_default()
-}
-
-fn save_provider_stats(stats: &ProviderStatsStore) {
-    let path = provider_stats_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    if let Ok(content) = serde_json::to_string(stats) {
         let _ = std::fs::write(&path, content);
     }
 }
@@ -441,6 +280,8 @@ pub struct OpenRouterProvider {
     provider_routing: Arc<RwLock<ProviderRouting>>,
     /// Session override for provider order (set via /model@provider)
     session_provider_order: Arc<RwLock<Option<Vec<String>>>>,
+    /// Session override for allowing fallbacks (set via /model@provider!)
+    session_allow_fallbacks: Arc<RwLock<Option<bool>>>,
     /// Dynamic routing state (pinning + stats)
     routing_state: Arc<RwLock<RoutingState>>,
 }
@@ -519,6 +360,7 @@ impl OpenRouterProvider {
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             provider_routing: Arc::new(RwLock::new(provider_routing)),
             session_provider_order: Arc::new(RwLock::new(None)),
+            session_allow_fallbacks: Arc::new(RwLock::new(None)),
             routing_state: Arc::new(RwLock::new(RoutingState::default())),
         })
     }
@@ -593,17 +435,22 @@ impl OpenRouterProvider {
         self.provider_routing.read().await.clone()
     }
 
-    fn parse_model_and_provider(model: &str) -> (String, Option<Vec<String>>) {
+    fn parse_model_and_provider(model: &str) -> (String, Option<Vec<String>>, Option<bool>) {
         let trimmed = model.trim();
-        if let Some((base, provider_part)) = trimmed.split_once('@') {
+        if let Some((base, provider_part_raw)) = trimmed.split_once('@') {
             let base = base.trim().to_string();
-            let provider_part = provider_part.trim();
+            let mut provider_part = provider_part_raw.trim();
+            let mut allow_fallbacks_override = None;
+            if provider_part.ends_with('!') {
+                provider_part = provider_part.trim_end_matches('!').trim();
+                allow_fallbacks_override = Some(false);
+            }
             if provider_part.is_empty() {
-                return (base, None);
+                return (base, None, allow_fallbacks_override);
             }
             let normalized = provider_part.to_lowercase();
             if matches!(normalized.as_str(), "auto" | "default" | "any" | "none") {
-                return (base, None);
+                return (base, None, allow_fallbacks_override);
             }
             let order: Vec<String> = provider_part
                 .split(',')
@@ -611,11 +458,11 @@ impl OpenRouterProvider {
                 .filter(|s| !s.is_empty())
                 .collect();
             if order.is_empty() {
-                return (base, None);
+                return (base, None, allow_fallbacks_override);
             }
-            return (base, Some(order));
+            return (base, Some(order), allow_fallbacks_override);
         }
-        (trimmed.to_string(), None)
+        (trimmed.to_string(), None, None)
     }
 
     async fn model_pricing(&self, model_id: &str) -> Option<ModelPricing> {
@@ -882,12 +729,14 @@ impl OpenRouterProvider {
     ) -> RoutingDecision {
         let config = self.provider_routing.read().await.clone();
         let session_order = self.session_provider_order.read().await.clone();
+        let session_allow_fallbacks = self.session_allow_fallbacks.read().await.clone();
         let manual_order = session_order.or_else(|| config.order.clone());
         let is_kimi = Self::is_kimi_model(model_id);
+        let allow_fallbacks = session_allow_fallbacks.unwrap_or(config.allow_fallbacks);
 
         let mut decision = RoutingDecision {
             order: None,
-            allow_fallbacks: config.allow_fallbacks,
+            allow_fallbacks,
             only: config.only.clone(),
             ignore: config.ignore.clone(),
             sort: config.sort.clone(),
@@ -1273,19 +1122,18 @@ impl Provider for OpenRouterProvider {
                         assistant_msg["tool_calls"] = serde_json::json!(tool_calls);
                     }
 
-                    if include_reasoning_content || !reasoning_content.is_empty() {
-                        if !reasoning_content.is_empty() || !tool_calls.is_empty() {
-                            let reasoning_payload =
-                                if reasoning_content.is_empty() && !tool_calls.is_empty() {
-                                    // Some providers require reasoning_content to be present and non-empty
-                                    // when thinking is enabled and tool calls are present.
-                                    " ".to_string()
-                                } else {
-                                    reasoning_content
-                                };
-                            assistant_msg["reasoning_content"] =
-                                serde_json::json!(reasoning_payload);
-                        }
+                    if include_reasoning_content {
+                        let reasoning_payload = if !reasoning_content.is_empty() {
+                            reasoning_content
+                        } else {
+                            // Some providers require reasoning_content to be present and non-empty
+                            // when thinking is enabled, especially with tool calls.
+                            " ".to_string()
+                        };
+                        assistant_msg["reasoning_content"] = serde_json::json!(reasoning_payload);
+                    } else if !reasoning_content.is_empty() {
+                        assistant_msg["reasoning_content"] =
+                            serde_json::json!(reasoning_content);
                     }
 
                     if assistant_msg.get("content").is_some() || !tool_calls.is_empty() {
@@ -1420,7 +1268,8 @@ impl Provider for OpenRouterProvider {
     fn set_model(&self, model: &str) -> Result<()> {
         // OpenRouter accepts any model ID - validation happens at API call time
         // This allows using any model without needing to pre-fetch the list
-        let (base_model, provider_order) = Self::parse_model_and_provider(model);
+        let (base_model, provider_order, allow_fallbacks_override) =
+            Self::parse_model_and_provider(model);
         if base_model.is_empty() {
             return Err(anyhow::anyhow!("Model name cannot be empty"));
         }
@@ -1433,26 +1282,26 @@ impl Provider for OpenRouterProvider {
             ));
         }
 
+        if let Ok(mut allow_guard) = self.session_allow_fallbacks.try_write() {
+            *allow_guard = allow_fallbacks_override;
+        } else {
+            return Err(anyhow::anyhow!(
+                "Cannot change provider routing while a request is in progress"
+            ));
+        }
+
         if let Ok(mut state) = self.routing_state.try_write() {
             state.pinned_provider.remove(&base_model);
         }
 
         if let Ok(mut current) = self.model.try_write() {
             *current = base_model;
-            Ok(())
-        } else {
-            return Err(anyhow::anyhow!(
-                "Cannot change model while a request is in progress"
-            ));
+            return Ok(());
         }
 
-        if let Some(provider) = provider {
-            self.set_explicit_pin(&model_id, provider);
-        } else {
-            self.clear_pin_if_model_changed(&model_id, true);
-        }
-
-        Ok(())
+        Err(anyhow::anyhow!(
+            "Cannot change model while a request is in progress"
+        ))
     }
 
     fn available_models(&self) -> Vec<&'static str> {
@@ -1572,6 +1421,7 @@ impl Provider for OpenRouterProvider {
                     .unwrap_or_default(),
             )),
             session_provider_order: Arc::new(RwLock::new(None)),
+            session_allow_fallbacks: Arc::new(RwLock::new(None)),
             routing_state: Arc::new(RwLock::new(RoutingState::default())),
         })
     }
@@ -2040,7 +1890,7 @@ impl Stream for OpenRouterStream {
 
 impl Drop for OpenRouterStream {
     fn drop(&mut self) {
-        self.record_stats();
+        self.finalize();
     }
 }
 
@@ -2058,58 +1908,51 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_model_spec() {
-        let (model, provider) = parse_model_spec("anthropic/claude-sonnet-4@Fireworks");
+    fn test_parse_model_and_provider() {
+        let (model, provider, allow_fallbacks) =
+            OpenRouterProvider::parse_model_and_provider("anthropic/claude-sonnet-4@Fireworks");
         assert_eq!(model, "anthropic/claude-sonnet-4");
-        let provider = provider.expect("provider");
-        assert_eq!(provider.name, "Fireworks");
-        assert!(provider.allow_fallbacks);
+        assert_eq!(provider, Some(vec!["Fireworks".to_string()]));
+        assert_eq!(allow_fallbacks, None);
 
-        let (model, provider) = parse_model_spec("anthropic/claude-sonnet-4@Fireworks!");
+        let (model, provider, allow_fallbacks) =
+            OpenRouterProvider::parse_model_and_provider("anthropic/claude-sonnet-4@Fireworks!");
         assert_eq!(model, "anthropic/claude-sonnet-4");
-        let provider = provider.expect("provider");
-        assert_eq!(provider.name, "Fireworks");
-        assert!(!provider.allow_fallbacks);
+        assert_eq!(provider, Some(vec!["Fireworks".to_string()]));
+        assert_eq!(allow_fallbacks, Some(false));
     }
 
     #[test]
     fn test_rank_providers_cache_priority() {
-        let now = now_epoch_secs();
-        let mut stats = ProviderStatsStore::default();
         let mut model_stats = HashMap::new();
         model_stats.insert(
             "FastCache".to_string(),
             ProviderStats {
-                samples: 5,
-                avg_cache_hit: Some(0.5),
-                avg_throughput: Some(50.0),
-                avg_cost_per_mtok: Some(2.0),
-                last_seen: now,
+                avg_throughput: 50.0,
+                avg_cache_hit_rate: 0.5,
+                avg_cost_per_mtok: 2.0,
+                throughput_samples: 5,
+                cache_samples: 5,
+                cost_samples: 5,
+                cache_read_supported: true,
+                cache_write_supported: false,
             },
         );
         model_stats.insert(
             "FasterNoCache".to_string(),
             ProviderStats {
-                samples: 5,
-                avg_cache_hit: Some(0.1),
-                avg_throughput: Some(60.0),
-                avg_cost_per_mtok: Some(1.0),
-                last_seen: now,
+                avg_throughput: 60.0,
+                avg_cache_hit_rate: 0.1,
+                avg_cost_per_mtok: 1.0,
+                throughput_samples: 5,
+                cache_samples: 5,
+                cost_samples: 5,
+                cache_read_supported: false,
+                cache_write_supported: false,
             },
         );
-        stats.models.insert("test/model".to_string(), model_stats);
 
-        let provider = OpenRouterProvider {
-            client: Client::new(),
-            model: Arc::new(RwLock::new("test/model".to_string())),
-            api_key: "test".to_string(),
-            models_cache: Arc::new(RwLock::new(ModelsCache::default())),
-            provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
-            provider_stats: Arc::new(Mutex::new(stats)),
-            provider_pin: Arc::new(Mutex::new(None)),
-        };
-
-        let ranked = provider.rank_providers("test/model");
+        let ranked = OpenRouterProvider::rank_providers(&model_stats, true);
         assert_eq!(ranked.first().map(|s| s.as_str()), Some("FastCache"));
     }
 }
