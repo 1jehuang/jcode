@@ -191,6 +191,8 @@ pub struct UsageInfo {
     pub cache_read_tokens: Option<u64>,
     /// Cache write tokens (creating cache, more expensive) - for API-key providers
     pub cache_write_tokens: Option<u64>,
+    /// Output tokens per second (live streaming)
+    pub output_tps: Option<f32>,
     /// Whether data was successfully fetched / available to show
     pub available: bool,
 }
@@ -677,6 +679,25 @@ fn calculate_widget_height(
             let mut h = 1u16; // Model name
             if data.auth_method != AuthMethod::Unknown {
                 h += 1; // Auth method line
+            }
+            if let Some(info) = &data.usage_info {
+                if info.available {
+                    match info.provider {
+                        UsageProvider::CostBased => {
+                            h += 1; // Cost + tokens
+                            if info.cache_read_tokens.is_some() || info.cache_write_tokens.is_some()
+                            {
+                                h += 1; // Cache line
+                            }
+                            if info.output_tps.is_some() {
+                                h += 1; // TPS line
+                            }
+                        }
+                        _ => {
+                            h += 2; // Subscription bars
+                        }
+                    }
+                }
             }
             h
         }
@@ -1392,6 +1413,16 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
                             Span::styled(
                                 format!(" write: {}", format_tokens(cache_write)),
                                 Style::default().fg(Color::Rgb(255, 160, 80)),
+                            ),
+                        ]));
+                    }
+
+                    if let Some(tps) = info.output_tps {
+                        lines.push(Line::from(vec![
+                            Span::styled("⏱ ", Style::default().fg(Color::Rgb(120, 170, 220))),
+                            Span::styled(
+                                format!("{:.1} tps", tps),
+                                Style::default().fg(Color::Rgb(140, 140, 150)),
                             ),
                         ]));
                     }
