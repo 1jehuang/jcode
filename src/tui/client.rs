@@ -1141,6 +1141,22 @@ impl TuiState for ClientApp {
             || ((provider_name == "unknown" || provider_name == "remote") && has_creds);
         let is_api_key_provider = provider_name.contains("openrouter");
 
+        let output_tps = if self.is_processing {
+            match (self.processing_started, self.streaming_output_tokens) {
+                (Some(start), output) if output > 0 => {
+                    let elapsed = start.elapsed().as_secs_f32();
+                    if elapsed > 0.0 {
+                        Some(output as f32 / elapsed)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         let usage_info = if is_oauth_provider {
             // OAuth providers (Claude) - fetch subscription usage
             let usage = crate::usage::get_sync();
@@ -1153,6 +1169,7 @@ impl TuiState for ClientApp {
                 output_tokens: 0,
                 cache_read_tokens: None,
                 cache_write_tokens: None,
+                output_tps: None,
                 available: true,
             })
         } else if is_api_key_provider {
@@ -1166,6 +1183,7 @@ impl TuiState for ClientApp {
                 output_tokens: self.total_output_tokens,
                 cache_read_tokens: None,
                 cache_write_tokens: None,
+                output_tps,
                 available: true,
             })
         } else {
