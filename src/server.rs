@@ -12,8 +12,9 @@ use crate::protocol::{
 use crate::provider::Provider;
 use crate::registry::{server_debug_socket_path, server_socket_path};
 use crate::todo::{save_todos, TodoItem};
-use crate::tool::Registry;
+use crate::tool::{Registry, ToolContext};
 use anyhow::Result;
+use futures::future::try_join_all;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -2658,10 +2659,25 @@ async fn run_swarm_task(
         "prompt": prompt,
         "subagent_type": subagent_type,
     });
-    let output = {
+    let (registry, session_id, working_dir) = {
         let agent = agent.lock().await;
-        agent.execute_tool("task", input).await?
+        (
+            agent.registry(),
+            agent.session_id().to_string(),
+            agent.working_dir().map(PathBuf::from),
+        )
     };
+    let call_id = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| format!("debug-{}", d.as_millis()))
+        .unwrap_or_else(|_| "debug".to_string());
+    let ctx = ToolContext {
+        session_id: session_id.clone(),
+        message_id: session_id,
+        tool_call_id: call_id,
+        working_dir,
+    };
+    let output = registry.execute("task", input, ctx).await?;
     Ok(output.output)
 }
 
@@ -2695,18 +2711,21 @@ No extra text.\n\nRequest:\n{message}"
         });
     }
 
-    let mut task_outputs: Vec<(String, String)> = Vec::new();
-    for task in &tasks {
+    let task_futures = tasks.iter().map(|task| {
+        let agent = agent.clone();
+        let working_dir_hint = working_dir_hint.clone();
+        let description = task.description.clone();
         let prompt = format!("{working_dir_hint}{}", task.prompt);
-        let output = run_swarm_task(
-            agent.clone(),
-            &task.description,
-            task.subagent_type.as_deref().unwrap_or("general"),
-            &prompt,
-        )
-        .await?;
-        task_outputs.push((task.description.clone(), output));
-    }
+        let subagent_type = task
+            .subagent_type
+            .clone()
+            .unwrap_or_else(|| "general".to_string());
+        async move {
+            let output = run_swarm_task(agent, &description, &subagent_type, &prompt).await?;
+            Ok::<(String, String), anyhow::Error>((description, output))
+        }
+    });
+    let task_outputs = try_join_all(task_futures).await?;
 
     let mut integration_prompt = String::new();
     integration_prompt.push_str(
