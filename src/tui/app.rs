@@ -7752,7 +7752,7 @@ impl super::TuiState for App {
                     output_tokens: 0,
                     cache_read_tokens: None,
                     cache_write_tokens: None,
-                    output_tps: None,
+                    output_tps,
                     available: true,
                 })
             } else if is_api_key_provider {
