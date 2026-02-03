@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use similar::{ChangeTag, TextDiff};
-use std::path::Path;
 
 pub struct MultiEditTool;
 
@@ -75,16 +74,16 @@ impl Tool for MultiEditTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: MultiEditInput = serde_json::from_value(input)?;
 
-        let path = Path::new(&params.file_path);
+        let path = ctx.resolve_path(&params.file_path);
 
         if !path.exists() {
             return Err(anyhow::anyhow!("File not found: {}", params.file_path));
         }
 
-        let original_content = tokio::fs::read_to_string(path).await?;
+        let original_content = tokio::fs::read_to_string(&path).await?;
         let mut content = original_content.clone();
         let mut applied = Vec::new();
         let mut failed = Vec::new();
@@ -126,7 +125,7 @@ impl Tool for MultiEditTool {
         }
 
         // Write the result
-        tokio::fs::write(path, &content).await?;
+        tokio::fs::write(&path, &content).await?;
 
         // Format output
         let mut output = format!("Edited {}\n\n", params.file_path);

@@ -160,11 +160,11 @@ pub fn render_mermaid(content: &str) -> RenderResult {
 
         // Configure theme for terminal (dark background friendly)
         let theme = terminal_theme();
-        
+
         // Use larger spacing for better readability in terminal
         let layout_config = LayoutConfig {
-            node_spacing: 80.0,  // Default is 50
-            rank_spacing: 80.0,  // Default is 50
+            node_spacing: 80.0,   // Default is 50
+            rank_spacing: 80.0,   // Default is 50
             node_padding_x: 40.0, // Default is 30
             node_padding_y: 20.0, // Default is 15
             ..Default::default()
@@ -502,10 +502,16 @@ pub fn error_to_lines(error: &str) -> Vec<Line<'static>> {
         )),
         Line::from(vec![
             Span::styled("│ ", dim),
-            Span::styled(format!("{:<width$}", error, width = content_width), err_style),
+            Span::styled(
+                format!("{:<width$}", error, width = content_width),
+                err_style,
+            ),
             Span::styled("│", dim),
         ]),
-        Line::from(Span::styled(format!("└─{}─┘", "─".repeat(bottom_width)), dim)),
+        Line::from(Span::styled(
+            format!("└─{}─┘", "─".repeat(bottom_width)),
+            dim,
+        )),
     ]
 }
 
@@ -520,7 +526,7 @@ fn terminal_theme() -> Theme {
         secondary_color: "#45475a".to_string(),
         tertiary_color: "#313244".to_string(),
         edge_label_background: "#00000000".to_string(), // Transparent edge labels
-        cluster_background: "#18182580".to_string(), // Semi-transparent cluster bg
+        cluster_background: "#18182580".to_string(),    // Semi-transparent cluster bg
         cluster_border: "#45475a".to_string(),
         font_family: "monospace".to_string(),
         font_size: 18.0, // Larger font for terminal readability (default was 13)

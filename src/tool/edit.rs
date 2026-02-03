@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use similar::{ChangeTag, TextDiff};
-use std::path::Path;
 
 pub struct EditTool;
 
@@ -70,13 +69,13 @@ impl Tool for EditTool {
             ));
         }
 
-        let path = Path::new(&params.file_path);
+        let path = ctx.resolve_path(&params.file_path);
 
         if !path.exists() {
             return Err(anyhow::anyhow!("File not found: {}", params.file_path));
         }
 
-        let content = tokio::fs::read_to_string(path).await?;
+        let content = tokio::fs::read_to_string(&path).await?;
 
         // Count occurrences
         let occurrences = content.matches(&params.old_string).count();
@@ -106,7 +105,7 @@ impl Tool for EditTool {
         let start_line = find_line_number(&content, &params.old_string);
 
         // Write back
-        tokio::fs::write(path, &new_content).await?;
+        tokio::fs::write(&path, &new_content).await?;
 
         // Publish file touch event for swarm coordination
         let end_line = start_line + params.new_string.lines().count().saturating_sub(1);

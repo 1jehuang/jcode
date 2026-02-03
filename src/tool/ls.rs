@@ -71,11 +71,11 @@ impl Tool for LsTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: LsInput = serde_json::from_value(input)?;
 
         let base_path = params.path.as_deref().unwrap_or(".");
-        let base = Path::new(base_path);
+        let base = ctx.resolve_path(base_path);
 
         if !base.exists() {
             return Err(anyhow::anyhow!("Directory not found: {}", base_path));
@@ -93,7 +93,14 @@ impl Tool for LsTool {
         }
 
         let mut entries: Vec<DirEntry> = Vec::new();
-        collect_entries(base, base, 0, &ignore_patterns, &mut entries, MAX_ENTRIES)?;
+        collect_entries(
+            base.as_path(),
+            base.as_path(),
+            0,
+            &ignore_patterns,
+            &mut entries,
+            MAX_ENTRIES,
+        )?;
 
         let truncated = entries.len() >= MAX_ENTRIES;
 
