@@ -13,6 +13,7 @@ use crate::registry::{server_debug_socket_path, server_socket_path};
 use crate::todo::{save_todos, TodoItem};
 use crate::tool::Registry;
 use anyhow::Result;
+use futures::future::join_all;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -2626,15 +2627,28 @@ No extra text.\n\nRequest:\n{}",
         });
     }
 
-    let mut task_outputs: Vec<(String, String)> = Vec::new();
-    for task in &tasks {
+    let agent_ref: &Agent = &*agent;
+    let task_futures = tasks.iter().map(|task| {
         let input = serde_json::json!({
             "description": task.description,
             "prompt": task.prompt,
             "subagent_type": task.subagent_type.clone().unwrap_or_else(|| "general".to_string()),
         });
-        let output = agent.execute_tool("task", input).await?;
-        task_outputs.push((task.description.clone(), output.output));
+        let desc = task.description.clone();
+        async move { (desc, agent_ref.execute_tool("task", input).await) }
+    });
+
+    let results = join_all(task_futures).await;
+    let mut task_outputs: Vec<(String, String)> = Vec::new();
+    let mut task_errors: Vec<String> = Vec::new();
+    for (desc, result) in results {
+        match result {
+            Ok(output) => task_outputs.push((desc, output.output)),
+            Err(e) => {
+                task_errors.push(desc.clone());
+                task_outputs.push((desc, format!("[Error] {}", e)));
+            }
+        }
     }
 
     let mut integration_prompt = String::new();
@@ -2647,6 +2661,12 @@ No extra text.\n\nRequest:\n{}",
     integration_prompt.push_str("\n\nSubagent outputs:\n");
     for (desc, output) in &task_outputs {
         integration_prompt.push_str(&format!("\n--- {} ---\n{}\n", desc, output));
+    }
+    if !task_errors.is_empty() {
+        integration_prompt.push_str("\nSubagent errors:\n");
+        for desc in &task_errors {
+            integration_prompt.push_str(&format!("- {} failed\n", desc));
+        }
     }
     integration_prompt.push_str("\nNow complete the task.\n");
 
