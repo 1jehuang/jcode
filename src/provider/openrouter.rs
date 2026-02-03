@@ -31,6 +31,8 @@ const API_BASE: &str = "https://openrouter.ai/api/v1";
 
 /// Default model (Claude Sonnet via OpenRouter)
 const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
+/// Default provider for Kimi models (official Moonshot AI upstream)
+const DEFAULT_KIMI_PROVIDER: &str = "Moonshot AI";
 
 /// Cache TTL in seconds (24 hours)
 const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
@@ -559,6 +561,12 @@ impl OpenRouterProvider {
             return base;
         }
 
+        if Self::is_kimi_model(model) {
+            let mut routing = base.clone();
+            routing.order = Some(vec![DEFAULT_KIMI_PROVIDER.to_string()]);
+            return routing;
+        }
+
         let ranked = self.rank_providers(model);
         if !ranked.is_empty() {
             let mut routing = base.clone();
@@ -723,12 +731,12 @@ impl Provider for OpenRouterProvider {
             }));
         }
 
-        let mut tool_result_ids: HashSet<String> = HashSet::new();
-        for msg in messages {
+        let mut tool_result_last_pos: HashMap<String, usize> = HashMap::new();
+        for (idx, msg) in messages.iter().enumerate() {
             if let Role::User = msg.role {
                 for block in &msg.content {
                     if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                        tool_result_ids.insert(tool_use_id.clone());
+                        tool_result_last_pos.insert(tool_use_id.clone(), idx);
                     }
                 }
             }
@@ -736,9 +744,14 @@ impl Provider for OpenRouterProvider {
 
         let missing_output = format!("[Error] {}", TOOL_OUTPUT_MISSING_TEXT);
         let mut injected_missing = 0usize;
+        let mut delayed_results = 0usize;
+        let mut skipped_results = 0usize;
+        let mut tool_calls_seen: HashSet<String> = HashSet::new();
+        let mut pending_tool_results: HashMap<String, String> = HashMap::new();
+        let mut used_tool_results: HashSet<String> = HashSet::new();
 
         // Convert messages
-        for msg in messages {
+        for (idx, msg) in messages.iter().enumerate() {
             match msg.role {
                 Role::User => {
                     for block in &msg.content {
@@ -754,16 +767,28 @@ impl Provider for OpenRouterProvider {
                                 content,
                                 is_error,
                             } => {
+                                if used_tool_results.contains(tool_use_id) {
+                                    skipped_results += 1;
+                                    continue;
+                                }
                                 let output = if is_error == &Some(true) {
                                     format!("[Error] {}", content)
                                 } else {
                                     content.clone()
                                 };
-                                api_messages.push(serde_json::json!({
-                                    "role": "tool",
-                                    "tool_call_id": tool_use_id,
-                                    "content": output
-                                }));
+                                if tool_calls_seen.contains(tool_use_id) {
+                                    api_messages.push(serde_json::json!({
+                                        "role": "tool",
+                                        "tool_call_id": tool_use_id,
+                                        "content": output
+                                    }));
+                                    used_tool_results.insert(tool_use_id.clone());
+                                } else if pending_tool_results.contains_key(tool_use_id) {
+                                    skipped_results += 1;
+                                } else {
+                                    pending_tool_results.insert(tool_use_id.clone(), output);
+                                    delayed_results += 1;
+                                }
                             }
                             _ => {}
                         }
@@ -771,7 +796,9 @@ impl Provider for OpenRouterProvider {
                 }
                 Role::Assistant => {
                     let mut text_content = String::new();
+                    let mut reasoning_content = String::new();
                     let mut tool_calls = Vec::new();
+                    let mut post_tool_outputs: Vec<(String, String)> = Vec::new();
                     let mut missing_tool_outputs: Vec<String> = Vec::new();
 
                     for block in &msg.content {
@@ -788,9 +815,19 @@ impl Provider for OpenRouterProvider {
                                         "arguments": serde_json::to_string(input).unwrap_or_default()
                                     }
                                 }));
-                                if !tool_result_ids.contains(id) {
-                                    tool_result_ids.insert(id.clone());
-                                    missing_tool_outputs.push(id.clone());
+                                tool_calls_seen.insert(id.clone());
+                                if let Some(output) = pending_tool_results.remove(id) {
+                                    post_tool_outputs.push((id.clone(), output));
+                                    used_tool_results.insert(id.clone());
+                                } else {
+                                    let has_future_output = tool_result_last_pos
+                                        .get(id)
+                                        .map(|pos| *pos > idx)
+                                        .unwrap_or(false);
+                                    if !has_future_output {
+                                        missing_tool_outputs.push(id.clone());
+                                        used_tool_results.insert(id.clone());
+                                    }
                                 }
                             }
                             _ => {}
@@ -809,20 +846,30 @@ impl Provider for OpenRouterProvider {
                         assistant_msg["tool_calls"] = serde_json::json!(tool_calls);
                     }
 
-                    // Some providers (e.g., Moonshot/Kimi) require reasoning_content when thinking is enabled.
-                    // Provide a minimal placeholder if missing/empty to satisfy schema.
-                    if include_reasoning_content {
-                        let current = assistant_msg
-                            .get("reasoning_content")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if current.is_empty() {
-                            assistant_msg["reasoning_content"] = serde_json::json!(" ");
+                    if include_reasoning_content || !reasoning_content.is_empty() {
+                        if !reasoning_content.is_empty() || !tool_calls.is_empty() {
+                            let reasoning_payload =
+                                if reasoning_content.is_empty() && !tool_calls.is_empty() {
+                                    " ".to_string()
+                                } else {
+                                    reasoning_content
+                                };
+                            assistant_msg["reasoning_content"] =
+                                serde_json::json!(reasoning_payload);
                         }
                     }
 
                     if !text_content.is_empty() || !tool_calls.is_empty() {
                         api_messages.push(assistant_msg);
+
+                        for (tool_call_id, output) in post_tool_outputs {
+                            api_messages.push(serde_json::json!({
+                                "role": "tool",
+                                "tool_call_id": tool_call_id,
+                                "content": output
+                            }));
+                        }
+
                         if !missing_tool_outputs.is_empty() {
                             injected_missing += missing_tool_outputs.len();
                             for missing_id in missing_tool_outputs {
@@ -837,10 +884,28 @@ impl Provider for OpenRouterProvider {
                 }
             }
         }
+
+        if delayed_results > 0 {
+            crate::logging::info(&format!(
+                "[openrouter] Delayed {} tool output(s) to preserve call ordering",
+                delayed_results
+            ));
+        }
+
+        if !pending_tool_results.is_empty() {
+            skipped_results += pending_tool_results.len();
+        }
+
         if injected_missing > 0 {
             crate::logging::info(&format!(
                 "[openrouter] Injected {} synthetic tool output(s) to prevent API error",
                 injected_missing
+            ));
+        }
+        if skipped_results > 0 {
+            crate::logging::info(&format!(
+                "[openrouter] Filtered {} orphaned tool result(s) to prevent API error",
+                skipped_results
             ));
         }
 

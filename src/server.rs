@@ -14,6 +14,7 @@ use crate::registry::{server_debug_socket_path, server_socket_path};
 use crate::todo::{save_todos, TodoItem};
 use crate::tool::Registry;
 use anyhow::Result;
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
@@ -2674,32 +2675,51 @@ async fn run_swarm_message(agent: Arc<Mutex<Agent>>, message: &str) -> Result<St
         .map(|dir| format!("Working directory: {}\n", dir))
         .unwrap_or_default();
 
-    let analysis_prompt = format!(
-        "{working_dir_hint}Analyze the task and propose concrete optimization steps.\n\nTask:\n{message}"
+    let planner_prompt = format!(
+        "{working_dir_hint}You are a task planner. Break the request into 2-4 subtasks. \
+Return ONLY a JSON array of objects with keys: description, prompt, subagent_type. \
+No extra text.\n\nRequest:\n{message}"
     );
-    let analysis_output =
-        run_swarm_task(agent.clone(), "Analyze task", "analysis", &analysis_prompt).await?;
 
-    let implement_prompt = format!(
-        "{working_dir_hint}Implement improvements based on the analysis below.\n\nTask:\n{message}\n\nAnalysis:\n{analysis_output}"
-    );
-    let implement_output = run_swarm_task(
-        agent.clone(),
-        "Implement changes",
-        "implementation",
-        &implement_prompt,
-    )
-    .await?;
+    let plan_text = {
+        let mut agent = agent.lock().await;
+        agent.run_once_capture(&planner_prompt).await?
+    };
 
-    let test_prompt = format!(
-        "{working_dir_hint}Validate the changes. Run `git diff origin/main tests/` (must be empty) and `python tests/submission_tests.py`.\n\nTask:\n{message}\n\nImplementation summary:\n{implement_output}"
-    );
-    let test_output =
-        run_swarm_task(agent.clone(), "Test and measure", "testing", &test_prompt).await?;
+    let mut tasks = parse_swarm_tasks(&plan_text);
+    if tasks.is_empty() {
+        tasks.push(SwarmTaskSpec {
+            description: "Main task".to_string(),
+            prompt: message.to_string(),
+            subagent_type: Some("general".to_string()),
+        });
+    }
 
-    let integration_prompt = format!(
-        "You are the coordinator. Combine the subtask outputs into a final response.\n\nTask:\n{message}\n\nSubtask outputs:\n\n<analysis>\n{analysis_output}\n</analysis>\n\n<implementation>\n{implement_output}\n</implementation>\n\n<testing>\n{test_output}\n</testing>\n\nDeliverables:\n- Summary of optimizations\n- Best cycle count achieved\n- Confirmation tests/ unchanged\n- List of modified files"
+    let mut task_outputs: Vec<(String, String)> = Vec::new();
+    for task in &tasks {
+        let prompt = format!("{working_dir_hint}{}", task.prompt);
+        let output = run_swarm_task(
+            agent.clone(),
+            &task.description,
+            task.subagent_type.as_deref().unwrap_or("general"),
+            &prompt,
+        )
+        .await?;
+        task_outputs.push((task.description.clone(), output));
+    }
+
+    let mut integration_prompt = String::new();
+    integration_prompt.push_str(
+        "You are the coordinator. Complete the original request using the subagent outputs below. ",
     );
+    integration_prompt.push_str("Do not stop early; run any requested tests and fix failures.\n\n");
+    integration_prompt.push_str("Original request:\n");
+    integration_prompt.push_str(message);
+    integration_prompt.push_str("\n\nSubagent outputs:\n");
+    for (desc, output) in &task_outputs {
+        integration_prompt.push_str(&format!("\n--- {} ---\n{}\n", desc, output));
+    }
+    integration_prompt.push_str("\nNow complete the task.\n");
 
     let final_output = {
         let mut agent = agent.lock().await;
@@ -2707,6 +2727,30 @@ async fn run_swarm_message(agent: Arc<Mutex<Agent>>, message: &str) -> Result<St
     };
 
     Ok(final_output)
+}
+
+#[derive(Debug, Deserialize)]
+struct SwarmTaskSpec {
+    description: String,
+    prompt: String,
+    #[serde(default)]
+    subagent_type: Option<String>,
+}
+
+fn parse_swarm_tasks(text: &str) -> Vec<SwarmTaskSpec> {
+    if let Ok(tasks) = serde_json::from_str::<Vec<SwarmTaskSpec>>(text) {
+        return tasks;
+    }
+
+    if let (Some(start), Some(end)) = (text.find('['), text.rfind(']')) {
+        if start < end {
+            if let Ok(tasks) = serde_json::from_str::<Vec<SwarmTaskSpec>>(&text[start..=end]) {
+                return tasks;
+            }
+        }
+    }
+
+    Vec::new()
 }
 
 async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Result<String> {
@@ -2823,7 +2867,7 @@ async fn execute_debug_command(agent: Arc<Mutex<Agent>>, command: &str) -> Resul
 
     if trimmed == "help" {
         return Ok(
-            "debug commands: state, history, tools, last_response, message:<text>, message_timeout:<s>:<t>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, job_status:<id>, job_cancel:<id>, jobs, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
+            "debug commands: state, history, tools, last_response, message:<text>, message_timeout:<s>:<t>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, job_status:<id>, job_wait:<id>, job_cancel:<id>, jobs, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
         );
     }
 
@@ -3199,7 +3243,13 @@ async fn handle_debug_client(
                                 let job_id_clone = job_id.clone();
                                 let msg = msg.to_string();
                                 let handle = tokio::spawn(async move {
-                                    let result = run_swarm_message(agent, &msg).await;
+                                    let result = run_swarm_message(agent.clone(), &msg).await;
+                                    let partial_output = if result.is_err() {
+                                        let agent = agent.lock().await;
+                                        agent.last_assistant_text()
+                                    } else {
+                                        None
+                                    };
 
                                     let mut jobs_guard = jobs.write().await;
                                     if let Some(job) = jobs_guard.get_mut(&job_id_clone) {
@@ -3214,6 +3264,9 @@ async fn handle_debug_client(
                                             Err(e) => {
                                                 job.status = DebugJobStatus::Error;
                                                 job.error = Some(e.to_string());
+                                                if let Some(output) = partial_output {
+                                                    job.output = Some(output);
+                                                }
                                             }
                                         }
                                         job.finished_at = Some(std::time::SystemTime::now());
@@ -3287,6 +3340,12 @@ async fn handle_debug_client(
                                         let mut agent = agent.lock().await;
                                         agent.run_once_capture(&msg).await
                                     };
+                                    let partial_output = if result.is_err() {
+                                        let agent = agent.lock().await;
+                                        agent.last_assistant_text()
+                                    } else {
+                                        None
+                                    };
 
                                     let mut jobs_guard = jobs.write().await;
                                     if let Some(job) = jobs_guard.get_mut(&job_id_clone) {
@@ -3301,6 +3360,9 @@ async fn handle_debug_client(
                                             Err(e) => {
                                                 job.status = DebugJobStatus::Error;
                                                 job.error = Some(e.to_string());
+                                                if let Some(output) = partial_output {
+                                                    job.output = Some(output);
+                                                }
                                             }
                                         }
                                         job.finished_at = Some(std::time::SystemTime::now());
@@ -3332,6 +3394,39 @@ async fn handle_debug_client(
                                         .unwrap_or_else(|_| "{}".to_string()))
                                 } else {
                                     Err(anyhow::anyhow!("Unknown job id '{}'", job_id))
+                                }
+                            }
+                        } else if cmd.starts_with("job_wait:") {
+                            let job_id = cmd.strip_prefix("job_wait:").unwrap_or("").trim();
+                            if job_id.is_empty() {
+                                Err(anyhow::anyhow!("job_wait: requires a job id"))
+                            } else {
+                                let timeout = Duration::from_secs(900);
+                                let start = Instant::now();
+                                loop {
+                                    {
+                                        let jobs_guard = debug_jobs.read().await;
+                                        if let Some(job) = jobs_guard.get(job_id) {
+                                            if job.status != DebugJobStatus::Running {
+                                                break Ok(serde_json::to_string_pretty(
+                                                    &job.snapshot(),
+                                                )
+                                                .unwrap_or_else(|_| "{}".to_string()));
+                                            }
+                                        } else {
+                                            break Err(anyhow::anyhow!(
+                                                "Unknown job id '{}'",
+                                                job_id
+                                            ));
+                                        }
+                                    }
+                                    if start.elapsed() > timeout {
+                                        break Err(anyhow::anyhow!(
+                                            "Timeout waiting for job '{}'",
+                                            job_id
+                                        ));
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
                                 }
                             }
                         } else if cmd.starts_with("job_cancel:") {
@@ -3435,6 +3530,7 @@ SERVER COMMANDS (server: prefix or no prefix):
   swarm_message:<text>     - Run a swarm-style task (analysis/implement/test) and integrate
   swarm_message_async:<text> - Run swarm task asynchronously (returns job id)
   job_status:<id>          - Check async job status/output
+  job_wait:<id>            - Wait for async job to finish
   job_cancel:<id>          - Cancel async job
   jobs                     - List async debug jobs
   tool:<name> <json>       - Execute tool directly

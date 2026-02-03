@@ -33,14 +33,22 @@ const RETRY_BASE_DELAY_MS: u64 = 1000;
 
 /// Available OpenAI/Codex models
 const AVAILABLE_MODELS: &[&str] = &[
+    "codex-mini-latest",
+    "gpt-5.2-chat-latest",
     "gpt-5.2-codex",
+    "gpt-5.2-pro",
     "gpt-5.1-codex-max",
     "gpt-5.1-codex",
     "gpt-5.1-codex-mini",
+    "gpt-5.2",
+    "gpt-5.1-chat-latest",
+    "gpt-5.1",
+    "gpt-5-chat-latest",
     "gpt-5-codex",
     "gpt-5-codex-mini",
-    "gpt-5.2",
-    "gpt-5.1",
+    "gpt-5-pro",
+    "gpt-5-mini",
+    "gpt-5-nano",
     "gpt-5",
 ];
 
@@ -216,48 +224,30 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
 }
 
 fn build_responses_input(messages: &[Message]) -> Vec<Value> {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
-    // First pass: collect tool call IDs and tool result IDs
-    let mut tool_call_ids: HashSet<String> = HashSet::new();
-    let mut tool_result_ids: HashSet<String> = HashSet::new();
-    for msg in messages {
-        match msg.role {
-            Role::Assistant => {
-                for block in &msg.content {
-                    if let ContentBlock::ToolUse { id, .. } = block {
-                        tool_call_ids.insert(id.clone());
-                    }
-                }
-            }
-            Role::User => {
-                for block in &msg.content {
-                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                        tool_result_ids.insert(tool_use_id.clone());
-                    }
+    let missing_output = MISSING_TOOL_OUTPUT_MESSAGE.to_string();
+
+    let mut tool_result_last_pos: HashMap<String, usize> = HashMap::new();
+    for (idx, msg) in messages.iter().enumerate() {
+        if let Role::User = msg.role {
+            for block in &msg.content {
+                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                    tool_result_last_pos.insert(tool_use_id.clone(), idx);
                 }
             }
         }
     }
 
-    let missing_tool_outputs: HashSet<_> = tool_call_ids
-        .difference(&tool_result_ids)
-        .cloned()
-        .collect();
-    if !missing_tool_outputs.is_empty() {
-        crate::logging::info(&format!(
-            "[openai] Injecting synthetic tool outputs for {} dangling call(s)",
-            missing_tool_outputs.len()
-        ));
-    }
-
-    // Second pass: build items, filtering orphaned tool results
     let mut items = Vec::new();
-    let mut skipped_results = 0;
-    let mut injected_missing = 0;
-    let mut injected_ids: HashSet<String> = HashSet::new();
+    let mut open_calls: HashSet<String> = HashSet::new();
+    let mut pending_outputs: HashMap<String, String> = HashMap::new();
+    let mut used_outputs: HashSet<String> = HashSet::new();
+    let mut skipped_results = 0usize;
+    let mut delayed_results = 0usize;
+    let mut injected_missing = 0usize;
 
-    for msg in messages {
+    for (idx, msg) in messages.iter().enumerate() {
         match msg.role {
             Role::User => {
                 for block in &msg.content {
@@ -274,26 +264,29 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
                             content,
                             is_error,
                         } => {
-                            // Skip orphaned tool results (no matching tool call)
-                            if !tool_call_ids.contains(tool_use_id) {
+                            if used_outputs.contains(tool_use_id) {
                                 skipped_results += 1;
-                                crate::logging::info(&format!(
-                                    "[openai] Skipping orphaned tool result with call_id: {}",
-                                    tool_use_id
-                                ));
                                 continue;
                             }
-                            // OpenAI expects output to be a string or array of objects, not an object
                             let output = if is_error == &Some(true) {
                                 format!("[Error] {}", content)
                             } else {
                                 content.clone()
                             };
-                            items.push(serde_json::json!({
-                                "type": "function_call_output",
-                                "call_id": tool_use_id,
-                                "output": output
-                            }));
+                            if open_calls.contains(tool_use_id) {
+                                items.push(serde_json::json!({
+                                    "type": "function_call_output",
+                                    "call_id": tool_use_id,
+                                    "output": output
+                                }));
+                                open_calls.remove(tool_use_id);
+                                used_outputs.insert(tool_use_id.clone());
+                            } else if pending_outputs.contains_key(tool_use_id) {
+                                skipped_results += 1;
+                            } else {
+                                pending_outputs.insert(tool_use_id.clone(), output);
+                                delayed_results += 1;
+                            }
                         }
                         _ => {}
                     }
@@ -317,14 +310,30 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
                                 "arguments": arguments,
                                 "call_id": id
                             }));
-                            if missing_tool_outputs.contains(id) && injected_ids.insert(id.clone())
-                            {
-                                injected_missing += 1;
+
+                            if let Some(output) = pending_outputs.remove(id) {
                                 items.push(serde_json::json!({
                                     "type": "function_call_output",
                                     "call_id": id,
-                                    "output": MISSING_TOOL_OUTPUT_MESSAGE
+                                    "output": output
                                 }));
+                                used_outputs.insert(id.clone());
+                            } else {
+                                let has_future_output = tool_result_last_pos
+                                    .get(id)
+                                    .map(|pos| *pos > idx)
+                                    .unwrap_or(false);
+                                if has_future_output {
+                                    open_calls.insert(id.clone());
+                                } else {
+                                    injected_missing += 1;
+                                    items.push(serde_json::json!({
+                                        "type": "function_call_output",
+                                        "call_id": id,
+                                        "output": missing_output.clone()
+                                    }));
+                                    used_outputs.insert(id.clone());
+                                }
                             }
                         }
                         _ => {}
@@ -332,6 +341,37 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
                 }
             }
         }
+    }
+
+    for call_id in open_calls {
+        if used_outputs.contains(&call_id) {
+            continue;
+        }
+        if let Some(output) = pending_outputs.remove(&call_id) {
+            items.push(serde_json::json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": output
+            }));
+        } else {
+            injected_missing += 1;
+            items.push(serde_json::json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": missing_output.clone()
+            }));
+        }
+    }
+
+    if delayed_results > 0 {
+        crate::logging::info(&format!(
+            "[openai] Delayed {} tool output(s) to preserve call ordering",
+            delayed_results
+        ));
+    }
+
+    if !pending_outputs.is_empty() {
+        skipped_results += pending_outputs.len();
     }
 
     if injected_missing > 0 {
@@ -347,7 +387,52 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
         ));
     }
 
-    items
+    let mut output_ids: HashSet<String> = HashSet::new();
+    for item in &items {
+        if item.get("type").and_then(|v| v.as_str()) == Some("function_call_output") {
+            if let Some(call_id) = item.get("call_id").and_then(|v| v.as_str()) {
+                output_ids.insert(call_id.to_string());
+            }
+        }
+    }
+
+    let mut normalized: Vec<Value> = Vec::with_capacity(items.len());
+    let mut extra_injected = 0usize;
+    for item in items {
+        let is_call = matches!(
+            item.get("type").and_then(|v| v.as_str()),
+            Some("function_call") | Some("custom_tool_call")
+        );
+        let call_id = item
+            .get("call_id")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+
+        normalized.push(item);
+
+        if is_call {
+            if let Some(call_id) = call_id {
+                if !output_ids.contains(&call_id) {
+                    extra_injected += 1;
+                    output_ids.insert(call_id.clone());
+                    normalized.push(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": missing_output.clone()
+                    }));
+                }
+            }
+        }
+    }
+
+    if extra_injected > 0 {
+        crate::logging::info(&format!(
+            "[openai] Safety-injected {} missing tool output(s) at request build",
+            extra_injected
+        ));
+    }
+
+    normalized
 }
 
 #[derive(Deserialize, Debug)]
@@ -965,6 +1050,7 @@ mod tests {
 
         let provider = OpenAIProvider::new(creds);
         assert!(provider.available_models().contains(&"gpt-5.2-codex"));
+        assert!(provider.available_models().contains(&"codex-mini-latest"));
         assert!(provider.available_models().contains(&"gpt-5.1-codex"));
         assert!(provider.available_models().contains(&"gpt-5.1-codex-mini"));
         assert!(provider.available_models().contains(&"gpt-5.1-codex-max"));
@@ -1052,6 +1138,51 @@ mod tests {
 
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0], "ok");
+    }
+
+    #[test]
+    fn test_build_responses_input_reorders_early_tool_output() {
+        let messages = vec![
+            Message::tool_result("call_1", "ok", false),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                }],
+            },
+        ];
+
+        let items = build_responses_input(&messages);
+        let mut call_pos = None;
+        let mut output_pos = None;
+        let mut outputs = Vec::new();
+
+        for (idx, item) in items.iter().enumerate() {
+            let item_type = item.get("type").and_then(|v| v.as_str());
+            match item_type {
+                Some("function_call") => {
+                    if item.get("call_id").and_then(|v| v.as_str()) == Some("call_1") {
+                        call_pos = Some(idx);
+                    }
+                }
+                Some("function_call_output") => {
+                    if item.get("call_id").and_then(|v| v.as_str()) == Some("call_1") {
+                        output_pos = Some(idx);
+                        if let Some(output) = item.get("output").and_then(|v| v.as_str()) {
+                            outputs.push(output.to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert!(call_pos.is_some());
+        assert!(output_pos.is_some());
+        assert!(output_pos.unwrap() > call_pos.unwrap());
+        assert_eq!(outputs, vec!["ok".to_string()]);
     }
 
     #[test]
