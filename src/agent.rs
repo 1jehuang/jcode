@@ -383,6 +383,10 @@ impl Agent {
         self.provider.available_models_display()
     }
 
+    pub fn registry(&self) -> Registry {
+        self.registry.clone()
+    }
+
     pub fn set_model(&mut self, model: &str) -> Result<()> {
         self.provider.set_model(model)?;
         self.session.model = Some(self.provider.model());
