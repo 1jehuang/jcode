@@ -770,6 +770,7 @@ impl OpenRouterProvider {
 
         if is_kimi {
             decision.order = Some(vec![DEFAULT_KIMI_PROVIDER.to_string()]);
+            decision.allow_fallbacks = false;
             return decision;
         }
 

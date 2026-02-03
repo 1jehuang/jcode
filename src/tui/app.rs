@@ -6570,7 +6570,12 @@ impl App {
                     return self.rank_model_suggestions("", models);
                 }
                 let mut providers: Vec<String> = if self.is_remote {
-                    if model.contains('/') {
+                    let is_openrouter = self
+                        .remote_provider_name
+                        .as_deref()
+                        .map(|p| p.eq_ignore_ascii_case("openrouter"))
+                        .unwrap_or(false);
+                    if is_openrouter {
                         crate::provider::openrouter::known_providers()
                     } else {
                         Vec::new()
