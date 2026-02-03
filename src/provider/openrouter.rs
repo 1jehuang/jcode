@@ -1298,6 +1298,99 @@ impl Provider for OpenRouterProvider {
             ));
         }
 
+        // Final pass: ensure tool outputs immediately follow assistant tool calls.
+        let mut tool_output_map: HashMap<String, Value> = HashMap::new();
+        for msg in &api_messages {
+            if msg.get("role").and_then(|v| v.as_str()) == Some("tool") {
+                if let Some(id) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
+                    let is_missing = msg
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .map(|v| v == missing_output)
+                        .unwrap_or(false);
+                    match tool_output_map.get(id) {
+                        Some(existing) => {
+                            let existing_missing = existing
+                                .get("content")
+                                .and_then(|v| v.as_str())
+                                .map(|v| v == missing_output)
+                                .unwrap_or(false);
+                            if existing_missing && !is_missing {
+                                tool_output_map.insert(id.to_string(), msg.clone());
+                            }
+                        }
+                        None => {
+                            tool_output_map.insert(id.to_string(), msg.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut reordered: Vec<Value> = Vec::with_capacity(api_messages.len());
+        let mut used_outputs: HashSet<String> = HashSet::new();
+        let mut injected_ordered = 0usize;
+        let mut dropped_orphans = 0usize;
+
+        for msg in api_messages.into_iter() {
+            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            if role == "assistant" {
+                let tool_calls = msg.get("tool_calls").and_then(|v| v.as_array()).cloned();
+                if let Some(tool_calls) = tool_calls {
+                    if tool_calls.is_empty() {
+                        reordered.push(msg);
+                        continue;
+                    }
+                    reordered.push(msg);
+                    for call in tool_calls {
+                        if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
+                            if let Some(tool_msg) = tool_output_map.get(id) {
+                                reordered.push(tool_msg.clone());
+                                used_outputs.insert(id.to_string());
+                            } else {
+                                injected_ordered += 1;
+                                reordered.push(serde_json::json!({
+                                    "role": "tool",
+                                    "tool_call_id": id,
+                                    "content": missing_output.clone()
+                                }));
+                                used_outputs.insert(id.to_string());
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            if role == "tool" {
+                if let Some(id) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
+                    if used_outputs.contains(id) {
+                        dropped_orphans += 1;
+                        continue;
+                    }
+                }
+                dropped_orphans += 1;
+                continue;
+            }
+
+            reordered.push(msg);
+        }
+
+        api_messages = reordered;
+
+        if injected_ordered > 0 {
+            crate::logging::info(&format!(
+                "[openrouter] Inserted {} tool output(s) to enforce call ordering",
+                injected_ordered
+            ));
+        }
+        if dropped_orphans > 0 {
+            crate::logging::info(&format!(
+                "[openrouter] Dropped {} orphaned tool output(s) during re-ordering",
+                dropped_orphans
+            ));
+        }
+
         // Build tools in OpenAI format
         let api_tools: Vec<Value> = tools
             .iter()
