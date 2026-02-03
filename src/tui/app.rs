@@ -6454,16 +6454,42 @@ impl App {
 
         // Check if this is a "/model " command with a partial model name
         if let Some(model_prefix) = prefix.strip_prefix("/model ") {
-            let (model_query, provider_suffix) = if let Some((left, right)) = model_prefix.split_once('@') {
-                (left.trim(), Some(right.trim()))
-            } else {
-                (model_prefix.trim(), None)
-            };
-            let query = model_query.trim();
-            let suffix = provider_suffix
-                .filter(|s| !s.is_empty())
-                .map(|s| format!("@{}", s))
-                .unwrap_or_default();
+            if let Some((left, right)) = model_prefix.split_once('@') {
+                let model = left.trim();
+                if !model.is_empty() && model.contains('/') {
+                    let provider_query = right.trim();
+                    let providers = [
+                        "auto",
+                        "Moonshot AI",
+                        "OpenAI",
+                        "Anthropic",
+                        "Fireworks",
+                        "Together",
+                        "DeepInfra",
+                    ];
+                    let mut scored: Vec<(i32, &str)> = providers
+                        .iter()
+                        .filter_map(|p| {
+                            if provider_query.is_empty() {
+                                Some((0, *p))
+                            } else {
+                                let score = Self::fuzzy_score(provider_query, &p.to_lowercase())?;
+                                Some((score, *p))
+                            }
+                        })
+                        .collect();
+                    scored.sort_by(|a, b| b.0.cmp(&a.0));
+                    return scored
+                        .into_iter()
+                        .take(20)
+                        .map(|(_, p)| {
+                            (format!("/model {}@{}", model, p), "Pin OpenRouter provider")
+                        })
+                        .collect();
+                }
+            }
+
+            let query = model_prefix.trim();
             let mut scored: Vec<(i32, String)> = models
                 .into_iter()
                 .filter_map(|m| {
@@ -6479,12 +6505,7 @@ impl App {
             return scored
                 .into_iter()
                 .take(50)
-                .map(|(_, m)| {
-                    (
-                        format!("/model {}{}", m, suffix),
-                        "Switch to this model",
-                    )
-                })
+                .map(|(_, m)| (format!("/model {}", m), "Switch to this model"))
                 .collect();
         }
 
