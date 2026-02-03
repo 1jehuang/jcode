@@ -157,10 +157,13 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
     "gpt-5.1-codex-mini",
     "gpt-5.1-codex-max",
     "gpt-5.2",
+    "gpt-5.1-chat-latest",
     "gpt-5.1",
     "gpt-5.1-codex",
+    "gpt-5-chat-latest",
     "gpt-5-codex",
     "gpt-5-codex-mini",
+    "gpt-5-pro",
     "gpt-5-mini",
     "gpt-5-nano",
     "gpt-5",
@@ -173,7 +176,10 @@ pub const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
 pub fn context_limit_for_model(model: &str) -> Option<usize> {
     let model = model.to_lowercase();
 
-    if model.starts_with("gpt-5.2-chat") || model.starts_with("gpt-5-chat") {
+    if model.starts_with("gpt-5.2-chat")
+        || model.starts_with("gpt-5.1-chat")
+        || model.starts_with("gpt-5-chat")
+    {
         return Some(128_000);
     }
 
