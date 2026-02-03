@@ -409,6 +409,8 @@ pub struct App {
     remote_session_id: Option<String>,
     // All sessions on the server (remote mode only)
     remote_sessions: Vec<String>,
+    // Swarm member status snapshots (remote mode only)
+    remote_swarm_members: Vec<crate::protocol::SwarmMemberStatus>,
     // Number of connected clients (remote mode only)
     remote_client_count: Option<usize>,
     // Build version tracking for auto-migration
@@ -579,6 +581,7 @@ impl App {
             tool_result_ids: HashSet::new(),
             remote_session_id: None,
             remote_sessions: Vec::new(),
+            remote_swarm_members: Vec::new(),
             known_stable_version: crate::build::read_stable_version().ok().flatten(),
             last_version_check: Some(Instant::now()),
             pending_migration: None,
@@ -2785,6 +2788,7 @@ impl App {
                     self.interleave_message = None;
                     self.pending_soft_interrupt = None;
                     self.remote_total_tokens = None;
+                    self.remote_swarm_members.clear();
                 }
                 // Store provider info for UI display
                 if let Some(name) = provider_name {
@@ -2815,6 +2819,10 @@ impl App {
                         });
                     }
                 }
+                false
+            }
+            ServerEvent::SwarmStatus { members } => {
+                self.remote_swarm_members = members;
                 false
             }
             ServerEvent::ModelChanged { model, error, .. } => {
@@ -7502,24 +7510,74 @@ impl super::TuiState for App {
         // Gather swarm info
         let swarm_info = {
             let subagent_status = self.subagent_status.clone();
-            let (session_count, client_count, session_names) = if self.is_remote {
+            let mut members: Vec<crate::protocol::SwarmMemberStatus> = Vec::new();
+            let (session_count, client_count, session_names, has_activity) = if self.is_remote {
+                members = self.remote_swarm_members.clone();
+                let session_names = if !members.is_empty() {
+                    members
+                        .iter()
+                        .map(|m| {
+                            m.friendly_name
+                                .clone()
+                                .unwrap_or_else(|| m.session_id.chars().take(8).collect())
+                        })
+                        .collect()
+                } else {
+                    self.remote_sessions.clone()
+                };
+                let session_count = if !members.is_empty() {
+                    members.len()
+                } else {
+                    self.remote_sessions.len()
+                };
+                let has_activity = members
+                    .iter()
+                    .any(|m| m.status != "ready" || m.detail.is_some());
                 (
-                    self.remote_sessions.len(),
+                    session_count,
                     self.remote_client_count,
-                    self.remote_sessions.clone(),
+                    session_names,
+                    has_activity,
                 )
             } else {
-                // In local mode, just show current session
-                (1, None, vec![self.session.id.clone()])
+                let (status, detail) = match &self.status {
+                    ProcessingStatus::Idle => ("ready".to_string(), None),
+                    ProcessingStatus::Sending => {
+                        ("running".to_string(), Some("sending".to_string()))
+                    }
+                    ProcessingStatus::Streaming => {
+                        ("running".to_string(), Some("streaming".to_string()))
+                    }
+                    ProcessingStatus::RunningTool(name) => {
+                        ("running".to_string(), Some(format!("tool: {}", name)))
+                    }
+                };
+                let detail = subagent_status.clone().or(detail);
+                let has_activity = status != "ready" || detail.is_some();
+                if has_activity {
+                    members.push(crate::protocol::SwarmMemberStatus {
+                        session_id: self.session.id.clone(),
+                        friendly_name: Some(self.session.display_name().to_string()),
+                        status,
+                        detail,
+                    });
+                }
+                (
+                    1,
+                    None,
+                    vec![self.session.display_name().to_string()],
+                    has_activity,
+                )
             };
 
             // Only show if there's something interesting
-            if subagent_status.is_some() || session_count > 1 || client_count.is_some() {
+            if has_activity || session_count > 1 || client_count.is_some() {
                 Some(super::info_widget::SwarmInfo {
                     session_count,
                     subagent_status,
                     client_count,
                     session_names,
+                    members,
                 })
             } else {
                 None
@@ -7745,6 +7803,13 @@ mod tests {
 
         assert_eq!(app.input(), "a");
         assert_eq!(app.cursor_pos(), 1);
+    }
+
+    #[test]
+    fn test_fuzzy_command_suggestions() {
+        let app = create_test_app();
+        let suggestions = app.get_suggestions_for("/mdl");
+        assert!(suggestions.iter().any(|(cmd, _)| cmd == "/model"));
     }
 
     #[test]

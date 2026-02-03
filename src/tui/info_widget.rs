@@ -5,6 +5,7 @@
 //! In left-aligned mode, widgets only appear on the right margin.
 
 use crate::prompt::ContextInfo;
+use crate::protocol::SwarmMemberStatus;
 use crate::provider::DEFAULT_CONTEXT_LIMIT;
 use crate::todo::TodoItem;
 use ratatui::{
@@ -124,6 +125,8 @@ pub struct SwarmInfo {
     pub client_count: Option<usize>,
     /// List of session names in the swarm
     pub session_names: Vec<String>,
+    /// Swarm member lifecycle status updates
+    pub members: Vec<SwarmMemberStatus>,
 }
 
 /// Background task status for the info widget
@@ -336,7 +339,10 @@ impl InfoWidgetData {
                 .swarm_info
                 .as_ref()
                 .map(|s| {
-                    s.subagent_status.is_some() || s.session_count > 1 || s.client_count.is_some()
+                    s.subagent_status.is_some()
+                        || s.session_count > 1
+                        || s.client_count.is_some()
+                        || !s.members.is_empty()
                 })
                 .unwrap_or(false),
             WidgetKind::BackgroundTasks => self
@@ -1074,6 +1080,41 @@ fn format_memory_event(event: &MemoryEvent, max_width: usize) -> (&'static str, 
     }
 }
 
+fn swarm_member_label(member: &SwarmMemberStatus) -> String {
+    member
+        .friendly_name
+        .clone()
+        .unwrap_or_else(|| member.session_id.chars().take(8).collect())
+}
+
+fn swarm_status_style(status: &str) -> (Color, &'static str) {
+    match status {
+        "spawned" => (Color::Rgb(140, 140, 150), "○"),
+        "ready" => (Color::Rgb(120, 180, 120), "●"),
+        "running" => (Color::Rgb(255, 200, 100), "▶"),
+        "blocked" => (Color::Rgb(255, 170, 80), "⏸"),
+        "failed" => (Color::Rgb(255, 100, 100), "✗"),
+        "completed" => (Color::Rgb(100, 200, 100), "✓"),
+        "stopped" => (Color::Rgb(140, 140, 150), "■"),
+        "crashed" => (Color::Rgb(255, 80, 80), "!"),
+        _ => (Color::Rgb(140, 140, 150), "·"),
+    }
+}
+
+fn swarm_member_line(member: &SwarmMemberStatus, max_width: usize) -> Line<'static> {
+    let name = swarm_member_label(member);
+    let mut detail = member.detail.clone().unwrap_or_default();
+    if !detail.is_empty() {
+        detail = format!(" — {}", detail);
+    }
+    let line_text = truncate_smart(&format!("{} {}{}", name, member.status, detail), max_width);
+    let (color, icon) = swarm_status_style(&member.status);
+    Line::from(vec![
+        Span::styled(format!("  {} ", icon), Style::default().fg(color)),
+        Span::styled(line_text, Style::default().fg(Color::Rgb(140, 140, 150))),
+    ])
+}
+
 /// Render swarm status widget
 fn render_swarm_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
     let Some(info) = &data.swarm_info else {
@@ -1108,28 +1149,36 @@ fn render_swarm_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
     }
     lines.push(Line::from(stats_parts));
 
-    // Active subagent status
-    if let Some(status) = &info.subagent_status {
-        lines.push(Line::from(vec![
-            Span::styled("▶ ", Style::default().fg(Color::Rgb(255, 200, 100))),
-            Span::styled(
-                truncate_smart(status, inner.width.saturating_sub(4) as usize),
-                Style::default().fg(Color::Rgb(200, 200, 210)),
-            ),
-        ]));
+    // Active subagent status (only when we don't have member status lines)
+    if info.members.is_empty() {
+        if let Some(status) = &info.subagent_status {
+            lines.push(Line::from(vec![
+                Span::styled("▶ ", Style::default().fg(Color::Rgb(255, 200, 100))),
+                Span::styled(
+                    truncate_smart(status, inner.width.saturating_sub(4) as usize),
+                    Style::default().fg(Color::Rgb(200, 200, 210)),
+                ),
+            ]));
+        }
     }
 
-    // Session names (limit based on height)
+    // Session names or member status lines (limit based on height)
     let max_names = inner.height.saturating_sub(lines.len() as u16) as usize;
-    let max_name_len = inner.width.saturating_sub(4) as usize;
-    for name in info.session_names.iter().take(max_names.min(3)) {
-        lines.push(Line::from(vec![
-            Span::styled("  · ", Style::default().fg(Color::Rgb(100, 100, 110))),
-            Span::styled(
-                truncate_smart(name, max_name_len),
-                Style::default().fg(Color::Rgb(140, 140, 150)),
-            ),
-        ]));
+    let max_name_len = inner.width.saturating_sub(6) as usize;
+    if !info.members.is_empty() {
+        for member in info.members.iter().take(max_names.min(3)) {
+            lines.push(swarm_member_line(member, max_name_len));
+        }
+    } else {
+        for name in info.session_names.iter().take(max_names.min(3)) {
+            lines.push(Line::from(vec![
+                Span::styled("  · ", Style::default().fg(Color::Rgb(100, 100, 110))),
+                Span::styled(
+                    truncate_smart(name, max_name_len),
+                    Style::default().fg(Color::Rgb(140, 140, 150)),
+                ),
+            ]));
+        }
     }
 
     lines
@@ -1666,7 +1715,11 @@ fn expanded_memory_height(data: &InfoWidgetData) -> u16 {
 fn compact_swarm_height(data: &InfoWidgetData) -> u16 {
     if let Some(info) = &data.swarm_info {
         // Show if we have active subagent or multiple sessions
-        if info.subagent_status.is_some() || info.session_count > 1 || info.client_count.is_some() {
+        if info.subagent_status.is_some()
+            || info.session_count > 1
+            || info.client_count.is_some()
+            || !info.members.is_empty()
+        {
             return 1;
         }
     }
@@ -1675,14 +1728,23 @@ fn compact_swarm_height(data: &InfoWidgetData) -> u16 {
 
 fn expanded_swarm_height(data: &InfoWidgetData) -> u16 {
     if let Some(info) = &data.swarm_info {
-        if info.subagent_status.is_some() || info.session_count > 1 || info.client_count.is_some() {
+        if info.subagent_status.is_some()
+            || info.session_count > 1
+            || info.client_count.is_some()
+            || !info.members.is_empty()
+        {
             // Title (1) + status line (1) + session list (up to 4)
             let mut height = 2u16;
             if info.subagent_status.is_some() {
                 height += 1; // Active subagent line
             }
             // Show session names (up to 4)
-            height += info.session_names.len().min(4) as u16;
+            let member_len = if info.members.is_empty() {
+                info.session_names.len()
+            } else {
+                info.members.len()
+            };
+            height += member_len.min(4) as u16;
             return height;
         }
     }
@@ -1736,7 +1798,11 @@ fn render_sections(
 
     // Swarm/subagent info at the bottom
     if let Some(info) = &data.swarm_info {
-        if info.subagent_status.is_some() || info.session_count > 1 || info.client_count.is_some() {
+        if info.subagent_status.is_some()
+            || info.session_count > 1
+            || info.client_count.is_some()
+            || !info.members.is_empty()
+        {
             if matches!(focus, Some(InfoPageKind::SwarmExpanded)) {
                 lines.extend(render_swarm_expanded(info, inner));
             } else {
@@ -2200,8 +2266,24 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
 fn render_swarm_compact(info: &SwarmInfo) -> Vec<Line<'static>> {
     let mut spans: Vec<Span> = Vec::new();
 
-    // Show active subagent status first (most important)
-    if let Some(status) = &info.subagent_status {
+    // Show active member or subagent status first (most important)
+    let active_member = info
+        .members
+        .iter()
+        .find(|m| matches!(m.status.as_str(), "running" | "blocked" | "failed"));
+    if let Some(member) = active_member {
+        let (color, icon) = swarm_status_style(&member.status);
+        spans.push(Span::styled(
+            format!("{} ", icon),
+            Style::default().fg(color),
+        ));
+        let detail = member.detail.as_deref().unwrap_or(member.status.as_str());
+        let label = format!("{} {}", swarm_member_label(member), detail);
+        spans.push(Span::styled(
+            truncate_smart(&label, 20),
+            Style::default().fg(Color::Rgb(180, 180, 190)),
+        ));
+    } else if let Some(status) = &info.subagent_status {
         spans.push(Span::styled(
             "▶ ",
             Style::default().fg(Color::Rgb(255, 200, 100)),
@@ -2220,9 +2302,7 @@ fn render_swarm_compact(info: &SwarmInfo) -> Vec<Line<'static>> {
 
     // Session count if > 1
     if info.session_count > 1 {
-        if !spans.is_empty() && info.subagent_status.is_none() {
-            // Already have icon
-        } else if info.subagent_status.is_some() {
+        if !spans.is_empty() {
             spans.push(Span::styled(
                 " · ",
                 Style::default().fg(Color::Rgb(100, 100, 110)),
@@ -2292,36 +2372,51 @@ fn render_swarm_expanded(info: &SwarmInfo, inner: Rect) -> Vec<Line<'static>> {
         lines.push(Line::from(stats_parts));
     }
 
-    // Active subagent status
-    if let Some(status) = &info.subagent_status {
-        lines.push(Line::from(vec![
-            Span::styled("▶ ", Style::default().fg(Color::Rgb(255, 200, 100))),
-            Span::styled(
-                truncate_smart(status, inner.width.saturating_sub(4) as usize),
-                Style::default().fg(Color::Rgb(200, 200, 210)),
-            ),
-        ]));
+    // Active subagent status (only when we don't have member status lines)
+    if info.members.is_empty() {
+        if let Some(status) = &info.subagent_status {
+            lines.push(Line::from(vec![
+                Span::styled("▶ ", Style::default().fg(Color::Rgb(255, 200, 100))),
+                Span::styled(
+                    truncate_smart(status, inner.width.saturating_sub(4) as usize),
+                    Style::default().fg(Color::Rgb(200, 200, 210)),
+                ),
+            ]));
+        }
     }
 
-    // Session names (up to 4)
-    let max_name_len = inner.width.saturating_sub(4) as usize;
-    for name in info.session_names.iter().take(4) {
-        lines.push(Line::from(vec![
-            Span::styled("  · ", Style::default().fg(Color::Rgb(100, 100, 110))),
-            Span::styled(
-                truncate_smart(name, max_name_len),
-                Style::default().fg(Color::Rgb(140, 140, 150)),
-            ),
-        ]));
-    }
+    let max_name_len = inner.width.saturating_sub(6) as usize;
+    if !info.members.is_empty() {
+        for member in info.members.iter().take(4) {
+            lines.push(swarm_member_line(member, max_name_len));
+        }
+        if info.members.len() > 4 {
+            let remaining = info.members.len() - 4;
+            lines.push(Line::from(vec![Span::styled(
+                format!("  +{} more", remaining),
+                Style::default().fg(Color::Rgb(100, 100, 110)),
+            )]));
+        }
+    } else {
+        // Session names (up to 4)
+        for name in info.session_names.iter().take(4) {
+            lines.push(Line::from(vec![
+                Span::styled("  · ", Style::default().fg(Color::Rgb(100, 100, 110))),
+                Span::styled(
+                    truncate_smart(name, max_name_len),
+                    Style::default().fg(Color::Rgb(140, 140, 150)),
+                ),
+            ]));
+        }
 
-    // Show count of remaining sessions
-    if info.session_names.len() > 4 {
-        let remaining = info.session_names.len() - 4;
-        lines.push(Line::from(vec![Span::styled(
-            format!("  +{} more", remaining),
-            Style::default().fg(Color::Rgb(100, 100, 110)),
-        )]));
+        // Show count of remaining sessions
+        if info.session_names.len() > 4 {
+            let remaining = info.session_names.len() - 4;
+            lines.push(Line::from(vec![Span::styled(
+                format!("  +{} more", remaining),
+                Style::default().fg(Color::Rgb(100, 100, 110)),
+            )]));
+        }
     }
 
     lines

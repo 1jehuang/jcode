@@ -22,7 +22,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll};
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -74,6 +74,130 @@ pub struct ModelPricing {
     pub input_cache_write: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ProviderStatsStore {
+    models: HashMap<String, HashMap<String, ProviderStats>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ProviderStats {
+    samples: u64,
+    avg_cache_hit: Option<f64>,
+    avg_throughput: Option<f64>,
+    avg_cost_per_mtok: Option<f64>,
+    last_seen: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PinSource {
+    Explicit,
+    Observed,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderPin {
+    model: String,
+    provider: String,
+    source: PinSource,
+    allow_fallbacks: bool,
+    last_cache_read: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderSample {
+    cache_hit: Option<f64>,
+    throughput: Option<f64>,
+    cost_per_mtok: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedProvider {
+    name: String,
+    allow_fallbacks: bool,
+}
+
+fn parse_model_spec(raw: &str) -> (String, Option<ParsedProvider>) {
+    let trimmed = raw.trim();
+    if let Some((model, provider)) = trimmed.rsplit_once('@') {
+        let model = model.trim();
+        let mut provider = provider.trim();
+        if model.is_empty() {
+            return (trimmed.to_string(), None);
+        }
+        if provider.is_empty() {
+            return (model.to_string(), None);
+        }
+        let mut allow_fallbacks = true;
+        if provider.ends_with('!') {
+            provider = provider.trim_end_matches('!').trim();
+            allow_fallbacks = false;
+        }
+        if provider.is_empty() {
+            return (model.to_string(), None);
+        }
+        return (
+            model.to_string(),
+            Some(ParsedProvider {
+                name: provider.to_string(),
+                allow_fallbacks,
+            }),
+        );
+    }
+
+    (trimmed.to_string(), None)
+}
+
+fn update_ewma(prev: Option<f64>, value: f64) -> f64 {
+    let value = value.max(0.0);
+    match prev {
+        Some(p) => p + PROVIDER_STATS_EWMA_ALPHA * (value - p),
+        None => value,
+    }
+}
+
+fn min_max(values: &[f64]) -> (Option<f64>, Option<f64>) {
+    if values.is_empty() {
+        return (None, None);
+    }
+    let mut min_val = values[0];
+    let mut max_val = values[0];
+    for v in values.iter().skip(1) {
+        if *v < min_val {
+            min_val = *v;
+        }
+        if *v > max_val {
+            max_val = *v;
+        }
+    }
+    (Some(min_val), Some(max_val))
+}
+
+fn normalize(value: f64, min: Option<f64>, max: Option<f64>, default: f64) -> f64 {
+    match (min, max) {
+        (Some(min), Some(max)) => {
+            if (max - min).abs() < f64::EPSILON {
+                1.0
+            } else {
+                ((value - min) / (max - min)).clamp(0.0, 1.0)
+            }
+        }
+        _ => default,
+    }
+}
+
+fn normalize_inverse(value: f64, min: Option<f64>, max: Option<f64>, default: f64) -> f64 {
+    match (min, max) {
+        (Some(min), Some(max)) => {
+            if (max - min).abs() < f64::EPSILON {
+                1.0
+            } else {
+                ((max - value) / (max - min)).clamp(0.0, 1.0)
+            }
+        }
+        _ => default,
+    }
+}
+
 /// Disk cache structure
 #[derive(Debug, Serialize, Deserialize)]
 struct DiskCache {
@@ -117,6 +241,22 @@ fn cache_path() -> PathBuf {
         .join("openrouter_models.json")
 }
 
+/// Get provider stats cache file path
+fn provider_stats_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".jcode")
+        .join("cache")
+        .join("openrouter_provider_stats.json")
+}
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Load models from disk cache if valid
 fn load_disk_cache() -> Option<Vec<ModelInfo>> {
     let path = cache_path();
@@ -156,6 +296,27 @@ fn save_disk_cache(models: &[ModelInfo]) {
     };
 
     if let Ok(content) = serde_json::to_string(&cache) {
+        let _ = std::fs::write(&path, content);
+    }
+}
+
+fn load_provider_stats() -> ProviderStatsStore {
+    let path = provider_stats_path();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return ProviderStatsStore::default(),
+    };
+
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn save_provider_stats(stats: &ProviderStatsStore) {
+    let path = provider_stats_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    if let Ok(content) = serde_json::to_string(stats) {
         let _ = std::fs::write(&path, content);
     }
 }
@@ -1280,10 +1441,18 @@ impl Provider for OpenRouterProvider {
             *current = base_model;
             Ok(())
         } else {
-            Err(anyhow::anyhow!(
+            return Err(anyhow::anyhow!(
                 "Cannot change model while a request is in progress"
-            ))
+            ));
         }
+
+        if let Some(provider) = provider {
+            self.set_explicit_pin(&model_id, provider);
+        } else {
+            self.clear_pin_if_model_changed(&model_id, true);
+        }
+
+        Ok(())
     }
 
     fn available_models(&self) -> Vec<&'static str> {
@@ -1869,9 +2038,16 @@ impl Stream for OpenRouterStream {
     }
 }
 
+impl Drop for OpenRouterStream {
+    fn drop(&mut self) {
+        self.record_stats();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_has_credentials() {
@@ -1879,5 +2055,61 @@ mod tests {
         // So we just verify it returns a boolean without panicking
         let _has_creds = OpenRouterProvider::has_credentials();
         // If we got here, the function works
+    }
+
+    #[test]
+    fn test_parse_model_spec() {
+        let (model, provider) = parse_model_spec("anthropic/claude-sonnet-4@Fireworks");
+        assert_eq!(model, "anthropic/claude-sonnet-4");
+        let provider = provider.expect("provider");
+        assert_eq!(provider.name, "Fireworks");
+        assert!(provider.allow_fallbacks);
+
+        let (model, provider) = parse_model_spec("anthropic/claude-sonnet-4@Fireworks!");
+        assert_eq!(model, "anthropic/claude-sonnet-4");
+        let provider = provider.expect("provider");
+        assert_eq!(provider.name, "Fireworks");
+        assert!(!provider.allow_fallbacks);
+    }
+
+    #[test]
+    fn test_rank_providers_cache_priority() {
+        let now = now_epoch_secs();
+        let mut stats = ProviderStatsStore::default();
+        let mut model_stats = HashMap::new();
+        model_stats.insert(
+            "FastCache".to_string(),
+            ProviderStats {
+                samples: 5,
+                avg_cache_hit: Some(0.5),
+                avg_throughput: Some(50.0),
+                avg_cost_per_mtok: Some(2.0),
+                last_seen: now,
+            },
+        );
+        model_stats.insert(
+            "FasterNoCache".to_string(),
+            ProviderStats {
+                samples: 5,
+                avg_cache_hit: Some(0.1),
+                avg_throughput: Some(60.0),
+                avg_cost_per_mtok: Some(1.0),
+                last_seen: now,
+            },
+        );
+        stats.models.insert("test/model".to_string(), model_stats);
+
+        let provider = OpenRouterProvider {
+            client: Client::new(),
+            model: Arc::new(RwLock::new("test/model".to_string())),
+            api_key: "test".to_string(),
+            models_cache: Arc::new(RwLock::new(ModelsCache::default())),
+            provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
+            provider_stats: Arc::new(Mutex::new(stats)),
+            provider_pin: Arc::new(Mutex::new(None)),
+        };
+
+        let ranked = provider.rank_providers("test/model");
+        assert_eq!(ranked.first().map(|s| s.as_str()), Some("FastCache"));
     }
 }
