@@ -1000,8 +1000,8 @@ impl Agent {
                         _thinking_start = Some(Instant::now());
                     }
                     StreamEvent::ThinkingDelta(thinking_text) => {
-                        // Display reasoning content
-                        if print_output {
+                        // Display reasoning content only if enabled
+                        if print_output && crate::config::config().display.show_thinking {
                             println!("💭 {}", thinking_text);
                         }
                         if store_reasoning_content {
@@ -1544,9 +1544,12 @@ impl Agent {
                 match event? {
                     StreamEvent::ThinkingStart | StreamEvent::ThinkingEnd => {}
                     StreamEvent::ThinkingDelta(thinking_text) => {
-                        let _ = event_tx.send(ServerEvent::TextDelta {
-                            text: format!("💭 {}\n", thinking_text),
-                        });
+                        // Only send thinking content if enabled in config
+                        if crate::config::config().display.show_thinking {
+                            let _ = event_tx.send(ServerEvent::TextDelta {
+                                text: format!("💭 {}\n", thinking_text),
+                            });
+                        }
                         if store_reasoning_content {
                             reasoning_content.push_str(&thinking_text);
                         }
@@ -1991,9 +1994,12 @@ impl Agent {
                 match event? {
                     StreamEvent::ThinkingStart | StreamEvent::ThinkingEnd => {}
                     StreamEvent::ThinkingDelta(thinking_text) => {
-                        let _ = event_tx.send(ServerEvent::TextDelta {
-                            text: format!("💭 {}\n", thinking_text),
-                        });
+                        // Only send thinking content if enabled in config
+                        if crate::config::config().display.show_thinking {
+                            let _ = event_tx.send(ServerEvent::TextDelta {
+                                text: format!("💭 {}\n", thinking_text),
+                            });
+                        }
                         if store_reasoning_content {
                             reasoning_content.push_str(&thinking_text);
                         }

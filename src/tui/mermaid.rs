@@ -36,6 +36,19 @@ static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> =
 static IMAGE_STATE: LazyLock<Mutex<HashMap<u64, StatefulProtocol>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Track last rendered position/state to avoid re-rendering unchanged images
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct RenderKey {
+    hash: u64,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+}
+
+static LAST_RENDERED: LazyLock<Mutex<HashMap<u64, RenderKey>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// Initialize the global picker by querying terminal capabilities.
 /// Should be called early in app startup, after entering alternate screen.
 pub fn init_picker() {
@@ -250,6 +263,10 @@ pub fn render_mermaid(content: &str) -> RenderResult {
 /// Render an image at the given area using ratatui-image
 /// If centered is true, the image will be horizontally centered within the area
 /// Returns the number of rows used
+///
+/// OPTIMIZATION: This function tracks the last rendered position for each image hash.
+/// If the image was already rendered at the exact same position, we skip re-rendering
+/// to avoid scroll lag. The terminal graphics protocol maintains the image display.
 pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bool) -> u16 {
     // Get the cached image dimensions to calculate centered area
     let img_width = {
@@ -280,6 +297,27 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
     } else {
         area
     };
+
+    // Check if we already rendered this image at this exact position
+    // This avoids expensive re-renders during scrolling
+    let current_key = RenderKey {
+        hash,
+        x: render_area.x,
+        y: render_area.y,
+        width: render_area.width,
+        height: render_area.height,
+    };
+
+    {
+        let last_rendered = LAST_RENDERED.lock().unwrap();
+        if let Some(last_key) = last_rendered.get(&hash) {
+            if *last_key == current_key {
+                // Image is already at this exact position - skip re-render
+                // The terminal graphics protocol maintains the image display
+                return area.height;
+            }
+        }
+    }
 
     // Note: We intentionally do NOT clear the buffer here.
     // ratatui-image handles clearing internally via cell.set_skip(true).
@@ -321,14 +359,22 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         }
     };
 
-    // First try to render from existing state
-    {
+    // Try to render from existing state
+    let render_result = {
         let mut state = IMAGE_STATE.lock().unwrap();
         if let Some(protocol) = state.get_mut(&hash) {
             let widget = StatefulImage::default().resize(make_resize());
             widget.render(render_area, buf, protocol);
-            return area.height;
+            true
+        } else {
+            false
         }
+    };
+
+    if render_result {
+        // Update tracking
+        LAST_RENDERED.lock().unwrap().insert(hash, current_key);
+        return area.height;
     }
 
     // No state available, try to load from cache
@@ -348,6 +394,8 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
                 if let Some(protocol) = state.get_mut(&hash) {
                     let widget = StatefulImage::default().resize(make_resize());
                     widget.render(render_area, buf, protocol);
+                    // Update tracking
+                    LAST_RENDERED.lock().unwrap().insert(hash, current_key);
                     return area.height;
                 }
             }
@@ -355,6 +403,14 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
     }
 
     0
+}
+
+/// Clear the last rendered tracking for all images or a specific hash.
+/// Call this on window resize to force re-render at new positions.
+pub fn clear_last_rendered() {
+    if let Ok(mut last) = LAST_RENDERED.lock() {
+        last.clear();
+    }
 }
 
 /// Estimate the height needed for an image in terminal rows
