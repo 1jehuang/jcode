@@ -9,7 +9,8 @@
 
 use super::{EventStream, Provider};
 use crate::message::{
-    ContentBlock, Message, Role, StreamEvent, ToolDefinition, TOOL_OUTPUT_MISSING_TEXT,
+    CacheControl, ContentBlock, Message, Role, StreamEvent, ToolDefinition,
+    TOOL_OUTPUT_MISSING_TEXT,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -59,6 +60,10 @@ pub struct ModelInfo {
 pub struct ModelPricing {
     pub prompt: Option<String>,
     pub completion: Option<String>,
+    #[serde(default, rename = "input_cache_read")]
+    pub input_cache_read: Option<String>,
+    #[serde(default, rename = "input_cache_write")]
+    pub input_cache_write: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -73,6 +78,10 @@ struct ProviderStats {
     avg_throughput: Option<f64>,
     avg_cost_per_mtok: Option<f64>,
     last_seen: u64,
+    #[serde(default)]
+    cache_read_supported: bool,
+    #[serde(default)]
+    cache_write_supported: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +192,38 @@ fn normalize_inverse(value: f64, min: Option<f64>, max: Option<f64>, default: f6
         }
         _ => default,
     }
+}
+
+fn add_cache_breakpoint(messages: &mut [Message]) -> bool {
+    let mut cache_index = None;
+    for (idx, msg) in messages.iter().enumerate().rev() {
+        if let Role::User = msg.role {
+            if msg
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { .. }))
+            {
+                cache_index = Some(idx);
+                break;
+            }
+        }
+    }
+
+    let Some(idx) = cache_index else {
+        return false;
+    };
+
+    let msg = &mut messages[idx];
+    for block in msg.content.iter_mut().rev() {
+        if let ContentBlock::Text { cache_control, .. } = block {
+            if cache_control.is_none() {
+                *cache_control = Some(CacheControl::ephemeral(None));
+            }
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Disk cache structure
@@ -470,13 +511,28 @@ impl OpenRouterProvider {
             return Vec::new();
         }
 
-        let cache_candidates: Vec<(String, ProviderStats)> = entries
+        let cache_supported = entries
             .iter()
-            .filter(|(_, stat)| stat.avg_cache_hit.unwrap_or(0.0) > 0.0)
-            .cloned()
-            .collect();
-        if !cache_candidates.is_empty() {
-            entries = cache_candidates;
+            .any(|(_, stat)| stat.cache_read_supported || stat.cache_write_supported);
+
+        if cache_supported {
+            let cache_capable: Vec<(String, ProviderStats)> = entries
+                .iter()
+                .filter(|(_, stat)| stat.cache_read_supported || stat.cache_write_supported)
+                .cloned()
+                .collect();
+            if !cache_capable.is_empty() {
+                entries = cache_capable;
+            }
+
+            let cache_candidates: Vec<(String, ProviderStats)> = entries
+                .iter()
+                .filter(|(_, stat)| stat.avg_cache_hit.unwrap_or(0.0) > 0.0)
+                .cloned()
+                .collect();
+            if !cache_candidates.is_empty() {
+                entries = cache_candidates;
+            }
         }
 
         let cache_vals: Vec<f64> = entries
@@ -510,10 +566,22 @@ impl OpenRouterProvider {
         let mut scored: Vec<(f64, String)> = entries
             .drain(..)
             .map(|(provider, stat)| {
-                let cache_score = stat
-                    .avg_cache_hit
-                    .map(|v| normalize(v, min_cache, max_cache, 0.0))
-                    .unwrap_or(0.0);
+                let cache_score = if cache_supported {
+                    if let Some(v) = stat.avg_cache_hit {
+                        let baseline = if stat.cache_read_supported || stat.cache_write_supported {
+                            0.2
+                        } else {
+                            0.0
+                        };
+                        normalize(v, min_cache, max_cache, baseline)
+                    } else if stat.cache_read_supported || stat.cache_write_supported {
+                        0.2
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
                 let tp_score = stat
                     .avg_throughput
                     .map(|v| normalize(v, min_tp, max_tp, 0.5))
@@ -704,6 +772,58 @@ impl OpenRouterProvider {
             None
         }
     }
+
+    async fn model_pricing(&self, model_id: &str) -> Option<ModelPricing> {
+        let cache = self.models_cache.read().await;
+        if cache.fetched {
+            if let Some(model) = cache.models.iter().find(|m| m.id == model_id) {
+                return Some(model.pricing.clone());
+            }
+        }
+
+        if let Some(models) = load_disk_cache() {
+            let pricing = models
+                .iter()
+                .find(|m| m.id == model_id)
+                .map(|m| m.pricing.clone());
+            if pricing.is_some() {
+                if let Ok(mut cache) = self.models_cache.try_write() {
+                    cache.models = models;
+                    cache.fetched = true;
+                }
+                return pricing;
+            }
+        }
+
+        if let Ok(models) = self.fetch_models().await {
+            if let Some(model) = models.iter().find(|m| m.id == model_id) {
+                return Some(model.pricing.clone());
+            }
+        }
+
+        None
+    }
+
+    async fn model_supports_cache(&self, model_id: &str) -> bool {
+        let Some(pricing) = self.model_pricing(model_id).await else {
+            return false;
+        };
+
+        let has_cache_read = pricing
+            .input_cache_read
+            .as_deref()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            > 0.0;
+        let has_cache_write = pricing
+            .input_cache_write
+            .as_deref()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            > 0.0;
+
+        has_cache_read || has_cache_write
+    }
 }
 
 #[async_trait]
@@ -717,8 +837,29 @@ impl Provider for OpenRouterProvider {
     ) -> Result<EventStream> {
         let model = self.model.read().await.clone();
         let thinking_override = Self::thinking_override();
+        let allow_reasoning = thinking_override != Some(false);
         let include_reasoning_content =
-            thinking_override == Some(true) || Self::is_kimi_model(&model);
+            thinking_override == Some(true) || (allow_reasoning && Self::is_kimi_model(&model));
+
+        let mut effective_messages: Vec<Message> = messages.to_vec();
+        let cache_supported = if self.model_supports_cache(&model).await {
+            true
+        } else {
+            let stats = self.provider_stats.lock().unwrap();
+            stats
+                .models
+                .get(&model)
+                .map(|m| {
+                    m.values()
+                        .any(|s| s.cache_read_supported || s.cache_write_supported)
+                })
+                .unwrap_or(false)
+        };
+        let cache_control_added = if cache_supported {
+            add_cache_breakpoint(&mut effective_messages)
+        } else {
+            false
+        };
 
         // Build messages in OpenAI format
         let mut api_messages = Vec::new();
@@ -731,8 +872,46 @@ impl Provider for OpenRouterProvider {
             }));
         }
 
+        let build_content_parts = |blocks: &[ContentBlock]| -> Vec<Value> {
+            let mut parts = Vec::new();
+            for block in blocks {
+                if let ContentBlock::Text {
+                    text,
+                    cache_control,
+                } = block
+                {
+                    let mut part = serde_json::json!({
+                        "type": "text",
+                        "text": text
+                    });
+                    if let Some(cache_control) = cache_control {
+                        part["cache_control"] =
+                            serde_json::to_value(cache_control).unwrap_or(Value::Null);
+                    }
+                    parts.push(part);
+                }
+            }
+            parts
+        };
+
+        let content_from_parts = |parts: Vec<Value>| -> Option<Value> {
+            if parts.is_empty() {
+                return None;
+            }
+            if parts.len() == 1 {
+                let part = &parts[0];
+                let has_cache = part.get("cache_control").is_some();
+                if !has_cache {
+                    if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                        return Some(serde_json::json!(text));
+                    }
+                }
+            }
+            Some(Value::Array(parts))
+        };
+
         let mut tool_result_last_pos: HashMap<String, usize> = HashMap::new();
-        for (idx, msg) in messages.iter().enumerate() {
+        for (idx, msg) in effective_messages.iter().enumerate() {
             if let Role::User = msg.role {
                 for block in &msg.content {
                     if let ContentBlock::ToolResult { tool_use_id, .. } = block {
@@ -751,46 +930,46 @@ impl Provider for OpenRouterProvider {
         let mut used_tool_results: HashSet<String> = HashSet::new();
 
         // Convert messages
-        for (idx, msg) in messages.iter().enumerate() {
+        for (idx, msg) in effective_messages.iter().enumerate() {
             match msg.role {
                 Role::User => {
+                    let parts = build_content_parts(&msg.content);
+                    if let Some(content) = content_from_parts(parts) {
+                        api_messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": content
+                        }));
+                    }
+
                     for block in &msg.content {
-                        match block {
-                            ContentBlock::Text { text, .. } => {
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } = block
+                        {
+                            if used_tool_results.contains(tool_use_id) {
+                                skipped_results += 1;
+                                continue;
+                            }
+                            let output = if is_error == &Some(true) {
+                                format!("[Error] {}", content)
+                            } else {
+                                content.clone()
+                            };
+                            if tool_calls_seen.contains(tool_use_id) {
                                 api_messages.push(serde_json::json!({
-                                    "role": "user",
-                                    "content": text
+                                    "role": "tool",
+                                    "tool_call_id": tool_use_id,
+                                    "content": output
                                 }));
+                                used_tool_results.insert(tool_use_id.clone());
+                            } else if pending_tool_results.contains_key(tool_use_id) {
+                                skipped_results += 1;
+                            } else {
+                                pending_tool_results.insert(tool_use_id.clone(), output);
+                                delayed_results += 1;
                             }
-                            ContentBlock::ToolResult {
-                                tool_use_id,
-                                content,
-                                is_error,
-                            } => {
-                                if used_tool_results.contains(tool_use_id) {
-                                    skipped_results += 1;
-                                    continue;
-                                }
-                                let output = if is_error == &Some(true) {
-                                    format!("[Error] {}", content)
-                                } else {
-                                    content.clone()
-                                };
-                                if tool_calls_seen.contains(tool_use_id) {
-                                    api_messages.push(serde_json::json!({
-                                        "role": "tool",
-                                        "tool_call_id": tool_use_id,
-                                        "content": output
-                                    }));
-                                    used_tool_results.insert(tool_use_id.clone());
-                                } else if pending_tool_results.contains_key(tool_use_id) {
-                                    skipped_results += 1;
-                                } else {
-                                    pending_tool_results.insert(tool_use_id.clone(), output);
-                                    delayed_results += 1;
-                                }
-                            }
-                            _ => {}
                         }
                     }
                 }
@@ -846,7 +1025,7 @@ impl Provider for OpenRouterProvider {
                         assistant_msg["tool_calls"] = serde_json::json!(tool_calls);
                     }
 
-                    if include_reasoning_content || !reasoning_content.is_empty() {
+                    if allow_reasoning && (include_reasoning_content || !reasoning_content.is_empty()) {
                         if !reasoning_content.is_empty() || !tool_calls.is_empty() {
                             let reasoning_payload =
                                 if reasoning_content.is_empty() && !tool_calls.is_empty() {
@@ -909,6 +1088,85 @@ impl Provider for OpenRouterProvider {
             ));
         }
 
+        // Safety pass: ensure tool-call messages include reasoning_content (when allowed)
+        // and that every tool call has a matching tool output after it.
+        let mut outputs_after: HashSet<String> = HashSet::new();
+        let mut missing_by_index: Vec<Vec<String>> = vec![Vec::new(); api_messages.len()];
+
+        for (idx, msg) in api_messages.iter().enumerate().rev() {
+            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            if role == "tool" {
+                if let Some(id) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
+                    outputs_after.insert(id.to_string());
+                }
+                continue;
+            }
+
+            if role == "assistant" {
+                if let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
+                    for call in tool_calls {
+                        if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
+                            if !outputs_after.contains(id) {
+                                outputs_after.insert(id.to_string());
+                                missing_by_index[idx].push(id.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut normalized = Vec::with_capacity(api_messages.len());
+        let mut extra_outputs = 0usize;
+        let mut missing_reasoning = 0usize;
+
+        for (idx, mut msg) in api_messages.into_iter().enumerate() {
+            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            if role == "assistant" && allow_reasoning {
+                if msg.get("tool_calls").and_then(|v| v.as_array()).is_some() {
+                    let needs_reasoning = match msg.get("reasoning_content") {
+                        Some(value) => value
+                            .as_str()
+                            .map(|s| s.trim().is_empty())
+                            .unwrap_or(true),
+                        None => true,
+                    };
+                    if needs_reasoning {
+                        msg["reasoning_content"] = serde_json::json!(" ");
+                        missing_reasoning += 1;
+                    }
+                }
+            }
+
+            normalized.push(msg);
+
+            if let Some(missing) = missing_by_index.get(idx) {
+                for id in missing {
+                    extra_outputs += 1;
+                    normalized.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": id,
+                        "content": missing_output.clone()
+                    }));
+                }
+            }
+        }
+
+        api_messages = normalized;
+
+        if missing_reasoning > 0 {
+            crate::logging::info(&format!(
+                "[openrouter] Filled reasoning_content on {} tool-call message(s)",
+                missing_reasoning
+            ));
+        }
+        if extra_outputs > 0 {
+            crate::logging::info(&format!(
+                "[openrouter] Safety-injected {} missing tool output(s) at request build",
+                extra_outputs
+            ));
+        }
+
         // Build tools in OpenAI format
         let api_tools: Vec<Value> = tools
             .iter()
@@ -945,30 +1203,41 @@ impl Provider for OpenRouterProvider {
 
         // Add provider routing if configured
         let routing = self.effective_routing(&model).await;
+        let mut provider_obj = None;
         if !routing.is_empty() {
-            let mut provider_obj = serde_json::json!({});
+            let mut obj = serde_json::json!({});
             if let Some(ref order) = routing.order {
-                provider_obj["order"] = serde_json::json!(order);
+                obj["order"] = serde_json::json!(order);
             }
             if !routing.allow_fallbacks {
-                provider_obj["allow_fallbacks"] = serde_json::json!(false);
+                obj["allow_fallbacks"] = serde_json::json!(false);
             }
             if let Some(ref sort) = routing.sort {
-                provider_obj["sort"] = serde_json::json!(sort);
+                obj["sort"] = serde_json::json!(sort);
             }
             if let Some(min_tp) = routing.preferred_min_throughput {
-                provider_obj["preferred_min_throughput"] = serde_json::json!(min_tp);
+                obj["preferred_min_throughput"] = serde_json::json!(min_tp);
             }
             if let Some(max_latency) = routing.preferred_max_latency {
-                provider_obj["preferred_max_latency"] = serde_json::json!(max_latency);
+                obj["preferred_max_latency"] = serde_json::json!(max_latency);
             }
             if let Some(max_price) = routing.max_price {
-                provider_obj["max_price"] = serde_json::json!(max_price);
+                obj["max_price"] = serde_json::json!(max_price);
             }
             if let Some(require_parameters) = routing.require_parameters {
-                provider_obj["require_parameters"] = serde_json::json!(require_parameters);
+                obj["require_parameters"] = serde_json::json!(require_parameters);
             }
-            request["provider"] = provider_obj;
+            provider_obj = Some(obj);
+        }
+
+        if cache_control_added {
+            let mut obj = provider_obj.unwrap_or_else(|| serde_json::json!({}));
+            obj["require_parameters"] = serde_json::json!(true);
+            provider_obj = Some(obj);
+        }
+
+        if let Some(obj) = provider_obj {
+            request["provider"] = obj;
         }
 
         // Send request
@@ -978,6 +1247,7 @@ impl Provider for OpenRouterProvider {
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
+            .header("Accept-Encoding", "identity")
             .header("HTTP-Referer", "https://github.com/jcode")
             .header("X-Title", "jcode")
             .json(&request)
@@ -1226,6 +1496,12 @@ impl OpenRouterStream {
 
         entry.samples = entry.samples.saturating_add(1);
         entry.last_seen = now_epoch_secs();
+        if usage.cache_read_input_tokens.is_some() {
+            entry.cache_read_supported = true;
+        }
+        if usage.cache_creation_input_tokens.is_some() {
+            entry.cache_write_supported = true;
+        }
 
         if let Some(cache_hit) = sample.cache_hit {
             entry.avg_cache_hit = Some(update_ewma(entry.avg_cache_hit, cache_hit));
@@ -1241,8 +1517,8 @@ impl OpenRouterStream {
         drop(stats);
         save_provider_stats(&snapshot);
 
-        if usage.cache_read_input_tokens.unwrap_or(0) > 0
-            || usage.cache_creation_input_tokens.unwrap_or(0) > 0
+        if usage.cache_read_input_tokens.is_some()
+            || usage.cache_creation_input_tokens.is_some()
         {
             let mut pin = self.provider_pin.lock().unwrap();
             if let Some(existing) = pin.as_mut() {
@@ -1559,6 +1835,8 @@ mod tests {
                 avg_throughput: Some(50.0),
                 avg_cost_per_mtok: Some(2.0),
                 last_seen: now,
+                cache_read_supported: true,
+                cache_write_supported: false,
             },
         );
         model_stats.insert(
@@ -1569,6 +1847,8 @@ mod tests {
                 avg_throughput: Some(60.0),
                 avg_cost_per_mtok: Some(1.0),
                 last_seen: now,
+                cache_read_supported: false,
+                cache_write_supported: false,
             },
         );
         stats.models.insert("test/model".to_string(), model_stats);
