@@ -49,6 +49,10 @@ struct CommunicateInput {
     value: Option<String>,
     #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
+    to_session: Option<String>,
+    #[serde(default)]
+    channel: Option<String>,
 }
 
 #[async_trait]
@@ -63,7 +67,9 @@ impl Tool for CommunicateTool {
          Actions:\n\
          - \"share\": Share context (key/value) with other agents. They'll be notified.\n\
          - \"read\": Read shared context from other agents.\n\
-         - \"message\": Send a message to all other agents in the codebase.\n\
+         - \"broadcast\"/\"message\": Send a message to all other agents in the codebase.\n\
+         - \"dm\": Send a direct message to a specific session.\n\
+         - \"channel\": Send a message to a named channel in this swarm.\n\
          - \"list\": See who else is working in this codebase and what files they've touched."
     }
 
@@ -74,7 +80,7 @@ impl Tool for CommunicateTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["share", "read", "message", "list"],
+                    "enum": ["share", "read", "message", "broadcast", "dm", "channel", "list"],
                     "description": "The communication action to perform"
                 },
                 "key": {
@@ -87,7 +93,15 @@ impl Tool for CommunicateTool {
                 },
                 "message": {
                     "type": "string",
-                    "description": "For 'message': the message to send to other agents."
+                    "description": "For 'message'/'broadcast'/'dm'/'channel': the message to send."
+                },
+                "to_session": {
+                    "type": "string",
+                    "description": "For 'dm': the target session ID."
+                },
+                "channel": {
+                    "type": "string",
+                    "description": "For 'channel': the channel name (without #)."
                 }
             }
         })
@@ -165,7 +179,7 @@ impl Tool for CommunicateTool {
                 }
             }
 
-            "message" => {
+            "message" | "broadcast" => {
                 let message = params
                     .message
                     .ok_or_else(|| anyhow::anyhow!("'message' is required for message action"))?;
@@ -183,6 +197,56 @@ impl Tool for CommunicateTool {
                         message
                     ))),
                     Err(e) => Err(anyhow::anyhow!("Failed to send message: {}", e)),
+                }
+            }
+
+            "dm" => {
+                let message = params
+                    .message
+                    .ok_or_else(|| anyhow::anyhow!("'message' is required for dm action"))?;
+                let to_session = params
+                    .to_session
+                    .ok_or_else(|| anyhow::anyhow!("'to_session' is required for dm action"))?;
+
+                let request = json!({
+                    "type": "comm_message",
+                    "id": 1,
+                    "from_session": ctx.session_id,
+                    "message": message,
+                    "to_session": to_session
+                });
+
+                match send_request(&request) {
+                    Ok(_) => Ok(ToolOutput::new(format!(
+                        "Direct message sent to {}: {}",
+                        to_session, message
+                    ))),
+                    Err(e) => Err(anyhow::anyhow!("Failed to send DM: {}", e)),
+                }
+            }
+
+            "channel" => {
+                let message = params
+                    .message
+                    .ok_or_else(|| anyhow::anyhow!("'message' is required for channel action"))?;
+                let channel = params
+                    .channel
+                    .ok_or_else(|| anyhow::anyhow!("'channel' is required for channel action"))?;
+
+                let request = json!({
+                    "type": "comm_message",
+                    "id": 1,
+                    "from_session": ctx.session_id,
+                    "message": message,
+                    "channel": channel
+                });
+
+                match send_request(&request) {
+                    Ok(_) => Ok(ToolOutput::new(format!(
+                        "Channel message sent to #{}: {}",
+                        channel, message
+                    ))),
+                    Err(e) => Err(anyhow::anyhow!("Failed to send channel message: {}", e)),
                 }
             }
 
@@ -243,7 +307,7 @@ impl Tool for CommunicateTool {
             }
 
             _ => Err(anyhow::anyhow!(
-                "Unknown action '{}'. Valid actions: share, read, message, list",
+                "Unknown action '{}'. Valid actions: share, read, message, broadcast, dm, channel, list",
                 params.action
             )),
         }
