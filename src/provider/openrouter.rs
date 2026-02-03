@@ -19,7 +19,7 @@ use futures::Stream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -32,6 +32,22 @@ const API_BASE: &str = "https://openrouter.ai/api/v1";
 
 /// Default model (Claude Sonnet via OpenRouter)
 const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
+/// Default provider for Kimi models (official Moonshot AI upstream)
+const DEFAULT_KIMI_PROVIDER: &str = "Moonshot AI";
+/// Known provider names for autocomplete when OpenRouter doesn't supply a list.
+const KNOWN_PROVIDERS: &[&str] = &[
+    "Moonshot AI",
+    "OpenAI",
+    "Anthropic",
+    "Fireworks",
+    "Together",
+    "DeepInfra",
+];
+
+/// Known OpenRouter provider names for autocomplete/fallback suggestions.
+pub fn known_providers() -> Vec<String> {
+    KNOWN_PROVIDERS.iter().map(|p| (*p).to_string()).collect()
+}
 
 /// Cache TTL in seconds (24 hours)
 const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
@@ -82,6 +98,8 @@ struct ProviderStats {
     throughput_samples: u64,
     cache_samples: u64,
     cost_samples: u64,
+    cache_read_supported: bool,
+    cache_write_supported: bool,
 }
 
 #[derive(Debug, Default)]
@@ -609,6 +627,15 @@ impl OpenRouterProvider {
             .collect();
 
         if cache_supported {
+            let cache_capable: Vec<(String, ProviderStats)> = entries
+                .iter()
+                .filter(|(_, stat)| stat.cache_read_supported || stat.cache_write_supported)
+                .cloned()
+                .collect();
+            if !cache_capable.is_empty() {
+                entries = cache_capable;
+            }
+
             let cache_candidates: Vec<(String, ProviderStats)> = entries
                 .iter()
                 .filter(|(_, stat)| stat.cache_samples > 0 && stat.avg_cache_hit_rate > 0.0)
@@ -653,7 +680,14 @@ impl OpenRouterProvider {
             .map(|(provider, stat)| {
                 let cache_score = if cache_supported {
                     if stat.cache_samples > 0 {
-                        Self::normalize(stat.avg_cache_hit_rate, min_cache, max_cache, 0.0)
+                        let baseline = if stat.cache_read_supported || stat.cache_write_supported {
+                            0.2
+                        } else {
+                            0.0
+                        };
+                        Self::normalize(stat.avg_cache_hit_rate, min_cache, max_cache, baseline)
+                    } else if stat.cache_read_supported || stat.cache_write_supported {
+                        0.2
                     } else {
                         0.0
                     }
@@ -688,6 +722,7 @@ impl OpenRouterProvider {
         let config = self.provider_routing.read().await.clone();
         let session_order = self.session_provider_order.read().await.clone();
         let manual_order = session_order.or_else(|| config.order.clone());
+        let is_kimi = Self::is_kimi_model(model_id);
 
         let mut decision = RoutingDecision {
             order: None,
@@ -719,6 +754,11 @@ impl OpenRouterProvider {
                 decision.order = Some(vec![provider]);
                 return decision;
             }
+        }
+
+        if is_kimi {
+            decision.order = Some(vec![DEFAULT_KIMI_PROVIDER.to_string()]);
+            return decision;
         }
 
         if let Some(ref stats) = stats_snapshot {
@@ -887,7 +927,20 @@ impl Provider for OpenRouterProvider {
         let include_reasoning_content =
             thinking_override == Some(true) || Self::is_kimi_model(&model);
         let mut effective_messages: Vec<Message> = messages.to_vec();
-        let cache_supported = self.model_supports_cache(&model).await;
+        let cache_supported = if self.model_supports_cache(&model).await {
+            true
+        } else {
+            let state = self.routing_state.read().await;
+            state
+                .provider_stats
+                .get(&model)
+                .map(|stats| {
+                    stats
+                        .values()
+                        .any(|s| s.cache_read_supported || s.cache_write_supported)
+                })
+                .unwrap_or(false)
+        };
         let cache_control_added = if cache_supported {
             Self::add_cache_breakpoint(&mut effective_messages)
         } else {
@@ -943,13 +996,12 @@ impl Provider for OpenRouterProvider {
             Some(Value::Array(parts))
         };
 
-        let mut tool_result_ids: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        for msg in &effective_messages {
+        let mut tool_result_last_pos: HashMap<String, usize> = HashMap::new();
+        for (idx, msg) in effective_messages.iter().enumerate() {
             if let Role::User = msg.role {
                 for block in &msg.content {
                     if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                        tool_result_ids.insert(tool_use_id.clone());
+                        tool_result_last_pos.insert(tool_use_id.clone(), idx);
                     }
                 }
             }
@@ -957,9 +1009,14 @@ impl Provider for OpenRouterProvider {
 
         let missing_output = format!("[Error] {}", TOOL_OUTPUT_MISSING_TEXT);
         let mut injected_missing = 0usize;
+        let mut delayed_results = 0usize;
+        let mut skipped_results = 0usize;
+        let mut tool_calls_seen: HashSet<String> = HashSet::new();
+        let mut pending_tool_results: HashMap<String, String> = HashMap::new();
+        let mut used_tool_results: HashSet<String> = HashSet::new();
 
         // Convert messages
-        for msg in &effective_messages {
+        for (idx, msg) in effective_messages.iter().enumerate() {
             match msg.role {
                 Role::User => {
                     let parts = build_content_parts(&msg.content);
@@ -977,16 +1034,28 @@ impl Provider for OpenRouterProvider {
                             is_error,
                         } = block
                         {
+                            if used_tool_results.contains(tool_use_id) {
+                                skipped_results += 1;
+                                continue;
+                            }
                             let output = if is_error == &Some(true) {
                                 format!("[Error] {}", content)
                             } else {
                                 content.clone()
                             };
-                            api_messages.push(serde_json::json!({
-                                "role": "tool",
-                                "tool_call_id": tool_use_id,
-                                "content": output
-                            }));
+                            if tool_calls_seen.contains(tool_use_id) {
+                                api_messages.push(serde_json::json!({
+                                    "role": "tool",
+                                    "tool_call_id": tool_use_id,
+                                    "content": output
+                                }));
+                                used_tool_results.insert(tool_use_id.clone());
+                            } else if pending_tool_results.contains_key(tool_use_id) {
+                                skipped_results += 1;
+                            } else {
+                                pending_tool_results.insert(tool_use_id.clone(), output);
+                                delayed_results += 1;
+                            }
                         }
                     }
                 }
@@ -994,6 +1063,7 @@ impl Provider for OpenRouterProvider {
                     let parts = build_content_parts(&msg.content);
                     let mut tool_calls = Vec::new();
                     let mut reasoning_content = String::new();
+                    let mut post_tool_outputs: Vec<(String, String)> = Vec::new();
                     let mut missing_tool_outputs: Vec<String> = Vec::new();
 
                     for block in &msg.content {
@@ -1011,9 +1081,19 @@ impl Provider for OpenRouterProvider {
                                         "arguments": serde_json::to_string(input).unwrap_or_default()
                                     }
                                 }));
-                                if !tool_result_ids.contains(id) {
-                                    tool_result_ids.insert(id.clone());
-                                    missing_tool_outputs.push(id.clone());
+                                tool_calls_seen.insert(id.clone());
+                                if let Some(output) = pending_tool_results.remove(id) {
+                                    post_tool_outputs.push((id.clone(), output));
+                                    used_tool_results.insert(id.clone());
+                                } else {
+                                    let has_future_output = tool_result_last_pos
+                                        .get(id)
+                                        .map(|pos| *pos > idx)
+                                        .unwrap_or(false);
+                                    if !has_future_output {
+                                        missing_tool_outputs.push(id.clone());
+                                        used_tool_results.insert(id.clone());
+                                    }
                                 }
                             }
                             _ => {}
@@ -1049,6 +1129,15 @@ impl Provider for OpenRouterProvider {
 
                     if assistant_msg.get("content").is_some() || !tool_calls.is_empty() {
                         api_messages.push(assistant_msg);
+
+                        for (tool_call_id, output) in post_tool_outputs {
+                            api_messages.push(serde_json::json!({
+                                "role": "tool",
+                                "tool_call_id": tool_call_id,
+                                "content": output
+                            }));
+                        }
+
                         if !missing_tool_outputs.is_empty() {
                             injected_missing += missing_tool_outputs.len();
                             for missing_id in missing_tool_outputs {
@@ -1063,10 +1152,28 @@ impl Provider for OpenRouterProvider {
                 }
             }
         }
+
+        if delayed_results > 0 {
+            crate::logging::info(&format!(
+                "[openrouter] Delayed {} tool output(s) to preserve call ordering",
+                delayed_results
+            ));
+        }
+
+        if !pending_tool_results.is_empty() {
+            skipped_results += pending_tool_results.len();
+        }
+
         if injected_missing > 0 {
             crate::logging::info(&format!(
                 "[openrouter] Injected {} synthetic tool output(s) to prevent API error",
                 injected_missing
+            ));
+        }
+        if skipped_results > 0 {
+            crate::logging::info(&format!(
+                "[openrouter] Filtered {} orphaned tool result(s) to prevent API error",
+                skipped_results
             ));
         }
 
@@ -1204,9 +1311,11 @@ impl Provider for OpenRouterProvider {
     }
 
     fn available_providers_for_model(&self, model: &str) -> Vec<String> {
-        let mut providers: Vec<String> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut push_provider = |provider: &str| {
+        fn push_provider(
+            providers: &mut Vec<String>,
+            seen: &mut std::collections::HashSet<String>,
+            provider: &str,
+        ) {
             let trimmed = provider.trim();
             if trimmed.is_empty() {
                 return;
@@ -1215,23 +1324,26 @@ impl Provider for OpenRouterProvider {
             if seen.insert(key) {
                 providers.push(trimmed.to_string());
             }
-        };
+        }
+
+        let mut providers: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
 
         if let Ok(order) = self.session_provider_order.try_read() {
             if let Some(ref order) = *order {
                 for provider in order {
-                    push_provider(provider);
+                    push_provider(&mut providers, &mut seen, provider);
                 }
             }
         }
 
         if let Ok(state) = self.routing_state.try_read() {
             if let Some(provider) = state.pinned_provider.get(model) {
-                push_provider(provider);
+                push_provider(&mut providers, &mut seen, provider);
             }
             if let Some(stats) = state.provider_stats.get(model) {
                 for provider in stats.keys() {
-                    push_provider(provider);
+                    push_provider(&mut providers, &mut seen, provider);
                 }
             }
         }
@@ -1239,18 +1351,28 @@ impl Provider for OpenRouterProvider {
         if let Ok(routing) = self.provider_routing.try_read() {
             if let Some(ref order) = routing.order {
                 for provider in order {
-                    push_provider(provider);
+                    push_provider(&mut providers, &mut seen, provider);
                 }
             }
             if let Some(ref only) = routing.only {
                 for provider in only {
-                    push_provider(provider);
+                    push_provider(&mut providers, &mut seen, provider);
                 }
             }
             if let Some(ref ignore) = routing.ignore {
                 for provider in ignore {
-                    push_provider(provider);
+                    push_provider(&mut providers, &mut seen, provider);
                 }
+            }
+        }
+
+        if Self::is_kimi_model(model) {
+            push_provider(&mut providers, &mut seen, DEFAULT_KIMI_PROVIDER);
+        }
+
+        if providers.is_empty() {
+            for provider in KNOWN_PROVIDERS {
+                push_provider(&mut providers, &mut seen, provider);
             }
         }
 
@@ -1400,6 +1522,21 @@ impl OpenRouterStream {
                 .entry(self.model_id.clone())
                 .or_default();
             let stats = stats_map.entry(provider.clone()).or_default();
+
+            if usage
+                .as_ref()
+                .and_then(|u| u.cache_read_input_tokens)
+                .is_some()
+            {
+                stats.cache_read_supported = true;
+            }
+            if usage
+                .as_ref()
+                .and_then(|u| u.cache_creation_input_tokens)
+                .is_some()
+            {
+                stats.cache_write_supported = true;
+            }
 
             if let Some(output_tokens) = usage.as_ref().and_then(|u| u.output_tokens) {
                 if output_tokens > 0 {

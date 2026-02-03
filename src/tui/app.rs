@@ -6536,10 +6536,17 @@ impl App {
                     return self.rank_model_suggestions("", models);
                 }
                 let mut providers: Vec<String> = if self.is_remote {
-                    Vec::new()
+                    if model.contains('/') {
+                        crate::provider::openrouter::known_providers()
+                    } else {
+                        Vec::new()
+                    }
                 } else {
                     self.provider.available_providers_for_model(model)
                 };
+                if providers.is_empty() {
+                    return self.rank_model_suggestions(&model_prefix_lower, models);
+                }
                 providers.insert(0, "auto".to_string());
                 return self.rank_provider_suggestions(model, provider_raw.trim(), providers);
             }
