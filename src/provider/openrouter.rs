@@ -1167,6 +1167,50 @@ impl Provider for OpenRouterProvider {
             ));
         }
 
+        // Final safety pass: ensure every tool_call_id has at least one tool response after it.
+        let mut tool_output_positions: HashMap<String, usize> = HashMap::new();
+        for (idx, msg) in api_messages.iter().enumerate() {
+            if msg.get("role").and_then(|v| v.as_str()) == Some("tool") {
+                if let Some(id) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
+                    tool_output_positions.entry(id.to_string()).or_insert(idx);
+                }
+            }
+        }
+
+        let mut missing_after: HashSet<String> = HashSet::new();
+        for (idx, msg) in api_messages.iter().enumerate() {
+            if msg.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+                continue;
+            }
+            if let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
+                for call in tool_calls {
+                    if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
+                        let has_after = tool_output_positions
+                            .get(id)
+                            .map(|pos| *pos > idx)
+                            .unwrap_or(false);
+                        if !has_after {
+                            missing_after.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        if !missing_after.is_empty() {
+            for id in missing_after.iter() {
+                api_messages.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": id,
+                    "content": missing_output.clone()
+                }));
+            }
+            crate::logging::info(&format!(
+                "[openrouter] Appended {} tool output(s) to satisfy call ordering",
+                missing_after.len()
+            ));
+        }
+
         // Build tools in OpenAI format
         let api_tools: Vec<Value> = tools
             .iter()
