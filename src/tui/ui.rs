@@ -288,9 +288,9 @@ fn format_gpt_name(short: &str) -> String {
 fn build_auth_status_line(auth: &crate::auth::AuthStatus) -> Line<'static> {
     use crate::auth::AuthState;
 
-    const GREEN: Color = Color::Rgb(100, 200, 100);  // Available
+    const GREEN: Color = Color::Rgb(100, 200, 100); // Available
     const YELLOW: Color = Color::Rgb(255, 200, 100); // Expired (may work)
-    const GRAY: Color = Color::Rgb(80, 80, 80);      // Not configured
+    const GRAY: Color = Color::Rgb(80, 80, 80); // Not configured
 
     fn dot_color(state: AuthState) -> Color {
         match state {
@@ -324,7 +324,10 @@ fn build_auth_status_line(auth: &crate::auth::AuthStatus) -> Line<'static> {
     } else {
         " anthropic "
     };
-    spans.push(Span::styled(anthropic_label, Style::default().fg(DIM_COLOR)));
+    spans.push(Span::styled(
+        anthropic_label,
+        Style::default().fg(DIM_COLOR),
+    ));
 
     // OpenRouter
     spans.push(Span::styled(
@@ -786,8 +789,7 @@ fn binary_age() -> Option<String> {
     let build_secs = now.signed_duration_since(build_date).num_seconds();
 
     // Parse git commit date
-    let git_commit_date =
-        chrono::DateTime::parse_from_str(git_date, "%Y-%m-%d %H:%M:%S %z").ok();
+    let git_commit_date = chrono::DateTime::parse_from_str(git_date, "%Y-%m-%d %H:%M:%S %z").ok();
     let git_secs = git_commit_date.map(|d| now.signed_duration_since(d).num_seconds());
 
     let build_age = format_age(build_secs);
@@ -1261,8 +1263,8 @@ fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>>
 
     // Line 4: Version and build info (dim, no chroma)
     let version_text = format!("{} · built {}", semver(), build_info);
-    let version_line = Line::from(Span::styled(version_text, Style::default().fg(DIM_COLOR)))
-        .alignment(align);
+    let version_line =
+        Line::from(Span::styled(version_text, Style::default().fg(DIM_COLOR))).alignment(align);
     lines.push(version_line);
 
     lines
@@ -1302,11 +1304,7 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
         format!("{} · /model to switch", model)
     };
     lines.push(
-        Line::from(Span::styled(
-            model_info,
-            Style::default().fg(DIM_COLOR),
-        ))
-        .alignment(align),
+        Line::from(Span::styled(model_info, Style::default().fg(DIM_COLOR))).alignment(align),
     );
 
     // Line: Auth status indicators (colored dots for each provider)
@@ -1330,8 +1328,11 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
             let mut content: Vec<Line> = Vec::new();
             for line in changelog_lines.iter().take(display_lines) {
                 content.push(
-                    Line::from(Span::styled(line.to_string(), Style::default().fg(DIM_COLOR)))
-                        .alignment(align),
+                    Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(DIM_COLOR),
+                    ))
+                    .alignment(align),
                 );
             }
             if has_more {
@@ -1595,7 +1596,10 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
             "error" => {
                 lines.push(
                     Line::from(vec![
-                        Span::styled(if centered { "✗ " } else { "  ✗ " }, Style::default().fg(Color::Red)),
+                        Span::styled(
+                            if centered { "✗ " } else { "  ✗ " },
+                            Style::default().fg(Color::Red),
+                        ),
                         Span::styled(msg.content.clone(), Style::default().fg(Color::Red)),
                     ])
                     .alignment(align),
@@ -1847,9 +1851,7 @@ fn render_tool_message(msg: &DisplayMessage, width: u16, show_diffs: bool) -> Ve
         } else {
             format!("{}└─", pad_str)
         };
-        lines.push(
-            Line::from(Span::styled(footer, Style::default().fg(DIM_COLOR))).left_aligned(),
-        );
+        lines.push(Line::from(Span::styled(footer, Style::default().fg(DIM_COLOR))).left_aligned());
     }
 
     lines
@@ -2045,7 +2047,7 @@ fn draw_messages(
         // Calculate available height - image will be clipped if it doesn't fit
         let available_height = area.height.saturating_sub(line_idx as u16);
         let render_height = height.min(available_height);
-        
+
         // Skip if no space at all
         if render_height == 0 {
             continue;
@@ -2130,14 +2132,17 @@ fn format_elapsed(secs: f32) -> String {
 fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count: usize) {
     let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
     let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
-    
+
     // Check for unexpected cache miss (cache write on turn 2+)
     let (cache_read, cache_creation) = app.streaming_cache_tokens();
-    let user_turn_count = app.display_messages().iter().filter(|m| m.role == "user").count();
-    let unexpected_cache_miss = user_turn_count > 1 
-        && cache_creation.unwrap_or(0) > 0 
-        && cache_read.unwrap_or(0) == 0;
-    
+    let user_turn_count = app
+        .display_messages()
+        .iter()
+        .filter(|m| m.role == "user")
+        .count();
+    let unexpected_cache_miss =
+        user_turn_count > 1 && cache_creation.unwrap_or(0) > 0 && cache_read.unwrap_or(0) == 0;
+
     // Helper to append queued count indicator
     let queued_suffix = if pending_count > 0 {
         format!(" · +{} queued", pending_count)
@@ -2204,7 +2209,10 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
                     ),
                 ];
                 if !queued_suffix.is_empty() {
-                    spans.push(Span::styled(queued_suffix.clone(), Style::default().fg(QUEUED_COLOR)));
+                    spans.push(Span::styled(
+                        queued_suffix.clone(),
+                        Style::default().fg(QUEUED_COLOR),
+                    ));
                 }
                 Line::from(spans)
             }
@@ -2226,10 +2234,20 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
                 }
                 let mut spans = vec![
                     Span::styled(spinner, Style::default().fg(AI_COLOR)),
-                    Span::styled(format!(" {}", status_text), Style::default().fg(if unexpected_cache_miss { Color::Rgb(255, 193, 7) } else { DIM_COLOR })),
+                    Span::styled(
+                        format!(" {}", status_text),
+                        Style::default().fg(if unexpected_cache_miss {
+                            Color::Rgb(255, 193, 7)
+                        } else {
+                            DIM_COLOR
+                        }),
+                    ),
                 ];
                 if !queued_suffix.is_empty() {
-                    spans.push(Span::styled(queued_suffix.clone(), Style::default().fg(QUEUED_COLOR)));
+                    spans.push(Span::styled(
+                        queued_suffix.clone(),
+                        Style::default().fg(QUEUED_COLOR),
+                    ));
                 }
                 Line::from(spans)
             }
@@ -2242,21 +2260,27 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
                     .map(|i| if i == filled_pos { '●' } else { '·' })
                     .collect();
                 let right_bar: String = (0..half_width)
-                    .map(|i| if i == (half_width - 1 - filled_pos) { '●' } else { '·' })
+                    .map(|i| {
+                        if i == (half_width - 1 - filled_pos) {
+                            '●'
+                        } else {
+                            '·'
+                        }
+                    })
                     .collect();
-                
+
                 let anim_color = animated_tool_color(elapsed);
-                
+
                 // Get tool details (command, file path, etc.)
                 let tool_detail = app
                     .streaming_tool_calls()
                     .last()
                     .map(|tc| get_tool_summary(tc))
                     .filter(|s| !s.is_empty());
-                
+
                 // Subagent status (only for task_runner)
                 let subagent = app.subagent_status();
-                
+
                 // Build the line: animation · tool · animation · detail · (status) · time · ⚠ cache
                 let mut spans = vec![
                     Span::styled(left_bar, Style::default().fg(anim_color)),
@@ -2265,17 +2289,26 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
                     Span::styled(" ", Style::default()),
                     Span::styled(right_bar, Style::default().fg(anim_color)),
                 ];
-                
+
                 if let Some(detail) = tool_detail {
-                    spans.push(Span::styled(format!(" · {}", detail), Style::default().fg(DIM_COLOR)));
+                    spans.push(Span::styled(
+                        format!(" · {}", detail),
+                        Style::default().fg(DIM_COLOR),
+                    ));
                 }
-                
+
                 if let Some(status) = subagent {
-                    spans.push(Span::styled(format!(" ({})", status), Style::default().fg(DIM_COLOR)));
+                    spans.push(Span::styled(
+                        format!(" ({})", status),
+                        Style::default().fg(DIM_COLOR),
+                    ));
                 }
-                
-                spans.push(Span::styled(format!(" · {}", format_elapsed(elapsed)), Style::default().fg(DIM_COLOR)));
-                
+
+                spans.push(Span::styled(
+                    format!(" · {}", format_elapsed(elapsed)),
+                    Style::default().fg(DIM_COLOR),
+                ));
+
                 if unexpected_cache_miss {
                     let miss_tokens = cache_creation.unwrap_or(0);
                     let miss_str = if miss_tokens >= 1000 {
@@ -2283,13 +2316,19 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
                     } else {
                         format!("{}", miss_tokens)
                     };
-                    spans.push(Span::styled(format!(" · ⚠ {} cache miss", miss_str), Style::default().fg(Color::Rgb(255, 193, 7))));
+                    spans.push(Span::styled(
+                        format!(" · ⚠ {} cache miss", miss_str),
+                        Style::default().fg(Color::Rgb(255, 193, 7)),
+                    ));
                 }
-                
+
                 if !queued_suffix.is_empty() {
-                    spans.push(Span::styled(queued_suffix.clone(), Style::default().fg(QUEUED_COLOR)));
+                    spans.push(Span::styled(
+                        queued_suffix.clone(),
+                        Style::default().fg(QUEUED_COLOR),
+                    ));
                 }
-                
+
                 Line::from(spans)
             }
         }
@@ -2373,7 +2412,10 @@ fn build_idle_usage_line(app: &dyn TuiState) -> Line<'static> {
                 Span::styled("5hr:", Style::default().fg(DIM_COLOR)),
                 Span::styled(format!("{}%", five_hr), Style::default().fg(five_hr_color)),
                 Span::styled(" · 7d:", Style::default().fg(DIM_COLOR)),
-                Span::styled(format!("{}%", seven_day), Style::default().fg(seven_day_color)),
+                Span::styled(
+                    format!("{}%", seven_day),
+                    Style::default().fg(seven_day_color),
+                ),
             ])
         }
     }
@@ -2697,7 +2739,12 @@ fn draw_input(
 
     let centered = app.centered_mode();
     let paragraph = if centered {
-        Paragraph::new(lines.iter().map(|l| l.clone().alignment(ratatui::layout::Alignment::Center)).collect::<Vec<_>>())
+        Paragraph::new(
+            lines
+                .iter()
+                .map(|l| l.clone().alignment(ratatui::layout::Alignment::Center))
+                .collect::<Vec<_>>(),
+        )
     } else {
         Paragraph::new(lines.clone())
     };

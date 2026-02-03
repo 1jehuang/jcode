@@ -58,7 +58,7 @@ impl Tool for PatchTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: PatchInput = serde_json::from_value(input)?;
 
         let patches = parse_patch(&params.patch_text)?;
@@ -70,7 +70,8 @@ impl Tool for PatchTool {
         let mut results = Vec::new();
 
         for patch in patches {
-            let result = apply_patch_with_diff(&patch).await;
+            let resolved_path = ctx.resolve_path(&patch.path);
+            let result = apply_patch_with_diff(&patch, &resolved_path).await;
             match result {
                 Ok((msg, diff)) => {
                     if diff.is_empty() {
@@ -205,9 +206,7 @@ fn parse_hunk(lines: &[&str], i: &mut usize) -> Option<Hunk> {
 }
 
 /// Apply a patch and return (status_message, diff_output)
-async fn apply_patch_with_diff(patch: &FilePatch) -> Result<(String, String)> {
-    let path = Path::new(&patch.path);
-
+async fn apply_patch_with_diff(patch: &FilePatch, path: &Path) -> Result<(String, String)> {
     // Handle deletion
     if patch.is_delete {
         if path.exists() {

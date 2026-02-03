@@ -961,7 +961,10 @@ impl MemoryManager {
         if let Ok(project) = self.load_project_graph() {
             for memory in project.all_memories() {
                 if memory.content.to_lowercase().contains(&query_lower)
-                    || memory.tags.iter().any(|t| t.to_lowercase().contains(&query_lower))
+                    || memory
+                        .tags
+                        .iter()
+                        .any(|t| t.to_lowercase().contains(&query_lower))
                 {
                     results.push(memory.clone());
                 }
@@ -972,7 +975,10 @@ impl MemoryManager {
         if let Ok(global) = self.load_global_graph() {
             for memory in global.all_memories() {
                 if memory.content.to_lowercase().contains(&query_lower)
-                    || memory.tags.iter().any(|t| t.to_lowercase().contains(&query_lower))
+                    || memory
+                        .tags
+                        .iter()
+                        .any(|t| t.to_lowercase().contains(&query_lower))
                 {
                     results.push(memory.clone());
                 }

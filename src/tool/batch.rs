@@ -118,7 +118,10 @@ impl Tool for BatchTool {
                     success_count += 1;
                     // Truncate long outputs
                     let truncated = if out.output.len() > 1000 {
-                        format!("{}...\n(truncated)", crate::util::truncate_str(&out.output, 1000))
+                        format!(
+                            "{}...\n(truncated)",
+                            crate::util::truncate_str(&out.output, 1000)
+                        )
                     } else {
                         out.output
                     };

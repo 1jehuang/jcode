@@ -147,7 +147,13 @@ pub fn build_system_prompt_with_context_and_memory(
     is_selfdev: bool,
     memory_prompt: Option<&str>,
 ) -> (String, ContextInfo) {
-    build_system_prompt_full(skill_prompt, available_skills, is_selfdev, memory_prompt, None)
+    build_system_prompt_full(
+        skill_prompt,
+        available_skills,
+        is_selfdev,
+        memory_prompt,
+        None,
+    )
 }
 
 /// Build the full system prompt with working directory support for loading context files
@@ -501,16 +507,18 @@ pub fn load_claude_md_files_from_dir(working_dir: Option<&Path>) -> (Option<Stri
     // Project-level files (from specified working directory or current directory)
     // AGENTS.md first (generic), then CLAUDE.md (Claude-specific)
     let project_dir = working_dir.unwrap_or(Path::new("."));
-    if let Some((content, size)) =
-        load_file(&project_dir.join("AGENTS.md"), "Project Instructions (AGENTS.md)")
-    {
+    if let Some((content, size)) = load_file(
+        &project_dir.join("AGENTS.md"),
+        "Project Instructions (AGENTS.md)",
+    ) {
         info.has_project_agents_md = true;
         info.project_agents_md_chars = size;
         contents.push(content);
     }
-    if let Some((content, size)) =
-        load_file(&project_dir.join("CLAUDE.md"), "Project Instructions (CLAUDE.md)")
-    {
+    if let Some((content, size)) = load_file(
+        &project_dir.join("CLAUDE.md"),
+        "Project Instructions (CLAUDE.md)",
+    ) {
         info.has_project_claude_md = true;
         info.project_claude_md_chars = size;
         contents.push(content);
