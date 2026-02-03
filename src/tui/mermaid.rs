@@ -131,6 +131,38 @@ pub fn is_mermaid_lang(lang: &str) -> bool {
     lang_lower == "mermaid" || lang_lower.starts_with("mermaid")
 }
 
+/// Maximum allowed nodes in a diagram (prevents OOM on complex diagrams)
+const MAX_NODES: usize = 100;
+/// Maximum allowed edges in a diagram
+const MAX_EDGES: usize = 200;
+
+/// Count nodes and edges in mermaid content (rough estimate)
+fn estimate_diagram_size(content: &str) -> (usize, usize) {
+    let mut nodes = 0;
+    let mut edges = 0;
+    
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("%%") {
+            continue;
+        }
+        // Count arrow connections as edges
+        if trimmed.contains("-->") || trimmed.contains("-.->") || trimmed.contains("==>") {
+            edges += 1;
+        }
+        // Count node definitions (rough heuristic)
+        if trimmed.contains('[') && trimmed.contains(']') {
+            nodes += 1;
+        } else if trimmed.contains('{') && trimmed.contains('}') {
+            nodes += 1;
+        } else if trimmed.contains('(') && trimmed.contains(')') {
+            nodes += 1;
+        }
+    }
+    
+    (nodes, edges)
+}
+
 /// Render a mermaid code block to PNG (cached)
 pub fn render_mermaid(content: &str) -> RenderResult {
     // Calculate content hash for caching
@@ -162,6 +194,16 @@ pub fn render_mermaid(content: &str) -> RenderResult {
     // This protects against any panics in the external library
     // We temporarily install a no-op panic hook to suppress the default output
     let content_owned = content.to_string();
+
+    // Check diagram size before attempting expensive layout
+    // This prevents OOM on complex diagrams (e.g., full system architecture)
+    let (node_count, edge_count) = estimate_diagram_size(&content_owned);
+    if node_count > MAX_NODES || edge_count > MAX_EDGES {
+        return RenderResult::Error(format!(
+            "Diagram too complex ({} nodes, {} edges). Max: {} nodes, {} edges.",
+            node_count, edge_count, MAX_NODES, MAX_EDGES
+        ));
+    }
     let prev_hook = panic::take_hook();
     panic::set_hook(Box::new(|_| {
         // Silently ignore panics from mermaid renderer
