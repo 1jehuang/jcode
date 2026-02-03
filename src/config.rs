@@ -74,6 +74,8 @@ pub struct DisplayConfig {
     pub debug_socket: bool,
     /// Center all content (default: false)
     pub centered: bool,
+    /// Show thinking/reasoning content by default (default: false)
+    pub show_thinking: bool,
 }
 
 impl Default for DisplayConfig {
@@ -84,6 +86,7 @@ impl Default for DisplayConfig {
             mouse_capture: false,
             debug_socket: false,
             centered: true,
+            show_thinking: false,
         }
     }
 }
@@ -180,6 +183,11 @@ impl Config {
                 self.display.debug_socket = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_SHOW_THINKING") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.show_thinking = parsed;
+            }
+        }
 
         // Provider
         if let Ok(v) = std::env::var("JCODE_MODEL") {
@@ -246,6 +254,9 @@ mouse_capture = false
 
 # Enable debug socket for external control/testing (default: false)
 debug_socket = false
+
+# Show thinking/reasoning content (default: false)
+show_thinking = false
 
 [provider]
 # Default model (optional, uses provider default if not set)

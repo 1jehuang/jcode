@@ -885,6 +885,10 @@ fn format_status_for_debug(app: &dyn TuiState) -> String {
             }
         }
         ProcessingStatus::Sending => "Sending...".to_string(),
+        ProcessingStatus::Thinking(start) => {
+            let elapsed = start.elapsed().as_secs_f32();
+            format!("Thinking... ({:.1}s)", elapsed)
+        }
         ProcessingStatus::Streaming => {
             let (input, output) = app.streaming_tokens();
             format!("Streaming (↑{} ↓{})", input, output)
@@ -2026,17 +2030,7 @@ fn draw_messages(
         }
     }
 
-    // Clear placeholder lines before rendering text to avoid flicker
-    // Replace image placeholder regions with empty lines
-    for &(line_idx, _, height) in &image_regions {
-        for i in 0..height as usize {
-            if line_idx + i < visible_lines.len() {
-                visible_lines[line_idx + i] = Line::from("");
-            }
-        }
-    }
-
-    // Render text (with image regions cleared)
+    // Render text first - mermaid widget handles its own clearing
     let paragraph = Paragraph::new(visible_lines);
     frame.render_widget(paragraph, area);
 
@@ -2205,6 +2199,23 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
                     Span::styled(spinner, Style::default().fg(AI_COLOR)),
                     Span::styled(
                         format!(" sending… {}", format_elapsed(elapsed)),
+                        Style::default().fg(DIM_COLOR),
+                    ),
+                ];
+                if !queued_suffix.is_empty() {
+                    spans.push(Span::styled(
+                        queued_suffix.clone(),
+                        Style::default().fg(QUEUED_COLOR),
+                    ));
+                }
+                Line::from(spans)
+            }
+            ProcessingStatus::Thinking(start) => {
+                let thinking_elapsed = start.elapsed().as_secs_f32();
+                let mut spans = vec![
+                    Span::styled(spinner, Style::default().fg(AI_COLOR)),
+                    Span::styled(
+                        format!(" thinking… {:.1}s", thinking_elapsed),
                         Style::default().fg(DIM_COLOR),
                     ),
                 ];

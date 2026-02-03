@@ -186,6 +186,8 @@ pub enum ProcessingStatus {
     Idle,
     /// Sending request to API
     Sending,
+    /// Model is reasoning/thinking (real-time duration tracking)
+    Thinking(Instant),
     /// Receiving streaming response
     Streaming,
     /// Executing a tool
@@ -376,6 +378,10 @@ pub struct App {
     thinking_start: Option<Instant>,
     // Whether we've inserted the current turn's thought line
     thought_line_inserted: bool,
+    // Buffer for accumulating thinking content during a thinking session
+    thinking_buffer: String,
+    // Whether we've emitted the 💭 prefix for the current thinking session
+    thinking_prefix_emitted: bool,
     // Hot-reload: if set, exec into new binary with this session ID (no rebuild)
     reload_requested: Option<String>,
     // Hot-rebuild: if set, do full git pull + cargo build + tests then exec
@@ -563,6 +569,8 @@ impl App {
             stream_buffer: StreamBuffer::new(),
             thinking_start: None,
             thought_line_inserted: false,
+            thinking_buffer: String::new(),
+            thinking_prefix_emitted: false,
             reload_requested: None,
             rebuild_requested: None,
             pasted_contents: Vec::new(),
@@ -1014,6 +1022,7 @@ impl App {
                         status: match &self.status {
                             ProcessingStatus::Idle => "ready".to_string(),
                             ProcessingStatus::Sending => "running".to_string(),
+                            ProcessingStatus::Thinking(_) => "thinking".to_string(),
                             ProcessingStatus::Streaming => "running".to_string(),
                             ProcessingStatus::RunningTool(_) => "running".to_string(),
                         },
@@ -2572,6 +2581,10 @@ impl App {
                 }
                 // Update status from Sending to Streaming on first text
                 if matches!(self.status, ProcessingStatus::Sending) {
+                    // Transition from Thinking to Streaming when text content arrives
+                    if matches!(self.status, ProcessingStatus::Thinking(_)) {
+                        self.status = ProcessingStatus::Streaming;
+                    }
                     self.status = ProcessingStatus::Streaming;
                 }
                 if let Some(chunk) = self.stream_buffer.push(&text) {
@@ -2699,6 +2712,8 @@ impl App {
                     self.streaming_tool_calls.clear();
                     self.current_message_id = None;
                     self.thought_line_inserted = false;
+                    self.thinking_prefix_emitted = false;
+                    self.thinking_buffer.clear();
                     remote.clear_pending();
                 }
                 false
@@ -2717,6 +2732,8 @@ impl App {
                 self.interleave_message = None;
                 self.pending_soft_interrupt = None;
                 self.thought_line_inserted = false;
+                self.thinking_prefix_emitted = false;
+                self.thinking_buffer.clear();
                 remote.clear_pending();
                 false
             }
@@ -2801,6 +2818,8 @@ impl App {
                     self.streaming_text.clear();
                     self.streaming_tool_calls.clear();
                     self.thought_line_inserted = false;
+                    self.thinking_prefix_emitted = false;
+                    self.thinking_buffer.clear();
                     self.streaming_input_tokens = 0;
                     self.streaming_output_tokens = 0;
                     self.streaming_cache_read_tokens = None;
@@ -3058,6 +3077,8 @@ impl App {
                         self.status = ProcessingStatus::Sending;
                         self.processing_started = Some(Instant::now());
                         self.thought_line_inserted = false;
+                        self.thinking_prefix_emitted = false;
+                        self.thinking_buffer.clear();
                     }
                     SendAction::Queue => {
                         self.queued_messages.push(expanded);
@@ -3282,6 +3303,8 @@ impl App {
                             self.status = ProcessingStatus::Sending;
                             self.processing_started = Some(Instant::now());
                             self.thought_line_inserted = false;
+                            self.thinking_prefix_emitted = false;
+                            self.thinking_buffer.clear();
                         }
                         SendAction::Queue => {
                             self.queued_messages.push(expanded);
@@ -3372,6 +3395,8 @@ impl App {
         self.interleave_message = None;
         self.pending_soft_interrupt = None;
         self.thought_line_inserted = false;
+        self.thinking_prefix_emitted = false;
+        self.thinking_buffer.clear();
     }
 
     /// Handle a key event (wrapper for debug injection)
@@ -4663,6 +4688,8 @@ impl App {
         self.streaming_md_renderer.borrow_mut().reset();
         self.stream_buffer.clear();
         self.thought_line_inserted = false;
+        self.thinking_prefix_emitted = false;
+        self.thinking_buffer.clear();
         self.streaming_tool_calls.clear();
         self.streaming_input_tokens = 0;
         self.streaming_output_tokens = 0;
@@ -4706,6 +4733,8 @@ impl App {
             self.streaming_text.clear();
             self.stream_buffer.clear();
             self.thought_line_inserted = false;
+            self.thinking_prefix_emitted = false;
+            self.thinking_buffer.clear();
             self.streaming_tool_calls.clear();
             self.streaming_input_tokens = 0;
             self.streaming_output_tokens = 0;
@@ -5176,17 +5205,35 @@ impl App {
                         return Err(anyhow::anyhow!("Stream error: {}", message));
                     }
                     StreamEvent::ThinkingStart => {
-                        // Track start but don't display - wait for ThinkingDone
-                        self.thinking_start = Some(Instant::now());
+                        // Track start and update status for real-time indicator
+                        let start = Instant::now();
+                        self.thinking_start = Some(start);
+                        self.thinking_buffer.clear();
+                        self.thinking_prefix_emitted = false;
+                        // Update status to Thinking for real-time duration display
+                        if !config().display.show_thinking {
+                            self.status = ProcessingStatus::Thinking(start);
+                        }
                     }
                     StreamEvent::ThinkingDelta(thinking_text) => {
-                        // Display reasoning/thinking content from OpenAI
+                        // Buffer thinking content and emit with prefix only once
+                        self.thinking_buffer.push_str(&thinking_text);
                         // Flush any pending text first
                         if let Some(chunk) = self.stream_buffer.flush() {
                             self.streaming_text.push_str(&chunk);
                         }
-                        // Insert thinking content as a thought line
-                        self.insert_thought_line(format!("💭 {}", thinking_text));
+                        // Only show thinking content if enabled in config
+                        if config().display.show_thinking {
+                            // Only emit the prefix once at the start of thinking
+                            if !self.thinking_prefix_emitted && !self.thinking_buffer.trim().is_empty() {
+                                self.insert_thought_line(format!("💭 {}", self.thinking_buffer.trim_start()));
+                                self.thinking_prefix_emitted = true;
+                                self.thinking_buffer.clear();
+                            } else if self.thinking_prefix_emitted {
+                                // After prefix is emitted, append subsequent chunks directly
+                                self.streaming_text.push_str(&thinking_text);
+                            }
+                        }
                         if store_reasoning_content {
                             reasoning_content.push_str(&thinking_text);
                         }
@@ -5194,6 +5241,7 @@ impl App {
                     StreamEvent::ThinkingEnd => {
                         // Don't display here - ThinkingDone has accurate timing
                         self.thinking_start = None;
+                        self.thinking_buffer.clear();
                     }
                     StreamEvent::ThinkingDone { duration_secs } => {
                         // Flush any pending buffered text first
@@ -5203,6 +5251,8 @@ impl App {
                         // Bridge provides accurate wall-clock timing
                         let thinking_msg = format!("*Thought for {:.1}s*", duration_secs);
                         self.insert_thought_line(thinking_msg);
+                        self.thinking_prefix_emitted = false;
+                        self.thinking_buffer.clear();
                     }
                     StreamEvent::Compaction {
                         trigger,
@@ -5805,21 +5855,42 @@ impl App {
                                         return Err(anyhow::anyhow!("Stream error: {}", message));
                                     }
                                     StreamEvent::ThinkingStart => {
-                                        self.thinking_start = Some(Instant::now());
+                                        let start = Instant::now();
+                                        self.thinking_start = Some(start);
+                                        self.thinking_buffer.clear();
+                                        self.thinking_prefix_emitted = false;
+                                        // Update status to Thinking for real-time duration display
+                                        if !config().display.show_thinking {
+                                            self.status = ProcessingStatus::Thinking(start);
+                                        }
                                         self.broadcast_debug(super::backend::DebugEvent::ThinkingStart);
                                     }
                                     StreamEvent::ThinkingDelta(thinking_text) => {
+                                        // Buffer thinking content and emit with prefix only once
+                                        self.thinking_buffer.push_str(&thinking_text);
                                         // Display reasoning/thinking content from OpenAI
                                         if let Some(chunk) = self.stream_buffer.flush() {
                                             self.streaming_text.push_str(&chunk);
                                         }
-                                        self.insert_thought_line(format!("💭 {}", thinking_text));
+                                        // Only show thinking content if enabled in config
+                                        if config().display.show_thinking {
+                                            // Only emit the prefix once at the start of thinking
+                                            if !self.thinking_prefix_emitted && !self.thinking_buffer.trim().is_empty() {
+                                                self.insert_thought_line(format!("💭 {}", self.thinking_buffer.trim_start()));
+                                                self.thinking_prefix_emitted = true;
+                                                self.thinking_buffer.clear();
+                                            } else if self.thinking_prefix_emitted {
+                                                // After prefix is emitted, append subsequent chunks directly
+                                                self.streaming_text.push_str(&thinking_text);
+                                            }
+                                        }
                                         if store_reasoning_content {
                                             reasoning_content.push_str(&thinking_text);
                                         }
                                     }
                                     StreamEvent::ThinkingEnd => {
                                         self.thinking_start = None;
+                                        self.thinking_buffer.clear();
                                         self.broadcast_debug(super::backend::DebugEvent::ThinkingEnd);
                                     }
                                     StreamEvent::ThinkingDone { duration_secs } => {
@@ -5829,6 +5900,8 @@ impl App {
                                         }
                                         let thinking_msg = format!("*Thought for {:.1}s*", duration_secs);
                                         self.insert_thought_line(thinking_msg);
+                                        self.thinking_prefix_emitted = false;
+                                        self.thinking_buffer.clear();
                                     }
                                     StreamEvent::Compaction { trigger, pre_tokens } => {
                                         // Flush any pending buffered text first
@@ -7575,6 +7648,9 @@ impl super::TuiState for App {
                     ProcessingStatus::Idle => ("ready".to_string(), None),
                     ProcessingStatus::Sending => {
                         ("running".to_string(), Some("sending".to_string()))
+                    }
+                    ProcessingStatus::Thinking(_) => {
+                        ("thinking".to_string(), None)
                     }
                     ProcessingStatus::Streaming => {
                         ("running".to_string(), Some("streaming".to_string()))
