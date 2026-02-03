@@ -996,6 +996,32 @@ impl App {
                 "version": env!("JCODE_VERSION"),
             })
             .to_string()
+        } else if cmd == "swarm" || cmd == "swarm-status" {
+            if self.is_remote {
+                serde_json::json!({
+                    "session_count": self.remote_sessions.len(),
+                    "client_count": self.remote_client_count,
+                    "members": self.remote_swarm_members,
+                })
+                .to_string()
+            } else {
+                serde_json::json!({
+                    "session_count": 1,
+                    "client_count": null,
+                    "members": vec![crate::protocol::SwarmMemberStatus {
+                        session_id: self.session.id.clone(),
+                        friendly_name: Some(self.session.display_name().to_string()),
+                        status: match &self.status {
+                            ProcessingStatus::Idle => "ready".to_string(),
+                            ProcessingStatus::Sending => "running".to_string(),
+                            ProcessingStatus::Streaming => "running".to_string(),
+                            ProcessingStatus::RunningTool(_) => "running".to_string(),
+                        },
+                        detail: self.subagent_status.clone(),
+                    }],
+                })
+                .to_string()
+            }
         } else if cmd == "snapshot" {
             let snapshot = self.build_debug_snapshot();
             serde_json::to_string_pretty(&snapshot).unwrap_or_else(|_| "{}".to_string())
