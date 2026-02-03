@@ -36,19 +36,6 @@ static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> =
 static IMAGE_STATE: LazyLock<Mutex<HashMap<u64, StatefulProtocol>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Track last rendered position/state to avoid re-rendering unchanged images
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct RenderKey {
-    hash: u64,
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
-}
-
-static LAST_RENDERED: LazyLock<Mutex<HashMap<u64, RenderKey>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
 /// Initialize the global picker by querying terminal capabilities.
 /// Should be called early in app startup, after entering alternate screen.
 pub fn init_picker() {
@@ -340,27 +327,6 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         area
     };
 
-    // Check if we already rendered this image at this exact position
-    // This avoids expensive re-renders during scrolling
-    let current_key = RenderKey {
-        hash,
-        x: render_area.x,
-        y: render_area.y,
-        width: render_area.width,
-        height: render_area.height,
-    };
-
-    {
-        let last_rendered = LAST_RENDERED.lock().unwrap();
-        if let Some(last_key) = last_rendered.get(&hash) {
-            if *last_key == current_key {
-                // Image is already at this exact position - skip re-render
-                // The terminal graphics protocol maintains the image display
-                return area.height;
-            }
-        }
-    }
-
     // Note: We intentionally do NOT clear the buffer here.
     // ratatui-image handles clearing internally via cell.set_skip(true).
     // Manual clearing causes flicker during scroll because it wipes the
@@ -385,20 +351,13 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         (render_area.width, render_area.height)
     };
 
-    // Use Fit to scale down if image is larger than available area
-    // Use Crop to clip if the available area is smaller than the scaled image
-    // This ensures diagrams always fit within the terminal width while preserving aspect ratio
+    // Always use Crop to clip - never resize the image
+    // This prevents flickering during scroll when the available area changes
     let make_resize = || {
-        if img_cols > render_area.width || img_rows > render_area.height {
-            // Image is larger than available area - scale to fit
-            Resize::Fit(None)
-        } else {
-            // Image fits - use crop to prevent upscaling
-            Resize::Crop(Some(CropOptions {
-                clip_top: false,
-                clip_left: false,
-            }))
-        }
+        Resize::Crop(Some(CropOptions {
+            clip_top: false,
+            clip_left: false,
+        }))
     };
 
     // Try to render from existing state
@@ -414,8 +373,6 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
     };
 
     if render_result {
-        // Update tracking
-        LAST_RENDERED.lock().unwrap().insert(hash, current_key);
         return area.height;
     }
 
@@ -436,8 +393,6 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
                 if let Some(protocol) = state.get_mut(&hash) {
                     let widget = StatefulImage::default().resize(make_resize());
                     widget.render(render_area, buf, protocol);
-                    // Update tracking
-                    LAST_RENDERED.lock().unwrap().insert(hash, current_key);
                     return area.height;
                 }
             }
@@ -445,14 +400,6 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
     }
 
     0
-}
-
-/// Clear the last rendered tracking for all images or a specific hash.
-/// Call this on window resize to force re-render at new positions.
-pub fn clear_last_rendered() {
-    if let Ok(mut last) = LAST_RENDERED.lock() {
-        last.clear();
-    }
 }
 
 /// Estimate the height needed for an image in terminal rows
