@@ -190,6 +190,10 @@ impl TuiState for BenchState {
         (None, None)
     }
 
+    fn output_tps(&self) -> Option<f32> {
+        None
+    }
+
     fn streaming_tool_calls(&self) -> Vec<ToolCall> {
         Vec::new()
     }
