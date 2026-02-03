@@ -7647,6 +7647,22 @@ impl super::TuiState for App {
                 || (provider_name == "remote" && has_oauth_creds);
             let is_api_key_provider = provider_name.contains("openrouter");
 
+            let output_tps = if self.is_processing {
+                match (self.processing_started, self.streaming_output_tokens) {
+                    (Some(start), output) if output > 0 => {
+                        let elapsed = start.elapsed().as_secs_f32();
+                        if elapsed > 0.0 {
+                            Some(output as f32 / elapsed)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
             if is_oauth_provider {
                 let usage = crate::usage::get_sync();
                 // Show widget for OAuth providers even if data is still loading
@@ -7660,6 +7676,7 @@ impl super::TuiState for App {
                     output_tokens: 0,
                     cache_read_tokens: None,
                     cache_write_tokens: None,
+                    output_tps: None,
                     available: true,
                 })
             } else if is_api_key_provider {
@@ -7674,6 +7691,7 @@ impl super::TuiState for App {
                     output_tokens: self.total_output_tokens,
                     cache_read_tokens: self.streaming_cache_read_tokens,
                     cache_write_tokens: self.streaming_cache_creation_tokens,
+                    output_tps,
                     available: true,
                 })
             } else {
