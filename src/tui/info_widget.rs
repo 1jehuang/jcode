@@ -1448,6 +1448,19 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
                         None,
                         inner.width,
                     ));
+
+                    if let Some(tps) = info.output_tps {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                "⏱ ",
+                                Style::default().fg(Color::Rgb(120, 170, 220)),
+                            ),
+                            Span::styled(
+                                format!("{:.1} tps", tps),
+                                Style::default().fg(Color::Rgb(140, 140, 150)),
+                            ),
+                        ]));
+                    }
                 }
             }
         }

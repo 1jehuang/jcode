@@ -1169,11 +1169,12 @@ impl TuiState for ClientApp {
                 output_tokens: 0,
                 cache_read_tokens: None,
                 cache_write_tokens: None,
-                output_tps: None,
+                output_tps,
                 available: true,
             })
-        } else if is_api_key_provider {
-            // API-key providers - always show cost widget
+        } else if is_api_key_provider || self.total_input_tokens > 0 || self.total_output_tokens > 0
+        {
+            // API-key providers or if we have token counts
             Some(super::info_widget::UsageInfo {
                 provider: super::info_widget::UsageProvider::CostBased,
                 five_hour: 0.0,
