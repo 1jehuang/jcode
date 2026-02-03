@@ -646,7 +646,10 @@ pub fn detect_crashed_sessions() -> Result<Option<CrashedSessionsInfo>> {
     crashed.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
     let session_ids: Vec<String> = crashed.iter().map(|s| s.id.clone()).collect();
-    let display_names: Vec<String> = crashed.iter().map(|s| s.display_name().to_string()).collect();
+    let display_names: Vec<String> = crashed
+        .iter()
+        .map(|s| s.display_name().to_string())
+        .collect();
 
     Ok(Some(CrashedSessionsInfo {
         session_ids,

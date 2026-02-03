@@ -63,12 +63,12 @@ impl Tool for ReadTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: ReadInput = serde_json::from_value(input)?;
 
-        let path = Path::new(&params.file_path);
+        let path = ctx.resolve_path(&params.file_path);
 
         // Check if file exists
         if !path.exists() {
             // Try to find similar files
-            let suggestions = find_similar_files(&params.file_path);
+            let suggestions = find_similar_files(&path);
             if suggestions.is_empty() {
                 return Err(anyhow::anyhow!("File not found: {}", params.file_path));
             } else {
@@ -81,17 +81,17 @@ impl Tool for ReadTool {
         }
 
         // Check for image files and display in terminal if supported
-        if is_image_file(path) {
-            return handle_image_file(path, &params.file_path);
+        if is_image_file(&path) {
+            return handle_image_file(&path, &params.file_path);
         }
 
         // Check for PDF files and extract text
-        if is_pdf_file(path) {
-            return handle_pdf_file(path, &params.file_path);
+        if is_pdf_file(&path) {
+            return handle_pdf_file(&path, &params.file_path);
         }
 
         // Check for binary files
-        if is_binary_file(path) {
+        if is_binary_file(&path) {
             return Ok(ToolOutput::new(format!(
                 "Binary file detected: {}\nUse appropriate tools to handle binary files.",
                 params.file_path
@@ -99,7 +99,7 @@ impl Tool for ReadTool {
         }
 
         // Read file
-        let content = tokio::fs::read_to_string(path).await?;
+        let content = tokio::fs::read_to_string(&path).await?;
         let lines: Vec<&str> = content.lines().collect();
 
         let offset = params.offset.unwrap_or(0);
@@ -174,8 +174,7 @@ fn is_binary_file(path: &Path) -> bool {
     false
 }
 
-fn find_similar_files(path: &str) -> Vec<String> {
-    let path = Path::new(path);
+fn find_similar_files(path: &Path) -> Vec<String> {
     let parent = path.parent().unwrap_or(Path::new("."));
     let filename = path.file_name().map(|s| s.to_string_lossy().to_lowercase());
 

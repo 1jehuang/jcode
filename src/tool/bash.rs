@@ -81,7 +81,11 @@ impl Tool for BashTool {
         let timeout_ms = params.timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(600000);
         let timeout_duration = Duration::from_millis(timeout_ms);
 
-        let mut child = Command::new("bash")
+        let mut command = Command::new("bash");
+        if let Some(ref dir) = ctx.working_dir {
+            command.current_dir(dir);
+        }
+        let mut child = command
             .arg("-c")
             .arg(&params.command)
             .kill_on_drop(true)
@@ -152,10 +156,15 @@ impl BashTool {
     async fn execute_background(&self, params: BashInput, ctx: ToolContext) -> Result<ToolOutput> {
         let command = params.command.clone();
         let description = params.description.clone();
+        let working_dir = ctx.working_dir.clone();
 
         let info = crate::background::global()
             .spawn("bash", &ctx.session_id, move |output_path| async move {
-                let mut child = Command::new("bash")
+                let mut cmd = Command::new("bash");
+                if let Some(dir) = working_dir {
+                    cmd.current_dir(dir);
+                }
+                let mut child = cmd
                     .arg("-c")
                     .arg(&command)
                     .kill_on_drop(true)

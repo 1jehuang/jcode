@@ -368,6 +368,10 @@ pub enum ServerEvent {
         message: String,
     },
 
+    /// Swarm lifecycle/status update
+    #[serde(rename = "swarm_status")]
+    SwarmStatus { members: Vec<SwarmMemberStatus> },
+
     /// Response to comm_read request
     #[serde(rename = "comm_context")]
     CommContext {
@@ -399,6 +403,19 @@ pub struct AgentInfo {
     pub friendly_name: Option<String>,
     /// Files this agent has touched
     pub files_touched: Vec<String>,
+}
+
+/// Swarm member status for lifecycle updates
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwarmMemberStatus {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub friendly_name: Option<String>,
+    /// Lifecycle status (ready, running, completed, failed, stopped, etc.)
+    pub status: String,
+    /// Optional detail (task, error, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// Type of notification from another agent

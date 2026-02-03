@@ -125,7 +125,11 @@ async fn fetch_usage() -> Result<UsageData> {
             .map(|u| u / 100.0)
             .unwrap_or(0.0),
         seven_day_resets_at: data.seven_day.as_ref().and_then(|w| w.resets_at.clone()),
-        seven_day_opus: data.seven_day_opus.as_ref().and_then(|w| w.utilization).map(|u| u / 100.0),
+        seven_day_opus: data
+            .seven_day_opus
+            .as_ref()
+            .and_then(|w| w.utilization)
+            .map(|u| u / 100.0),
         fetched_at: Some(Instant::now()),
         last_error: None,
     })

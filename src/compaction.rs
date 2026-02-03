@@ -219,9 +219,7 @@ impl CompactionManager {
         // Adjust cutoff to not split tool call/result pairs
         cutoff = self.safe_cutoff(cutoff);
         if cutoff == 0 {
-            return Err(
-                "Cannot compact - would split tool call/result pairs".to_string()
-            );
+            return Err("Cannot compact - would split tool call/result pairs".to_string());
         }
 
         // Snapshot messages to summarize

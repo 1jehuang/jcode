@@ -3,7 +3,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::Path;
 
 const MAX_RESULTS: usize = 100;
 
@@ -50,11 +49,11 @@ impl Tool for GlobTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: GlobInput = serde_json::from_value(input)?;
 
         let base_path = params.path.as_deref().unwrap_or(".");
-        let base = Path::new(base_path);
+        let base = ctx.resolve_path(base_path);
 
         if !base.exists() {
             return Err(anyhow::anyhow!("Directory not found: {}", base_path));
@@ -70,7 +69,7 @@ impl Tool for GlobTool {
         // Use ignore crate for gitignore-aware globbing
         let mut results: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
 
-        let walker = ignore::WalkBuilder::new(base)
+        let walker = ignore::WalkBuilder::new(base.as_path())
             .hidden(false)
             .git_ignore(true)
             .git_global(true)
@@ -88,7 +87,7 @@ impl Tool for GlobTool {
             }
 
             // Check if matches the pattern
-            let relative = path.strip_prefix(base).unwrap_or(path);
+            let relative = path.strip_prefix(base.as_path()).unwrap_or(path);
             let path_str = relative.to_string_lossy();
 
             if glob_pattern.matches(&path_str) || glob_pattern.matches_path(relative) {
@@ -123,7 +122,7 @@ impl Tool for GlobTool {
 
         for (path, _) in &results {
             let display = path
-                .strip_prefix(base)
+                .strip_prefix(base.as_path())
                 .unwrap_or(path)
                 .display()
                 .to_string();

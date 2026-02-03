@@ -37,7 +37,7 @@ impl McpManager {
     pub async fn connect_all(&self) -> Result<(usize, Vec<(String, String)>)> {
         let mut successes = 0;
         let mut failures = Vec::new();
-        
+
         for (name, config) in &self.config.servers {
             match self.connect(name, config).await {
                 Ok(()) => {

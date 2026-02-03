@@ -38,6 +38,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -73,6 +74,7 @@ pub struct ToolContext {
     pub session_id: String,
     pub message_id: String,
     pub tool_call_id: String,
+    pub working_dir: Option<PathBuf>,
 }
 
 impl ToolContext {
@@ -81,7 +83,19 @@ impl ToolContext {
             session_id: self.session_id.clone(),
             message_id: self.message_id.clone(),
             tool_call_id,
+            working_dir: self.working_dir.clone(),
         }
+    }
+
+    pub fn resolve_path(&self, path: &str) -> PathBuf {
+        let raw = PathBuf::from(path);
+        if raw.is_absolute() {
+            return raw;
+        }
+        if let Some(ref base) = self.working_dir {
+            return base.join(raw);
+        }
+        raw
     }
 }
 
@@ -373,8 +387,8 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{EventStream, Provider};
     use crate::message::{Message, ToolDefinition};
+    use crate::provider::{EventStream, Provider};
     use async_trait::async_trait;
 
     struct MockProvider;
@@ -420,6 +434,9 @@ mod tests {
         let names: Vec<&str> = defs1.iter().map(|d| d.name.as_str()).collect();
         let mut sorted_names = names.clone();
         sorted_names.sort();
-        assert_eq!(names, sorted_names, "Tool definitions should be sorted alphabetically");
+        assert_eq!(
+            names, sorted_names,
+            "Tool definitions should be sorted alphabetically"
+        );
     }
 }
