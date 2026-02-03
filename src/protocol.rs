@@ -222,6 +222,10 @@ pub enum ServerEvent {
     #[serde(rename = "upstream_provider")]
     UpstreamProvider { provider: String },
 
+    /// Swarm status update (subagent/session lifecycle info)
+    #[serde(rename = "swarm_status")]
+    SwarmStatus { members: Vec<SwarmMemberStatus> },
+
     /// Soft interrupt message was injected at a safe point
     #[serde(rename = "soft_interrupt_injected")]
     SoftInterruptInjected {
@@ -399,6 +403,17 @@ pub struct AgentInfo {
     pub friendly_name: Option<String>,
     /// Files this agent has touched
     pub files_touched: Vec<String>,
+}
+
+/// Swarm member lifecycle/status update
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwarmMemberStatus {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub friendly_name: Option<String>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// Type of notification from another agent

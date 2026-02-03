@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-#![allow(dead_code)]
 
 use crate::agent::Agent;
 use crate::build;
@@ -19,13 +18,11 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
-use tokio::task::JoinHandle;
 
 /// Record of a file access by an agent
 #[derive(Clone, Debug)]
@@ -159,60 +156,6 @@ impl ClientDebugState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DebugJobStatus {
-    Running,
-    Done,
-    Error,
-    Cancelled,
-    Timeout,
-}
-
-impl DebugJobStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            DebugJobStatus::Running => "running",
-            DebugJobStatus::Done => "done",
-            DebugJobStatus::Error => "error",
-            DebugJobStatus::Cancelled => "cancelled",
-            DebugJobStatus::Timeout => "timeout",
-        }
-    }
-}
-
-struct DebugJob {
-    id: String,
-    session_id: String,
-    status: DebugJobStatus,
-    started_at: std::time::SystemTime,
-    finished_at: Option<std::time::SystemTime>,
-    output: Option<String>,
-    error: Option<String>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl DebugJob {
-    fn snapshot(&self) -> serde_json::Value {
-        let started_at_ms = self
-            .started_at
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .ok()
-            .map(|d| d.as_millis());
-        let finished_at_ms = self
-            .finished_at
-            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis());
-        serde_json::json!({
-            "id": self.id,
-            "session_id": self.session_id,
-            "status": self.status.as_str(),
-            "started_at_ms": started_at_ms,
-            "finished_at_ms": finished_at_ms,
-            "output": self.output,
-            "error": self.error,
-        })
-    }
-}
 
 /// Socket path for main communication
 /// Can be overridden via JCODE_SOCKET env var
@@ -1116,8 +1059,6 @@ impl Server {
                                 crate::logging::error(&format!("Debug client error: {}", e));
                             }
 
-                            // Decrement debug client count when done
-                            *client_count.write().await -= 1;
                         });
                     }
                     Err(e) => {
@@ -2712,6 +2653,48 @@ No extra text.\n\nRequest:\n{}",
     agent.run_once_capture(&integration_prompt).await
 }
 
+fn debug_message_timeout_secs() -> Option<u64> {
+    let raw = std::env::var("JCODE_DEBUG_MESSAGE_TIMEOUT_SECS").ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let secs = trimmed.parse::<u64>().ok()?;
+    if secs == 0 {
+        None
+    } else {
+        Some(secs)
+    }
+}
+
+async fn run_debug_message_with_timeout(
+    agent: Arc<Mutex<Agent>>,
+    msg: &str,
+    timeout_secs: u64,
+) -> Result<String> {
+    let msg = msg.to_string();
+    let mut handle = tokio::spawn(async move {
+        let mut agent = agent.lock().await;
+        agent.run_once_capture(&msg).await
+    });
+
+    tokio::select! {
+        join_result = &mut handle => {
+            match join_result {
+                Ok(result) => result,
+                Err(e) => Err(anyhow::anyhow!("debug message task failed: {}", e)),
+            }
+        }
+        _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => {
+            handle.abort();
+            Err(anyhow::anyhow!(
+                "debug message timed out after {}s",
+                timeout_secs
+            ))
+        }
+    }
+}
+
 async fn execute_debug_command(
     agent: Arc<Mutex<Agent>>,
     command: &str,
@@ -3394,261 +3377,6 @@ async fn handle_debug_client(
                                     Err(anyhow::anyhow!("Unknown session_id '{}'", target_id))
                                 }
                             }
-                        } else if cmd.starts_with("swarm_message_async:") {
-                            let msg = cmd
-                                .strip_prefix("swarm_message_async:")
-                                .unwrap_or("")
-                                .trim();
-                            if msg.is_empty() {
-                                Err(anyhow::anyhow!("swarm_message_async: requires a message"))
-                            } else {
-                                let (target_id, agent) = resolve_debug_session(
-                                    &sessions,
-                                    &session_id,
-                                    requested_session,
-                                )
-                                .await?;
-                                let job_id = format!(
-                                    "job_{}",
-                                    debug_job_counter.fetch_add(1, Ordering::Relaxed)
-                                );
-                                let now = std::time::SystemTime::now();
-                                let job = DebugJob {
-                                    id: job_id.clone(),
-                                    session_id: target_id.clone(),
-                                    status: DebugJobStatus::Running,
-                                    started_at: now,
-                                    finished_at: None,
-                                    output: None,
-                                    error: None,
-                                    handle: None,
-                                };
-
-                                {
-                                    let mut jobs_guard = debug_jobs.write().await;
-                                    jobs_guard.insert(job_id.clone(), job);
-                                }
-
-                                let jobs = Arc::clone(&debug_jobs);
-                                let job_id_clone = job_id.clone();
-                                let msg = msg.to_string();
-                                let handle = tokio::spawn(async move {
-                                    let result = run_swarm_message(agent.clone(), &msg).await;
-                                    let partial_output = if result.is_err() {
-                                        let agent = agent.lock().await;
-                                        agent.last_assistant_text()
-                                    } else {
-                                        None
-                                    };
-
-                                    let mut jobs_guard = jobs.write().await;
-                                    if let Some(job) = jobs_guard.get_mut(&job_id_clone) {
-                                        if job.status != DebugJobStatus::Running {
-                                            return;
-                                        }
-                                        match result {
-                                            Ok(output) => {
-                                                job.status = DebugJobStatus::Done;
-                                                job.output = Some(output);
-                                            }
-                                            Err(e) => {
-                                                job.status = DebugJobStatus::Error;
-                                                job.error = Some(e.to_string());
-                                                if let Some(output) = partial_output {
-                                                    job.output = Some(output);
-                                                }
-                                            }
-                                        }
-                                        job.finished_at = Some(std::time::SystemTime::now());
-                                        job.handle = None;
-                                    }
-                                });
-
-                                {
-                                    let mut jobs_guard = debug_jobs.write().await;
-                                    if let Some(job) = jobs_guard.get_mut(&job_id) {
-                                        job.handle = Some(handle);
-                                    }
-                                }
-
-                                Ok(serde_json::to_string_pretty(&serde_json::json!({
-                                    "job_id": job_id,
-                                    "session_id": target_id,
-                                }))
-                                .unwrap_or_else(|_| "{}".to_string()))
-                            }
-                        } else if cmd.starts_with("swarm_message:") {
-                            let msg = cmd.strip_prefix("swarm_message:").unwrap_or("").trim();
-                            if msg.is_empty() {
-                                Err(anyhow::anyhow!("swarm_message: requires a message"))
-                            } else {
-                                let (_target_id, agent) = resolve_debug_session(
-                                    &sessions,
-                                    &session_id,
-                                    requested_session,
-                                )
-                                .await?;
-                                run_swarm_message(agent, msg).await
-                            }
-                        } else if cmd.starts_with("message_async:") {
-                            let msg = cmd.strip_prefix("message_async:").unwrap_or("").trim();
-                            if msg.is_empty() {
-                                Err(anyhow::anyhow!("message_async: requires a message"))
-                            } else {
-                                let (target_id, agent) = resolve_debug_session(
-                                    &sessions,
-                                    &session_id,
-                                    requested_session,
-                                )
-                                .await?;
-                                let job_id = format!(
-                                    "job_{}",
-                                    debug_job_counter.fetch_add(1, Ordering::Relaxed)
-                                );
-                                let now = std::time::SystemTime::now();
-                                let job = DebugJob {
-                                    id: job_id.clone(),
-                                    session_id: target_id.clone(),
-                                    status: DebugJobStatus::Running,
-                                    started_at: now,
-                                    finished_at: None,
-                                    output: None,
-                                    error: None,
-                                    handle: None,
-                                };
-
-                                {
-                                    let mut jobs_guard = debug_jobs.write().await;
-                                    jobs_guard.insert(job_id.clone(), job);
-                                }
-
-                                let jobs = Arc::clone(&debug_jobs);
-                                let job_id_clone = job_id.clone();
-                                let msg = msg.to_string();
-                                let handle = tokio::spawn(async move {
-                                    let result = {
-                                        let mut agent = agent.lock().await;
-                                        agent.run_once_capture(&msg).await
-                                    };
-                                    let partial_output = if result.is_err() {
-                                        let agent = agent.lock().await;
-                                        agent.last_assistant_text()
-                                    } else {
-                                        None
-                                    };
-
-                                    let mut jobs_guard = jobs.write().await;
-                                    if let Some(job) = jobs_guard.get_mut(&job_id_clone) {
-                                        if job.status != DebugJobStatus::Running {
-                                            return;
-                                        }
-                                        match result {
-                                            Ok(output) => {
-                                                job.status = DebugJobStatus::Done;
-                                                job.output = Some(output);
-                                            }
-                                            Err(e) => {
-                                                job.status = DebugJobStatus::Error;
-                                                job.error = Some(e.to_string());
-                                                if let Some(output) = partial_output {
-                                                    job.output = Some(output);
-                                                }
-                                            }
-                                        }
-                                        job.finished_at = Some(std::time::SystemTime::now());
-                                        job.handle = None;
-                                    }
-                                });
-
-                                {
-                                    let mut jobs_guard = debug_jobs.write().await;
-                                    if let Some(job) = jobs_guard.get_mut(&job_id) {
-                                        job.handle = Some(handle);
-                                    }
-                                }
-
-                                Ok(serde_json::to_string_pretty(&serde_json::json!({
-                                    "job_id": job_id,
-                                    "session_id": target_id,
-                                }))
-                                .unwrap_or_else(|_| "{}".to_string()))
-                            }
-                        } else if cmd.starts_with("job_status:") {
-                            let job_id = cmd.strip_prefix("job_status:").unwrap_or("").trim();
-                            if job_id.is_empty() {
-                                Err(anyhow::anyhow!("job_status: requires a job id"))
-                            } else {
-                                let jobs_guard = debug_jobs.read().await;
-                                if let Some(job) = jobs_guard.get(job_id) {
-                                    Ok(serde_json::to_string_pretty(&job.snapshot())
-                                        .unwrap_or_else(|_| "{}".to_string()))
-                                } else {
-                                    Err(anyhow::anyhow!("Unknown job id '{}'", job_id))
-                                }
-                            }
-                        } else if cmd.starts_with("job_wait:") {
-                            let job_id = cmd.strip_prefix("job_wait:").unwrap_or("").trim();
-                            if job_id.is_empty() {
-                                Err(anyhow::anyhow!("job_wait: requires a job id"))
-                            } else {
-                                let timeout = Duration::from_secs(900);
-                                let start = Instant::now();
-                                loop {
-                                    {
-                                        let jobs_guard = debug_jobs.read().await;
-                                        if let Some(job) = jobs_guard.get(job_id) {
-                                            if job.status != DebugJobStatus::Running {
-                                                break Ok(serde_json::to_string_pretty(
-                                                    &job.snapshot(),
-                                                )
-                                                .unwrap_or_else(|_| "{}".to_string()));
-                                            }
-                                        } else {
-                                            break Err(anyhow::anyhow!(
-                                                "Unknown job id '{}'",
-                                                job_id
-                                            ));
-                                        }
-                                    }
-                                    if start.elapsed() > timeout {
-                                        break Err(anyhow::anyhow!(
-                                            "Timeout waiting for job '{}'",
-                                            job_id
-                                        ));
-                                    }
-                                    tokio::time::sleep(Duration::from_millis(500)).await;
-                                }
-                            }
-                        } else if cmd.starts_with("job_cancel:") {
-                            let job_id = cmd.strip_prefix("job_cancel:").unwrap_or("").trim();
-                            if job_id.is_empty() {
-                                Err(anyhow::anyhow!("job_cancel: requires a job id"))
-                            } else {
-                                let mut jobs_guard = debug_jobs.write().await;
-                                if let Some(job) = jobs_guard.get_mut(job_id) {
-                                    if job.status == DebugJobStatus::Running {
-                                        if let Some(handle) = job.handle.take() {
-                                            handle.abort();
-                                        }
-                                        job.status = DebugJobStatus::Cancelled;
-                                        job.finished_at = Some(std::time::SystemTime::now());
-                                    }
-                                    Ok(format!("job {} {}", job_id, job.status.as_str()))
-                                } else {
-                                    Err(anyhow::anyhow!("Unknown job id '{}'", job_id))
-                                }
-                            }
-                        } else if cmd == "jobs" {
-                            let jobs_guard = debug_jobs.read().await;
-                            let mut list: Vec<serde_json::Value> =
-                                jobs_guard.values().map(|job| job.snapshot()).collect();
-                            list.sort_by(|a, b| {
-                                a.get("id")
-                                    .and_then(|v| v.as_str())
-                                    .cmp(&b.get("id").and_then(|v| v.as_str()))
-                            });
-                            Ok(serde_json::to_string_pretty(&list)
-                                .unwrap_or_else(|_| "[]".to_string()))
                         } else if cmd == "sessions" {
                             let sessions_guard = sessions.read().await;
                             let session_list: Vec<_> = sessions_guard.keys().collect();
