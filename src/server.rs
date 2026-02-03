@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
@@ -2012,6 +2012,12 @@ async fn execute_debug_command(
                 let mut agent = agent.lock().await;
                 run_swarm_message(&mut agent, &msg).await
             };
+            let partial_output = if result.is_err() {
+                let agent = agent.lock().await;
+                agent.last_assistant_text()
+            } else {
+                None
+            };
 
             let mut jobs = jobs.write().await;
             if let Some(job) = jobs.get_mut(&job_id_inner) {
@@ -2024,6 +2030,9 @@ async fn execute_debug_command(
                     Err(e) => {
                         job.status = DebugJobStatus::Failed;
                         job.error = Some(e.to_string());
+                        if let Some(output) = partial_output {
+                            job.output = Some(output);
+                        }
                     }
                 }
             }
@@ -2077,6 +2086,12 @@ async fn execute_debug_command(
                 let mut agent = agent.lock().await;
                 agent.run_once_capture(&msg).await
             };
+            let partial_output = if result.is_err() {
+                let agent = agent.lock().await;
+                agent.last_assistant_text()
+            } else {
+                None
+            };
 
             let mut jobs = jobs.write().await;
             if let Some(job) = jobs.get_mut(&job_id_inner) {
@@ -2089,6 +2104,9 @@ async fn execute_debug_command(
                     Err(e) => {
                         job.status = DebugJobStatus::Failed;
                         job.error = Some(e.to_string());
+                        if let Some(output) = partial_output {
+                            job.output = Some(output);
+                        }
                     }
                 }
             }
@@ -2201,7 +2219,7 @@ async fn execute_debug_command(
 
     if trimmed == "help" {
         return Ok(
-            "debug commands: state, history, tools, last_response, message:<text>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, jobs, job_status:<id>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
+            "debug commands: state, history, tools, last_response, message:<text>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, jobs, job_status:<id>, job_wait:<id>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
         );
     }
 
@@ -2566,6 +2584,42 @@ async fn handle_debug_client(
                                     Err(anyhow::anyhow!("Unknown job id '{}'", job_id))
                                 }
                             }
+                        } else if cmd.starts_with("job_wait:") {
+                            let job_id = cmd.strip_prefix("job_wait:").unwrap_or("").trim();
+                            if job_id.is_empty() {
+                                Err(anyhow::anyhow!("job_wait: requires a job id"))
+                            } else {
+                                let timeout = Duration::from_secs(900);
+                                let start = Instant::now();
+                                loop {
+                                    {
+                                        let jobs_guard = debug_jobs.read().await;
+                                        if let Some(job) = jobs_guard.get(job_id) {
+                                            if matches!(
+                                                job.status,
+                                                DebugJobStatus::Completed | DebugJobStatus::Failed
+                                            ) {
+                                                break Ok(serde_json::to_string_pretty(
+                                                    &job.status_payload(),
+                                                )
+                                                .unwrap_or_else(|_| "{}".to_string()));
+                                            }
+                                        } else {
+                                            break Err(anyhow::anyhow!(
+                                                "Unknown job id '{}'",
+                                                job_id
+                                            ));
+                                        }
+                                    }
+                                    if start.elapsed() > timeout {
+                                        break Err(anyhow::anyhow!(
+                                            "Timeout waiting for job '{}'",
+                                            job_id
+                                        ));
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
+                                }
+                            }
                         } else if cmd == "create_session" || cmd.starts_with("create_session:") {
                             create_headless_session(&sessions, &session_id, &provider, cmd).await
                         } else if cmd.starts_with("destroy_session:") {
@@ -2641,6 +2695,7 @@ SERVER COMMANDS (server: prefix or no prefix):
   tool:<name> <json>       - Execute tool directly
   jobs                     - List async debug jobs
   job_status:<id>          - Get async job status/output
+  job_wait:<id>            - Wait for async job to finish
   sessions                 - List all sessions
   create_session           - Create headless session
   create_session:<path>    - Create session with working dir
