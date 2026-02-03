@@ -1189,6 +1189,85 @@ impl Provider for OpenRouterProvider {
             ));
         }
 
+        // Safety pass: ensure tool-call messages include reasoning_content (when required)
+        // and that every tool call has a matching tool output after it.
+        let mut outputs_after: HashSet<String> = HashSet::new();
+        let mut missing_by_index: Vec<Vec<String>> = vec![Vec::new(); api_messages.len()];
+
+        for (idx, msg) in api_messages.iter().enumerate().rev() {
+            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            if role == "tool" {
+                if let Some(id) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
+                    outputs_after.insert(id.to_string());
+                }
+                continue;
+            }
+
+            if role == "assistant" {
+                if let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
+                    for call in tool_calls {
+                        if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
+                            if !outputs_after.contains(id) {
+                                outputs_after.insert(id.to_string());
+                                missing_by_index[idx].push(id.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut normalized = Vec::with_capacity(api_messages.len());
+        let mut extra_outputs = 0usize;
+        let mut missing_reasoning = 0usize;
+
+        for (idx, mut msg) in api_messages.into_iter().enumerate() {
+            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            if role == "assistant" && include_reasoning_content {
+                if msg.get("tool_calls").and_then(|v| v.as_array()).is_some() {
+                    let needs_reasoning = match msg.get("reasoning_content") {
+                        Some(value) => value
+                            .as_str()
+                            .map(|s| s.trim().is_empty())
+                            .unwrap_or(true),
+                        None => true,
+                    };
+                    if needs_reasoning {
+                        msg["reasoning_content"] = serde_json::json!(" ");
+                        missing_reasoning += 1;
+                    }
+                }
+            }
+
+            normalized.push(msg);
+
+            if let Some(missing) = missing_by_index.get(idx) {
+                for id in missing {
+                    extra_outputs += 1;
+                    normalized.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": id,
+                        "content": missing_output.clone()
+                    }));
+                }
+            }
+        }
+
+        api_messages = normalized;
+
+        if missing_reasoning > 0 {
+            crate::logging::info(&format!(
+                "[openrouter] Filled reasoning_content on {} tool-call message(s)",
+                missing_reasoning
+            ));
+        }
+        if extra_outputs > 0 {
+            crate::logging::info(&format!(
+                "[openrouter] Safety-injected {} missing tool output(s) at request build",
+                extra_outputs
+            ));
+        }
+
         // Build tools in OpenAI format
         let api_tools: Vec<Value> = tools
             .iter()
@@ -1234,6 +1313,7 @@ impl Provider for OpenRouterProvider {
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
+            .header("Accept-Encoding", "identity")
             .header("HTTP-Referer", "https://github.com/jcode")
             .header("X-Title", "jcode")
             .json(&request)
@@ -1610,7 +1690,15 @@ impl OpenRouterStream {
                 }
             }
 
-            if self.cache_supported && !self.manual_order_active {
+            let cache_seen = usage
+                .as_ref()
+                .map(|u| {
+                    u.cache_read_input_tokens.is_some()
+                        || u.cache_creation_input_tokens.is_some()
+                })
+                .unwrap_or(false);
+
+            if (self.cache_supported || cache_seen) && !self.manual_order_active {
                 state
                     .pinned_provider
                     .entry(self.model_id.clone())
