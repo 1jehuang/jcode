@@ -162,6 +162,10 @@ pub enum Request {
         id: u64,
         from_session: String,
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
     },
 
     /// List agents and their activity
@@ -413,7 +417,14 @@ pub enum NotificationType {
     SharedContext { key: String, value: String },
     /// Direct message from another agent
     #[serde(rename = "message")]
-    Message,
+    Message {
+        /// Message scope: "dm", "channel", or "broadcast"
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        /// Channel name for channel messages (e.g. "parser")
+        #[serde(skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
+    },
 }
 
 impl Request {

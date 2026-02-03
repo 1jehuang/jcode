@@ -781,7 +781,14 @@ impl ClientApp {
                     NotificationType::SharedContext { key, .. } => {
                         format!("📤 Context shared: {}", key)
                     }
-                    NotificationType::Message => "💬 Message".to_string(),
+                    NotificationType::Message { scope, channel } => match scope.as_deref() {
+                        Some("dm") => "💬 DM".to_string(),
+                        Some("channel") => channel
+                            .as_deref()
+                            .map(|c| format!("💬 #{}", c))
+                            .unwrap_or_else(|| "💬 Channel".to_string()),
+                        _ => "💬 Broadcast".to_string(),
+                    },
                 };
                 self.push_display_message(DisplayMessage {
                     role: "notification".to_string(),

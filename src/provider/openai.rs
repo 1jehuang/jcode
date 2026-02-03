@@ -1043,7 +1043,7 @@ mod tests {
     use crate::auth::codex::CodexCredentials;
 
     #[test]
-    fn test_openai_supports_codex_52_model() {
+    fn test_openai_supports_codex_models() {
         let creds = CodexCredentials {
             access_token: "test".to_string(),
             refresh_token: String::new(),
@@ -1057,8 +1057,11 @@ mod tests {
         assert!(provider.available_models().contains(&"codex-mini-latest"));
         assert!(provider.available_models().contains(&"gpt-5.1-codex-mini"));
 
-        provider.set_model("gpt-5.2-codex").unwrap();
-        assert_eq!(provider.model(), "gpt-5.2-codex");
+        provider.set_model("gpt-5.1-codex").unwrap();
+        assert_eq!(provider.model(), "gpt-5.1-codex");
+
+        provider.set_model("gpt-5.1-codex-mini").unwrap();
+        assert_eq!(provider.model(), "gpt-5.1-codex-mini");
     }
 
     #[test]
