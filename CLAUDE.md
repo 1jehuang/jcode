@@ -234,6 +234,9 @@ Commands can be namespaced with `server:`, `client:`, or `tester:` prefixes. Unn
 | `swarm:touches` | List all file touches (path, session, op, age) |
 | `swarm:touches:<path>` | Get touches for specific file |
 | `swarm:conflicts` | Files touched by multiple sessions |
+| `swarm:broadcast:<message>` | Broadcast message to all swarm members |
+| `swarm:broadcast:<swarm_id> <message>` | Broadcast to specific swarm |
+| `swarm:notify:<session_id> <message>` | Send DM to specific session |
 | `swarm:help` | Full swarm command reference |
 
 ### Python Test Example
