@@ -53,6 +53,10 @@ struct CommunicateInput {
     to_session: Option<String>,
     #[serde(default)]
     channel: Option<String>,
+    #[serde(default)]
+    proposer_session: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[async_trait]
@@ -70,7 +74,9 @@ impl Tool for CommunicateTool {
          - \"broadcast\"/\"message\": Send a message to all other agents in the codebase.\n\
          - \"dm\": Send a direct message to a specific session.\n\
          - \"channel\": Send a message to a named channel in this swarm.\n\
-         - \"list\": See who else is working in this codebase and what files they've touched."
+         - \"list\": See who else is working in this codebase and what files they've touched.\n\
+         - \"approve_plan\": (Coordinator only) Approve a plan proposal from another agent.\n\
+         - \"reject_plan\": (Coordinator only) Reject a plan proposal with an optional reason."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -80,7 +86,7 @@ impl Tool for CommunicateTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["share", "read", "message", "broadcast", "dm", "channel", "list"],
+                    "enum": ["share", "read", "message", "broadcast", "dm", "channel", "list", "approve_plan", "reject_plan"],
                     "description": "The communication action to perform"
                 },
                 "key": {
@@ -102,6 +108,14 @@ impl Tool for CommunicateTool {
                 "channel": {
                     "type": "string",
                     "description": "For 'channel': the channel name (without #)."
+                },
+                "proposer_session": {
+                    "type": "string",
+                    "description": "For 'approve_plan'/'reject_plan': the session ID of the agent who proposed the plan."
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "For 'reject_plan': optional reason for rejection."
                 }
             }
         })
@@ -306,8 +320,70 @@ impl Tool for CommunicateTool {
                 }
             }
 
+            "approve_plan" => {
+                let proposer = params.proposer_session.ok_or_else(|| {
+                    anyhow::anyhow!("'proposer_session' is required for approve_plan action")
+                })?;
+
+                let request = json!({
+                    "type": "comm_approve_plan",
+                    "id": 1,
+                    "session_id": ctx.session_id,
+                    "proposer_session": proposer
+                });
+
+                match send_request(&request) {
+                    Ok(response) => {
+                        if let Some(error) = response.get("message").and_then(|m| m.as_str()) {
+                            if response.get("type").and_then(|t| t.as_str()) == Some("error") {
+                                return Err(anyhow::anyhow!("{}", error));
+                            }
+                        }
+                        Ok(ToolOutput::new(format!(
+                            "Approved plan proposal from {}",
+                            proposer
+                        )))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to approve plan: {}", e)),
+                }
+            }
+
+            "reject_plan" => {
+                let proposer = params.proposer_session.ok_or_else(|| {
+                    anyhow::anyhow!("'proposer_session' is required for reject_plan action")
+                })?;
+
+                let request = json!({
+                    "type": "comm_reject_plan",
+                    "id": 1,
+                    "session_id": ctx.session_id,
+                    "proposer_session": proposer,
+                    "reason": params.reason
+                });
+
+                match send_request(&request) {
+                    Ok(response) => {
+                        if let Some(error) = response.get("message").and_then(|m| m.as_str()) {
+                            if response.get("type").and_then(|t| t.as_str()) == Some("error") {
+                                return Err(anyhow::anyhow!("{}", error));
+                            }
+                        }
+                        let reason_msg = params
+                            .reason
+                            .as_ref()
+                            .map(|r| format!(" (reason: {})", r))
+                            .unwrap_or_default();
+                        Ok(ToolOutput::new(format!(
+                            "Rejected plan proposal from {}{}",
+                            proposer, reason_msg
+                        )))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to reject plan: {}", e)),
+                }
+            }
+
             _ => Err(anyhow::anyhow!(
-                "Unknown action '{}'. Valid actions: share, read, message, broadcast, dm, channel, list",
+                "Unknown action '{}'. Valid actions: share, read, message, broadcast, dm, channel, list, approve_plan, reject_plan",
                 params.action
             )),
         }
