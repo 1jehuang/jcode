@@ -43,6 +43,16 @@ const KNOWN_PROVIDERS: &[&str] = &[
     "Together",
     "DeepInfra",
 ];
+/// Short aliases to normalize provider input.
+const PROVIDER_ALIASES: &[(&str, &str)] = &[
+    ("moonshot", "Moonshot AI"),
+    ("moonshotai", "Moonshot AI"),
+    ("openai", "OpenAI"),
+    ("anthropic", "Anthropic"),
+    ("fireworks", "Fireworks"),
+    ("together", "Together"),
+    ("deepinfra", "DeepInfra"),
+];
 
 /// Known OpenRouter provider names for autocomplete/fallback suggestions.
 pub fn known_providers() -> Vec<String> {
@@ -126,6 +136,40 @@ struct ParsedProvider {
     allow_fallbacks: bool,
 }
 
+fn normalize_provider_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let lower = trimmed.to_lowercase();
+    for (alias, canonical) in PROVIDER_ALIASES {
+        if lower == *alias {
+            return (*canonical).to_string();
+        }
+    }
+
+    for known in KNOWN_PROVIDERS {
+        if known.eq_ignore_ascii_case(trimmed) {
+            return (*known).to_string();
+        }
+    }
+
+    let simplified: String = lower.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    for known in KNOWN_PROVIDERS {
+        let known_simple: String = known
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
+        if known_simple == simplified {
+            return (*known).to_string();
+        }
+    }
+
+    trimmed.to_string()
+}
+
 fn parse_model_spec(raw: &str) -> (String, Option<ParsedProvider>) {
     let trimmed = raw.trim();
     if let Some((model, provider)) = trimmed.rsplit_once('@') {
@@ -145,10 +189,14 @@ fn parse_model_spec(raw: &str) -> (String, Option<ParsedProvider>) {
         if provider.is_empty() {
             return (model.to_string(), None);
         }
+        if provider.eq_ignore_ascii_case("auto") {
+            return (model.to_string(), None);
+        }
+        let provider = normalize_provider_name(provider);
         return (
             model.to_string(),
             Some(ParsedProvider {
-                name: provider.to_string(),
+                name: provider,
                 allow_fallbacks,
             }),
         );
@@ -674,6 +722,24 @@ impl OpenRouterProvider {
         self.provider_routing.read().await.clone()
     }
 
+    /// Return a list of known/observed providers for a model (for autocomplete).
+    pub fn available_providers_for_model(&self, model: &str) -> Vec<String> {
+        let mut providers: Vec<String> = Vec::new();
+        if let Ok(stats) = self.provider_stats.lock() {
+            if let Some(model_stats) = stats.models.get(model) {
+                providers.extend(model_stats.keys().cloned());
+            }
+        }
+
+        if providers.is_empty() {
+            providers = known_providers();
+        }
+
+        providers.sort();
+        providers.dedup();
+        providers
+    }
+
     /// Check if OPENROUTER_API_KEY is available (env var or config file)
     pub fn has_credentials() -> bool {
         Self::get_api_key().is_some()
@@ -851,9 +917,16 @@ impl Provider for OpenRouterProvider {
     ) -> Result<EventStream> {
         let model = self.model.read().await.clone();
         let thinking_override = Self::thinking_override();
-        let allow_reasoning = thinking_override != Some(false);
+        let thinking_enabled = thinking_override.or_else(|| {
+            if Self::is_kimi_model(&model) {
+                Some(true)
+            } else {
+                None
+            }
+        });
+        let allow_reasoning = thinking_enabled != Some(false);
         let include_reasoning_content =
-            thinking_override == Some(true) || (allow_reasoning && Self::is_kimi_model(&model));
+            thinking_enabled == Some(true) || (allow_reasoning && Self::is_kimi_model(&model));
 
         let mut effective_messages: Vec<Message> = messages.to_vec();
         let cache_supported = if self.model_supports_cache(&model).await {
@@ -1346,7 +1419,7 @@ impl Provider for OpenRouterProvider {
         }
 
         // Optional thinking override for OpenRouter (provider-specific).
-        if let Some(enable) = thinking_override {
+        if let Some(enable) = thinking_enabled {
             request["thinking"] = serde_json::json!({
                 "type": if enable { "enabled" } else { "disabled" }
             });
@@ -1971,6 +2044,15 @@ mod tests {
         let provider = provider.expect("provider");
         assert_eq!(provider.name, "Fireworks");
         assert!(!provider.allow_fallbacks);
+
+        let (model, provider) = parse_model_spec("moonshotai/kimi-k2.5@moonshot");
+        assert_eq!(model, "moonshotai/kimi-k2.5");
+        let provider = provider.expect("provider");
+        assert_eq!(provider.name, "Moonshot AI");
+
+        let (model, provider) = parse_model_spec("anthropic/claude-sonnet-4@auto");
+        assert_eq!(model, "anthropic/claude-sonnet-4");
+        assert!(provider.is_none());
     }
 
     #[test]

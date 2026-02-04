@@ -36,11 +36,6 @@ static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> =
 static IMAGE_STATE: LazyLock<Mutex<HashMap<u64, StatefulProtocol>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Track last rendered position to avoid re-rendering unchanged images
-/// Stores (hash, rect) of the last render to detect when position/size actually changes
-static LAST_RENDER_POS: LazyLock<Mutex<Option<(u64, Rect)>>> =
-    LazyLock::new(|| Mutex::new(None));
-
 /// Initialize the global picker by querying terminal capabilities.
 /// Should be called early in app startup, after entering alternate screen.
 pub fn init_picker() {
@@ -332,30 +327,6 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         area
     };
 
-    // If we've already rendered this exact image at the exact same position/size,
-    // skip re-rendering to reduce scroll lag. The terminal protocol retains it.
-    let should_skip_render = {
-        let mut last = LAST_RENDER_POS.lock().unwrap();
-        if let Some((last_hash, last_area)) = *last {
-            if last_hash == hash && last_area == render_area {
-                true
-            } else {
-                *last = Some((hash, render_area));
-                false
-            }
-        } else {
-            *last = Some((hash, render_area));
-            false
-        }
-    };
-
-    if should_skip_render {
-        let has_state = { IMAGE_STATE.lock().unwrap().contains_key(&hash) };
-        if has_state {
-            return area.height;
-        }
-    }
-
     // Note: We intentionally do NOT clear the buffer here.
     // ratatui-image handles clearing internally via cell.set_skip(true).
     // Manual clearing causes flicker during scroll because it wipes the
@@ -389,25 +360,12 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         }))
     };
 
-    // Check if this is the same image at the same position as last render
-    // This prevents flickering caused by re-rendering unchanged images
-    let is_same_position = {
-        let last_pos = LAST_RENDER_POS.lock().unwrap();
-        last_pos
-            .map(|(h, r)| h == hash && r == render_area)
-            .unwrap_or(false)
-    };
-
     // Try to render from existing state
     let render_result = {
         let mut state = IMAGE_STATE.lock().unwrap();
         if let Some(protocol) = state.get_mut(&hash) {
-            // Only actually render if position changed
-            // This prevents flicker from re-rendering the same image at the same position
-            if !is_same_position {
-                let widget = StatefulImage::default().resize(make_resize());
-                widget.render(render_area, buf, protocol);
-            }
+            let widget = StatefulImage::default().resize(make_resize());
+            widget.render(render_area, buf, protocol);
             true
         } else {
             false
@@ -415,9 +373,6 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
     };
 
     if render_result {
-        // Update position tracking
-        let mut last_pos = LAST_RENDER_POS.lock().unwrap();
-        *last_pos = Some((hash, render_area));
         return area.height;
     }
 
@@ -445,14 +400,6 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
     }
 
     0
-}
-
-/// Clear the last rendered position tracking.
-/// Call this on scroll or window resize to force re-render at new positions.
-pub fn clear_last_render_pos() {
-    if let Ok(mut last) = LAST_RENDER_POS.lock() {
-        *last = None;
-    }
 }
 
 /// Estimate the height needed for an image in terminal rows
