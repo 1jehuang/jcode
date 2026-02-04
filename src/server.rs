@@ -524,8 +524,22 @@ impl Server {
         sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
     ) {
         let mut receiver = Bus::global().subscribe();
+        let mut last_cleanup = Instant::now();
+        const TOUCH_EXPIRY: Duration = Duration::from_secs(30 * 60); // 30 min
+        const CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60); // 5 min
 
         loop {
+            // Periodic cleanup of expired file touches
+            if last_cleanup.elapsed() > CLEANUP_INTERVAL {
+                let mut touches = file_touches.write().await;
+                let now = Instant::now();
+                touches.retain(|_, accesses| {
+                    accesses.retain(|a| now.duration_since(a.timestamp) < TOUCH_EXPIRY);
+                    !accesses.is_empty()
+                });
+                last_cleanup = Instant::now();
+            }
+
             match receiver.recv().await {
                 Ok(BusEvent::FileTouch(touch)) => {
                     let path = touch.path.clone();
@@ -1535,7 +1549,7 @@ async fn handle_client(
                             {
                                 let swarms = swarms_by_id.read().await;
                                 if let Some(swarm) = swarms.get(&old_id) {
-                                    new_coordinator = swarm.iter().next().cloned();
+                                    new_coordinator = swarm.iter().min().cloned();
                                 }
                             }
                             let mut coordinators = swarm_coordinators.write().await;
@@ -2044,8 +2058,14 @@ async fn handle_client(
                             }
                         }
                     }
+                    let _ = client_event_tx.send(ServerEvent::Done { id });
+                } else {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: "Not in a swarm. Use a git repository to enable swarm features."
+                            .to_string(),
+                    });
                 }
-                let _ = client_event_tx.send(ServerEvent::Done { id });
             }
 
             Request::CommRead {
@@ -2129,6 +2149,17 @@ async fn handle_client(
                             .unwrap_or_default()
                     };
 
+                    // Validate DM recipient exists in swarm
+                    if let Some(ref target) = to_session {
+                        if !swarm_session_ids.contains(target) {
+                            let _ = client_event_tx.send(ServerEvent::Error {
+                                id,
+                                message: format!("DM failed: session '{}' not in swarm", target),
+                            });
+                            continue;
+                        }
+                    }
+
                     let scope = if to_session.is_some() {
                         "dm"
                     } else if channel.is_some() {
@@ -2183,8 +2214,14 @@ async fn handle_client(
                             }
                         }
                     }
+                    let _ = client_event_tx.send(ServerEvent::Done { id });
+                } else {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: "Not in a swarm. Use a git repository to enable swarm features."
+                            .to_string(),
+                    });
                 }
-                let _ = client_event_tx.send(ServerEvent::Done { id });
             }
 
             Request::CommList {
@@ -2199,7 +2236,7 @@ async fn handle_client(
                         .and_then(|m| m.swarm_id.clone())
                 };
 
-                let member_list = if let Some(swarm_id) = swarm_id {
+                if let Some(swarm_id) = swarm_id {
                     let swarm_session_ids: Vec<String> = {
                         let swarms = swarms_by_id.read().await;
                         swarms
@@ -2211,7 +2248,7 @@ async fn handle_client(
                     let members = swarm_members.read().await;
                     let touches = file_touches.read().await;
 
-                    swarm_session_ids
+                    let member_list: Vec<AgentInfo> = swarm_session_ids
                         .iter()
                         .filter_map(|sid| {
                             members.get(sid).map(|m| {
@@ -2234,15 +2271,19 @@ async fn handle_client(
                                 }
                             })
                         })
-                        .collect()
-                } else {
-                    vec![]
-                };
+                        .collect();
 
-                let _ = client_event_tx.send(ServerEvent::CommMembers {
-                    id,
-                    members: member_list,
-                });
+                    let _ = client_event_tx.send(ServerEvent::CommMembers {
+                        id,
+                        members: member_list,
+                    });
+                } else {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: "Not in a swarm. Use a git repository to enable swarm features."
+                            .to_string(),
+                    });
+                }
             }
 
             // These are handled via channels, not direct requests from TUI
@@ -2309,7 +2350,7 @@ async fn handle_client(
                     if swarm.is_empty() {
                         swarms.remove(swarm_id);
                     } else if was_coordinator {
-                        new_coordinator = swarm.iter().next().cloned();
+                        new_coordinator = swarm.iter().min().cloned();
                     }
                 }
             }
