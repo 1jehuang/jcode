@@ -2031,22 +2031,14 @@ fn truncate_smart(s: &str, max_len: usize) -> String {
     }
 
     let target = max_len - 3;
-    let mut cutoff = s.len();
-    let mut seen = 0usize;
-    for (idx, _) in s.char_indices() {
-        if seen == target {
-            cutoff = idx;
-            break;
-        }
-        seen += 1;
-    }
-    let prefix = &s[..cutoff];
+    let prefix = truncate_chars(s, target);
 
     // Try to find a word boundary
     if let Some(pos) = prefix.rfind(' ') {
-        let pos_chars = prefix[..pos].chars().count();
+        let before = &prefix[..pos];
+        let pos_chars = before.chars().count();
         if pos_chars > target / 2 {
-            return format!("{}...", &prefix[..pos]);
+            return format!("{}...", before);
         }
     }
     format!("{}...", prefix)
@@ -2073,6 +2065,18 @@ fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
     }
     let truncated = truncate_chars(s, max_chars.saturating_sub(1));
     format!("{}…", truncated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_smart;
+
+    #[test]
+    fn truncate_smart_handles_unicode() {
+        let s = "eagle running — keep going";
+        let out = truncate_smart(s, 15);
+        assert_eq!(out, "eagle runnin...");
+    }
 }
 
 fn render_todos_compact(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static>> {
