@@ -218,6 +218,24 @@ Commands can be namespaced with `server:`, `client:`, or `tester:` prefixes. Unn
 | `tester:<id>:message:<text>` | Send message to tester |
 | `tester:<id>:stop` | Stop tester |
 
+**Swarm Commands** (multi-agent coordination - `swarm:` prefix):
+| Command | Description |
+|---------|-------------|
+| `swarm` / `swarm:members` | List all swarm members with details |
+| `swarm:list` | List all swarm IDs with member counts |
+| `swarm:info:<swarm_id>` | Full info: members, coordinator, plan, context, conflicts |
+| `swarm:coordinators` | List all coordinators (swarm_id -> session_id) |
+| `swarm:coordinator:<swarm_id>` | Get coordinator for specific swarm |
+| `swarm:plans` | List all swarm plans with todo counts |
+| `swarm:plan:<swarm_id>` | Get todos for specific swarm |
+| `swarm:context` | List all shared context entries |
+| `swarm:context:<swarm_id>` | List context for specific swarm |
+| `swarm:context:<swarm_id>:<key>` | Get specific context value |
+| `swarm:touches` | List all file touches (path, session, op, age) |
+| `swarm:touches:<path>` | Get touches for specific file |
+| `swarm:conflicts` | Files touched by multiple sessions |
+| `swarm:help` | Full swarm command reference |
+
 ### Python Test Example
 
 ```python

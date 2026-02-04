@@ -1041,6 +1041,11 @@ impl Server {
         let debug_provider = Arc::clone(&self.provider);
         let debug_client_debug_state = Arc::clone(&self.client_debug_state);
         let debug_swarm_members = Arc::clone(&self.swarm_members);
+        let debug_swarms_by_id = Arc::clone(&self.swarms_by_id);
+        let debug_shared_context = Arc::clone(&self.shared_context);
+        let debug_swarm_plans = Arc::clone(&self.swarm_plans);
+        let debug_swarm_coordinators = Arc::clone(&self.swarm_coordinators);
+        let debug_file_touches = Arc::clone(&self.file_touches);
         let debug_client_debug_response_tx = self.client_debug_response_tx.clone();
         let debug_jobs = Arc::clone(&self.debug_jobs);
 
@@ -1054,6 +1059,11 @@ impl Server {
                         let provider = Arc::clone(&debug_provider);
                         let client_debug_state = Arc::clone(&debug_client_debug_state);
                         let swarm_members = Arc::clone(&debug_swarm_members);
+                        let swarms_by_id = Arc::clone(&debug_swarms_by_id);
+                        let shared_context = Arc::clone(&debug_shared_context);
+                        let swarm_plans = Arc::clone(&debug_swarm_plans);
+                        let swarm_coordinators = Arc::clone(&debug_swarm_coordinators);
+                        let file_touches = Arc::clone(&debug_file_touches);
                         let client_debug_response_tx = debug_client_debug_response_tx.clone();
                         let debug_jobs = Arc::clone(&debug_jobs);
 
@@ -1065,6 +1075,11 @@ impl Server {
                                 session_id,
                                 provider,
                                 swarm_members,
+                                swarms_by_id,
+                                shared_context,
+                                swarm_plans,
+                                swarm_coordinators,
+                                file_touches,
                                 client_debug_state,
                                 client_debug_response_tx,
                                 debug_jobs,
@@ -2796,6 +2811,10 @@ async fn create_headless_session(
     global_session_id: &Arc<RwLock<String>>,
     provider_template: &Arc<dyn Provider>,
     command: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
+    swarm_plans: &Arc<RwLock<HashMap<String, Vec<TodoItem>>>>,
 ) -> Result<String> {
     // Parse optional working directory from command: create_session:/path/to/dir
     let working_dir = if let Some(path_str) = command.strip_prefix("create_session:") {
@@ -2873,9 +2892,60 @@ async fn create_headless_session(
         sessions_guard.insert(client_session_id.clone(), agent);
     }
 
+    // Calculate swarm_id and register as swarm member
+    let swarm_id = swarm_id_for_dir(working_dir.clone());
+    let friendly_name = crate::id::extract_session_name(&client_session_id)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| client_session_id[..8.min(client_session_id.len())].to_string());
+
+    // Create an event channel for this headless session
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
+
+    // Register as swarm member
+    {
+        let mut members = swarm_members.write().await;
+        members.insert(
+            client_session_id.clone(),
+            SwarmMember {
+                session_id: client_session_id.clone(),
+                event_tx: event_tx.clone(),
+                working_dir: working_dir.clone(),
+                swarm_id: swarm_id.clone(),
+                status: "ready".to_string(),
+                detail: None,
+                friendly_name: Some(friendly_name.clone()),
+            },
+        );
+
+        // Add to swarm by swarm_id
+        if let Some(ref id) = swarm_id {
+            let mut swarms = swarms_by_id.write().await;
+            swarms
+                .entry(id.clone())
+                .or_insert_with(HashSet::new)
+                .insert(client_session_id.clone());
+        }
+    }
+
+    // Set up coordinator if needed
+    if let Some(ref id) = swarm_id {
+        let mut coordinators = swarm_coordinators.write().await;
+        if coordinators.get(id).is_none() {
+            coordinators.insert(id.clone(), client_session_id.clone());
+        }
+    }
+
+    // Sync existing swarm plan to this session
+    if let Some(ref id) = swarm_id {
+        broadcast_swarm_status(id, swarm_members, swarms_by_id).await;
+        sync_swarm_plan_to_session(id, &client_session_id, swarm_plans).await;
+    }
+
     Ok(serde_json::json!({
         "session_id": client_session_id,
         "working_dir": working_dir,
+        "swarm_id": swarm_id,
+        "friendly_name": friendly_name,
     })
     .to_string())
 }
@@ -3512,6 +3582,11 @@ async fn handle_debug_client(
     session_id: Arc<RwLock<String>>,
     provider: Arc<dyn Provider>,
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
+    swarm_plans: Arc<RwLock<HashMap<String, Vec<TodoItem>>>>,
+    swarm_coordinators: Arc<RwLock<HashMap<String, String>>>,
+    file_touches: Arc<RwLock<HashMap<PathBuf, Vec<FileAccess>>>>,
     client_debug_state: Arc<RwLock<ClientDebugState>>,
     client_debug_response_tx: broadcast::Sender<(u64, String)>,
     debug_jobs: Arc<RwLock<HashMap<String, DebugJob>>>,
@@ -3692,7 +3767,17 @@ async fn handle_debug_client(
                                 }
                             }
                         } else if cmd == "create_session" || cmd.starts_with("create_session:") {
-                            create_headless_session(&sessions, &session_id, &provider, cmd).await
+                            create_headless_session(
+                                &sessions,
+                                &session_id,
+                                &provider,
+                                cmd,
+                                &swarm_members,
+                                &swarms_by_id,
+                                &swarm_coordinators,
+                                &swarm_plans,
+                            )
+                            .await
                         } else if cmd.starts_with("destroy_session:") {
                             let target_id =
                                 cmd.strip_prefix("destroy_session:").unwrap_or("").trim();
@@ -3701,6 +3786,38 @@ async fn handle_debug_client(
                             } else {
                                 let mut sessions_guard = sessions.write().await;
                                 if sessions_guard.remove(target_id).is_some() {
+                                    // Clean up swarm membership
+                                    let swarm_id = {
+                                        let mut members = swarm_members.write().await;
+                                        members.remove(target_id).and_then(|m| m.swarm_id)
+                                    };
+                                    if let Some(ref id) = swarm_id {
+                                        // Remove from swarm
+                                        let mut swarms = swarms_by_id.write().await;
+                                        if let Some(swarm) = swarms.get_mut(id) {
+                                            swarm.remove(target_id);
+                                            if swarm.is_empty() {
+                                                swarms.remove(id);
+                                            }
+                                        }
+                                        // Handle coordinator change if needed
+                                        let was_coordinator = {
+                                            let coordinators = swarm_coordinators.read().await;
+                                            coordinators.get(id).map(|c| c == target_id).unwrap_or(false)
+                                        };
+                                        if was_coordinator {
+                                            let new_coordinator = {
+                                                let swarms = swarms_by_id.read().await;
+                                                swarms.get(id).and_then(|s| s.iter().min().cloned())
+                                            };
+                                            let mut coordinators = swarm_coordinators.write().await;
+                                            coordinators.remove(id);
+                                            if let Some(new_id) = new_coordinator {
+                                                coordinators.insert(id.clone(), new_id);
+                                            }
+                                        }
+                                        broadcast_swarm_status(id, &swarm_members, &swarms_by_id).await;
+                                    }
                                     Ok(format!("Session '{}' destroyed", target_id))
                                 } else {
                                     Err(anyhow::anyhow!("Unknown session_id '{}'", target_id))
@@ -3711,7 +3828,8 @@ async fn handle_debug_client(
                             let session_list: Vec<_> = sessions_guard.keys().collect();
                             Ok(serde_json::to_string_pretty(&session_list)
                                 .unwrap_or_else(|_| "[]".to_string()))
-                        } else if cmd == "swarm" || cmd == "swarm_status" {
+                        } else if cmd == "swarm" || cmd == "swarm_status" || cmd == "swarm:members" {
+                            // List all swarm members with full details
                             let members = swarm_members.read().await;
                             let mut out: Vec<serde_json::Value> = Vec::new();
                             for member in members.values() {
@@ -3719,12 +3837,281 @@ async fn handle_debug_client(
                                     "session_id": member.session_id,
                                     "friendly_name": member.friendly_name,
                                     "swarm_id": member.swarm_id,
+                                    "working_dir": member.working_dir,
                                     "status": member.status,
                                     "detail": member.detail,
                                 }));
                             }
                             Ok(serde_json::to_string_pretty(&out)
                                 .unwrap_or_else(|_| "[]".to_string()))
+                        } else if cmd == "swarm:list" {
+                            // List all swarm IDs with member counts
+                            let swarms = swarms_by_id.read().await;
+                            let coordinators = swarm_coordinators.read().await;
+                            let members = swarm_members.read().await;
+                            let mut out: Vec<serde_json::Value> = Vec::new();
+                            for (swarm_id, session_ids) in swarms.iter() {
+                                let coordinator = coordinators.get(swarm_id);
+                                let coordinator_name = coordinator.and_then(|cid| {
+                                    members.get(cid).and_then(|m| m.friendly_name.clone())
+                                });
+                                out.push(serde_json::json!({
+                                    "swarm_id": swarm_id,
+                                    "member_count": session_ids.len(),
+                                    "members": session_ids.iter().collect::<Vec<_>>(),
+                                    "coordinator": coordinator,
+                                    "coordinator_name": coordinator_name,
+                                }));
+                            }
+                            Ok(serde_json::to_string_pretty(&out)
+                                .unwrap_or_else(|_| "[]".to_string()))
+                        } else if cmd == "swarm:coordinators" {
+                            // List all coordinators
+                            let coordinators = swarm_coordinators.read().await;
+                            let members = swarm_members.read().await;
+                            let mut out: Vec<serde_json::Value> = Vec::new();
+                            for (swarm_id, session_id) in coordinators.iter() {
+                                let name = members.get(session_id).and_then(|m| m.friendly_name.clone());
+                                out.push(serde_json::json!({
+                                    "swarm_id": swarm_id,
+                                    "coordinator_session": session_id,
+                                    "coordinator_name": name,
+                                }));
+                            }
+                            Ok(serde_json::to_string_pretty(&out)
+                                .unwrap_or_else(|_| "[]".to_string()))
+                        } else if cmd.starts_with("swarm:coordinator:") {
+                            // Get coordinator for specific swarm
+                            let swarm_id = cmd.strip_prefix("swarm:coordinator:").unwrap_or("").trim();
+                            let coordinators = swarm_coordinators.read().await;
+                            let members = swarm_members.read().await;
+                            if let Some(session_id) = coordinators.get(swarm_id) {
+                                let name = members.get(session_id).and_then(|m| m.friendly_name.clone());
+                                Ok(serde_json::json!({
+                                    "swarm_id": swarm_id,
+                                    "coordinator_session": session_id,
+                                    "coordinator_name": name,
+                                }).to_string())
+                            } else {
+                                Err(anyhow::anyhow!("No coordinator for swarm '{}'", swarm_id))
+                            }
+                        } else if cmd == "swarm:plans" {
+                            // List all swarm plans
+                            let plans = swarm_plans.read().await;
+                            let mut out: Vec<serde_json::Value> = Vec::new();
+                            for (swarm_id, todos) in plans.iter() {
+                                out.push(serde_json::json!({
+                                    "swarm_id": swarm_id,
+                                    "todo_count": todos.len(),
+                                    "todos": todos,
+                                }));
+                            }
+                            Ok(serde_json::to_string_pretty(&out)
+                                .unwrap_or_else(|_| "[]".to_string()))
+                        } else if cmd.starts_with("swarm:plan:") {
+                            // Get plan for specific swarm
+                            let swarm_id = cmd.strip_prefix("swarm:plan:").unwrap_or("").trim();
+                            let plans = swarm_plans.read().await;
+                            if let Some(todos) = plans.get(swarm_id) {
+                                Ok(serde_json::to_string_pretty(todos)
+                                    .unwrap_or_else(|_| "[]".to_string()))
+                            } else {
+                                Ok("[]".to_string())
+                            }
+                        } else if cmd == "swarm:context" {
+                            // List all shared context
+                            let ctx = shared_context.read().await;
+                            let mut out: Vec<serde_json::Value> = Vec::new();
+                            for (swarm_id, entries) in ctx.iter() {
+                                for (key, context) in entries.iter() {
+                                    out.push(serde_json::json!({
+                                        "swarm_id": swarm_id,
+                                        "key": key,
+                                        "value": context.value,
+                                        "from_session": context.from_session,
+                                        "from_name": context.from_name,
+                                    }));
+                                }
+                            }
+                            Ok(serde_json::to_string_pretty(&out)
+                                .unwrap_or_else(|_| "[]".to_string()))
+                        } else if cmd.starts_with("swarm:context:") {
+                            // Get context for specific swarm or key
+                            let arg = cmd.strip_prefix("swarm:context:").unwrap_or("").trim();
+                            let ctx = shared_context.read().await;
+                            // Check if arg contains a key separator
+                            if let Some((swarm_id, key)) = arg.split_once(':') {
+                                // Get specific key in specific swarm
+                                if let Some(entries) = ctx.get(swarm_id) {
+                                    if let Some(context) = entries.get(key) {
+                                        Ok(serde_json::json!({
+                                            "swarm_id": swarm_id,
+                                            "key": key,
+                                            "value": context.value,
+                                            "from_session": context.from_session,
+                                            "from_name": context.from_name,
+                                        }).to_string())
+                                    } else {
+                                        Err(anyhow::anyhow!("No context key '{}' in swarm '{}'", key, swarm_id))
+                                    }
+                                } else {
+                                    Err(anyhow::anyhow!("No context for swarm '{}'", swarm_id))
+                                }
+                            } else {
+                                // Get all context for swarm
+                                if let Some(entries) = ctx.get(arg) {
+                                    let mut out: Vec<serde_json::Value> = Vec::new();
+                                    for (key, context) in entries.iter() {
+                                        out.push(serde_json::json!({
+                                            "key": key,
+                                            "value": context.value,
+                                            "from_session": context.from_session,
+                                            "from_name": context.from_name,
+                                        }));
+                                    }
+                                    Ok(serde_json::to_string_pretty(&out)
+                                        .unwrap_or_else(|_| "[]".to_string()))
+                                } else {
+                                    Ok("[]".to_string())
+                                }
+                            }
+                        } else if cmd == "swarm:touches" {
+                            // List all file touches
+                            let touches = file_touches.read().await;
+                            let members = swarm_members.read().await;
+                            let mut out: Vec<serde_json::Value> = Vec::new();
+                            for (path, accesses) in touches.iter() {
+                                for access in accesses.iter() {
+                                    let name = members.get(&access.session_id)
+                                        .and_then(|m| m.friendly_name.clone());
+                                    out.push(serde_json::json!({
+                                        "path": path.to_string_lossy(),
+                                        "session_id": access.session_id,
+                                        "session_name": name,
+                                        "op": access.op.as_str(),
+                                        "summary": access.summary,
+                                        "age_secs": access.timestamp.elapsed().as_secs(),
+                                    }));
+                                }
+                            }
+                            Ok(serde_json::to_string_pretty(&out)
+                                .unwrap_or_else(|_| "[]".to_string()))
+                        } else if cmd.starts_with("swarm:touches:") {
+                            // Get touches for specific path
+                            let path_str = cmd.strip_prefix("swarm:touches:").unwrap_or("").trim();
+                            let path = PathBuf::from(path_str);
+                            let touches = file_touches.read().await;
+                            let members = swarm_members.read().await;
+                            if let Some(accesses) = touches.get(&path) {
+                                let mut out: Vec<serde_json::Value> = Vec::new();
+                                for access in accesses.iter() {
+                                    let name = members.get(&access.session_id)
+                                        .and_then(|m| m.friendly_name.clone());
+                                    out.push(serde_json::json!({
+                                        "session_id": access.session_id,
+                                        "session_name": name,
+                                        "op": access.op.as_str(),
+                                        "summary": access.summary,
+                                        "age_secs": access.timestamp.elapsed().as_secs(),
+                                    }));
+                                }
+                                Ok(serde_json::to_string_pretty(&out)
+                                    .unwrap_or_else(|_| "[]".to_string()))
+                            } else {
+                                Ok("[]".to_string())
+                            }
+                        } else if cmd == "swarm:conflicts" {
+                            // List files touched by multiple sessions
+                            let touches = file_touches.read().await;
+                            let members = swarm_members.read().await;
+                            let mut out: Vec<serde_json::Value> = Vec::new();
+                            for (path, accesses) in touches.iter() {
+                                // Get unique session IDs
+                                let unique_sessions: HashSet<_> = accesses.iter()
+                                    .map(|a| &a.session_id)
+                                    .collect();
+                                if unique_sessions.len() > 1 {
+                                    let session_info: Vec<_> = unique_sessions.iter().map(|sid| {
+                                        let name = members.get(*sid).and_then(|m| m.friendly_name.clone());
+                                        serde_json::json!({
+                                            "session_id": sid,
+                                            "session_name": name,
+                                        })
+                                    }).collect();
+                                    out.push(serde_json::json!({
+                                        "path": path.to_string_lossy(),
+                                        "session_count": unique_sessions.len(),
+                                        "sessions": session_info,
+                                    }));
+                                }
+                            }
+                            Ok(serde_json::to_string_pretty(&out)
+                                .unwrap_or_else(|_| "[]".to_string()))
+                        } else if cmd.starts_with("swarm:info:") {
+                            // Get full info for a specific swarm
+                            let swarm_id = cmd.strip_prefix("swarm:info:").unwrap_or("").trim();
+                            let swarms = swarms_by_id.read().await;
+                            let coordinators = swarm_coordinators.read().await;
+                            let members = swarm_members.read().await;
+                            let plans = swarm_plans.read().await;
+                            let ctx = shared_context.read().await;
+                            let touches = file_touches.read().await;
+
+                            if let Some(session_ids) = swarms.get(swarm_id) {
+                                let coordinator = coordinators.get(swarm_id);
+                                let coordinator_name = coordinator.and_then(|cid| {
+                                    members.get(cid).and_then(|m| m.friendly_name.clone())
+                                });
+
+                                // Get member details
+                                let member_details: Vec<_> = session_ids.iter().filter_map(|sid| {
+                                    members.get(sid).map(|m| serde_json::json!({
+                                        "session_id": m.session_id,
+                                        "friendly_name": m.friendly_name,
+                                        "status": m.status,
+                                        "detail": m.detail,
+                                        "working_dir": m.working_dir,
+                                    }))
+                                }).collect();
+
+                                // Get plan
+                                let plan = plans.get(swarm_id).cloned().unwrap_or_default();
+
+                                // Get context keys
+                                let context_keys: Vec<_> = ctx.get(swarm_id)
+                                    .map(|entries| entries.keys().cloned().collect())
+                                    .unwrap_or_default();
+
+                                // Get files with conflicts in this swarm
+                                let conflicts: Vec<_> = touches.iter().filter_map(|(path, accesses)| {
+                                    let swarm_accesses: Vec<_> = accesses.iter()
+                                        .filter(|a| session_ids.contains(&a.session_id))
+                                        .collect();
+                                    let unique: HashSet<_> = swarm_accesses.iter()
+                                        .map(|a| &a.session_id)
+                                        .collect();
+                                    if unique.len() > 1 {
+                                        Some(path.to_string_lossy().to_string())
+                                    } else {
+                                        None
+                                    }
+                                }).collect();
+
+                                Ok(serde_json::json!({
+                                    "swarm_id": swarm_id,
+                                    "member_count": session_ids.len(),
+                                    "members": member_details,
+                                    "coordinator": coordinator,
+                                    "coordinator_name": coordinator_name,
+                                    "plan": plan,
+                                    "context_keys": context_keys,
+                                    "conflict_files": conflicts,
+                                }).to_string())
+                            } else {
+                                Err(anyhow::anyhow!("No swarm with id '{}'", swarm_id))
+                            }
+                        } else if cmd == "swarm:help" {
+                            Ok(swarm_debug_help_text())
                         } else if cmd == "help" {
                             Ok(debug_help_text())
                         } else {
@@ -3782,7 +4169,8 @@ SERVER COMMANDS (server: prefix or no prefix):
   job_status:<id>          - Get async job status/output
   job_wait:<id>            - Wait for async job to finish
   sessions                 - List all sessions
-  swarm                    - List swarm members + status
+  swarm                    - List swarm members + status (alias: swarm:members)
+  swarm:help               - Full swarm command reference
   create_session           - Create headless session
   create_session:<path>    - Create session with working dir
   destroy_session:<id>     - Destroy a session
@@ -3791,6 +4179,17 @@ SERVER COMMANDS (server: prefix or no prefix):
   trigger_extraction       - Force end-of-session memory extraction
   available_models         - List all available models
   reload                   - Trigger server reload with current binary
+
+SWARM COMMANDS (swarm: prefix):
+  swarm:members            - List all swarm members with details
+  swarm:list               - List all swarms with member counts
+  swarm:info:<swarm_id>    - Full info for a swarm
+  swarm:coordinators       - List all coordinators
+  swarm:plans              - List all swarm plans
+  swarm:context            - List all shared context
+  swarm:touches            - List all file touches
+  swarm:conflicts          - Files touched by multiple sessions
+  swarm:help               - Full swarm command reference
 
 CLIENT COMMANDS (client: prefix):
   client:state             - Get TUI state
@@ -3819,7 +4218,44 @@ Examples:
   {"type":"debug_command","id":2,"command":"client:frame"}
   {"type":"debug_command","id":3,"command":"tester:list"}
   {"type":"debug_command","id":4,"command":"set_provider:openai","session_id":"..."}
-  {"type":"debug_command","id":5,"command":"trigger_extraction","session_id":"..."}"#
+  {"type":"debug_command","id":5,"command":"swarm:info:/home/user/project"}"#
+        .to_string()
+}
+
+/// Generate help text for swarm debug commands
+fn swarm_debug_help_text() -> String {
+    r#"Swarm debug commands (swarm: prefix):
+
+MEMBERS & STRUCTURE:
+  swarm                    - List all swarm members (alias for swarm:members)
+  swarm:members            - List all swarm members with full details
+  swarm:list               - List all swarm IDs with member counts and coordinators
+  swarm:info:<swarm_id>    - Full info: members, coordinator, plan, context, conflicts
+
+COORDINATORS:
+  swarm:coordinators       - List all coordinators (swarm_id -> session_id)
+  swarm:coordinator:<id>   - Get coordinator for specific swarm
+
+PLANS (shared todo lists):
+  swarm:plans              - List all swarm plans with todo counts
+  swarm:plan:<swarm_id>    - Get todos for specific swarm
+
+SHARED CONTEXT (key-value store):
+  swarm:context            - List all shared context entries
+  swarm:context:<swarm_id> - List context for specific swarm
+  swarm:context:<swarm_id>:<key> - Get specific context value
+
+FILE TOUCHES (conflict detection):
+  swarm:touches            - List all file touches (path, session, op, age)
+  swarm:touches:<path>     - Get touches for specific file
+  swarm:conflicts          - List files touched by multiple sessions
+
+Examples:
+  {"type":"debug_command","id":1,"command":"swarm:list"}
+  {"type":"debug_command","id":2,"command":"swarm:info:/home/user/myproject"}
+  {"type":"debug_command","id":3,"command":"swarm:plan:/home/user/myproject"}
+  {"type":"debug_command","id":4,"command":"swarm:context:/home/user/myproject:notes"}
+  {"type":"debug_command","id":5,"command":"swarm:conflicts"}"#
         .to_string()
 }
 
