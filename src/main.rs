@@ -307,26 +307,33 @@ async fn main() -> Result<()> {
         server::set_socket_path(socket);
     }
 
-    // Check for updates unless --no-update is specified or running Update command
-    if !args.no_update && !matches!(args.command, Some(Command::Update)) && args.resume.is_none() {
-        if let Some(update_available) = check_for_updates() {
-            if update_available {
-                if args.auto_update {
-                    eprintln!("Update available - auto-updating...");
-                    if let Err(e) = run_auto_update() {
+    // Check for updates in background unless --no-update is specified or running Update command
+    let check_updates = !args.no_update
+        && !matches!(args.command, Some(Command::Update))
+        && args.resume.is_none();
+    let auto_update = args.auto_update;
+
+    if check_updates {
+        // Spawn update check in background to avoid blocking startup
+        std::thread::spawn(move || {
+            if let Some(update_available) = check_for_updates() {
+                if update_available {
+                    if auto_update {
+                        eprintln!("Update available - auto-updating...");
+                        if let Err(e) = run_auto_update() {
+                            eprintln!(
+                                "Auto-update failed: {}. Continuing with current version.",
+                                e
+                            );
+                        }
+                    } else {
                         eprintln!(
-                            "Auto-update failed: {}. Continuing with current version.",
-                            e
+                            "\n📦 Update available! Run `jcode update` or `/reload` to update.\n"
                         );
                     }
-                    // If we get here, exec failed or update failed
-                } else {
-                    eprintln!(
-                        "\n📦 Update available! Run `jcode update` or `/reload` to update.\n"
-                    );
                 }
             }
-        }
+        });
     }
 
     // Run main logic with error handling for auto-debug
@@ -520,9 +527,13 @@ async fn init_provider_and_registry(
             Arc::new(provider::MultiProvider::with_preference(true))
         }
         ProviderChoice::Auto => {
-            // Check if we have any credentials
-            let has_claude = auth::claude::load_credentials().is_ok();
-            let has_openai = auth::codex::load_credentials().is_ok();
+            // Check if we have any credentials (in parallel)
+            let (has_claude, has_openai) = tokio::join!(
+                tokio::task::spawn_blocking(|| auth::claude::load_credentials().is_ok()),
+                tokio::task::spawn_blocking(|| auth::codex::load_credentials().is_ok()),
+            );
+            let has_claude = has_claude.unwrap_or(false);
+            let has_openai = has_openai.unwrap_or(false);
 
             if has_claude || has_openai {
                 // Use MultiProvider - it will auto-detect and allow switching

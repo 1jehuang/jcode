@@ -334,6 +334,7 @@ impl Registry {
     }
 
     /// Register MCP tools (MCP management and server tools)
+    /// Connections happen in background to avoid blocking startup.
     pub async fn register_mcp_tools(&self) {
         use crate::mcp::McpManager;
         use std::sync::Arc;
@@ -341,37 +342,43 @@ impl Registry {
 
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
 
-        // Register MCP management tool
+        // Register MCP management tool immediately
         let mcp_tool = mcp::McpManagementTool::new(Arc::clone(&mcp_manager));
         self.register("mcp".to_string(), Arc::new(mcp_tool) as Arc<dyn Tool>)
             .await;
 
-        // Connect to configured MCP servers and register their tools
-        let manager = mcp_manager.read().await;
-        let server_count = manager.config().servers.len();
+        // Check if we have servers to connect to
+        let server_count = {
+            let manager = mcp_manager.read().await;
+            manager.config().servers.len()
+        };
+
         if server_count > 0 {
-            drop(manager);
             crate::logging::info(&format!("MCP: Found {} server(s) in config", server_count));
 
-            let (successes, failures) = {
-                let manager = mcp_manager.write().await;
-                manager.connect_all().await.unwrap_or((0, Vec::new()))
-            };
+            // Spawn connection and tool registration in background
+            let registry = self.clone();
+            tokio::spawn(async move {
+                let (successes, failures) = {
+                    let manager = mcp_manager.write().await;
+                    manager.connect_all().await.unwrap_or((0, Vec::new()))
+                };
 
-            if successes > 0 {
-                crate::logging::info(&format!("MCP: Connected to {} server(s)", successes));
-            }
-            if !failures.is_empty() {
-                for (name, error) in &failures {
-                    crate::logging::error(&format!("MCP '{}' failed: {}", name, error));
+                if successes > 0 {
+                    crate::logging::info(&format!("MCP: Connected to {} server(s)", successes));
                 }
-            }
+                if !failures.is_empty() {
+                    for (name, error) in &failures {
+                        crate::logging::error(&format!("MCP '{}' failed: {}", name, error));
+                    }
+                }
 
-            // Register MCP server tools
-            let tools = crate::mcp::create_mcp_tools(Arc::clone(&mcp_manager)).await;
-            for (name, tool) in tools {
-                self.register(name, tool).await;
-            }
+                // Register MCP server tools
+                let tools = crate::mcp::create_mcp_tools(Arc::clone(&mcp_manager)).await;
+                for (name, tool) in tools {
+                    registry.register(name, tool).await;
+                }
+            });
         }
     }
 

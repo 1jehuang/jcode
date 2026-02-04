@@ -285,6 +285,48 @@ impl Agent {
             .unwrap_or(false)
     }
 
+    /// Get count of queued soft interrupts
+    pub fn soft_interrupt_count(&self) -> usize {
+        self.soft_interrupt_queue
+            .lock()
+            .map(|q| q.len())
+            .unwrap_or(0)
+    }
+
+    /// Get count of pending alerts
+    pub fn pending_alert_count(&self) -> usize {
+        self.pending_alerts.len()
+    }
+
+    /// Get pending alerts (for debug visibility)
+    pub fn pending_alerts_preview(&self) -> Vec<String> {
+        self.pending_alerts
+            .iter()
+            .take(10)
+            .map(|s| if s.len() > 100 { format!("{}...", &s[..100]) } else { s.clone() })
+            .collect()
+    }
+
+    /// Get soft interrupt previews (for debug visibility)
+    pub fn soft_interrupts_preview(&self) -> Vec<(String, bool)> {
+        self.soft_interrupt_queue
+            .lock()
+            .map(|q| {
+                q.iter()
+                    .take(10)
+                    .map(|m| {
+                        let preview = if m.content.len() > 100 {
+                            format!("{}...", &m.content[..100])
+                        } else {
+                            m.content.clone()
+                        };
+                        (preview, m.urgent)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Inject all pending soft interrupt messages into the conversation.
     /// Returns the combined message content and clears the queue.
     fn inject_soft_interrupts(&mut self) -> Option<String> {

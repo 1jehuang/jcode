@@ -221,23 +221,41 @@ Commands can be namespaced with `server:`, `client:`, or `tester:` prefixes. Unn
 **Swarm Commands** (multi-agent coordination - `swarm:` prefix):
 | Command | Description |
 |---------|-------------|
-| `swarm` / `swarm:members` | List all swarm members with details |
+| `swarm` / `swarm:members` | List all swarm members with details (includes timestamps, provider/model) |
 | `swarm:list` | List all swarm IDs with member counts |
 | `swarm:info:<swarm_id>` | Full info: members, coordinator, plan, context, conflicts |
 | `swarm:coordinators` | List all coordinators (swarm_id -> session_id) |
 | `swarm:coordinator:<swarm_id>` | Get coordinator for specific swarm |
 | `swarm:plans` | List all swarm plans with todo counts |
 | `swarm:plan:<swarm_id>` | Get todos for specific swarm |
-| `swarm:context` | List all shared context entries |
+| `swarm:proposals` | List all pending plan proposals |
+| `swarm:proposals:<swarm_id>` | List proposals for specific swarm (with items) |
+| `swarm:proposals:<session_id>` | Get detailed proposal from a session |
+| `swarm:context` | List all shared context entries (includes timestamps) |
 | `swarm:context:<swarm_id>` | List context for specific swarm |
 | `swarm:context:<swarm_id>:<key>` | Get specific context value |
-| `swarm:touches` | List all file touches (path, session, op, age) |
+| `swarm:touches` | List all file touches (path, session, op, age, timestamp_unix) |
 | `swarm:touches:<path>` | Get touches for specific file |
-| `swarm:conflicts` | Files touched by multiple sessions |
+| `swarm:touches:swarm:<swarm_id>` | Get touches filtered by swarm members |
+| `swarm:conflicts` | Files touched by multiple sessions (with full access history) |
+| `swarm:session:<id>` | Detailed session state (interrupts, provider, token usage) |
+| `swarm:interrupts` | List pending interrupts across all sessions |
+| `swarm:id:<path>` | Compute swarm_id for a path (shows git_root, is_git_repo) |
 | `swarm:broadcast:<message>` | Broadcast message to all swarm members |
 | `swarm:broadcast:<swarm_id> <message>` | Broadcast to specific swarm |
 | `swarm:notify:<session_id> <message>` | Send DM to specific session |
 | `swarm:help` | Full swarm command reference |
+
+**Event Commands** (real-time event subscription - `events:` prefix):
+| Command | Description |
+|---------|-------------|
+| `events:recent` | Get recent 50 events |
+| `events:recent:<N>` | Get recent N events |
+| `events:since:<id>` | Get events since event ID (for polling) |
+| `events:count` | Get event count and latest ID |
+| `events:types` | List available event types |
+
+Event types include: `file_touch`, `notification`, `plan_update`, `plan_proposal`, `context_update`, `status_change`, `member_change`. Events include timestamps (`age_secs`, `timestamp_unix`) for debugging timing issues.
 
 ### Python Test Example
 
