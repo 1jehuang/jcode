@@ -633,6 +633,7 @@ async fn run_tui(
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     }
     ratatui::restore();
+    crate::tui::mermaid::clear_image_state();
 
     let run_result = result?;
 
@@ -1461,6 +1462,7 @@ async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     }
     ratatui::restore();
+    crate::tui::mermaid::clear_image_state();
 
     let run_result = result?;
 
@@ -2066,6 +2068,7 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     }
     ratatui::restore();
+    crate::tui::mermaid::clear_image_state();
 
     let run_result = result?;
 
