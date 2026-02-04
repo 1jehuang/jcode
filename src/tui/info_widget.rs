@@ -87,6 +87,18 @@ impl WidgetKind {
             WidgetKind::ModelInfo,
         ]
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WidgetKind::Todos => "todos",
+            WidgetKind::ContextUsage => "context",
+            WidgetKind::MemoryActivity => "memory",
+            WidgetKind::SwarmStatus => "swarm",
+            WidgetKind::BackgroundTasks => "background",
+            WidgetKind::UsageLimits => "usage",
+            WidgetKind::ModelInfo => "model",
+        }
+    }
 }
 
 /// Which side of the screen a widget is on
@@ -94,6 +106,15 @@ impl WidgetKind {
 pub enum Side {
     Left,
     Right,
+}
+
+impl Side {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Side::Left => "left",
+            Side::Right => "right",
+        }
+    }
 }
 
 /// A placed widget with its location and type
@@ -1453,10 +1474,7 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
 
                     if let Some(tps) = info.output_tps {
                         lines.push(Line::from(vec![
-                            Span::styled(
-                                "⏱ ",
-                                Style::default().fg(Color::Rgb(120, 170, 220)),
-                            ),
+                            Span::styled("⏱ ", Style::default().fg(Color::Rgb(120, 170, 220))),
                             Span::styled(
                                 format!("{:.1} tps", tps),
                                 Style::default().fg(Color::Rgb(140, 140, 150)),

@@ -947,10 +947,27 @@ impl App {
         }
         if cmd == "status" {
             let enabled = super::visual_debug::is_enabled();
+            let overlay = super::visual_debug::overlay_enabled();
             return serde_json::json!({
-                "visual_debug_enabled": enabled
+                "visual_debug_enabled": enabled,
+                "visual_debug_overlay": overlay
             })
             .to_string();
+        }
+        if cmd == "overlay" || cmd == "overlay:status" {
+            let overlay = super::visual_debug::overlay_enabled();
+            return serde_json::json!({
+                "visual_debug_overlay": overlay
+            })
+            .to_string();
+        }
+        if cmd == "overlay:on" || cmd == "overlay:enable" {
+            super::visual_debug::set_overlay(true);
+            return "Visual debug overlay enabled.".to_string();
+        }
+        if cmd == "overlay:off" || cmd == "overlay:disable" {
+            super::visual_debug::set_overlay(false);
+            return "Visual debug overlay disabled.".to_string();
         }
         if cmd.starts_with("message:") {
             let msg = cmd.strip_prefix("message:").unwrap_or("");
@@ -1087,6 +1104,90 @@ impl App {
             visual_debug::enable();
             visual_debug::latest_frame_json_normalized()
                 .unwrap_or_else(|| "screen-json-normalized: no frames captured".to_string())
+        } else if cmd == "layout" {
+            use super::visual_debug;
+            visual_debug::enable();
+            match visual_debug::latest_frame() {
+                Some(frame) => serde_json::to_string_pretty(&serde_json::json!({
+                    "frame_id": frame.frame_id,
+                    "terminal_size": frame.terminal_size,
+                    "layout": frame.layout,
+                }))
+                .unwrap_or_else(|_| "{}".to_string()),
+                None => "layout: no frames captured".to_string(),
+            }
+        } else if cmd == "margins" {
+            use super::visual_debug;
+            visual_debug::enable();
+            match visual_debug::latest_frame() {
+                Some(frame) => serde_json::to_string_pretty(&serde_json::json!({
+                    "frame_id": frame.frame_id,
+                    "margins": frame.layout.margins,
+                }))
+                .unwrap_or_else(|_| "{}".to_string()),
+                None => "margins: no frames captured".to_string(),
+            }
+        } else if cmd == "widgets" || cmd == "info-widgets" {
+            use super::visual_debug;
+            visual_debug::enable();
+            match visual_debug::latest_frame() {
+                Some(frame) => serde_json::to_string_pretty(&serde_json::json!({
+                    "frame_id": frame.frame_id,
+                    "info_widgets": frame.info_widgets,
+                }))
+                .unwrap_or_else(|_| "{}".to_string()),
+                None => "widgets: no frames captured".to_string(),
+            }
+        } else if cmd == "render-stats" {
+            use super::visual_debug;
+            visual_debug::enable();
+            match visual_debug::latest_frame() {
+                Some(frame) => serde_json::to_string_pretty(&serde_json::json!({
+                    "frame_id": frame.frame_id,
+                    "render_timing": frame.render_timing,
+                    "render_order": frame.render_order,
+                }))
+                .unwrap_or_else(|_| "{}".to_string()),
+                None => "render-stats: no frames captured".to_string(),
+            }
+        } else if cmd == "render-order" {
+            use super::visual_debug;
+            visual_debug::enable();
+            match visual_debug::latest_frame() {
+                Some(frame) => serde_json::to_string_pretty(&frame.render_order)
+                    .unwrap_or_else(|_| "[]".to_string()),
+                None => "render-order: no frames captured".to_string(),
+            }
+        } else if cmd == "anomalies" {
+            use super::visual_debug;
+            visual_debug::enable();
+            match visual_debug::latest_frame() {
+                Some(frame) => serde_json::to_string_pretty(&frame.anomalies)
+                    .unwrap_or_else(|_| "[]".to_string()),
+                None => "anomalies: no frames captured".to_string(),
+            }
+        } else if cmd == "theme" {
+            use super::visual_debug;
+            visual_debug::enable();
+            match visual_debug::latest_frame() {
+                Some(frame) => serde_json::to_string_pretty(&frame.theme)
+                    .unwrap_or_else(|_| "null".to_string()),
+                None => "theme: no frames captured".to_string(),
+            }
+        } else if cmd == "mermaid:stats" {
+            let stats = super::mermaid::debug_stats();
+            serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string())
+        } else if cmd == "mermaid:cache" {
+            let entries = super::mermaid::debug_cache();
+            serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string())
+        } else if cmd == "mermaid:evict" || cmd == "mermaid:clear-cache" {
+            match super::mermaid::clear_cache() {
+                Ok(_) => "mermaid: cache cleared".to_string(),
+                Err(e) => format!("mermaid: cache clear failed: {}", e),
+            }
+        } else if cmd == "markdown:stats" {
+            let stats = super::markdown::debug_stats();
+            serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string())
         } else if cmd.starts_with("assert:") {
             let raw = cmd.strip_prefix("assert:").unwrap_or("");
             self.handle_assertions(raw)
@@ -1250,6 +1351,18 @@ impl App {
                  - screen-json-normalized - dump normalized frame (for diffs)\n\
                  - frame - alias for screen-json\n\
                  - frame-normalized - alias for screen-json-normalized\n\
+                 - layout - dump latest layout JSON\n\
+                 - margins - dump layout margins JSON\n\
+                 - widgets - dump info widget summary/placements\n\
+                 - render-stats - dump render timing + order JSON\n\
+                 - render-order - dump render order list\n\
+                 - anomalies - dump visual debug anomalies\n\
+                 - theme - dump current palette snapshot\n\
+                 - mermaid:stats - dump mermaid debug stats\n\
+                 - mermaid:cache - list mermaid cache entries\n\
+                 - mermaid:evict - clear mermaid cache\n\
+                 - markdown:stats - dump markdown debug stats\n\
+                 - overlay:on/off/status - toggle overlay boxes\n\
                  - enable/disable/status - control visual debug capture\n\
                  - wait - check if processing\n\
                  - wait:<ms> - block until idle or timeout\n\
@@ -5225,8 +5338,13 @@ impl App {
                         // Only show thinking content if enabled in config
                         if config().display.show_thinking {
                             // Only emit the prefix once at the start of thinking
-                            if !self.thinking_prefix_emitted && !self.thinking_buffer.trim().is_empty() {
-                                self.insert_thought_line(format!("💭 {}", self.thinking_buffer.trim_start()));
+                            if !self.thinking_prefix_emitted
+                                && !self.thinking_buffer.trim().is_empty()
+                            {
+                                self.insert_thought_line(format!(
+                                    "💭 {}",
+                                    self.thinking_buffer.trim_start()
+                                ));
                                 self.thinking_prefix_emitted = true;
                                 self.thinking_buffer.clear();
                             } else if self.thinking_prefix_emitted {
@@ -7673,9 +7791,7 @@ impl super::TuiState for App {
                     ProcessingStatus::Sending => {
                         ("running".to_string(), Some("sending".to_string()))
                     }
-                    ProcessingStatus::Thinking(_) => {
-                        ("thinking".to_string(), None)
-                    }
+                    ProcessingStatus::Thinking(_) => ("thinking".to_string(), None),
                     ProcessingStatus::Streaming => {
                         ("running".to_string(), Some("streaming".to_string()))
                     }
