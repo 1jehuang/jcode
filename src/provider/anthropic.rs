@@ -235,10 +235,13 @@ impl AnthropicProvider {
     }
 
     /// Convert tool definitions to Anthropic API format
+    /// Adds cache_control to the last tool for prompt caching
     fn format_tools(&self, tools: &[ToolDefinition], is_oauth: bool) -> Vec<ApiTool> {
+        let len = tools.len();
         tools
             .iter()
-            .map(|tool| ApiTool {
+            .enumerate()
+            .map(|(i, tool)| ApiTool {
                 name: if is_oauth {
                     map_tool_name_for_oauth(&tool.name)
                 } else {
@@ -246,6 +249,12 @@ impl AnthropicProvider {
                 },
                 description: tool.description.clone(),
                 input_schema: tool.input_schema.clone(),
+                // Add cache_control to the last tool to cache all tool definitions
+                cache_control: if i == len - 1 {
+                    Some(CacheControlParam::ephemeral())
+                } else {
+                    None
+                },
             })
             .collect()
     }
@@ -966,6 +975,8 @@ struct ApiTool {
     name: String,
     description: String,
     input_schema: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControlParam>,
 }
 
 // Response types for SSE parsing
