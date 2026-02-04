@@ -2,10 +2,16 @@
 
 use super::info_widget;
 use super::markdown;
-use super::visual_debug::{self, FrameCaptureBuilder, MessageCapture};
+use super::visual_debug::{
+    self, FrameCaptureBuilder, InfoWidgetCapture, InfoWidgetSummary, MarginsCapture,
+    MessageCapture, RenderTimingCapture, WidgetPlacementCapture,
+};
 use super::{DisplayMessage, ProcessingStatus, TuiState};
 use crate::message::ToolCall;
-use ratatui::{prelude::*, widgets::Paragraph};
+use ratatui::{
+    prelude::*,
+    widgets::{Block, Borders, Paragraph},
+};
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
@@ -1031,6 +1037,9 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         .count();
 
     let total_start = Instant::now();
+    if let Some(ref mut capture) = debug_capture {
+        capture.render_order.push("prepare_messages".to_string());
+    }
     let prep_start = Instant::now();
     let prepared = prepare_messages(app, area.width);
     let prep_elapsed = prep_start.elapsed();
@@ -1113,13 +1122,33 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         capture.rendered_text.status_line = format_status_for_debug(app);
     }
 
+    if let Some(ref mut capture) = debug_capture {
+        capture.render_order.push("draw_messages".to_string());
+    }
     let draw_start = Instant::now();
     let margins = draw_messages(frame, app, chunks[0], &prepared);
-    let draw_elapsed = draw_start.elapsed();
+    let messages_draw = draw_start.elapsed();
+
+    if let Some(ref mut capture) = debug_capture {
+        capture.layout.margins = Some(MarginsCapture {
+            left_widths: margins.left_widths.clone(),
+            right_widths: margins.right_widths.clone(),
+            centered: margins.centered,
+        });
+    }
     if queued_height > 0 {
+        if let Some(ref mut capture) = debug_capture {
+            capture.render_order.push("draw_queued".to_string());
+        }
         draw_queued(frame, app, chunks[1], user_count + 1);
     }
+    if let Some(ref mut capture) = debug_capture {
+        capture.render_order.push("draw_status".to_string());
+    }
     draw_status(frame, app, chunks[2], pending_count);
+    if let Some(ref mut capture) = debug_capture {
+        capture.render_order.push("draw_input".to_string());
+    }
     draw_input(
         frame,
         app,
@@ -1130,18 +1159,86 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
 
     // Draw info widget overlays (if there's space and content)
     let widget_data = app.info_widget_data();
+    let mut widget_render_ms: Option<f32> = None;
+    let mut placements: Vec<info_widget::WidgetPlacement> = Vec::new();
     if !widget_data.is_empty() {
-        let placements = info_widget::calculate_placements(chunks[0], &margins, &widget_data);
+        if let Some(ref mut capture) = debug_capture {
+            capture.render_order.push("render_info_widgets".to_string());
+        }
+        placements = info_widget::calculate_placements(chunks[0], &margins, &widget_data);
+
+        if let Some(ref mut capture) = debug_capture {
+            let placement_captures = capture_widget_placements(&placements);
+            capture.layout.widget_placements = placement_captures.clone();
+            capture.info_widgets = Some(InfoWidgetCapture {
+                summary: build_info_widget_summary(&widget_data),
+                placements: placement_captures,
+            });
+
+            // Detect overlaps with message area
+            for placement in &placements {
+                if rects_overlap(placement.rect, chunks[0]) {
+                    capture.anomaly(format!(
+                        "Info widget {:?} overlaps messages area",
+                        placement.kind
+                    ));
+                }
+                if !rect_within_bounds(placement.rect, area) {
+                    capture.anomaly(format!(
+                        "Info widget {:?} out of bounds {:?}",
+                        placement.kind, placement.rect
+                    ));
+                }
+            }
+            for i in 0..placements.len() {
+                for j in (i + 1)..placements.len() {
+                    if rects_overlap(placements[i].rect, placements[j].rect) {
+                        capture.anomaly(format!(
+                            "Info widgets overlap: {:?} and {:?}",
+                            placements[i].kind, placements[j].kind
+                        ));
+                    }
+                }
+            }
+        }
+
+        let widget_start = Instant::now();
         info_widget::render_all(frame, &placements, &widget_data);
+        widget_render_ms = Some(widget_start.elapsed().as_secs_f32() * 1000.0);
+
+        // Optional visual overlay for placements
+    } else if let Some(ref mut capture) = debug_capture {
+        capture.info_widgets = Some(InfoWidgetCapture {
+            summary: build_info_widget_summary(&widget_data),
+            placements: Vec::new(),
+        });
+    }
+    if visual_debug::overlay_enabled() {
+        draw_debug_overlay(frame, &placements, &chunks);
     }
 
     // Record the frame capture if enabled
     if let Some(capture) = debug_capture {
+        let total_draw = draw_start.elapsed();
+        let render_timing = RenderTimingCapture {
+            prepare_ms: prep_elapsed.as_secs_f32() * 1000.0,
+            draw_ms: total_draw.as_secs_f32() * 1000.0,
+            total_ms: total_start.elapsed().as_secs_f32() * 1000.0,
+            messages_ms: Some(messages_draw.as_secs_f32() * 1000.0),
+            widgets_ms: widget_render_ms,
+        };
+
+        let mut capture = capture;
+        capture.render_timing = Some(render_timing);
+        capture.mermaid = crate::tui::mermaid::debug_stats_json();
+        capture.markdown = crate::tui::markdown::debug_stats_json();
+        capture.theme = debug_palette_json();
         visual_debug::record_frame(capture.build());
     }
 
     if profile_enabled() {
-        record_profile(prep_elapsed, draw_elapsed, total_start.elapsed());
+        let total_draw = draw_start.elapsed();
+        record_profile(prep_elapsed, total_draw, total_start.elapsed());
     }
 }
 
@@ -1970,6 +2067,153 @@ fn compute_visible_margins(
     }
 }
 
+fn capture_widget_placements(
+    placements: &[info_widget::WidgetPlacement],
+) -> Vec<WidgetPlacementCapture> {
+    placements
+        .iter()
+        .map(|p| WidgetPlacementCapture {
+            kind: p.kind.as_str().to_string(),
+            side: p.side.as_str().to_string(),
+            rect: p.rect.into(),
+        })
+        .collect()
+}
+
+fn build_info_widget_summary(data: &info_widget::InfoWidgetData) -> InfoWidgetSummary {
+    let todos_total = data.todos.len();
+    let todos_done = data
+        .todos
+        .iter()
+        .filter(|t| t.status == "completed")
+        .count();
+
+    let context_total_chars = data.context_info.as_ref().map(|c| c.total_chars);
+    let context_limit = data.context_limit;
+
+    let memory_total = data.memory_info.as_ref().map(|m| m.total_count);
+    let memory_project = data.memory_info.as_ref().map(|m| m.project_count);
+    let memory_global = data.memory_info.as_ref().map(|m| m.global_count);
+    let memory_activity = data.memory_info.as_ref().map(|m| m.activity.is_some());
+
+    let swarm_session_count = data.swarm_info.as_ref().map(|s| s.session_count);
+    let swarm_member_count = data.swarm_info.as_ref().map(|s| s.members.len());
+    let swarm_subagent_status = data
+        .swarm_info
+        .as_ref()
+        .and_then(|s| s.subagent_status.clone());
+
+    let background_running = data.background_info.as_ref().map(|b| b.running_count);
+    let background_tasks = data.background_info.as_ref().map(|b| b.running_tasks.len());
+
+    let usage_available = data.usage_info.as_ref().map(|u| u.available);
+    let usage_provider = data
+        .usage_info
+        .as_ref()
+        .map(|u| format!("{:?}", u.provider));
+
+    InfoWidgetSummary {
+        todos_total,
+        todos_done,
+        context_total_chars,
+        context_limit,
+        queue_mode: data.queue_mode,
+        model: data.model.clone(),
+        reasoning_effort: data.reasoning_effort.clone(),
+        session_count: data.session_count,
+        client_count: data.client_count,
+        memory_total,
+        memory_project,
+        memory_global,
+        memory_activity,
+        swarm_session_count,
+        swarm_member_count,
+        swarm_subagent_status,
+        background_running,
+        background_tasks,
+        usage_available,
+        usage_provider,
+        tokens_per_second: data.tokens_per_second,
+        auth_method: Some(format!("{:?}", data.auth_method)),
+        upstream_provider: data.upstream_provider.clone(),
+    }
+}
+
+fn rects_overlap(a: Rect, b: Rect) -> bool {
+    if a.width == 0 || a.height == 0 || b.width == 0 || b.height == 0 {
+        return false;
+    }
+    let a_right = a.x.saturating_add(a.width);
+    let a_bottom = a.y.saturating_add(a.height);
+    let b_right = b.x.saturating_add(b.width);
+    let b_bottom = b.y.saturating_add(b.height);
+    a.x < b_right && a_right > b.x && a.y < b_bottom && a_bottom > b.y
+}
+
+fn rect_within_bounds(rect: Rect, bounds: Rect) -> bool {
+    let right = rect.x.saturating_add(rect.width);
+    let bottom = rect.y.saturating_add(rect.height);
+    let bounds_right = bounds.x.saturating_add(bounds.width);
+    let bounds_bottom = bounds.y.saturating_add(bounds.height);
+    rect.x >= bounds.x && rect.y >= bounds.y && right <= bounds_right && bottom <= bounds_bottom
+}
+
+fn draw_debug_overlay(
+    frame: &mut Frame,
+    placements: &[info_widget::WidgetPlacement],
+    chunks: &[Rect],
+) {
+    if chunks.len() < 4 {
+        return;
+    }
+    render_overlay_box(frame, chunks[0], "messages", Color::Red);
+    render_overlay_box(frame, chunks[1], "queued", Color::Yellow);
+    render_overlay_box(frame, chunks[2], "status", Color::Cyan);
+    render_overlay_box(frame, chunks[3], "input", Color::Green);
+
+    for placement in placements {
+        let title = format!("widget:{}", placement.kind.as_str());
+        render_overlay_box(frame, placement.rect, &title, Color::Magenta);
+    }
+}
+
+fn render_overlay_box(frame: &mut Frame, area: Rect, title: &str, color: Color) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(color))
+        .title(Span::styled(title.to_string(), Style::default().fg(color)));
+    frame.render_widget(block, area);
+}
+
+fn debug_palette_json() -> Option<serde_json::Value> {
+    Some(serde_json::json!({
+        "USER_COLOR": color_to_rgb(USER_COLOR),
+        "AI_COLOR": color_to_rgb(AI_COLOR),
+        "TOOL_COLOR": color_to_rgb(TOOL_COLOR),
+        "DIM_COLOR": color_to_rgb(DIM_COLOR),
+        "ACCENT_COLOR": color_to_rgb(ACCENT_COLOR),
+        "QUEUED_COLOR": color_to_rgb(QUEUED_COLOR),
+        "ASAP_COLOR": color_to_rgb(ASAP_COLOR),
+        "PENDING_COLOR": color_to_rgb(PENDING_COLOR),
+        "USER_TEXT": color_to_rgb(USER_TEXT),
+        "USER_BG": color_to_rgb(USER_BG),
+        "AI_TEXT": color_to_rgb(AI_TEXT),
+        "HEADER_ICON_COLOR": color_to_rgb(HEADER_ICON_COLOR),
+        "HEADER_NAME_COLOR": color_to_rgb(HEADER_NAME_COLOR),
+        "HEADER_SESSION_COLOR": color_to_rgb(HEADER_SESSION_COLOR),
+    }))
+}
+
+fn color_to_rgb(color: Color) -> Option<[u8; 3]> {
+    match color {
+        Color::Rgb(r, g, b) => Some([r, g, b]),
+        _ => None,
+    }
+}
+
 fn draw_messages(
     frame: &mut Frame,
     app: &dyn TuiState,
@@ -2673,6 +2917,7 @@ fn draw_input(
     // Show command suggestions if available (prepended to lines)
     let mut lines: Vec<Line> = Vec::new();
     let mut hint_shown = false;
+    let mut hint_line: Option<String> = None;
     if has_suggestions {
         // Limit suggestions and add Tab hint
         let max_suggestions = 5;
@@ -2704,6 +2949,7 @@ fn draw_input(
         } else {
             "  Shift+Enter to queue"
         };
+        hint_line = Some(hint.trim().to_string());
         lines.push(Line::from(Span::styled(
             hint,
             Style::default().fg(DIM_COLOR),
@@ -2713,8 +2959,8 @@ fn draw_input(
     // Visual debug: check for shift-enter hint anomalies
     if let Some(ref mut capture) = debug_capture {
         capture.rendered_text.input_area = input_text.to_string();
-        if hint_shown {
-            capture.rendered_text.input_hint = Some("Shift+Enter to send now".to_string());
+        if let Some(hint) = &hint_line {
+            capture.rendered_text.input_hint = Some(hint.clone());
         }
         visual_debug::check_shift_enter_anomaly(
             capture,

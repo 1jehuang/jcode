@@ -17,12 +17,14 @@ use ratatui_image::{
     protocol::StatefulProtocol,
     CropOptions, Resize, StatefulImage,
 };
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash as _, Hasher};
 use std::panic;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex, OnceLock};
+use std::time::Instant;
 
 /// Global picker for terminal capability detection
 /// Initialized once on first use
@@ -38,6 +40,106 @@ static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> =
 /// Image state cache - holds StatefulProtocol for each rendered image
 static IMAGE_STATE: LazyLock<Mutex<HashMap<u64, StatefulProtocol>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Debug stats for mermaid rendering
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MermaidDebugStats {
+    pub total_requests: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub render_success: u64,
+    pub render_errors: u64,
+    pub last_render_ms: Option<f32>,
+    pub last_error: Option<String>,
+    pub last_hash: Option<String>,
+    pub last_nodes: Option<usize>,
+    pub last_edges: Option<usize>,
+    pub last_content_len: Option<usize>,
+    pub image_state_hits: u64,
+    pub image_state_misses: u64,
+    pub last_image_render_ms: Option<f32>,
+    pub cache_entries: usize,
+    pub cache_dir: Option<String>,
+    pub protocol: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct MermaidDebugState {
+    stats: MermaidDebugStats,
+}
+
+static MERMAID_DEBUG: LazyLock<Mutex<MermaidDebugState>> =
+    LazyLock::new(|| Mutex::new(MermaidDebugState::default()));
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MermaidCacheEntry {
+    pub hash: String,
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+pub fn debug_stats() -> MermaidDebugStats {
+    let mut out = if let Ok(state) = MERMAID_DEBUG.lock() {
+        state.stats.clone()
+    } else {
+        MermaidDebugStats::default()
+    };
+
+    // Fill runtime fields
+    if let Ok(cache) = RENDER_CACHE.lock() {
+        out.cache_entries = cache.entries.len();
+        out.cache_dir = Some(cache.cache_dir.to_string_lossy().to_string());
+    }
+    out.protocol = protocol_type().map(|p| format!("{:?}", p));
+    out
+}
+
+pub fn debug_stats_json() -> Option<serde_json::Value> {
+    serde_json::to_value(debug_stats()).ok()
+}
+
+pub fn debug_cache() -> Vec<MermaidCacheEntry> {
+    if let Ok(cache) = RENDER_CACHE.lock() {
+        return cache
+            .entries
+            .iter()
+            .map(|(hash, diagram)| MermaidCacheEntry {
+                hash: format!("{:016x}", hash),
+                path: diagram.path.to_string_lossy().to_string(),
+                width: diagram.width,
+                height: diagram.height,
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+pub fn clear_cache() -> Result<(), String> {
+    let cache_dir = if let Ok(cache) = RENDER_CACHE.lock() {
+        cache.cache_dir.clone()
+    } else {
+        PathBuf::from("/tmp")
+    };
+
+    // Clear in-memory caches
+    if let Ok(mut cache) = RENDER_CACHE.lock() {
+        cache.entries.clear();
+    }
+    if let Ok(mut state) = IMAGE_STATE.lock() {
+        state.clear();
+    }
+
+    // Remove cached files on disk
+    let entries = fs::read_dir(&cache_dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("png") {
+            let _ = fs::remove_file(path);
+        }
+    }
+    Ok(())
+}
 
 /// Initialize the global picker by querying terminal capabilities.
 /// Should be called early in app startup, after entering alternate screen.
@@ -126,7 +228,7 @@ const MAX_EDGES: usize = 200;
 fn estimate_diagram_size(content: &str) -> (usize, usize) {
     let mut nodes = 0;
     let mut edges = 0;
-    
+
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("%%") {
@@ -145,12 +247,18 @@ fn estimate_diagram_size(content: &str) -> (usize, usize) {
             nodes += 1;
         }
     }
-    
+
     (nodes, edges)
 }
 
 /// Render a mermaid code block to PNG (cached)
 pub fn render_mermaid(content: &str) -> RenderResult {
+    if let Ok(mut state) = MERMAID_DEBUG.lock() {
+        state.stats.total_requests += 1;
+        state.stats.last_content_len = Some(content.len());
+        state.stats.last_error = None;
+    }
+
     // Calculate content hash for caching
     let hash = hash_content(content);
 
@@ -159,6 +267,10 @@ pub fn render_mermaid(content: &str) -> RenderResult {
         let cache = RENDER_CACHE.lock().unwrap();
         if let Some(cached) = cache.get(hash) {
             if cached.path.exists() {
+                if let Ok(mut state) = MERMAID_DEBUG.lock() {
+                    state.stats.cache_hits += 1;
+                    state.stats.last_hash = Some(format!("{:016x}", hash));
+                }
                 return RenderResult::Image {
                     hash,
                     path: cached.path.clone(),
@@ -167,6 +279,10 @@ pub fn render_mermaid(content: &str) -> RenderResult {
                 };
             }
         }
+    }
+    if let Ok(mut state) = MERMAID_DEBUG.lock() {
+        state.stats.cache_misses += 1;
+        state.stats.last_hash = Some(format!("{:016x}", hash));
     }
 
     // Get cache path early (needed outside catch_unwind)
@@ -184,17 +300,27 @@ pub fn render_mermaid(content: &str) -> RenderResult {
     // Check diagram size before attempting expensive layout
     // This prevents OOM on complex diagrams (e.g., full system architecture)
     let (node_count, edge_count) = estimate_diagram_size(&content_owned);
+    if let Ok(mut state) = MERMAID_DEBUG.lock() {
+        state.stats.last_nodes = Some(node_count);
+        state.stats.last_edges = Some(edge_count);
+    }
     if node_count > MAX_NODES || edge_count > MAX_EDGES {
-        return RenderResult::Error(format!(
+        let msg = format!(
             "Diagram too complex ({} nodes, {} edges). Max: {} nodes, {} edges.",
             node_count, edge_count, MAX_NODES, MAX_EDGES
-        ));
+        );
+        if let Ok(mut state) = MERMAID_DEBUG.lock() {
+            state.stats.render_errors += 1;
+            state.stats.last_error = Some(msg.clone());
+        }
+        return RenderResult::Error(msg);
     }
     let prev_hook = panic::take_hook();
     panic::set_hook(Box::new(|_| {
         // Silently ignore panics from mermaid renderer
     }));
 
+    let render_start = Instant::now();
     let render_result = panic::catch_unwind(move || -> Result<(), String> {
         // Parse mermaid
         let parsed = parse_mermaid(&content_owned).map_err(|e| format!("Parse error: {}", e))?;
@@ -240,9 +366,22 @@ pub fn render_mermaid(content: &str) -> RenderResult {
     panic::set_hook(prev_hook);
 
     // Handle the result
+    let render_ms = render_start.elapsed().as_secs_f32() * 1000.0;
     match render_result {
-        Ok(Ok(())) => {} // Success, continue below
-        Ok(Err(e)) => return RenderResult::Error(e),
+        Ok(Ok(())) => {
+            if let Ok(mut state) = MERMAID_DEBUG.lock() {
+                state.stats.render_success += 1;
+                state.stats.last_render_ms = Some(render_ms);
+            }
+        } // Success, continue below
+        Ok(Err(e)) => {
+            if let Ok(mut state) = MERMAID_DEBUG.lock() {
+                state.stats.render_errors += 1;
+                state.stats.last_render_ms = Some(render_ms);
+                state.stats.last_error = Some(e.clone());
+            }
+            return RenderResult::Error(e);
+        }
         Err(panic_info) => {
             let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
                 s.to_string()
@@ -251,6 +390,11 @@ pub fn render_mermaid(content: &str) -> RenderResult {
             } else {
                 "unknown panic in mermaid renderer".to_string()
             };
+            if let Ok(mut state) = MERMAID_DEBUG.lock() {
+                state.stats.render_errors += 1;
+                state.stats.last_render_ms = Some(render_ms);
+                state.stats.last_error = Some(format!("Renderer panic: {}", msg));
+            }
             return RenderResult::Error(format!("Renderer panic: {}", msg));
         }
     }
@@ -296,6 +440,7 @@ pub fn render_mermaid(content: &str) -> RenderResult {
 /// If the image was already rendered at the exact same position, we skip re-rendering
 /// to avoid scroll lag. The terminal graphics protocol maintains the image display.
 pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bool) -> u16 {
+    let render_start = Instant::now();
     // Get the cached image dimensions to calculate centered area
     let img_width = {
         let cache = RENDER_CACHE.lock().unwrap();
@@ -353,7 +498,14 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
     };
 
     if render_result {
+        if let Ok(mut state) = MERMAID_DEBUG.lock() {
+            state.stats.image_state_hits += 1;
+            state.stats.last_image_render_ms = Some(render_start.elapsed().as_secs_f32() * 1000.0);
+        }
         return area.height;
+    }
+    if let Ok(mut state) = MERMAID_DEBUG.lock() {
+        state.stats.image_state_misses += 1;
     }
 
     // No state available, try to load from cache
@@ -373,6 +525,10 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
                 if let Some(protocol) = state.get_mut(&hash) {
                     let widget = StatefulImage::default().resize(make_resize());
                     widget.render(render_area, buf, protocol);
+                    if let Ok(mut state) = MERMAID_DEBUG.lock() {
+                        state.stats.last_image_render_ms =
+                            Some(render_start.elapsed().as_secs_f32() * 1000.0);
+                    }
                     return area.height;
                 }
             }
@@ -468,7 +624,10 @@ fn image_widget_placeholder(hash: u64, height: u16) -> Vec<Line<'static>> {
 
     // Header with hash marker
     lines.push(Line::from(Span::styled(
-        format!("{}{:016x}{}", MERMAID_MARKER_PREFIX, hash, MERMAID_MARKER_SUFFIX),
+        format!(
+            "{}{:016x}{}",
+            MERMAID_MARKER_PREFIX, hash, MERMAID_MARKER_SUFFIX
+        ),
         dim,
     )));
 

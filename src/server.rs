@@ -13,8 +13,8 @@ use crate::registry::{server_debug_socket_path, server_socket_path};
 use crate::todo::{save_todos, TodoItem};
 use crate::tool::{Registry, ToolContext};
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use futures::future::try_join_all;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -86,10 +86,7 @@ pub enum SwarmEventType {
         message: String,
     },
     /// A plan/todo was updated
-    PlanUpdate {
-        swarm_id: String,
-        item_count: usize,
-    },
+    PlanUpdate { swarm_id: String, item_count: usize },
     /// A plan proposal was submitted
     PlanProposal {
         swarm_id: String,
@@ -97,10 +94,7 @@ pub enum SwarmEventType {
         item_count: usize,
     },
     /// Shared context was updated
-    ContextUpdate {
-        swarm_id: String,
-        key: String,
-    },
+    ContextUpdate { swarm_id: String, key: String },
     /// Session status changed
     StatusChange {
         old_status: String,
@@ -222,7 +216,6 @@ impl ClientDebugState {
         None
     }
 }
-
 
 /// Socket path for main communication
 /// Can be overridden via JCODE_SOCKET env var
@@ -828,7 +821,8 @@ impl Server {
                                 // Record plan proposal event
                                 {
                                     let event = SwarmEvent {
-                                        id: event_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                                        id: event_counter
+                                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
                                         session_id: todo_event.session_id.clone(),
                                         session_name: from_name.clone(),
                                         swarm_id: Some(swarm_id.clone()),
@@ -1183,6 +1177,8 @@ impl Server {
         let debug_client_debug_response_tx = self.client_debug_response_tx.clone();
         let debug_jobs = Arc::clone(&self.debug_jobs);
         let debug_event_history = Arc::clone(&self.event_history);
+        let debug_server_identity = self.identity.clone();
+        let debug_start_time = std::time::Instant::now();
 
         let debug_handle = tokio::spawn(async move {
             loop {
@@ -1202,6 +1198,8 @@ impl Server {
                         let client_debug_response_tx = debug_client_debug_response_tx.clone();
                         let debug_jobs = Arc::clone(&debug_jobs);
                         let event_history = Arc::clone(&debug_event_history);
+                        let server_identity = debug_server_identity.clone();
+                        let server_start_time = debug_start_time;
 
                         tokio::spawn(async move {
                             if let Err(e) = handle_debug_client(
@@ -1220,12 +1218,13 @@ impl Server {
                                 client_debug_response_tx,
                                 debug_jobs,
                                 event_history,
+                                server_identity,
+                                server_start_time,
                             )
                             .await
                             {
                                 crate::logging::error(&format!("Debug client error: {}", e));
                             }
-
                         });
                     }
                     Err(e) => {
@@ -2179,10 +2178,7 @@ async fn handle_client(
                         let swarm_ctx = ctx.entry(swarm_id.clone()).or_insert_with(HashMap::new);
                         let now = Instant::now();
                         // Preserve created_at if updating existing context
-                        let created_at = swarm_ctx
-                            .get(&key)
-                            .map(|c| c.created_at)
-                            .unwrap_or(now);
+                        let created_at = swarm_ctx.get(&key).map(|c| c.created_at).unwrap_or(now);
                         swarm_ctx.insert(
                             key.clone(),
                             SharedContext {
@@ -2462,7 +2458,10 @@ async fn handle_client(
                         .and_then(|m| m.swarm_id.clone());
                     let is_coordinator = if let Some(ref sid) = swarm_id {
                         let coordinators = swarm_coordinators.read().await;
-                        coordinators.get(sid).map(|c| c == &req_session_id).unwrap_or(false)
+                        coordinators
+                            .get(sid)
+                            .map(|c| c == &req_session_id)
+                            .unwrap_or(false)
                     } else {
                         false
                     };
@@ -2502,7 +2501,10 @@ async fn handle_client(
                     None => {
                         let _ = client_event_tx.send(ServerEvent::Error {
                             id,
-                            message: format!("No pending plan proposal from session '{}'", proposer_session),
+                            message: format!(
+                                "No pending plan proposal from session '{}'",
+                                proposer_session
+                            ),
                         });
                         continue;
                     }
@@ -2589,7 +2591,10 @@ async fn handle_client(
                         .and_then(|m| m.swarm_id.clone());
                     let is_coordinator = if let Some(ref sid) = swarm_id {
                         let coordinators = swarm_coordinators.read().await;
-                        coordinators.get(sid).map(|c| c == &req_session_id).unwrap_or(false)
+                        coordinators
+                            .get(sid)
+                            .map(|c| c == &req_session_id)
+                            .unwrap_or(false)
                     } else {
                         false
                     };
@@ -2627,7 +2632,10 @@ async fn handle_client(
                 if !proposal_exists {
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
-                        message: format!("No pending plan proposal from session '{}'", proposer_session),
+                        message: format!(
+                            "No pending plan proposal from session '{}'",
+                            proposer_session
+                        ),
                     });
                     continue;
                 }
@@ -2655,7 +2663,10 @@ async fn handle_client(
                         .as_ref()
                         .map(|r| format!(": {}", r))
                         .unwrap_or_default();
-                    let msg = format!("Your plan proposal was rejected by the coordinator{}", reason_msg);
+                    let msg = format!(
+                        "Your plan proposal was rejected by the coordinator{}",
+                        reason_msg
+                    );
                     let _ = member.event_tx.send(ServerEvent::Notification {
                         from_session: req_session_id.clone(),
                         from_name: coordinator_name.clone(),
@@ -3510,6 +3521,44 @@ async fn execute_debug_command(
         return Ok(serde_json::to_string_pretty(&tools).unwrap_or_else(|_| "[]".to_string()));
     }
 
+    if trimmed == "tools:full" {
+        let agent = agent.lock().await;
+        let definitions = agent.tool_definitions_for_debug().await;
+        return Ok(serde_json::to_string_pretty(&definitions).unwrap_or_else(|_| "[]".to_string()));
+    }
+
+    if trimmed == "cancel" {
+        // Queue an urgent interrupt to cancel in-flight generation
+        let agent = agent.lock().await;
+        agent.queue_soft_interrupt(
+            "[CANCELLED] Generation cancelled via debug socket".to_string(),
+            true,
+        );
+        return Ok(serde_json::json!({
+            "status": "cancel_queued",
+            "message": "Urgent interrupt queued - will cancel at next tool boundary"
+        })
+        .to_string());
+    }
+
+    if trimmed == "clear" || trimmed == "clear_history" {
+        // Clear conversation history
+        let mut agent = agent.lock().await;
+        agent.clear();
+        return Ok(serde_json::json!({
+            "status": "cleared",
+            "message": "Conversation history cleared"
+        })
+        .to_string());
+    }
+
+    if trimmed == "agent:info" {
+        // Get comprehensive agent internal state
+        let agent = agent.lock().await;
+        let info = agent.debug_info();
+        return Ok(serde_json::to_string_pretty(&info).unwrap_or_else(|_| "{}".to_string()));
+    }
+
     if trimmed == "last_response" {
         let agent = agent.lock().await;
         return Ok(agent
@@ -3648,7 +3697,7 @@ async fn execute_debug_command(
 /// Execute a client debug command (visual debug, TUI state, etc.)
 /// These commands access the TUI's visual debug module which uses global state.
 fn execute_client_debug_command(command: &str) -> String {
-    use crate::tui::visual_debug;
+    use crate::tui::{markdown, mermaid, visual_debug};
 
     let trimmed = command.trim();
 
@@ -3686,10 +3735,141 @@ fn execute_client_debug_command(command: &str) -> String {
 
     if trimmed == "status" {
         let enabled = visual_debug::is_enabled();
+        let overlay = visual_debug::overlay_enabled();
         return serde_json::json!({
             "visual_debug_enabled": enabled,
+            "visual_debug_overlay": overlay,
         })
         .to_string();
+    }
+
+    if trimmed == "overlay" || trimmed == "overlay:status" {
+        let overlay = visual_debug::overlay_enabled();
+        return serde_json::json!({
+            "visual_debug_overlay": overlay,
+        })
+        .to_string();
+    }
+
+    if trimmed == "overlay:on" || trimmed == "overlay:enable" {
+        visual_debug::set_overlay(true);
+        return "Visual debug overlay enabled.".to_string();
+    }
+
+    if trimmed == "overlay:off" || trimmed == "overlay:disable" {
+        visual_debug::set_overlay(false);
+        return "Visual debug overlay disabled.".to_string();
+    }
+
+    if trimmed == "layout" {
+        visual_debug::enable();
+        return visual_debug::latest_frame().map_or_else(
+            || "layout: no frames captured".to_string(),
+            |frame| {
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "frame_id": frame.frame_id,
+                    "terminal_size": frame.terminal_size,
+                    "layout": frame.layout,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            },
+        );
+    }
+
+    if trimmed == "margins" {
+        visual_debug::enable();
+        return visual_debug::latest_frame().map_or_else(
+            || "margins: no frames captured".to_string(),
+            |frame| {
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "frame_id": frame.frame_id,
+                    "margins": frame.layout.margins,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            },
+        );
+    }
+
+    if trimmed == "widgets" || trimmed == "info-widgets" {
+        visual_debug::enable();
+        return visual_debug::latest_frame().map_or_else(
+            || "widgets: no frames captured".to_string(),
+            |frame| {
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "frame_id": frame.frame_id,
+                    "info_widgets": frame.info_widgets,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            },
+        );
+    }
+
+    if trimmed == "render-stats" {
+        visual_debug::enable();
+        return visual_debug::latest_frame().map_or_else(
+            || "render-stats: no frames captured".to_string(),
+            |frame| {
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "frame_id": frame.frame_id,
+                    "render_timing": frame.render_timing,
+                    "render_order": frame.render_order,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            },
+        );
+    }
+
+    if trimmed == "render-order" {
+        visual_debug::enable();
+        return visual_debug::latest_frame().map_or_else(
+            || "render-order: no frames captured".to_string(),
+            |frame| {
+                serde_json::to_string_pretty(&frame.render_order)
+                    .unwrap_or_else(|_| "[]".to_string())
+            },
+        );
+    }
+
+    if trimmed == "anomalies" {
+        visual_debug::enable();
+        return visual_debug::latest_frame().map_or_else(
+            || "anomalies: no frames captured".to_string(),
+            |frame| {
+                serde_json::to_string_pretty(&frame.anomalies).unwrap_or_else(|_| "[]".to_string())
+            },
+        );
+    }
+
+    if trimmed == "theme" {
+        visual_debug::enable();
+        return visual_debug::latest_frame().map_or_else(
+            || "theme: no frames captured".to_string(),
+            |frame| {
+                serde_json::to_string_pretty(&frame.theme).unwrap_or_else(|_| "null".to_string())
+            },
+        );
+    }
+
+    if trimmed == "mermaid:stats" {
+        let stats = mermaid::debug_stats();
+        return serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string());
+    }
+
+    if trimmed == "mermaid:cache" {
+        let entries = mermaid::debug_cache();
+        return serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string());
+    }
+
+    if trimmed == "mermaid:evict" || trimmed == "mermaid:clear-cache" {
+        return match mermaid::clear_cache() {
+            Ok(_) => "mermaid: cache cleared".to_string(),
+            Err(e) => format!("mermaid: cache clear failed: {}", e),
+        };
+    }
+
+    if trimmed == "markdown:stats" {
+        let stats = markdown::debug_stats();
+        return serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string());
     }
 
     if trimmed == "help" {
@@ -3697,6 +3877,18 @@ fn execute_client_debug_command(command: &str) -> String {
   frame / screen-json      - Get latest visual debug frame (JSON)
   frame-normalized         - Get normalized frame (for diffs)
   screen                   - Dump visual debug frames to file
+  layout                   - Get latest layout JSON
+  margins                  - Get layout margins JSON
+  widgets                  - Get info widget summary/placements
+  render-stats             - Get render timing + order JSON
+  render-order             - Get render order list
+  anomalies                - Get latest visual debug anomalies
+  theme                    - Get palette snapshot
+  mermaid:stats            - Get mermaid render/cache stats
+  mermaid:cache            - List mermaid cache entries
+  mermaid:evict            - Clear mermaid cache
+  markdown:stats           - Get markdown render stats
+  overlay:on/off/status    - Toggle overlay boxes
   enable                   - Enable visual debug capture
   disable                  - Disable visual debug capture
   status                   - Get client debug status
@@ -3746,6 +3938,8 @@ async fn handle_debug_client(
     client_debug_response_tx: broadcast::Sender<(u64, String)>,
     debug_jobs: Arc<RwLock<HashMap<String, DebugJob>>>,
     event_history: Arc<RwLock<Vec<SwarmEvent>>>,
+    server_identity: ServerIdentity,
+    server_start_time: std::time::Instant,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -3886,6 +4080,60 @@ async fn handle_debug_client(
                                     Err(anyhow::anyhow!("Unknown job id '{}'", job_id))
                                 }
                             }
+                        } else if cmd.starts_with("job_cancel:") {
+                            // Cancel a running job
+                            let job_id = cmd.strip_prefix("job_cancel:").unwrap_or("").trim();
+                            if job_id.is_empty() {
+                                Err(anyhow::anyhow!("job_cancel: requires a job id"))
+                            } else {
+                                let mut jobs_guard = debug_jobs.write().await;
+                                if let Some(job) = jobs_guard.get_mut(job_id) {
+                                    if matches!(
+                                        job.status,
+                                        DebugJobStatus::Running | DebugJobStatus::Queued
+                                    ) {
+                                        job.status = DebugJobStatus::Failed;
+                                        job.output = Some("[CANCELLED]".to_string());
+                                        Ok(serde_json::json!({
+                                            "status": "cancelled",
+                                            "job_id": job_id,
+                                        })
+                                        .to_string())
+                                    } else {
+                                        Err(anyhow::anyhow!("Job '{}' is not running", job_id))
+                                    }
+                                } else {
+                                    Err(anyhow::anyhow!("Unknown job id '{}'", job_id))
+                                }
+                            }
+                        } else if cmd == "jobs:purge" {
+                            // Remove all completed/failed jobs
+                            let mut jobs_guard = debug_jobs.write().await;
+                            let before = jobs_guard.len();
+                            jobs_guard.retain(|_, job| {
+                                matches!(
+                                    job.status,
+                                    DebugJobStatus::Running | DebugJobStatus::Queued
+                                )
+                            });
+                            let removed = before - jobs_guard.len();
+                            Ok(serde_json::json!({
+                                "status": "purged",
+                                "removed": removed,
+                                "remaining": jobs_guard.len(),
+                            })
+                            .to_string())
+                        } else if cmd.starts_with("jobs:session:") {
+                            // List jobs for a specific session
+                            let sess_id = cmd.strip_prefix("jobs:session:").unwrap_or("").trim();
+                            let jobs_guard = debug_jobs.read().await;
+                            let payload: Vec<Value> = jobs_guard
+                                .values()
+                                .filter(|job| job.session_id.as_deref() == Some(sess_id))
+                                .map(|job| job.summary_payload())
+                                .collect();
+                            Ok(serde_json::to_string_pretty(&payload)
+                                .unwrap_or_else(|_| "[]".to_string()))
                         } else if cmd.starts_with("job_wait:") {
                             let job_id = cmd.strip_prefix("job_wait:").unwrap_or("").trim();
                             if job_id.is_empty() {
@@ -3959,7 +4207,10 @@ async fn handle_debug_client(
                                         // Handle coordinator change if needed
                                         let was_coordinator = {
                                             let coordinators = swarm_coordinators.read().await;
-                                            coordinators.get(id).map(|c| c == target_id).unwrap_or(false)
+                                            coordinators
+                                                .get(id)
+                                                .map(|c| c == target_id)
+                                                .unwrap_or(false)
                                         };
                                         if was_coordinator {
                                             let new_coordinator = {
@@ -3972,7 +4223,8 @@ async fn handle_debug_client(
                                                 coordinators.insert(id.clone(), new_id);
                                             }
                                         }
-                                        broadcast_swarm_status(id, &swarm_members, &swarms_by_id).await;
+                                        broadcast_swarm_status(id, &swarm_members, &swarms_by_id)
+                                            .await;
                                     }
                                     Ok(format!("Session '{}' destroyed", target_id))
                                 } else {
@@ -3980,18 +4232,69 @@ async fn handle_debug_client(
                                 }
                             }
                         } else if cmd == "sessions" {
+                            // Return full session metadata
                             let sessions_guard = sessions.read().await;
-                            let session_list: Vec<_> = sessions_guard.keys().collect();
-                            Ok(serde_json::to_string_pretty(&session_list)
+                            let members = swarm_members.read().await;
+                            let mut out: Vec<serde_json::Value> = Vec::new();
+                            for (sid, agent_arc) in sessions_guard.iter() {
+                                let member_info = members.get(sid);
+                                let (provider, model, is_processing, working_dir_str, token_usage): (
+                                    Option<String>,
+                                    Option<String>,
+                                    bool,
+                                    Option<String>,
+                                    Option<serde_json::Value>,
+                                ) = if let Ok(agent) = agent_arc.try_lock() {
+                                    let usage = agent.last_usage();
+                                    (
+                                        Some(agent.provider_name()),
+                                        Some(agent.provider_model()),
+                                        false, // Not processing if we can lock
+                                        agent.working_dir().map(|p| p.to_string()),
+                                        Some(serde_json::json!({
+                                            "input": usage.input_tokens,
+                                            "output": usage.output_tokens,
+                                            "cache_read": usage.cache_read_input_tokens,
+                                            "cache_write": usage.cache_creation_input_tokens,
+                                        })),
+                                    )
+                                } else {
+                                    (None, None, true, None, None) // Processing if locked
+                                };
+                                let final_working_dir: Option<String> =
+                                    working_dir_str.or_else(|| {
+                                        member_info.and_then(|m| {
+                                            m.working_dir
+                                                .as_ref()
+                                                .map(|p| p.to_string_lossy().to_string())
+                                        })
+                                    });
+                                out.push(serde_json::json!({
+                                    "session_id": sid,
+                                    "friendly_name": member_info.and_then(|m| m.friendly_name.clone()),
+                                    "provider": provider,
+                                    "model": model,
+                                    "is_processing": is_processing,
+                                    "working_dir": final_working_dir,
+                                    "swarm_id": member_info.and_then(|m| m.swarm_id.clone()),
+                                    "status": member_info.map(|m| m.status.clone()),
+                                    "detail": member_info.and_then(|m| m.detail.clone()),
+                                    "token_usage": token_usage,
+                                }));
+                            }
+                            Ok(serde_json::to_string_pretty(&out)
                                 .unwrap_or_else(|_| "[]".to_string()))
-                        } else if cmd == "swarm" || cmd == "swarm_status" || cmd == "swarm:members" {
+                        } else if cmd == "swarm" || cmd == "swarm_status" || cmd == "swarm:members"
+                        {
                             // List all swarm members with full details
                             let members = swarm_members.read().await;
                             let sessions_guard = sessions.read().await;
                             let mut out: Vec<serde_json::Value> = Vec::new();
                             for member in members.values() {
                                 // Get provider/model from the agent if session exists
-                                let (provider, model) = if let Some(agent_arc) = sessions_guard.get(&member.session_id) {
+                                let (provider, model) = if let Some(agent_arc) =
+                                    sessions_guard.get(&member.session_id)
+                                {
                                     if let Ok(agent) = agent_arc.try_lock() {
                                         (Some(agent.provider_name()), Some(agent.provider_model()))
                                     } else {
@@ -4042,7 +4345,9 @@ async fn handle_debug_client(
                             let members = swarm_members.read().await;
                             let mut out: Vec<serde_json::Value> = Vec::new();
                             for (swarm_id, session_id) in coordinators.iter() {
-                                let name = members.get(session_id).and_then(|m| m.friendly_name.clone());
+                                let name = members
+                                    .get(session_id)
+                                    .and_then(|m| m.friendly_name.clone());
                                 out.push(serde_json::json!({
                                     "swarm_id": swarm_id,
                                     "coordinator_session": session_id,
@@ -4053,16 +4358,20 @@ async fn handle_debug_client(
                                 .unwrap_or_else(|_| "[]".to_string()))
                         } else if cmd.starts_with("swarm:coordinator:") {
                             // Get coordinator for specific swarm
-                            let swarm_id = cmd.strip_prefix("swarm:coordinator:").unwrap_or("").trim();
+                            let swarm_id =
+                                cmd.strip_prefix("swarm:coordinator:").unwrap_or("").trim();
                             let coordinators = swarm_coordinators.read().await;
                             let members = swarm_members.read().await;
                             if let Some(session_id) = coordinators.get(swarm_id) {
-                                let name = members.get(session_id).and_then(|m| m.friendly_name.clone());
+                                let name = members
+                                    .get(session_id)
+                                    .and_then(|m| m.friendly_name.clone());
                                 Ok(serde_json::json!({
                                     "swarm_id": swarm_id,
                                     "coordinator_session": session_id,
                                     "coordinator_name": name,
-                                }).to_string())
+                                })
+                                .to_string())
                             } else {
                                 Err(anyhow::anyhow!("No coordinator for swarm '{}'", swarm_id))
                             }
@@ -4127,7 +4436,11 @@ async fn handle_debug_client(
                                             "updated_secs_ago": context.updated_at.elapsed().as_secs(),
                                         }).to_string())
                                     } else {
-                                        Err(anyhow::anyhow!("No context key '{}' in swarm '{}'", key, swarm_id))
+                                        Err(anyhow::anyhow!(
+                                            "No context key '{}' in swarm '{}'",
+                                            key,
+                                            swarm_id
+                                        ))
                                     }
                                 } else {
                                     Err(anyhow::anyhow!("No context for swarm '{}'", swarm_id))
@@ -4159,9 +4472,11 @@ async fn handle_debug_client(
                             let mut out: Vec<serde_json::Value> = Vec::new();
                             for (path, accesses) in touches.iter() {
                                 for access in accesses.iter() {
-                                    let name = members.get(&access.session_id)
+                                    let name = members
+                                        .get(&access.session_id)
                                         .and_then(|m| m.friendly_name.clone());
-                                    let timestamp_iso = access.absolute_time
+                                    let timestamp_iso = access
+                                        .absolute_time
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .map(|d| d.as_secs())
                                         .unwrap_or(0);
@@ -4188,7 +4503,8 @@ async fn handle_debug_client(
                             if arg.starts_with("swarm:") {
                                 let swarm_id = arg.strip_prefix("swarm:").unwrap_or("");
                                 // Get session IDs for this swarm
-                                let swarm_sessions: HashSet<String> = members.iter()
+                                let swarm_sessions: HashSet<String> = members
+                                    .iter()
                                     .filter(|(_, m)| m.swarm_id.as_deref() == Some(swarm_id))
                                     .map(|(id, _)| id.clone())
                                     .collect();
@@ -4197,9 +4513,11 @@ async fn handle_debug_client(
                                 for (path, accesses) in touches.iter() {
                                     for access in accesses.iter() {
                                         if swarm_sessions.contains(&access.session_id) {
-                                            let name = members.get(&access.session_id)
+                                            let name = members
+                                                .get(&access.session_id)
                                                 .and_then(|m| m.friendly_name.clone());
-                                            let timestamp_unix = access.absolute_time
+                                            let timestamp_unix = access
+                                                .absolute_time
                                                 .duration_since(std::time::UNIX_EPOCH)
                                                 .map(|d| d.as_secs())
                                                 .unwrap_or(0);
@@ -4223,9 +4541,11 @@ async fn handle_debug_client(
                                 if let Some(accesses) = touches.get(&path) {
                                     let mut out: Vec<serde_json::Value> = Vec::new();
                                     for access in accesses.iter() {
-                                        let name = members.get(&access.session_id)
+                                        let name = members
+                                            .get(&access.session_id)
                                             .and_then(|m| m.friendly_name.clone());
-                                        let timestamp_unix = access.absolute_time
+                                        let timestamp_unix = access
+                                            .absolute_time
                                             .duration_since(std::time::UNIX_EPOCH)
                                             .map(|d| d.as_secs())
                                             .unwrap_or(0);
@@ -4251,26 +4571,31 @@ async fn handle_debug_client(
                             let mut out: Vec<serde_json::Value> = Vec::new();
                             for (path, accesses) in touches.iter() {
                                 // Get unique session IDs
-                                let unique_sessions: HashSet<_> = accesses.iter()
-                                    .map(|a| &a.session_id)
-                                    .collect();
+                                let unique_sessions: HashSet<_> =
+                                    accesses.iter().map(|a| &a.session_id).collect();
                                 if unique_sessions.len() > 1 {
                                     // Build full access history for this conflicting file
-                                    let access_history: Vec<_> = accesses.iter().map(|a| {
-                                        let name = members.get(&a.session_id).and_then(|m| m.friendly_name.clone());
-                                        let timestamp_unix = a.absolute_time
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_secs())
-                                            .unwrap_or(0);
-                                        serde_json::json!({
-                                            "session_id": a.session_id,
-                                            "session_name": name,
-                                            "op": a.op.as_str(),
-                                            "summary": a.summary,
-                                            "age_secs": a.timestamp.elapsed().as_secs(),
-                                            "timestamp_unix": timestamp_unix,
+                                    let access_history: Vec<_> = accesses
+                                        .iter()
+                                        .map(|a| {
+                                            let name = members
+                                                .get(&a.session_id)
+                                                .and_then(|m| m.friendly_name.clone());
+                                            let timestamp_unix = a
+                                                .absolute_time
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .map(|d| d.as_secs())
+                                                .unwrap_or(0);
+                                            serde_json::json!({
+                                                "session_id": a.session_id,
+                                                "session_name": name,
+                                                "op": a.op.as_str(),
+                                                "summary": a.summary,
+                                                "age_secs": a.timestamp.elapsed().as_secs(),
+                                                "timestamp_unix": timestamp_unix,
+                                            })
                                         })
-                                    }).collect();
+                                        .collect();
                                     out.push(serde_json::json!({
                                         "path": path.to_string_lossy(),
                                         "session_count": unique_sessions.len(),
@@ -4288,10 +4613,15 @@ async fn handle_debug_client(
                             for (swarm_id, swarm_ctx) in ctx.iter() {
                                 for (key, context) in swarm_ctx.iter() {
                                     if key.starts_with("plan_proposal:") {
-                                        let proposer_id = key.strip_prefix("plan_proposal:").unwrap_or("");
-                                        let proposer_name = members.get(proposer_id)
+                                        let proposer_id =
+                                            key.strip_prefix("plan_proposal:").unwrap_or("");
+                                        let proposer_name = members
+                                            .get(proposer_id)
                                             .and_then(|m| m.friendly_name.clone());
-                                        let item_count = serde_json::from_str::<Vec<serde_json::Value>>(&context.value)
+                                        let item_count =
+                                            serde_json::from_str::<Vec<serde_json::Value>>(
+                                                &context.value,
+                                            )
                                             .map(|v| v.len())
                                             .unwrap_or(0);
                                         out.push(serde_json::json!({
@@ -4320,18 +4650,22 @@ async fn handle_debug_client(
                                 let mut found_proposal: Option<String> = None;
                                 for (swarm_id, swarm_ctx) in ctx.iter() {
                                     if let Some(context) = swarm_ctx.get(&proposal_key) {
-                                        let proposer_name = members.get(arg)
-                                            .and_then(|m| m.friendly_name.clone());
-                                        let items: Vec<serde_json::Value> = serde_json::from_str(&context.value)
-                                            .unwrap_or_default();
-                                        found_proposal = Some(serde_json::json!({
-                                            "swarm_id": swarm_id,
-                                            "proposer_session": arg,
-                                            "proposer_name": proposer_name,
-                                            "status": "pending",
-                                            "age_secs": context.created_at.elapsed().as_secs(),
-                                            "items": items,
-                                        }).to_string());
+                                        let proposer_name =
+                                            members.get(arg).and_then(|m| m.friendly_name.clone());
+                                        let items: Vec<serde_json::Value> =
+                                            serde_json::from_str(&context.value)
+                                                .unwrap_or_default();
+                                        found_proposal = Some(
+                                            serde_json::json!({
+                                                "swarm_id": swarm_id,
+                                                "proposer_session": arg,
+                                                "proposer_name": proposer_name,
+                                                "status": "pending",
+                                                "age_secs": context.created_at.elapsed().as_secs(),
+                                                "items": items,
+                                            })
+                                            .to_string(),
+                                        );
                                         break;
                                     }
                                 }
@@ -4346,11 +4680,14 @@ async fn handle_debug_client(
                                 if let Some(swarm_ctx) = ctx.get(arg) {
                                     for (key, context) in swarm_ctx.iter() {
                                         if key.starts_with("plan_proposal:") {
-                                            let proposer_id = key.strip_prefix("plan_proposal:").unwrap_or("");
-                                            let proposer_name = members.get(proposer_id)
+                                            let proposer_id =
+                                                key.strip_prefix("plan_proposal:").unwrap_or("");
+                                            let proposer_name = members
+                                                .get(proposer_id)
                                                 .and_then(|m| m.friendly_name.clone());
-                                            let items: Vec<serde_json::Value> = serde_json::from_str(&context.value)
-                                                .unwrap_or_default();
+                                            let items: Vec<serde_json::Value> =
+                                                serde_json::from_str(&context.value)
+                                                    .unwrap_or_default();
                                             out.push(serde_json::json!({
                                                 "proposer_session": proposer_id,
                                                 "proposer_name": proposer_name,
@@ -4381,38 +4718,47 @@ async fn handle_debug_client(
                                 });
 
                                 // Get member details
-                                let member_details: Vec<_> = session_ids.iter().filter_map(|sid| {
-                                    members.get(sid).map(|m| serde_json::json!({
-                                        "session_id": m.session_id,
-                                        "friendly_name": m.friendly_name,
-                                        "status": m.status,
-                                        "detail": m.detail,
-                                        "working_dir": m.working_dir,
-                                    }))
-                                }).collect();
+                                let member_details: Vec<_> = session_ids
+                                    .iter()
+                                    .filter_map(|sid| {
+                                        members.get(sid).map(|m| {
+                                            serde_json::json!({
+                                                "session_id": m.session_id,
+                                                "friendly_name": m.friendly_name,
+                                                "status": m.status,
+                                                "detail": m.detail,
+                                                "working_dir": m.working_dir,
+                                            })
+                                        })
+                                    })
+                                    .collect();
 
                                 // Get plan
                                 let plan = plans.get(swarm_id).cloned().unwrap_or_default();
 
                                 // Get context keys
-                                let context_keys: Vec<_> = ctx.get(swarm_id)
+                                let context_keys: Vec<_> = ctx
+                                    .get(swarm_id)
                                     .map(|entries| entries.keys().cloned().collect())
                                     .unwrap_or_default();
 
                                 // Get files with conflicts in this swarm
-                                let conflicts: Vec<_> = touches.iter().filter_map(|(path, accesses)| {
-                                    let swarm_accesses: Vec<_> = accesses.iter()
-                                        .filter(|a| session_ids.contains(&a.session_id))
-                                        .collect();
-                                    let unique: HashSet<_> = swarm_accesses.iter()
-                                        .map(|a| &a.session_id)
-                                        .collect();
-                                    if unique.len() > 1 {
-                                        Some(path.to_string_lossy().to_string())
-                                    } else {
-                                        None
-                                    }
-                                }).collect();
+                                let conflicts: Vec<_> = touches
+                                    .iter()
+                                    .filter_map(|(path, accesses)| {
+                                        let swarm_accesses: Vec<_> = accesses
+                                            .iter()
+                                            .filter(|a| session_ids.contains(&a.session_id))
+                                            .collect();
+                                        let unique: HashSet<_> =
+                                            swarm_accesses.iter().map(|a| &a.session_id).collect();
+                                        if unique.len() > 1 {
+                                            Some(path.to_string_lossy().to_string())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect();
 
                                 Ok(serde_json::json!({
                                     "swarm_id": swarm_id,
@@ -4423,7 +4769,8 @@ async fn handle_debug_client(
                                     "plan": plan,
                                     "context_keys": context_keys,
                                     "conflict_files": conflicts,
-                                }).to_string())
+                                })
+                                .to_string())
                             } else {
                                 Err(anyhow::anyhow!("No swarm with id '{}'", swarm_id))
                             }
@@ -4431,7 +4778,8 @@ async fn handle_debug_client(
                             // Broadcast a message to all members of a swarm
                             let rest = cmd.strip_prefix("swarm:broadcast:").unwrap_or("").trim();
                             // Parse: swarm_id message or just message (uses requester's swarm)
-                            let (target_swarm_id, message) = if let Some(space_idx) = rest.find(' ') {
+                            let (target_swarm_id, message) = if let Some(space_idx) = rest.find(' ')
+                            {
                                 let potential_id = &rest[..space_idx];
                                 let msg = rest[space_idx + 1..].trim();
                                 // Check if potential_id looks like a swarm_id (contains /)
@@ -4454,7 +4802,8 @@ async fn handle_debug_client(
                                     // Try to find requester's swarm
                                     let members = swarm_members.read().await;
                                     let current_session = session_id.read().await;
-                                    members.get(&*current_session)
+                                    members
+                                        .get(&*current_session)
                                         .and_then(|m| m.swarm_id.clone())
                                 };
 
@@ -4462,7 +4811,8 @@ async fn handle_debug_client(
                                     let swarms = swarms_by_id.read().await;
                                     let members = swarm_members.read().await;
                                     let current_session = session_id.read().await;
-                                    let from_name = members.get(&*current_session)
+                                    let from_name = members
+                                        .get(&*current_session)
                                         .and_then(|m| m.friendly_name.clone());
 
                                     if let Some(member_ids) = swarms.get(&swarm_id) {
@@ -4487,7 +4837,8 @@ async fn handle_debug_client(
                                             "swarm_id": swarm_id,
                                             "message": message,
                                             "sent_to": sent_count,
-                                        }).to_string())
+                                        })
+                                        .to_string())
                                     } else {
                                         Err(anyhow::anyhow!("No members in swarm '{}'", swarm_id))
                                     }
@@ -4508,7 +4859,8 @@ async fn handle_debug_client(
                                 } else {
                                     let members = swarm_members.read().await;
                                     let current_session = session_id.read().await;
-                                    let from_name = members.get(&*current_session)
+                                    let from_name = members
+                                        .get(&*current_session)
                                         .and_then(|m| m.friendly_name.clone());
 
                                     if let Some(target) = members.get(target_session) {
@@ -4527,7 +4879,8 @@ async fn handle_debug_client(
                                                 "sent_to": target_session,
                                                 "sent_to_name": target_name,
                                                 "message": message,
-                                            }).to_string())
+                                            })
+                                            .to_string())
                                         } else {
                                             Err(anyhow::anyhow!("Failed to send notification"))
                                         }
@@ -4536,11 +4889,14 @@ async fn handle_debug_client(
                                     }
                                 }
                             } else {
-                                Err(anyhow::anyhow!("Usage: swarm:notify:<session_id> <message>"))
+                                Err(anyhow::anyhow!(
+                                    "Usage: swarm:notify:<session_id> <message>"
+                                ))
                             }
                         } else if cmd.starts_with("swarm:session:") {
                             // Get detailed execution state for a specific session
-                            let target_session = cmd.strip_prefix("swarm:session:").unwrap_or("").trim();
+                            let target_session =
+                                cmd.strip_prefix("swarm:session:").unwrap_or("").trim();
                             if target_session.is_empty() {
                                 Err(anyhow::anyhow!("swarm:session requires a session_id"))
                             } else {
@@ -4596,7 +4952,8 @@ async fn handle_debug_client(
                                     let interrupt_count = agent.soft_interrupt_count();
 
                                     if alert_count > 0 || interrupt_count > 0 {
-                                        let name = members.get(session_id)
+                                        let name = members
+                                            .get(session_id)
                                             .and_then(|m| m.friendly_name.clone());
                                         out.push(serde_json::json!({
                                             "session_id": session_id,
@@ -4621,7 +4978,8 @@ async fn handle_debug_client(
                                 let path = PathBuf::from(path_str);
 
                                 // Check env override first
-                                let env_override = std::env::var("JCODE_SWARM_ID").ok()
+                                let env_override = std::env::var("JCODE_SWARM_ID")
+                                    .ok()
                                     .filter(|s| !s.trim().is_empty());
 
                                 // Try to get git common dir
@@ -4641,20 +4999,24 @@ async fn handle_debug_client(
                                     "git_common_dir": git_common.clone(),
                                     "git_root": git_common,
                                     "is_git_repo": is_git_repo,
-                                }).to_string())
+                                })
+                                .to_string())
                             }
                         } else if cmd == "events:recent" || cmd.starts_with("events:recent:") {
                             // Get recent events (default 50, or specify count)
-                            let count: usize = cmd.strip_prefix("events:recent:")
+                            let count: usize = cmd
+                                .strip_prefix("events:recent:")
                                 .and_then(|s| s.parse().ok())
                                 .unwrap_or(50);
 
                             let history = event_history.read().await;
-                            let events: Vec<serde_json::Value> = history.iter()
+                            let events: Vec<serde_json::Value> = history
+                                .iter()
                                 .rev()
                                 .take(count)
                                 .map(|e| {
-                                    let timestamp_unix = e.absolute_time
+                                    let timestamp_unix = e
+                                        .absolute_time
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .map(|d| d.as_secs())
                                         .unwrap_or(0);
@@ -4673,15 +5035,18 @@ async fn handle_debug_client(
                                 .unwrap_or_else(|_| "[]".to_string()))
                         } else if cmd.starts_with("events:since:") {
                             // Get events since a specific event ID
-                            let since_id: u64 = cmd.strip_prefix("events:since:")
+                            let since_id: u64 = cmd
+                                .strip_prefix("events:since:")
                                 .and_then(|s| s.parse().ok())
                                 .unwrap_or(0);
 
                             let history = event_history.read().await;
-                            let events: Vec<serde_json::Value> = history.iter()
+                            let events: Vec<serde_json::Value> = history
+                                .iter()
                                 .filter(|e| e.id > since_id)
                                 .map(|e| {
-                                    let timestamp_unix = e.absolute_time
+                                    let timestamp_unix = e
+                                        .absolute_time
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .map(|d| d.as_secs())
                                         .unwrap_or(0);
@@ -4720,7 +5085,37 @@ async fn handle_debug_client(
                                 "count": history.len(),
                                 "latest_id": latest_id,
                                 "max_history": MAX_EVENT_HISTORY,
-                            }).to_string())
+                            })
+                            .to_string())
+                        } else if cmd == "server:info" {
+                            // Return server identity, health, and uptime
+                            let uptime_secs = server_start_time.elapsed().as_secs();
+                            let session_count = sessions.read().await.len();
+                            let member_count = swarm_members.read().await.len();
+                            let has_update = server_has_newer_binary();
+                            Ok(serde_json::json!({
+                                "id": server_identity.id,
+                                "name": server_identity.name,
+                                "icon": server_identity.icon,
+                                "version": server_identity.version,
+                                "git_hash": server_identity.git_hash,
+                                "uptime_secs": uptime_secs,
+                                "session_count": session_count,
+                                "swarm_member_count": member_count,
+                                "has_update": has_update,
+                                "debug_control_enabled": debug_control_allowed(),
+                            })
+                            .to_string())
+                        } else if cmd == "clients" {
+                            // List connected TUI clients
+                            let debug_state = client_debug_state.read().await;
+                            let client_ids: Vec<&String> = debug_state.clients.keys().collect();
+                            Ok(serde_json::json!({
+                                "count": debug_state.clients.len(),
+                                "active_id": debug_state.active_id,
+                                "client_ids": client_ids,
+                            })
+                            .to_string())
                         } else if cmd == "swarm:help" {
                             Ok(swarm_debug_help_text())
                         } else if cmd == "help" {
@@ -4769,17 +5164,26 @@ fn debug_help_text() -> String {
 SERVER COMMANDS (server: prefix or no prefix):
   state                    - Get agent state
   history                  - Get conversation history
-  tools                    - List available tools
+  tools                    - List available tools (names only)
+  tools:full               - List tools with full definitions (input_schema)
   last_response            - Get last assistant response
   message:<text>           - Send message to agent
   message_async:<text>     - Send message async (returns job id)
   swarm_message:<text>     - Plan and run subtasks via task tool, then integrate
   swarm_message_async:<text> - Async swarm message (returns job id)
   tool:<name> <json>       - Execute tool directly
+  cancel                   - Cancel in-flight generation (urgent interrupt)
+  clear                    - Clear conversation history
+  agent:info               - Get comprehensive agent internal state
   jobs                     - List async debug jobs
   job_status:<id>          - Get async job status/output
   job_wait:<id>            - Wait for async job to finish
-  sessions                 - List all sessions
+  job_cancel:<id>          - Cancel a running job
+  jobs:purge               - Remove completed/failed jobs
+  jobs:session:<id>        - List jobs for a session
+  sessions                 - List all sessions (with full metadata)
+  clients                  - List connected TUI clients
+  server:info              - Server identity, health, uptime
   swarm                    - List swarm members + status (alias: swarm:members)
   swarm:help               - Full swarm command reference
   create_session           - Create headless session
@@ -4817,6 +5221,18 @@ CLIENT COMMANDS (client: prefix):
   client:frame             - Get latest visual debug frame (JSON)
   client:frame-normalized  - Get normalized frame (for diffs)
   client:screen            - Dump visual debug to file
+  client:layout            - Get latest layout JSON
+  client:margins           - Get layout margins JSON
+  client:widgets           - Get info widget summary/placements
+  client:render-stats      - Get render timing + order JSON
+  client:render-order      - Get render order list
+  client:anomalies         - Get latest visual debug anomalies
+  client:theme             - Get palette snapshot
+  client:mermaid:stats     - Get mermaid render/cache stats
+  client:mermaid:cache     - List mermaid cache entries
+  client:mermaid:evict     - Clear mermaid cache
+  client:markdown:stats    - Get markdown render stats
+  client:overlay:on/off    - Toggle overlay boxes
   client:input             - Get current input buffer
   client:set_input:<text>  - Set input buffer
   client:keys:<keyspec>    - Inject key events

@@ -13,9 +13,12 @@ use std::sync::{Mutex, OnceLock};
 
 use ratatui::layout::Rect;
 use serde::Serialize;
+use serde_json::Value;
 
 /// Global flag to enable visual debugging (set via /debug-visual command)
 static VISUAL_DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Global flag to enable overlay drawing
+static VISUAL_DEBUG_OVERLAY: AtomicBool = AtomicBool::new(false);
 
 /// Maximum number of frames to keep in the ring buffer
 const MAX_FRAMES: usize = 100;
@@ -44,10 +47,22 @@ pub struct FrameCapture {
     pub anomalies: Vec<String>,
     /// The actual text content rendered to each area (stripped of ANSI)
     pub rendered_text: RenderedText,
+    /// Render timing information (milliseconds)
+    pub render_timing: Option<RenderTimingCapture>,
+    /// Info widget placements and summary data
+    pub info_widgets: Option<InfoWidgetCapture>,
+    /// Render order for major phases
+    pub render_order: Vec<String>,
+    /// Mermaid debug stats snapshot (if available)
+    pub mermaid: Option<Value>,
+    /// Markdown debug stats snapshot (if available)
+    pub markdown: Option<Value>,
+    /// Theme/palette snapshot (if available)
+    pub theme: Option<Value>,
 }
 
 /// Captured layout computation
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct LayoutCapture {
     /// Whether packed layout was used (vs scrolling)
     pub use_packed: bool,
@@ -65,15 +80,80 @@ pub struct LayoutCapture {
     pub input_lines_raw: usize,
     /// Input line count (after wrapping)
     pub input_lines_wrapped: usize,
+    /// Margin widths for info widgets (per visible row)
+    pub margins: Option<MarginsCapture>,
+    /// Info widget placements
+    pub widget_placements: Vec<WidgetPlacementCapture>,
 }
 
 /// Rect capture (serializable)
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub struct RectCapture {
     pub x: u16,
     pub y: u16,
     pub width: u16,
     pub height: u16,
+}
+
+/// Margin widths captured for debug
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct MarginsCapture {
+    pub left_widths: Vec<u16>,
+    pub right_widths: Vec<u16>,
+    pub centered: bool,
+}
+
+/// Info widget placement capture
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct WidgetPlacementCapture {
+    pub kind: String,
+    pub side: String,
+    pub rect: RectCapture,
+}
+
+/// Render timing capture (milliseconds)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct RenderTimingCapture {
+    pub prepare_ms: f32,
+    pub draw_ms: f32,
+    pub total_ms: f32,
+    pub messages_ms: Option<f32>,
+    pub widgets_ms: Option<f32>,
+}
+
+/// Info widget summary capture
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct InfoWidgetSummary {
+    pub todos_total: usize,
+    pub todos_done: usize,
+    pub context_total_chars: Option<usize>,
+    pub context_limit: Option<usize>,
+    pub queue_mode: Option<bool>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub session_count: Option<usize>,
+    pub client_count: Option<usize>,
+    pub memory_total: Option<usize>,
+    pub memory_project: Option<usize>,
+    pub memory_global: Option<usize>,
+    pub memory_activity: Option<bool>,
+    pub swarm_session_count: Option<usize>,
+    pub swarm_member_count: Option<usize>,
+    pub swarm_subagent_status: Option<String>,
+    pub background_running: Option<usize>,
+    pub background_tasks: Option<usize>,
+    pub usage_available: Option<bool>,
+    pub usage_provider: Option<String>,
+    pub tokens_per_second: Option<f32>,
+    pub auth_method: Option<String>,
+    pub upstream_provider: Option<String>,
+}
+
+/// Info widget capture (summary + placements)
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct InfoWidgetCapture {
+    pub summary: InfoWidgetSummary,
+    pub placements: Vec<WidgetPlacementCapture>,
 }
 
 impl From<Rect> for RectCapture {
@@ -174,6 +254,16 @@ pub fn disable() {
     VISUAL_DEBUG_ENABLED.store(false, Ordering::SeqCst);
 }
 
+/// Enable or disable overlay drawing
+pub fn set_overlay(enabled: bool) {
+    VISUAL_DEBUG_OVERLAY.store(enabled, Ordering::SeqCst);
+}
+
+/// Check if overlay drawing is enabled
+pub fn overlay_enabled() -> bool {
+    VISUAL_DEBUG_OVERLAY.load(Ordering::SeqCst)
+}
+
 /// Check if visual debugging is enabled
 pub fn is_enabled() -> bool {
     VISUAL_DEBUG_ENABLED.load(Ordering::SeqCst)
@@ -192,6 +282,8 @@ pub fn record_frame(frame: FrameCapture) {
     if let Some(last) = buffer.frames.back() {
         let dominated = frame.state == last.state
             && frame.rendered_text == last.rendered_text
+            && frame.layout == last.layout
+            && frame.info_widgets == last.info_widgets
             && frame.anomalies.is_empty();
         if dominated {
             return;
@@ -436,6 +528,26 @@ fn write_frame(file: &mut File, frame: &FrameCapture) -> std::io::Result<()> {
         "  input_lines: {} raw, {} wrapped",
         frame.layout.input_lines_raw, frame.layout.input_lines_wrapped
     )?;
+    if let Some(margins) = &frame.layout.margins {
+        writeln!(
+            file,
+            "  margins: centered={} left_rows={} right_rows={}",
+            margins.centered,
+            margins.left_widths.len(),
+            margins.right_widths.len()
+        )?;
+    }
+    if !frame.layout.widget_placements.is_empty() {
+        writeln!(file, "  widget_placements:")?;
+        for placement in &frame.layout.widget_placements {
+            let r = placement.rect;
+            writeln!(
+                file,
+                "    {} ({}) at ({}, {}) {}x{}",
+                placement.kind, placement.side, r.x, r.y, r.width, r.height
+            )?;
+        }
+    }
 
     // Rendered text
     writeln!(file, "Rendered:")?;
@@ -468,6 +580,54 @@ fn write_frame(file: &mut File, frame: &FrameCapture) -> std::io::Result<()> {
         )?;
     }
 
+    // Render timing
+    if let Some(timing) = &frame.render_timing {
+        writeln!(
+            file,
+            "Timing: prepare={:.2}ms draw={:.2}ms total={:.2}ms messages={:?} widgets={:?}",
+            timing.prepare_ms,
+            timing.draw_ms,
+            timing.total_ms,
+            timing.messages_ms,
+            timing.widgets_ms
+        )?;
+    }
+
+    // Info widget summary
+    if let Some(info) = &frame.info_widgets {
+        writeln!(file, "InfoWidgets:")?;
+        writeln!(
+            file,
+            "  todos: {}/{} done, context_chars: {:?}, model: {:?}",
+            info.summary.todos_done,
+            info.summary.todos_total,
+            info.summary.context_total_chars,
+            info.summary.model
+        )?;
+        writeln!(
+            file,
+            "  session_count: {:?}, client_count: {:?}, swarm_members: {:?}",
+            info.summary.session_count, info.summary.client_count, info.summary.swarm_member_count
+        )?;
+    }
+
+    if !frame.render_order.is_empty() {
+        writeln!(file, "Render order:")?;
+        for step in &frame.render_order {
+            writeln!(file, "  - {}", step)?;
+        }
+    }
+
+    if let Some(mermaid) = &frame.mermaid {
+        writeln!(file, "Mermaid: {}", mermaid)?;
+    }
+    if let Some(markdown) = &frame.markdown {
+        writeln!(file, "Markdown: {}", markdown)?;
+    }
+    if let Some(theme) = &frame.theme {
+        writeln!(file, "Theme: {}", theme)?;
+    }
+
     // Anomalies
     if !frame.anomalies.is_empty() {
         writeln!(file, "ANOMALIES:")?;
@@ -487,6 +647,12 @@ pub struct FrameCaptureBuilder {
     pub state: StateSnapshot,
     pub rendered_text: RenderedText,
     pub anomalies: Vec<String>,
+    pub render_timing: Option<RenderTimingCapture>,
+    pub info_widgets: Option<InfoWidgetCapture>,
+    pub render_order: Vec<String>,
+    pub mermaid: Option<Value>,
+    pub markdown: Option<Value>,
+    pub theme: Option<Value>,
     terminal_size: (u16, u16),
 }
 
@@ -520,6 +686,12 @@ impl FrameCaptureBuilder {
             state: self.state,
             anomalies: self.anomalies,
             rendered_text: self.rendered_text,
+            render_timing: self.render_timing,
+            info_widgets: self.info_widgets,
+            render_order: self.render_order,
+            mermaid: self.mermaid,
+            markdown: self.markdown,
+            theme: self.theme,
         }
     }
 }
