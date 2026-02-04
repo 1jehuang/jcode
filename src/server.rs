@@ -11,9 +11,9 @@ use crate::protocol::{
 use crate::provider::Provider;
 use crate::registry::{server_debug_socket_path, server_socket_path};
 use crate::todo::{save_todos, TodoItem};
-use crate::tool::Registry;
+use crate::tool::{Registry, ToolContext};
 use anyhow::Result;
-use futures::future::join_all;
+use futures::future::try_join_all;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -2609,47 +2609,84 @@ async fn create_headless_session(
     .to_string())
 }
 
-async fn run_swarm_message(agent: &mut Agent, msg: &str) -> Result<String> {
+async fn run_swarm_task(
+    agent: Arc<Mutex<Agent>>,
+    description: &str,
+    subagent_type: &str,
+    prompt: &str,
+) -> Result<String> {
+    let input = serde_json::json!({
+        "description": description,
+        "prompt": prompt,
+        "subagent_type": subagent_type,
+    });
+    let (registry, session_id, working_dir) = {
+        let agent = agent.lock().await;
+        (
+            agent.registry(),
+            agent.session_id().to_string(),
+            agent.working_dir().map(PathBuf::from),
+        )
+    };
+    let call_id = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| format!("debug-{}", d.as_millis()))
+        .unwrap_or_else(|_| "debug".to_string());
+    let ctx = ToolContext {
+        session_id: session_id.clone(),
+        message_id: session_id,
+        tool_call_id: call_id,
+        working_dir,
+    };
+    let output = registry.execute("task", input, ctx).await?;
+    Ok(output.output)
+}
+
+async fn run_swarm_message(agent: Arc<Mutex<Agent>>, message: &str) -> Result<String> {
+    let working_dir = {
+        let agent = agent.lock().await;
+        agent.working_dir().map(|dir| dir.to_string())
+    };
+    let working_dir_hint = working_dir
+        .as_deref()
+        .map(|dir| format!("Working directory: {}\n", dir))
+        .unwrap_or_default();
+
     let planner_prompt = format!(
-        "You are a task planner. Break the request into 2-4 subtasks. \
+        "{working_dir_hint}You are a task planner. Break the request into 2-4 subtasks. \
 Return ONLY a JSON array of objects with keys: description, prompt, subagent_type. \
-No extra text.\n\nRequest:\n{}",
-        msg
+No extra text.\n\nRequest:\n{message}"
     );
 
-    let plan_text = agent.run_once_capture(&planner_prompt).await?;
+    let plan_text = {
+        let mut agent = agent.lock().await;
+        agent.run_once_capture(&planner_prompt).await?
+    };
+
     let mut tasks = parse_swarm_tasks(&plan_text);
     if tasks.is_empty() {
         tasks.push(SwarmTaskSpec {
             description: "Main task".to_string(),
-            prompt: msg.to_string(),
+            prompt: message.to_string(),
             subagent_type: Some("general".to_string()),
         });
     }
 
-    let agent_ref: &Agent = &*agent;
     let task_futures = tasks.iter().map(|task| {
-        let input = serde_json::json!({
-            "description": task.description,
-            "prompt": task.prompt,
-            "subagent_type": task.subagent_type.clone().unwrap_or_else(|| "general".to_string()),
-        });
-        let desc = task.description.clone();
-        async move { (desc, agent_ref.execute_tool("task", input).await) }
-    });
-
-    let results = join_all(task_futures).await;
-    let mut task_outputs: Vec<(String, String)> = Vec::new();
-    let mut task_errors: Vec<String> = Vec::new();
-    for (desc, result) in results {
-        match result {
-            Ok(output) => task_outputs.push((desc, output.output)),
-            Err(e) => {
-                task_errors.push(desc.clone());
-                task_outputs.push((desc, format!("[Error] {}", e)));
-            }
+        let agent = agent.clone();
+        let working_dir_hint = working_dir_hint.clone();
+        let description = task.description.clone();
+        let prompt = format!("{working_dir_hint}{}", task.prompt);
+        let subagent_type = task
+            .subagent_type
+            .clone()
+            .unwrap_or_else(|| "general".to_string());
+        async move {
+            let output = run_swarm_task(agent, &description, &subagent_type, &prompt).await?;
+            Ok::<(String, String), anyhow::Error>((description, output))
         }
-    }
+    });
+    let task_outputs = try_join_all(task_futures).await?;
 
     let mut integration_prompt = String::new();
     integration_prompt.push_str(
@@ -2657,20 +2694,43 @@ No extra text.\n\nRequest:\n{}",
     );
     integration_prompt.push_str("Do not stop early; run any requested tests and fix failures.\n\n");
     integration_prompt.push_str("Original request:\n");
-    integration_prompt.push_str(msg);
+    integration_prompt.push_str(message);
     integration_prompt.push_str("\n\nSubagent outputs:\n");
     for (desc, output) in &task_outputs {
         integration_prompt.push_str(&format!("\n--- {} ---\n{}\n", desc, output));
     }
-    if !task_errors.is_empty() {
-        integration_prompt.push_str("\nSubagent errors:\n");
-        for desc in &task_errors {
-            integration_prompt.push_str(&format!("- {} failed\n", desc));
-        }
-    }
     integration_prompt.push_str("\nNow complete the task.\n");
 
-    agent.run_once_capture(&integration_prompt).await
+    let final_output = {
+        let mut agent = agent.lock().await;
+        agent.run_once_capture(&integration_prompt).await?
+    };
+
+    Ok(final_output)
+}
+
+#[derive(Debug, Deserialize)]
+struct SwarmTaskSpec {
+    description: String,
+    prompt: String,
+    #[serde(default)]
+    subagent_type: Option<String>,
+}
+
+fn parse_swarm_tasks(text: &str) -> Vec<SwarmTaskSpec> {
+    if let Ok(tasks) = serde_json::from_str::<Vec<SwarmTaskSpec>>(text) {
+        return tasks;
+    }
+
+    if let (Some(start), Some(end)) = (text.find('['), text.rfind(']')) {
+        if start < end {
+            if let Ok(tasks) = serde_json::from_str::<Vec<SwarmTaskSpec>>(&text[start..=end]) {
+                return tasks;
+            }
+        }
+    }
+
+    Vec::new()
 }
 
 fn debug_message_timeout_secs() -> Option<u64> {
@@ -2766,10 +2826,7 @@ async fn execute_debug_command(
                 }
             }
 
-            let result = {
-                let mut agent = agent.lock().await;
-                run_swarm_message(&mut agent, &msg).await
-            };
+            let result = run_swarm_message(agent.clone(), &msg).await;
             let partial_output = if result.is_err() {
                 let agent = agent.lock().await;
                 agent.last_assistant_text()
@@ -2879,8 +2936,7 @@ async fn execute_debug_command(
             return Err(anyhow::anyhow!("swarm_message: requires content"));
         }
 
-        let mut agent = agent.lock().await;
-        let final_text = run_swarm_message(&mut agent, msg).await?;
+        let final_text = run_swarm_message(agent.clone(), msg).await?;
         return Ok(final_text);
     }
 
@@ -3085,30 +3141,6 @@ async fn execute_debug_command(
     }
 
     Err(anyhow::anyhow!("Unknown debug command '{}'", trimmed))
-}
-
-#[derive(Debug, Deserialize)]
-struct SwarmTaskSpec {
-    description: String,
-    prompt: String,
-    #[serde(default)]
-    subagent_type: Option<String>,
-}
-
-fn parse_swarm_tasks(text: &str) -> Vec<SwarmTaskSpec> {
-    if let Ok(tasks) = serde_json::from_str::<Vec<SwarmTaskSpec>>(text) {
-        return tasks;
-    }
-
-    if let (Some(start), Some(end)) = (text.find('['), text.rfind(']')) {
-        if start < end {
-            if let Ok(tasks) = serde_json::from_str::<Vec<SwarmTaskSpec>>(&text[start..=end]) {
-                return tasks;
-            }
-        }
-    }
-
-    Vec::new()
 }
 
 /// Execute a client debug command (visual debug, TUI state, etc.)

@@ -1224,8 +1224,18 @@ impl TuiState for ClientApp {
             super::info_widget::AuthMethod::Unknown
         };
 
+        let tokens_per_second = self.processing_started.and_then(|started| {
+            let elapsed = started.elapsed().as_secs_f32();
+            if elapsed >= 0.2 && self.streaming_output_tokens > 0 {
+                Some(self.streaming_output_tokens as f32 / elapsed)
+            } else {
+                None
+            }
+        });
+
         super::info_widget::InfoWidgetData {
             usage_info,
+            tokens_per_second,
             auth_method,
             upstream_provider: None, // Client mode doesn't have upstream provider info
             ..Default::default()

@@ -7799,6 +7799,15 @@ impl super::TuiState for App {
             }
         };
 
+        let tokens_per_second = self.processing_started.and_then(|started| {
+            let elapsed = started.elapsed().as_secs_f32();
+            if elapsed >= 0.2 && self.streaming_output_tokens > 0 {
+                Some(self.streaming_output_tokens as f32 / elapsed)
+            } else {
+                None
+            }
+        });
+
         // Determine authentication method
         let auth_method = if self.is_remote {
             super::info_widget::AuthMethod::Unknown
@@ -7847,6 +7856,7 @@ impl super::TuiState for App {
             swarm_info,
             background_info,
             usage_info,
+            tokens_per_second,
             auth_method,
             upstream_provider: self.upstream_provider.clone(),
         }
