@@ -4110,6 +4110,117 @@ async fn handle_debug_client(
                             } else {
                                 Err(anyhow::anyhow!("No swarm with id '{}'", swarm_id))
                             }
+                        } else if cmd.starts_with("swarm:broadcast:") {
+                            // Broadcast a message to all members of a swarm
+                            let rest = cmd.strip_prefix("swarm:broadcast:").unwrap_or("").trim();
+                            // Parse: swarm_id message or just message (uses requester's swarm)
+                            let (target_swarm_id, message) = if let Some(space_idx) = rest.find(' ') {
+                                let potential_id = &rest[..space_idx];
+                                let msg = rest[space_idx + 1..].trim();
+                                // Check if potential_id looks like a swarm_id (contains /)
+                                if potential_id.contains('/') {
+                                    (Some(potential_id.to_string()), msg.to_string())
+                                } else {
+                                    (None, rest.to_string())
+                                }
+                            } else {
+                                (None, rest.to_string())
+                            };
+
+                            if message.is_empty() {
+                                Err(anyhow::anyhow!("swarm:broadcast requires a message"))
+                            } else {
+                                // Find the swarm to broadcast to
+                                let swarm_id = if let Some(id) = target_swarm_id {
+                                    Some(id)
+                                } else {
+                                    // Try to find requester's swarm
+                                    let members = swarm_members.read().await;
+                                    let current_session = session_id.read().await;
+                                    members.get(&*current_session)
+                                        .and_then(|m| m.swarm_id.clone())
+                                };
+
+                                if let Some(swarm_id) = swarm_id {
+                                    let swarms = swarms_by_id.read().await;
+                                    let members = swarm_members.read().await;
+                                    let current_session = session_id.read().await;
+                                    let from_name = members.get(&*current_session)
+                                        .and_then(|m| m.friendly_name.clone());
+
+                                    if let Some(member_ids) = swarms.get(&swarm_id) {
+                                        let mut sent_count = 0;
+                                        for member_id in member_ids {
+                                            if let Some(member) = members.get(member_id) {
+                                                let notification = ServerEvent::Notification {
+                                                    from_session: current_session.clone(),
+                                                    from_name: from_name.clone(),
+                                                    notification_type: NotificationType::Message {
+                                                        scope: Some("broadcast".to_string()),
+                                                        channel: None,
+                                                    },
+                                                    message: message.clone(),
+                                                };
+                                                if member.event_tx.send(notification).is_ok() {
+                                                    sent_count += 1;
+                                                }
+                                            }
+                                        }
+                                        Ok(serde_json::json!({
+                                            "swarm_id": swarm_id,
+                                            "message": message,
+                                            "sent_to": sent_count,
+                                        }).to_string())
+                                    } else {
+                                        Err(anyhow::anyhow!("No members in swarm '{}'", swarm_id))
+                                    }
+                                } else {
+                                    Err(anyhow::anyhow!("No swarm found. Specify swarm_id: swarm:broadcast:<swarm_id> <message>"))
+                                }
+                            }
+                        } else if cmd.starts_with("swarm:notify:") {
+                            // Send notification to a specific session
+                            let rest = cmd.strip_prefix("swarm:notify:").unwrap_or("").trim();
+                            // Parse: session_id message
+                            if let Some(space_idx) = rest.find(' ') {
+                                let target_session = &rest[..space_idx];
+                                let message = rest[space_idx + 1..].trim();
+
+                                if message.is_empty() {
+                                    Err(anyhow::anyhow!("swarm:notify requires a message"))
+                                } else {
+                                    let members = swarm_members.read().await;
+                                    let current_session = session_id.read().await;
+                                    let from_name = members.get(&*current_session)
+                                        .and_then(|m| m.friendly_name.clone());
+
+                                    if let Some(target) = members.get(target_session) {
+                                        let notification = ServerEvent::Notification {
+                                            from_session: current_session.clone(),
+                                            from_name: from_name.clone(),
+                                            notification_type: NotificationType::Message {
+                                                scope: Some("dm".to_string()),
+                                                channel: None,
+                                            },
+                                            message: message.to_string(),
+                                        };
+                                        if target.event_tx.send(notification).is_ok() {
+                                            let target_name = target.friendly_name.clone();
+                                            Ok(serde_json::json!({
+                                                "sent_to": target_session,
+                                                "sent_to_name": target_name,
+                                                "message": message,
+                                            }).to_string())
+                                        } else {
+                                            Err(anyhow::anyhow!("Failed to send notification"))
+                                        }
+                                    } else {
+                                        Err(anyhow::anyhow!("Unknown session '{}'", target_session))
+                                    }
+                                }
+                            } else {
+                                Err(anyhow::anyhow!("Usage: swarm:notify:<session_id> <message>"))
+                            }
                         } else if cmd == "swarm:help" {
                             Ok(swarm_debug_help_text())
                         } else if cmd == "help" {
@@ -4189,6 +4300,8 @@ SWARM COMMANDS (swarm: prefix):
   swarm:context            - List all shared context
   swarm:touches            - List all file touches
   swarm:conflicts          - Files touched by multiple sessions
+  swarm:broadcast:<msg>    - Broadcast to swarm members
+  swarm:notify:<sid> <msg> - Send DM to specific session
   swarm:help               - Full swarm command reference
 
 CLIENT COMMANDS (client: prefix):
@@ -4250,12 +4363,17 @@ FILE TOUCHES (conflict detection):
   swarm:touches:<path>     - Get touches for specific file
   swarm:conflicts          - List files touched by multiple sessions
 
+NOTIFICATIONS:
+  swarm:broadcast:<msg>    - Broadcast message to all members of your swarm
+  swarm:broadcast:<swarm_id> <msg> - Broadcast to specific swarm
+  swarm:notify:<session_id> <msg> - Send direct message to specific session
+
 Examples:
   {"type":"debug_command","id":1,"command":"swarm:list"}
   {"type":"debug_command","id":2,"command":"swarm:info:/home/user/myproject"}
   {"type":"debug_command","id":3,"command":"swarm:plan:/home/user/myproject"}
-  {"type":"debug_command","id":4,"command":"swarm:context:/home/user/myproject:notes"}
-  {"type":"debug_command","id":5,"command":"swarm:conflicts"}"#
+  {"type":"debug_command","id":4,"command":"swarm:broadcast:Build complete, ready for review"}
+  {"type":"debug_command","id":5,"command":"swarm:notify:session_fox_123 Please review PR #42"}"#
         .to_string()
 }
 
