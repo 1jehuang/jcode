@@ -2,9 +2,11 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::prelude::*;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style as SynStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
@@ -21,6 +23,30 @@ static HIGHLIGHT_CACHE: LazyLock<Mutex<HighlightCache>> =
     LazyLock::new(|| Mutex::new(HighlightCache::new()));
 
 const HIGHLIGHT_CACHE_LIMIT: usize = 256;
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MarkdownDebugStats {
+    pub total_renders: u64,
+    pub last_render_ms: Option<f32>,
+    pub last_text_len: Option<usize>,
+    pub last_lines: Option<usize>,
+    pub last_headings: usize,
+    pub last_code_blocks: usize,
+    pub last_mermaid_blocks: usize,
+    pub last_tables: usize,
+    pub last_list_items: usize,
+    pub last_blockquotes: usize,
+    pub highlight_cache_hits: u64,
+    pub highlight_cache_misses: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct MarkdownDebugState {
+    stats: MarkdownDebugStats,
+}
+
+static MARKDOWN_DEBUG: LazyLock<Mutex<MarkdownDebugState>> =
+    LazyLock::new(|| Mutex::new(MarkdownDebugState::default()));
 
 struct HighlightCache {
     entries: HashMap<u64, Vec<Line<'static>>>,
@@ -227,8 +253,20 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
     render_markdown_with_width(text, None)
 }
 
+pub fn debug_stats() -> MarkdownDebugStats {
+    if let Ok(state) = MARKDOWN_DEBUG.lock() {
+        return state.stats.clone();
+    }
+    MarkdownDebugStats::default()
+}
+
+pub fn debug_stats_json() -> Option<serde_json::Value> {
+    serde_json::to_value(debug_stats()).ok()
+}
+
 /// Render markdown with optional width constraint for tables
 pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<Line<'static>> {
+    let render_start = Instant::now();
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current_spans: Vec<Span<'static>> = Vec::new();
 
@@ -252,9 +290,18 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
     options.insert(Options::ENABLE_TABLES);
     let parser = Parser::new_ext(text, options);
 
+    // Debug counters
+    let mut dbg_headings = 0usize;
+    let mut dbg_code_blocks = 0usize;
+    let mut dbg_mermaid_blocks = 0usize;
+    let mut dbg_tables = 0usize;
+    let mut dbg_list_items = 0usize;
+    let mut dbg_blockquotes = 0usize;
+
     for event in parser {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
+                dbg_headings += 1;
                 if !current_spans.is_empty() {
                     lines.push(Line::from(std::mem::take(&mut current_spans)));
                 }
@@ -288,6 +335,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
             Event::End(TagEnd::Emphasis) => italic = false,
 
             Event::Start(Tag::CodeBlock(kind)) => {
+                dbg_code_blocks += 1;
                 // Flush current line before code block
                 if !current_spans.is_empty() {
                     lines.push(Line::from(std::mem::take(&mut current_spans)));
@@ -308,6 +356,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     .unwrap_or(false);
 
                 if is_mermaid {
+                    dbg_mermaid_blocks += 1;
                     // Render mermaid diagram
                     let result = mermaid::render_mermaid(&code_block_content);
                     let mermaid_lines = mermaid::result_to_lines(result, max_width);
@@ -434,6 +483,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
             }
 
             Event::Start(Tag::Item) => {
+                dbg_list_items += 1;
                 current_spans.push(Span::styled("• ", Style::default().fg(DIM_COLOR)));
             }
             Event::End(TagEnd::Item) => {
@@ -444,6 +494,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
 
             // Table handling
             Event::Start(Tag::Table(_)) => {
+                dbg_tables += 1;
                 // Flush any pending content
                 if !current_spans.is_empty() {
                     lines.push(Line::from(std::mem::take(&mut current_spans)));
@@ -497,6 +548,19 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
     // Flush remaining spans
     if !current_spans.is_empty() {
         lines.push(Line::from(current_spans));
+    }
+
+    if let Ok(mut state) = MARKDOWN_DEBUG.lock() {
+        state.stats.total_renders += 1;
+        state.stats.last_render_ms = Some(render_start.elapsed().as_secs_f32() * 1000.0);
+        state.stats.last_text_len = Some(text.len());
+        state.stats.last_lines = Some(lines.len());
+        state.stats.last_headings = dbg_headings;
+        state.stats.last_code_blocks = dbg_code_blocks;
+        state.stats.last_mermaid_blocks = dbg_mermaid_blocks;
+        state.stats.last_tables = dbg_tables;
+        state.stats.last_list_items = dbg_list_items;
+        state.stats.last_blockquotes = dbg_blockquotes;
     }
 
     lines
@@ -606,11 +670,17 @@ fn highlight_code_cached(code: &str, lang: Option<&str>) -> Vec<Line<'static>> {
     // Check cache first
     if let Ok(cache) = HIGHLIGHT_CACHE.lock() {
         if let Some(lines) = cache.get(hash) {
+            if let Ok(mut state) = MARKDOWN_DEBUG.lock() {
+                state.stats.highlight_cache_hits += 1;
+            }
             return lines;
         }
     }
 
     // Cache miss - do the highlighting
+    if let Ok(mut state) = MARKDOWN_DEBUG.lock() {
+        state.stats.highlight_cache_misses += 1;
+    }
     let lines = highlight_code(code, lang);
 
     // Store in cache
