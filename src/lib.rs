@@ -9,6 +9,7 @@ pub mod compaction;
 pub mod config;
 pub mod embedding;
 pub mod id;
+pub mod import;
 pub mod logging;
 pub mod mcp;
 pub mod memory;

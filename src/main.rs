@@ -9,6 +9,7 @@ mod compaction;
 mod config;
 mod embedding;
 mod id;
+mod import;
 mod logging;
 mod mcp;
 mod memory;
@@ -224,6 +225,10 @@ enum Command {
     /// Memory management commands
     #[command(subcommand)]
     Memory(MemoryCommand),
+
+    /// Import sessions from Claude Code
+    #[command(subcommand)]
+    Import(ImportCommand),
 }
 
 #[derive(Subcommand, Debug)]
@@ -278,6 +283,26 @@ enum MemoryCommand {
 
     /// Clear test memory storage (used by debug sessions)
     ClearTest,
+}
+
+#[derive(Subcommand, Debug)]
+enum ImportCommand {
+    /// List available Claude Code sessions
+    List {
+        /// Filter by project path
+        #[arg(short, long)]
+        project: Option<String>,
+    },
+
+    /// Import a specific Claude Code session by ID
+    Session {
+        /// Claude Code session ID (UUID)
+        session_id: String,
+
+        /// Automatically start the session after import
+        #[arg(short = 's', long = "start")]
+        start_session: bool,
+    },
 }
 
 #[tokio::main]
@@ -430,6 +455,9 @@ async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::Memory(subcmd)) => {
             run_memory_command(subcmd)?;
+        }
+        Some(Command::Import(subcmd)) => {
+            run_import_command(subcmd)?;
         }
         None => {
             // Auto-detect jcode repo and enable self-dev mode
@@ -1161,6 +1189,67 @@ fn run_memory_command(cmd: MemoryCommand) -> Result<()> {
                 println!("Cleared test memory storage ({} files)", count);
             } else {
                 println!("Test memory storage is already empty");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Run import commands (Claude Code session import)
+fn run_import_command(cmd: ImportCommand) -> Result<()> {
+    match cmd {
+        ImportCommand::List { project } => {
+            let sessions = if let Some(ref filter) = project {
+                import::list_sessions_for_project(filter)?
+            } else {
+                import::list_claude_code_sessions()?
+            };
+            import::print_sessions_table(&sessions);
+        }
+        ImportCommand::Session { session_id, start_session } => {
+            eprintln!("Importing Claude Code session {}...", session_id);
+
+            let session = import::import_session(&session_id)?;
+            let msg_count = session.messages.len();
+            let jcode_id = session.id.clone();
+
+            eprintln!(
+                "Imported {} messages into jcode session: {}",
+                msg_count, jcode_id
+            );
+
+            if let Some(ref title) = session.title {
+                eprintln!("Title: {}", title);
+            }
+            if let Some(ref model) = session.model {
+                eprintln!("Model: {}", model);
+            }
+            if let Some(ref wd) = session.working_dir {
+                eprintln!("Working dir: {}", wd);
+            }
+
+            if start_session {
+                eprintln!("\nResuming session...");
+                // Exec into jcode with the session
+                use std::os::unix::process::CommandExt;
+                let exe = std::env::current_exe()?;
+                let cwd = session
+                    .working_dir
+                    .as_ref()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+                let err = ProcessCommand::new(&exe)
+                    .arg("--resume")
+                    .arg(&jcode_id)
+                    .current_dir(cwd)
+                    .exec();
+
+                return Err(anyhow::anyhow!("Failed to exec: {}", err));
+            } else {
+                eprintln!("\nTo resume this session:");
+                eprintln!("  jcode --resume {}", jcode_id);
             }
         }
     }
