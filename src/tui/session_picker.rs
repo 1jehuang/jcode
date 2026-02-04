@@ -1173,6 +1173,7 @@ impl SessionPicker {
             let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
         }
         ratatui::restore();
+        super::mermaid::clear_image_state();
 
         result
     }
