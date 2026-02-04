@@ -171,6 +171,24 @@ pub enum Request {
     /// List agents and their activity
     #[serde(rename = "comm_list")]
     CommList { id: u64, session_id: String },
+
+    /// Approve a plan proposal (coordinator only)
+    #[serde(rename = "comm_approve_plan")]
+    CommApprovePlan {
+        id: u64,
+        session_id: String,
+        proposer_session: String,
+    },
+
+    /// Reject a plan proposal (coordinator only)
+    #[serde(rename = "comm_reject_plan")]
+    CommRejectPlan {
+        id: u64,
+        session_id: String,
+        proposer_session: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 
 /// Server event sent to client
@@ -470,6 +488,8 @@ impl Request {
             Request::CommRead { id, .. } => *id,
             Request::CommMessage { id, .. } => *id,
             Request::CommList { id, .. } => *id,
+            Request::CommApprovePlan { id, .. } => *id,
+            Request::CommRejectPlan { id, .. } => *id,
         }
     }
 }

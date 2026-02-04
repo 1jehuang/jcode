@@ -2286,6 +2286,233 @@ async fn handle_client(
                 }
             }
 
+            Request::CommApprovePlan {
+                id,
+                session_id: req_session_id,
+                proposer_session,
+            } => {
+                // Verify the requester is the coordinator
+                let (swarm_id, is_coordinator) = {
+                    let members = swarm_members.read().await;
+                    let swarm_id = members
+                        .get(&req_session_id)
+                        .and_then(|m| m.swarm_id.clone());
+                    let is_coordinator = if let Some(ref sid) = swarm_id {
+                        let coordinators = swarm_coordinators.read().await;
+                        coordinators.get(sid).map(|c| c == &req_session_id).unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    (swarm_id, is_coordinator)
+                };
+
+                if !is_coordinator {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: "Only the coordinator can approve plan proposals.".to_string(),
+                    });
+                    continue;
+                }
+
+                let swarm_id = match swarm_id {
+                    Some(sid) => sid,
+                    None => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: "Not in a swarm.".to_string(),
+                        });
+                        continue;
+                    }
+                };
+
+                // Read proposal from shared context
+                let proposal_key = format!("plan_proposal:{}", proposer_session);
+                let proposal_value = {
+                    let ctx = shared_context.read().await;
+                    ctx.get(&swarm_id)
+                        .and_then(|sc| sc.get(&proposal_key))
+                        .map(|c| c.value.clone())
+                };
+
+                let proposal = match proposal_value {
+                    Some(v) => v,
+                    None => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("No pending plan proposal from session '{}'", proposer_session),
+                        });
+                        continue;
+                    }
+                };
+
+                // Parse and apply to swarm_plans
+                if let Ok(items) = serde_json::from_str::<Vec<TodoItem>>(&proposal) {
+                    {
+                        let mut plans = swarm_plans.write().await;
+                        let plan = plans.entry(swarm_id.clone()).or_insert_with(Vec::new);
+                        plan.extend(items.clone());
+                    }
+
+                    // Remove proposal from shared context
+                    {
+                        let mut ctx = shared_context.write().await;
+                        if let Some(swarm_ctx) = ctx.get_mut(&swarm_id) {
+                            swarm_ctx.remove(&proposal_key);
+                        }
+                    }
+
+                    // Sync approved plan to all swarm members
+                    let swarm_session_ids: Vec<String> = {
+                        let swarms = swarms_by_id.read().await;
+                        swarms
+                            .get(&swarm_id)
+                            .map(|s| s.iter().cloned().collect())
+                            .unwrap_or_default()
+                    };
+
+                    let coordinator_name = {
+                        let members = swarm_members.read().await;
+                        members
+                            .get(&req_session_id)
+                            .and_then(|m| m.friendly_name.clone())
+                    };
+
+                    let members = swarm_members.read().await;
+                    let agent_sessions = sessions.read().await;
+                    for sid in &swarm_session_ids {
+                        if let Some(member) = members.get(sid) {
+                            let msg = format!(
+                                "Plan approved by coordinator: {} items added from {}",
+                                items.len(),
+                                proposer_session
+                            );
+                            let _ = member.event_tx.send(ServerEvent::Notification {
+                                from_session: req_session_id.clone(),
+                                from_name: coordinator_name.clone(),
+                                notification_type: NotificationType::Message {
+                                    scope: Some("swarm".to_string()),
+                                    channel: None,
+                                },
+                                message: msg.clone(),
+                            });
+
+                            // Also push to agent's pending alerts
+                            if let Some(agent) = agent_sessions.get(sid) {
+                                if let Ok(agent) = agent.try_lock() {
+                                    agent.queue_soft_interrupt(msg.clone(), false);
+                                }
+                            }
+
+                            // Sync todos to each member
+                            let _ = save_todos(sid, &items);
+                        }
+                    }
+                }
+
+                let _ = client_event_tx.send(ServerEvent::Done { id });
+            }
+
+            Request::CommRejectPlan {
+                id,
+                session_id: req_session_id,
+                proposer_session,
+                reason,
+            } => {
+                // Verify the requester is the coordinator
+                let (swarm_id, is_coordinator) = {
+                    let members = swarm_members.read().await;
+                    let swarm_id = members
+                        .get(&req_session_id)
+                        .and_then(|m| m.swarm_id.clone());
+                    let is_coordinator = if let Some(ref sid) = swarm_id {
+                        let coordinators = swarm_coordinators.read().await;
+                        coordinators.get(sid).map(|c| c == &req_session_id).unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    (swarm_id, is_coordinator)
+                };
+
+                if !is_coordinator {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: "Only the coordinator can reject plan proposals.".to_string(),
+                    });
+                    continue;
+                }
+
+                let swarm_id = match swarm_id {
+                    Some(sid) => sid,
+                    None => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: "Not in a swarm.".to_string(),
+                        });
+                        continue;
+                    }
+                };
+
+                // Check if proposal exists
+                let proposal_key = format!("plan_proposal:{}", proposer_session);
+                let proposal_exists = {
+                    let ctx = shared_context.read().await;
+                    ctx.get(&swarm_id)
+                        .and_then(|sc| sc.get(&proposal_key))
+                        .is_some()
+                };
+
+                if !proposal_exists {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: format!("No pending plan proposal from session '{}'", proposer_session),
+                    });
+                    continue;
+                }
+
+                // Remove proposal from shared context
+                {
+                    let mut ctx = shared_context.write().await;
+                    if let Some(swarm_ctx) = ctx.get_mut(&swarm_id) {
+                        swarm_ctx.remove(&proposal_key);
+                    }
+                }
+
+                // Notify the proposer
+                let coordinator_name = {
+                    let members = swarm_members.read().await;
+                    members
+                        .get(&req_session_id)
+                        .and_then(|m| m.friendly_name.clone())
+                };
+
+                let members = swarm_members.read().await;
+                let agent_sessions = sessions.read().await;
+                if let Some(member) = members.get(&proposer_session) {
+                    let reason_msg = reason
+                        .as_ref()
+                        .map(|r| format!(": {}", r))
+                        .unwrap_or_default();
+                    let msg = format!("Your plan proposal was rejected by the coordinator{}", reason_msg);
+                    let _ = member.event_tx.send(ServerEvent::Notification {
+                        from_session: req_session_id.clone(),
+                        from_name: coordinator_name.clone(),
+                        notification_type: NotificationType::Message {
+                            scope: Some("dm".to_string()),
+                            channel: None,
+                        },
+                        message: msg.clone(),
+                    });
+
+                    if let Some(agent) = agent_sessions.get(&proposer_session) {
+                        if let Ok(agent) = agent.try_lock() {
+                            agent.queue_soft_interrupt(msg, false);
+                        }
+                    }
+                }
+
+                let _ = client_event_tx.send(ServerEvent::Done { id });
+            }
+
             // These are handled via channels, not direct requests from TUI
             Request::ClientDebugCommand { id, .. } => {
                 let _ = client_event_tx.send(ServerEvent::Error {
