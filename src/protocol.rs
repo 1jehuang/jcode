@@ -405,13 +405,15 @@ pub struct AgentInfo {
     pub files_touched: Vec<String>,
 }
 
-/// Swarm member lifecycle/status update
+/// Swarm member status for lifecycle updates
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwarmMemberStatus {
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub friendly_name: Option<String>,
+    /// Lifecycle status (ready, running, completed, failed, stopped, etc.)
     pub status: String,
+    /// Optional detail (task, error, etc.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
