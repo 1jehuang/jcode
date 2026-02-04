@@ -36,6 +36,15 @@ pub struct SoftInterruptMessage {
 /// Thread-safe soft interrupt queue that can be accessed without holding the agent lock
 pub type SoftInterruptQueue = Arc<std::sync::Mutex<Vec<SoftInterruptMessage>>>;
 
+/// Token usage from the last API request
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+}
+
 pub struct Agent {
     provider: Arc<dyn Provider>,
     registry: Registry,
@@ -54,6 +63,8 @@ pub struct Agent {
     soft_interrupt_queue: SoftInterruptQueue,
     /// Client-side cache tracking for detecting append-only violations
     cache_tracker: CacheTracker,
+    /// Last token usage from API request (for debug socket queries)
+    last_usage: TokenUsage,
 }
 
 impl Agent {
@@ -71,6 +82,7 @@ impl Agent {
             pending_alerts: Vec::new(),
             soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             cache_tracker: CacheTracker::new(),
+            last_usage: TokenUsage::default(),
         };
         agent.session.model = Some(agent.provider.model());
         agent.seed_compaction_from_session();
@@ -96,6 +108,7 @@ impl Agent {
             pending_alerts: Vec::new(),
             soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             cache_tracker: CacheTracker::new(),
+            last_usage: TokenUsage::default(),
         };
         if let Some(model) = agent.session.model.clone() {
             if let Err(e) = agent.provider.set_model(&model) {
@@ -304,6 +317,11 @@ impl Agent {
 
     pub fn session_id(&self) -> &str {
         &self.session.id
+    }
+
+    /// Get the last token usage from the most recent API request
+    pub fn last_usage(&self) -> &TokenUsage {
+        &self.last_usage
     }
 
     /// Set logging context for this agent's session/provider
@@ -1219,6 +1237,14 @@ impl Agent {
                 io::stdout().flush()?;
             }
 
+            // Store usage for debug queries
+            self.last_usage = TokenUsage {
+                input_tokens: usage_input.unwrap_or(0),
+                output_tokens: usage_output.unwrap_or(0),
+                cache_read_input_tokens: usage_cache_read,
+                cache_creation_input_tokens: usage_cache_creation,
+            };
+
             // Add assistant message to history
             let mut content_blocks = Vec::new();
             if !text_content.is_empty() {
@@ -1696,6 +1722,14 @@ impl Agent {
                 });
             }
 
+            // Store usage for debug queries
+            self.last_usage = TokenUsage {
+                input_tokens: usage_input.unwrap_or(0),
+                output_tokens: usage_output.unwrap_or(0),
+                cache_read_input_tokens: usage_cache_read,
+                cache_creation_input_tokens: usage_cache_creation,
+            };
+
             // Add assistant message to history
             let mut content_blocks = Vec::new();
             if !text_content.is_empty() {
@@ -2142,6 +2176,14 @@ impl Agent {
                     cache_creation_input: usage_cache_creation,
                 });
             }
+
+            // Store usage for debug queries
+            self.last_usage = TokenUsage {
+                input_tokens: usage_input.unwrap_or(0),
+                output_tokens: usage_output.unwrap_or(0),
+                cache_read_input_tokens: usage_cache_read,
+                cache_creation_input_tokens: usage_cache_creation,
+            };
 
             // Add assistant message to history
             let mut content_blocks = Vec::new();
