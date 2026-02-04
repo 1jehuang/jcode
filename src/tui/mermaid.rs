@@ -28,6 +28,9 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 /// Initialized once on first use
 static PICKER: OnceLock<Option<Picker>> = OnceLock::new();
 
+/// Track whether cache eviction has run
+static CACHE_EVICTED: OnceLock<()> = OnceLock::new();
+
 /// Cache for rendered mermaid diagrams
 static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> =
     LazyLock::new(|| Mutex::new(MermaidCache::new()));
@@ -38,8 +41,13 @@ static IMAGE_STATE: LazyLock<Mutex<HashMap<u64, StatefulProtocol>>> =
 
 /// Initialize the global picker by querying terminal capabilities.
 /// Should be called early in app startup, after entering alternate screen.
+/// Also triggers cache eviction on first call.
 pub fn init_picker() {
     PICKER.get_or_init(|| Picker::from_query_stdio().ok());
+    // Evict old cache files once per process
+    CACHE_EVICTED.get_or_init(|| {
+        evict_old_cache();
+    });
 }
 
 /// Get the current protocol type (for debugging/display)
@@ -99,17 +107,8 @@ pub enum RenderResult {
         width: u32,
         height: u32,
     },
-    /// ASCII fallback (parsing info only)
-    Ascii(AsciiDiagram),
     /// Error during rendering
     Error(String),
-}
-
-/// ASCII representation of a diagram
-pub struct AsciiDiagram {
-    pub kind: String,
-    pub node_count: usize,
-    pub edge_count: usize,
 }
 
 /// Check if a code block language is mermaid
@@ -332,25 +331,6 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
     // Manual clearing causes flicker during scroll because it wipes the
     // Unicode placeholders before ratatui-image can redraw them.
 
-    // Get image dimensions from cache
-    let (img_width, img_height) = {
-        let cache = RENDER_CACHE.lock().unwrap();
-        cache
-            .get(hash)
-            .map(|c| (c.width, c.height))
-            .unwrap_or((0, 0))
-    };
-
-    // Calculate image dimensions in terminal cells
-    let (img_cols, img_rows) = if let Some(Some(picker)) = PICKER.get() {
-        let font_size = picker.font_size();
-        let cols = (img_width as f32 / font_size.0 as f32).ceil() as u16;
-        let rows = (img_height as f32 / font_size.1 as f32).ceil() as u16;
-        (cols, rows)
-    } else {
-        (render_area.width, render_area.height)
-    };
-
     // Always use Crop to clip - never resize the image
     // This prevents flickering during scroll when the available area changes
     let make_resize = || {
@@ -456,7 +436,6 @@ pub fn result_to_content(result: RenderResult, max_width: Option<usize>) -> Merm
                 MermaidContent::Lines(image_placeholder_lines(width, height))
             }
         }
-        RenderResult::Ascii(diagram) => MermaidContent::Lines(ascii_to_lines(&diagram)),
         RenderResult::Error(msg) => MermaidContent::Lines(error_to_lines(&msg)),
     }
 }
@@ -475,6 +454,10 @@ pub fn result_to_lines(result: RenderResult, max_width: Option<usize>) -> Vec<Li
     }
 }
 
+/// Marker prefix for mermaid image placeholders
+const MERMAID_MARKER_PREFIX: &str = "\x00MERMAID_IMAGE:";
+const MERMAID_MARKER_SUFFIX: &str = "\x00";
+
 /// Create placeholder lines for an image widget
 /// These will be recognized and replaced during rendering
 fn image_widget_placeholder(hash: u64, height: u16) -> Vec<Line<'static>> {
@@ -485,7 +468,7 @@ fn image_widget_placeholder(hash: u64, height: u16) -> Vec<Line<'static>> {
 
     // Header with hash marker
     lines.push(Line::from(Span::styled(
-        format!("\x00MERMAID_IMAGE:{:016x}\x00", hash),
+        format!("{}{:016x}{}", MERMAID_MARKER_PREFIX, hash, MERMAID_MARKER_SUFFIX),
         dim,
     )));
 
@@ -504,13 +487,16 @@ pub fn parse_image_placeholder(line: &Line<'_>) -> Option<u64> {
     }
 
     let content = &line.spans[0].content;
-    // Prefix "\x00MERMAID_IMAGE:" is 15 bytes, then 16 hex digits, then "\x00"
-    if content.starts_with("\x00MERMAID_IMAGE:") && content.ends_with("\x00") {
-        let hex = &content[15..31]; // Extract the 16 hex digits (bytes 15-30)
-        u64::from_str_radix(hex, 16).ok()
-    } else {
-        None
+    if content.starts_with(MERMAID_MARKER_PREFIX) && content.ends_with(MERMAID_MARKER_SUFFIX) {
+        // Extract hex between prefix and suffix
+        let start = MERMAID_MARKER_PREFIX.len();
+        let end = content.len() - MERMAID_MARKER_SUFFIX.len();
+        if end > start {
+            let hex = &content[start..end];
+            return u64::from_str_radix(hex, 16).ok();
+        }
     }
+    None
 }
 
 /// Create placeholder lines for when image protocols aren't available
@@ -524,29 +510,6 @@ fn image_placeholder_lines(width: u32, height: u32) -> Vec<Line<'static>> {
             Span::styled("│ ", dim),
             Span::styled(
                 format!("{}×{} px (image protocols not available)", width, height),
-                info,
-            ),
-        ]),
-        Line::from(Span::styled("└─", dim)),
-    ]
-}
-
-/// Convert ASCII diagram to ratatui Lines
-pub fn ascii_to_lines(diagram: &AsciiDiagram) -> Vec<Line<'static>> {
-    let dim = Style::default().fg(Color::Rgb(100, 100, 100));
-    let label = Style::default().fg(Color::Rgb(180, 180, 180));
-    let info = Style::default().fg(Color::Rgb(140, 140, 140));
-
-    vec![
-        Line::from(Span::styled("┌─ mermaid ", dim)),
-        Line::from(vec![
-            Span::styled("│ ", dim),
-            Span::styled(format!("[{}]", diagram.kind), label),
-        ]),
-        Line::from(vec![
-            Span::styled("│ ", dim),
-            Span::styled(
-                format!("{} nodes, {} edges", diagram.node_count, diagram.edge_count),
                 info,
             ),
         ]),
@@ -634,14 +597,66 @@ fn get_png_dimensions(path: &PathBuf) -> Option<(u32, u32)> {
     None
 }
 
-/// Clean up cached files (call on exit)
-pub fn cleanup_cache() {
-    if let Ok(cache) = RENDER_CACHE.lock() {
-        let _ = fs::remove_dir_all(&cache.cache_dir);
+/// Maximum age for cached files (7 days)
+const CACHE_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Maximum total cache size (100 MB)
+const CACHE_MAX_SIZE_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Evict old cache files on startup.
+/// Removes files older than CACHE_MAX_AGE_SECS and enforces CACHE_MAX_SIZE_BYTES limit.
+/// Called automatically during init_picker().
+pub fn evict_old_cache() {
+    let cache_dir = match RENDER_CACHE.lock() {
+        Ok(cache) => cache.cache_dir.clone(),
+        Err(_) => return,
+    };
+
+    let Ok(entries) = fs::read_dir(&cache_dir) else {
+        return;
+    };
+
+    let now = std::time::SystemTime::now();
+    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total_size: u64 = 0;
+
+    // Collect file info
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "png") {
+            if let Ok(meta) = entry.metadata() {
+                let size = meta.len();
+                let modified = meta.modified().unwrap_or(now);
+                files.push((path, size, modified));
+                total_size += size;
+            }
+        }
     }
+
+    // Sort by modification time (oldest first)
+    files.sort_by_key(|(_, _, modified)| *modified);
+
+    let mut deleted_count = 0;
+    let mut deleted_bytes: u64 = 0;
+
+    for (path, size, modified) in &files {
+        let age = now.duration_since(*modified).unwrap_or_default();
+        let should_delete = age.as_secs() > CACHE_MAX_AGE_SECS
+            || (total_size - deleted_bytes) > CACHE_MAX_SIZE_BYTES;
+
+        if should_delete {
+            if fs::remove_file(path).is_ok() {
+                deleted_count += 1;
+                deleted_bytes += size;
+            }
+        }
+    }
+
+    // Silently evict - logging not needed for routine cache maintenance
+    let _ = (deleted_count, deleted_bytes);
 }
 
-/// Clear image state (call when switching sessions or on memory pressure)
+/// Clear image state (call on app exit to free memory)
 pub fn clear_image_state() {
     if let Ok(mut state) = IMAGE_STATE.lock() {
         state.clear();
