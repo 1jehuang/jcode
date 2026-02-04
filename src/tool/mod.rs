@@ -333,6 +333,48 @@ impl Registry {
         tools.insert(name, tool);
     }
 
+    /// Register MCP tools (MCP management and server tools)
+    pub async fn register_mcp_tools(&self) {
+        use crate::mcp::McpManager;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
+
+        // Register MCP management tool
+        let mcp_tool = mcp::McpManagementTool::new(Arc::clone(&mcp_manager));
+        self.register("mcp".to_string(), Arc::new(mcp_tool) as Arc<dyn Tool>)
+            .await;
+
+        // Connect to configured MCP servers and register their tools
+        let manager = mcp_manager.read().await;
+        let server_count = manager.config().servers.len();
+        if server_count > 0 {
+            drop(manager);
+            crate::logging::info(&format!("MCP: Found {} server(s) in config", server_count));
+
+            let (successes, failures) = {
+                let manager = mcp_manager.write().await;
+                manager.connect_all().await.unwrap_or((0, Vec::new()))
+            };
+
+            if successes > 0 {
+                crate::logging::info(&format!("MCP: Connected to {} server(s)", successes));
+            }
+            if !failures.is_empty() {
+                for (name, error) in &failures {
+                    crate::logging::error(&format!("MCP '{}' failed: {}", name, error));
+                }
+            }
+
+            // Register MCP server tools
+            let tools = crate::mcp::create_mcp_tools(Arc::clone(&mcp_manager)).await;
+            for (name, tool) in tools {
+                self.register(name, tool).await;
+            }
+        }
+    }
+
     /// Register self-dev tools (only for canary/self-dev sessions)
     pub async fn register_selfdev_tools(&self) {
         // Self-dev management tool

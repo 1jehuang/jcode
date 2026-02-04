@@ -2560,6 +2560,9 @@ async fn create_headless_session(
         registry.register_selfdev_tools().await;
     }
 
+    // Register MCP tools for headless sessions
+    registry.register_mcp_tools().await;
+
     // Create a new agent
     let mut new_agent = Agent::new(Arc::clone(&provider), registry);
     let client_session_id = new_agent.session_id().to_string();
