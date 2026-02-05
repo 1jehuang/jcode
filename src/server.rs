@@ -3974,6 +3974,34 @@ fn execute_client_debug_command(command: &str) -> String {
         };
     }
 
+    if trimmed == "mermaid:state" {
+        let state = mermaid::debug_image_state();
+        return serde_json::to_string_pretty(&state).unwrap_or_else(|_| "[]".to_string());
+    }
+
+    if trimmed == "mermaid:test" {
+        let result = mermaid::debug_test_render();
+        return serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string());
+    }
+
+    if trimmed == "mermaid:scroll" {
+        let result = mermaid::debug_test_scroll(None);
+        return serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string());
+    }
+
+    if let Some(content) = trimmed.strip_prefix("mermaid:render ") {
+        let result = mermaid::debug_render(content);
+        return serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string());
+    }
+
+    if let Some(hash_str) = trimmed.strip_prefix("mermaid:stability ") {
+        if let Ok(hash) = u64::from_str_radix(hash_str, 16) {
+            let result = mermaid::debug_test_resize_stability(hash);
+            return serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string());
+        }
+        return "Invalid hash (expected hex)".to_string();
+    }
+
     if trimmed == "markdown:stats" {
         let stats = markdown::debug_stats();
         return serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string());
@@ -3993,6 +4021,11 @@ fn execute_client_debug_command(command: &str) -> String {
   theme                    - Get palette snapshot
   mermaid:stats            - Get mermaid render/cache stats
   mermaid:cache            - List mermaid cache entries
+  mermaid:state            - Get image state (resize modes, areas)
+  mermaid:test             - Render test diagram, return results
+  mermaid:scroll           - Run scroll simulation test
+  mermaid:render <content> - Render arbitrary mermaid content
+  mermaid:stability <hash> - Test resize mode stability for hash
   mermaid:evict            - Clear mermaid cache
   markdown:stats           - Get markdown render stats
   overlay:on/off/status    - Toggle overlay boxes
@@ -5373,6 +5406,10 @@ CLIENT COMMANDS (client: prefix):
   client:theme             - Get palette snapshot
   client:mermaid:stats     - Get mermaid render/cache stats
   client:mermaid:cache     - List mermaid cache entries
+  client:mermaid:state     - Get image state (resize modes)
+  client:mermaid:test      - Render test diagram
+  client:mermaid:scroll    - Run scroll simulation test
+  client:mermaid:render <c> - Render arbitrary mermaid
   client:mermaid:evict     - Clear mermaid cache
   client:markdown:stats    - Get markdown render stats
   client:overlay:on/off    - Toggle overlay boxes
