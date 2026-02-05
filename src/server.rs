@@ -4,6 +4,7 @@ use crate::agent::Agent;
 use crate::build;
 use crate::bus::{Bus, BusEvent, FileOp};
 use crate::id;
+use crate::mcp::McpConfig;
 use crate::protocol::{
     decode_request, encode_event, AgentInfo, ContextEntry, HistoryMessage, NotificationType,
     Request, ServerEvent,
@@ -16,7 +17,7 @@ use anyhow::Result;
 use futures::future::try_join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::sync::Arc;
@@ -125,6 +126,14 @@ const MAX_EVENT_HISTORY: usize = 500;
 struct ClientDebugState {
     active_id: Option<String>,
     clients: HashMap<String, mpsc::UnboundedSender<(u64, String)>>,
+}
+
+#[derive(Clone, Debug)]
+struct ClientConnectionInfo {
+    client_id: String,
+    session_id: String,
+    connected_at: Instant,
+    last_seen: Instant,
 }
 
 #[derive(Clone, Debug)]
@@ -466,6 +475,8 @@ pub struct Server {
     session_id: Arc<RwLock<String>>,
     /// Number of connected clients
     client_count: Arc<RwLock<usize>>,
+    /// Connected client mapping (client_id -> session_id)
+    client_connections: Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     /// Track file touches: path -> list of accesses
     file_touches: Arc<RwLock<HashMap<PathBuf, Vec<FileAccess>>>>,
     /// Swarm members: session_id -> SwarmMember info
@@ -504,6 +515,7 @@ impl Server {
             is_processing: Arc::new(RwLock::new(false)),
             session_id: Arc::new(RwLock::new(String::new())),
             client_count: Arc::new(RwLock::new(0)),
+            client_connections: Arc::new(RwLock::new(HashMap::new())),
             file_touches: Arc::new(RwLock::new(HashMap::new())),
             swarm_members: Arc::new(RwLock::new(HashMap::new())),
             swarms_by_id: Arc::new(RwLock::new(HashMap::new())),
@@ -550,6 +562,7 @@ impl Server {
             is_processing: Arc::new(RwLock::new(false)),
             session_id: Arc::new(RwLock::new(String::new())),
             client_count: Arc::new(RwLock::new(0)),
+            client_connections: Arc::new(RwLock::new(HashMap::new())),
             file_touches: Arc::new(RwLock::new(HashMap::new())),
             swarm_members: Arc::new(RwLock::new(HashMap::new())),
             swarms_by_id: Arc::new(RwLock::new(HashMap::new())),
@@ -1090,6 +1103,7 @@ impl Server {
         let main_is_processing = Arc::clone(&self.is_processing);
         let main_session_id = Arc::clone(&self.session_id);
         let main_client_count = Arc::clone(&self.client_count);
+        let main_client_connections = Arc::clone(&self.client_connections);
         let main_swarm_members = Arc::clone(&self.swarm_members);
         let main_swarms_by_id = Arc::clone(&self.swarms_by_id);
         let main_shared_context = Arc::clone(&self.shared_context);
@@ -1111,6 +1125,7 @@ impl Server {
                         let is_processing = Arc::clone(&main_is_processing);
                         let session_id = Arc::clone(&main_session_id);
                         let client_count = Arc::clone(&main_client_count);
+                        let client_connections = Arc::clone(&main_client_connections);
                         let swarm_members = Arc::clone(&main_swarm_members);
                         let swarms_by_id = Arc::clone(&main_swarms_by_id);
                         let shared_context = Arc::clone(&main_shared_context);
@@ -1134,6 +1149,7 @@ impl Server {
                                 is_processing,
                                 session_id,
                                 Arc::clone(&client_count),
+                                client_connections,
                                 swarm_members,
                                 swarms_by_id,
                                 shared_context,
@@ -1168,6 +1184,7 @@ impl Server {
         let debug_session_id = Arc::clone(&self.session_id);
         let debug_provider = Arc::clone(&self.provider);
         let debug_client_debug_state = Arc::clone(&self.client_debug_state);
+        let debug_client_connections = Arc::clone(&self.client_connections);
         let debug_swarm_members = Arc::clone(&self.swarm_members);
         let debug_swarms_by_id = Arc::clone(&self.swarms_by_id);
         let debug_shared_context = Arc::clone(&self.shared_context);
@@ -1189,6 +1206,7 @@ impl Server {
                         let session_id = Arc::clone(&debug_session_id);
                         let provider = Arc::clone(&debug_provider);
                         let client_debug_state = Arc::clone(&debug_client_debug_state);
+                        let client_connections = Arc::clone(&debug_client_connections);
                         let swarm_members = Arc::clone(&debug_swarm_members);
                         let swarms_by_id = Arc::clone(&debug_swarms_by_id);
                         let shared_context = Arc::clone(&debug_shared_context);
@@ -1208,6 +1226,7 @@ impl Server {
                                 is_processing,
                                 session_id,
                                 provider,
+                                client_connections,
                                 swarm_members,
                                 swarms_by_id,
                                 shared_context,
@@ -1248,6 +1267,7 @@ async fn handle_client(
     _global_is_processing: Arc<RwLock<bool>>,
     global_session_id: Arc<RwLock<String>>,
     client_count: Arc<RwLock<usize>>,
+    client_connections: Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
@@ -1280,6 +1300,21 @@ async fn handle_client(
     let mut new_agent = Agent::new(Arc::clone(&provider), registry.clone());
     let mut client_session_id = new_agent.session_id().to_string();
     let friendly_name = new_agent.session_short_name().map(|s| s.to_string());
+    let client_connection_id = id::new_id("conn");
+    let connected_at = Instant::now();
+
+    {
+        let mut connections = client_connections.write().await;
+        connections.insert(
+            client_connection_id.clone(),
+            ClientConnectionInfo {
+                client_id: client_connection_id.clone(),
+                session_id: client_session_id.clone(),
+                connected_at,
+                last_seen: connected_at,
+            },
+        );
+    }
 
     {
         let mut current = global_session_id.write().await;
@@ -1470,6 +1505,10 @@ async fn handle_client(
                 if n == 0 {
                     break; // Client disconnected
                 }
+                let mut connections = client_connections.write().await;
+                if let Some(info) = connections.get_mut(&client_connection_id) {
+                    info.last_seen = Instant::now();
+                }
             }
         }
 
@@ -1620,6 +1659,13 @@ async fn handle_client(
                 }
 
                 client_session_id = new_id.clone();
+                {
+                    let mut connections = client_connections.write().await;
+                    if let Some(info) = connections.get_mut(&client_connection_id) {
+                        info.session_id = new_id.clone();
+                        info.last_seen = Instant::now();
+                    }
+                }
                 let _ = client_event_tx.send(ServerEvent::SessionId { session_id: new_id });
                 let _ = client_event_tx.send(ServerEvent::Done { id });
             }
@@ -1890,6 +1936,13 @@ async fn handle_client(
                         // Update client_session_id to match the restored session
                         let old_session_id = client_session_id.clone();
                         client_session_id = session_id.clone();
+                        {
+                            let mut connections = client_connections.write().await;
+                            if let Some(info) = connections.get_mut(&client_connection_id) {
+                                info.session_id = session_id.clone();
+                                info.last_seen = Instant::now();
+                            }
+                        }
 
                         {
                             let mut members = swarm_members.write().await;
@@ -2789,6 +2842,10 @@ async fn handle_client(
         let mut debug_state = client_debug_state.write().await;
         debug_state.unregister(&client_debug_id);
     }
+    {
+        let mut connections = client_connections.write().await;
+        connections.remove(&client_connection_id);
+    }
 
     if let Some(handle) = processing_task.take() {
         handle.abort();
@@ -3527,6 +3584,61 @@ async fn execute_debug_command(
         return Ok(serde_json::to_string_pretty(&definitions).unwrap_or_else(|_| "[]".to_string()));
     }
 
+    if trimmed == "mcp" || trimmed == "mcp:servers" {
+        let agent = agent.lock().await;
+        let tool_names = agent.tool_names().await;
+        let mut connected: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for name in tool_names {
+            if let Some(rest) = name.strip_prefix("mcp__") {
+                let mut parts = rest.splitn(2, "__");
+                if let (Some(server), Some(tool)) = (parts.next(), parts.next()) {
+                    connected
+                        .entry(server.to_string())
+                        .or_default()
+                        .push(tool.to_string());
+                }
+            }
+        }
+        for tools in connected.values_mut() {
+            tools.sort();
+        }
+        let connected_servers: Vec<String> = connected.keys().cloned().collect();
+
+        let mut config_path: Option<String> = None;
+        let config = if let Some(dir) = agent.working_dir() {
+            let path = PathBuf::from(dir).join(".claude/mcp.json");
+            if path.exists() {
+                config_path = Some(path.to_string_lossy().to_string());
+                McpConfig::load_from_file(&path).unwrap_or_default()
+            } else {
+                McpConfig::load()
+            }
+        } else {
+            McpConfig::load()
+        };
+        if config_path.is_none() {
+            let local = std::path::Path::new(".claude/mcp.json");
+            if local.exists() {
+                config_path = Some(local.display().to_string());
+            } else if let Some(home) = dirs::home_dir() {
+                let global = home.join(".claude/mcp.json");
+                if global.exists() {
+                    config_path = Some(global.display().to_string());
+                }
+            }
+        }
+        let mut configured_servers: Vec<String> = config.servers.keys().cloned().collect();
+        configured_servers.sort();
+
+        return Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "config_path": config_path,
+            "configured_servers": configured_servers,
+            "connected_servers": connected_servers,
+            "connected_tools": connected,
+        }))
+        .unwrap_or_else(|_| "{}".to_string()));
+    }
+
     if trimmed == "cancel" {
         // Queue an urgent interrupt to cancel in-flight generation
         let agent = agent.lock().await;
@@ -3587,7 +3699,7 @@ async fn execute_debug_command(
 
     if trimmed == "help" {
         return Ok(
-            "debug commands: state, usage, history, tools, last_response, message:<text>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, jobs, job_status:<id>, job_wait:<id>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
+            "debug commands: state, usage, history, tools, tools:full, mcp:servers, last_response, message:<text>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, jobs, job_status:<id>, job_wait:<id>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
         );
     }
 
@@ -3928,6 +4040,7 @@ async fn handle_debug_client(
     is_processing: Arc<RwLock<bool>>,
     session_id: Arc<RwLock<String>>,
     provider: Arc<dyn Provider>,
+    client_connections: Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
@@ -5087,6 +5200,14 @@ async fn handle_debug_client(
                                 "max_history": MAX_EVENT_HISTORY,
                             })
                             .to_string())
+                        } else if cmd == "background" || cmd == "background:tasks" {
+                            // List background tasks (running + completed on disk)
+                            let tasks = crate::background::global().list().await;
+                            Ok(serde_json::json!({
+                                "count": tasks.len(),
+                                "tasks": tasks,
+                            })
+                            .to_string())
                         } else if cmd == "server:info" {
                             // Return server identity, health, and uptime
                             let uptime_secs = server_start_time.elapsed().as_secs();
@@ -5104,6 +5225,30 @@ async fn handle_debug_client(
                                 "swarm_member_count": member_count,
                                 "has_update": has_update,
                                 "debug_control_enabled": debug_control_allowed(),
+                            })
+                            .to_string())
+                        } else if cmd == "clients:map" || cmd == "clients:mapping" {
+                            // Map connected clients to sessions
+                            let connections = client_connections.read().await;
+                            let members = swarm_members.read().await;
+                            let mut out: Vec<serde_json::Value> = Vec::new();
+                            for info in connections.values() {
+                                let member = members.get(&info.session_id);
+                                out.push(serde_json::json!({
+                                    "client_id": info.client_id,
+                                    "session_id": info.session_id,
+                                    "friendly_name": member.and_then(|m| m.friendly_name.clone()),
+                                    "working_dir": member.and_then(|m| m.working_dir.clone()),
+                                    "swarm_id": member.and_then(|m| m.swarm_id.clone()),
+                                    "status": member.map(|m| m.status.clone()),
+                                    "detail": member.and_then(|m| m.detail.clone()),
+                                    "connected_secs_ago": info.connected_at.elapsed().as_secs(),
+                                    "last_seen_secs_ago": info.last_seen.elapsed().as_secs(),
+                                }));
+                            }
+                            Ok(serde_json::json!({
+                                "count": out.len(),
+                                "clients": out,
                             })
                             .to_string())
                         } else if cmd == "clients" {
@@ -5166,6 +5311,7 @@ SERVER COMMANDS (server: prefix or no prefix):
   history                  - Get conversation history
   tools                    - List available tools (names only)
   tools:full               - List tools with full definitions (input_schema)
+  mcp:servers              - List configured + connected MCP servers
   last_response            - Get last assistant response
   message:<text>           - Send message to agent
   message_async:<text>     - Send message async (returns job id)
@@ -5181,8 +5327,10 @@ SERVER COMMANDS (server: prefix or no prefix):
   job_cancel:<id>          - Cancel a running job
   jobs:purge               - Remove completed/failed jobs
   jobs:session:<id>        - List jobs for a session
+  background:tasks         - List background tasks
   sessions                 - List all sessions (with full metadata)
   clients                  - List connected TUI clients
+  clients:map              - Map connected clients to sessions
   server:info              - Server identity, health, uptime
   swarm                    - List swarm members + status (alias: swarm:members)
   swarm:help               - Full swarm command reference
