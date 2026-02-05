@@ -1392,15 +1392,14 @@ async fn handle_client(
                 last_status_change: now,
             },
         );
-
-        // Add to swarm by swarm_id
-        if let Some(ref id) = swarm_id {
-            let mut swarms = swarms_by_id.write().await;
-            swarms
-                .entry(id.clone())
-                .or_insert_with(HashSet::new)
-                .insert(client_session_id.clone());
-        }
+    }
+    // Add to swarm by swarm_id (separate scope to avoid holding swarm_members lock)
+    if let Some(ref id) = swarm_id {
+        let mut swarms = swarms_by_id.write().await;
+        swarms
+            .entry(id.clone())
+            .or_insert_with(HashSet::new)
+            .insert(client_session_id.clone());
     }
     let mut is_new_coordinator = false;
     if let Some(ref id) = swarm_id {
@@ -1408,11 +1407,13 @@ async fn handle_client(
         if coordinators.get(id).is_none() {
             coordinators.insert(id.clone(), client_session_id.clone());
             is_new_coordinator = true;
-            // Update role on the member
-            let mut members = swarm_members.write().await;
-            if let Some(m) = members.get_mut(&client_session_id) {
-                m.role = "coordinator".to_string();
-            }
+        }
+    }
+    // Update role separately to avoid nested lock
+    if is_new_coordinator {
+        let mut members = swarm_members.write().await;
+        if let Some(m) = members.get_mut(&client_session_id) {
+            m.role = "coordinator".to_string();
         }
     }
     if let Some(ref id) = swarm_id {
@@ -1666,20 +1667,24 @@ async fn handle_client(
                 }
 
                 // Update swarm membership to the new session id
-                {
+                let swarm_id_for_update = {
                     let mut members = swarm_members.write().await;
                     if let Some(mut member) = members.remove(&client_session_id) {
-                        if let Some(ref swarm_id) = member.swarm_id {
-                            let mut swarms = swarms_by_id.write().await;
-                            if let Some(swarm) = swarms.get_mut(swarm_id) {
-                                swarm.remove(&client_session_id);
-                                swarm.insert(new_id.clone());
-                            }
-                        }
+                        let sid = member.swarm_id.clone();
                         member.session_id = new_id.clone();
                         member.status = "ready".to_string();
                         member.detail = None;
                         members.insert(new_id.clone(), member);
+                        sid
+                    } else {
+                        None
+                    }
+                };
+                if let Some(ref swarm_id) = swarm_id_for_update {
+                    let mut swarms = swarms_by_id.write().await;
+                    if let Some(swarm) = swarms.get_mut(swarm_id) {
+                        swarm.remove(&client_session_id);
+                        swarm.insert(new_id.clone());
                     }
                 }
                 update_member_status(&new_id, "ready", None, &swarm_members, &swarms_by_id).await;
@@ -1741,32 +1746,33 @@ async fn handle_client(
                     let new_swarm_id = swarm_id_for_dir(Some(new_path.clone()));
                     let mut old_swarm_id: Option<String> = None;
                     let mut updated_swarm_id: Option<String> = None;
+                    // Update member fields (separate scope to avoid nested locks)
                     {
                         let mut members = swarm_members.write().await;
                         if let Some(member) = members.get_mut(&client_session_id) {
                             old_swarm_id = member.swarm_id.clone();
-                            // Remove from old swarm
-                            if let Some(ref old_swarm_id) = member.swarm_id {
-                                let mut swarms = swarms_by_id.write().await;
-                                if let Some(swarm) = swarms.get_mut(old_swarm_id) {
-                                    swarm.remove(&client_session_id);
-                                    if swarm.is_empty() {
-                                        swarms.remove(old_swarm_id);
-                                    }
-                                }
-                            }
-                            // Add to new swarm
-                            if let Some(ref id) = new_swarm_id {
-                                let mut swarms = swarms_by_id.write().await;
-                                swarms
-                                    .entry(id.clone())
-                                    .or_insert_with(HashSet::new)
-                                    .insert(client_session_id.clone());
-                            }
                             member.working_dir = Some(new_path);
                             member.swarm_id = new_swarm_id;
                             updated_swarm_id = member.swarm_id.clone();
                         }
+                    }
+                    // Remove from old swarm group
+                    if let Some(ref old_id) = old_swarm_id {
+                        let mut swarms = swarms_by_id.write().await;
+                        if let Some(swarm) = swarms.get_mut(old_id) {
+                            swarm.remove(&client_session_id);
+                            if swarm.is_empty() {
+                                swarms.remove(old_id);
+                            }
+                        }
+                    }
+                    // Add to new swarm group
+                    if let Some(ref new_id) = updated_swarm_id {
+                        let mut swarms = swarms_by_id.write().await;
+                        swarms
+                            .entry(new_id.clone())
+                            .or_insert_with(HashSet::new)
+                            .insert(client_session_id.clone());
                     }
                     if let Some(old_id) = old_swarm_id.clone() {
                         let was_coordinator = {
@@ -1784,10 +1790,15 @@ async fn handle_client(
                                     new_coordinator = swarm.iter().min().cloned();
                                 }
                             }
-                            let mut coordinators = swarm_coordinators.write().await;
-                            coordinators.remove(&old_id);
+                            {
+                                let mut coordinators = swarm_coordinators.write().await;
+                                coordinators.remove(&old_id);
+                                if let Some(ref new_id) = new_coordinator {
+                                    coordinators.insert(old_id.clone(), new_id.clone());
+                                }
+                            }
+                            // Notify new coordinator (separate scope to avoid nested lock)
                             if let Some(new_id) = new_coordinator.clone() {
-                                coordinators.insert(old_id.clone(), new_id.clone());
                                 let members = swarm_members.read().await;
                                 if let Some(member) = members.get(&new_id) {
                                     let msg =
@@ -3018,9 +3029,11 @@ async fn handle_client(
 
                 // If assigning coordinator, update swarm_coordinators
                 if role == "coordinator" {
-                    let mut coordinators = swarm_coordinators.write().await;
-                    coordinators.insert(swarm_id.clone(), target_session.clone());
-                    // Demote the old coordinator to agent
+                    {
+                        let mut coordinators = swarm_coordinators.write().await;
+                        coordinators.insert(swarm_id.clone(), target_session.clone());
+                    }
+                    // Demote the old coordinator to agent (separate scope to avoid nested lock)
                     let mut members = swarm_members.write().await;
                     if let Some(m) = members.get_mut(&req_session_id) {
                         if m.session_id != target_session {
@@ -3710,8 +3723,14 @@ async fn create_headless_session(
         .map(|s| s.to_string())
         .unwrap_or_else(|| client_session_id[..8.min(client_session_id.len())].to_string());
 
-    // Create an event channel for this headless session
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
+    // Create an event channel for this headless session.
+    // Spawn a drain task so sends succeed (headless sessions have no TUI consumer).
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
+    tokio::spawn(async move {
+        while event_rx.recv().await.is_some() {
+            // Drain events to keep channel alive
+        }
+    });
 
     // Register as swarm member
     {
@@ -3732,27 +3751,31 @@ async fn create_headless_session(
                 last_status_change: now,
             },
         );
+    }
 
-        // Add to swarm by swarm_id
-        if let Some(ref id) = swarm_id {
-            let mut swarms = swarms_by_id.write().await;
-            swarms
-                .entry(id.clone())
-                .or_insert_with(HashSet::new)
-                .insert(client_session_id.clone());
-        }
+    // Add to swarm by swarm_id (separate scope to avoid holding swarm_members lock)
+    if let Some(ref id) = swarm_id {
+        let mut swarms = swarms_by_id.write().await;
+        swarms
+            .entry(id.clone())
+            .or_insert_with(HashSet::new)
+            .insert(client_session_id.clone());
     }
 
     // Set up coordinator if needed
+    let mut is_new_coordinator = false;
     if let Some(ref id) = swarm_id {
         let mut coordinators = swarm_coordinators.write().await;
         if coordinators.get(id).is_none() {
             coordinators.insert(id.clone(), client_session_id.clone());
-            // Update role on the member
-            let mut members = swarm_members.write().await;
-            if let Some(m) = members.get_mut(&client_session_id) {
-                m.role = "coordinator".to_string();
-            }
+            is_new_coordinator = true;
+        }
+    }
+    // Update role separately to avoid nested lock
+    if is_new_coordinator {
+        let mut members = swarm_members.write().await;
+        if let Some(m) = members.get_mut(&client_session_id) {
+            m.role = "coordinator".to_string();
         }
     }
 
@@ -4950,20 +4973,26 @@ async fn handle_debug_client(
                             if target_id.is_empty() {
                                 Err(anyhow::anyhow!("destroy_session: requires a session_id"))
                             } else {
-                                let mut sessions_guard = sessions.write().await;
-                                if sessions_guard.remove(target_id).is_some() {
+                                // Remove session first, drop write guard immediately
+                                let removed = {
+                                    let mut sessions_guard = sessions.write().await;
+                                    sessions_guard.remove(target_id).is_some()
+                                };
+                                if removed {
                                     // Clean up swarm membership
                                     let swarm_id = {
                                         let mut members = swarm_members.write().await;
                                         members.remove(target_id).and_then(|m| m.swarm_id)
                                     };
                                     if let Some(ref id) = swarm_id {
-                                        // Remove from swarm
-                                        let mut swarms = swarms_by_id.write().await;
-                                        if let Some(swarm) = swarms.get_mut(id) {
-                                            swarm.remove(target_id);
-                                            if swarm.is_empty() {
-                                                swarms.remove(id);
+                                        // Remove from swarm (scoped to drop write guard)
+                                        {
+                                            let mut swarms = swarms_by_id.write().await;
+                                            if let Some(swarm) = swarms.get_mut(id) {
+                                                swarm.remove(target_id);
+                                                if swarm.is_empty() {
+                                                    swarms.remove(id);
+                                                }
                                             }
                                         }
                                         // Handle coordinator change if needed
@@ -5140,14 +5169,19 @@ async fn handle_debug_client(
                         } else if cmd == "swarm:roles" {
                             // List all members with their roles
                             let members = swarm_members.read().await;
+                            let coordinators = swarm_coordinators.read().await;
                             let mut out: Vec<serde_json::Value> = Vec::new();
                             for (sid, m) in members.iter() {
+                                let is_coordinator = m.swarm_id.as_ref().map(|swid| {
+                                    coordinators.get(swid).map(|c| c == sid).unwrap_or(false)
+                                }).unwrap_or(false);
                                 out.push(serde_json::json!({
                                     "session_id": sid,
                                     "friendly_name": m.friendly_name,
                                     "role": m.role,
                                     "swarm_id": m.swarm_id,
                                     "status": m.status,
+                                    "is_coordinator": is_coordinator,
                                 }));
                             }
                             Ok(serde_json::to_string_pretty(&out)
@@ -5819,6 +5853,194 @@ async fn handle_debug_client(
                                 })
                                 .to_string())
                             }
+                        } else if cmd.starts_with("swarm:set_context:") {
+                            // Set shared context: swarm:set_context:<session_id> <key> <value>
+                            let rest = cmd.strip_prefix("swarm:set_context:").unwrap_or("").trim();
+                            // Parse: session_id key value
+                            let parts: Vec<&str> = rest.splitn(3, ' ').collect();
+                            if parts.len() < 3 {
+                                Err(anyhow::anyhow!("Usage: swarm:set_context:<session_id> <key> <value>"))
+                            } else {
+                                let acting_session = parts[0];
+                                let key = parts[1].to_string();
+                                let value = parts[2].to_string();
+
+                                // Find swarm_id for acting session
+                                let (swarm_id, friendly_name) = {
+                                    let members = swarm_members.read().await;
+                                    let swarm_id = members.get(acting_session).and_then(|m| m.swarm_id.clone());
+                                    let name = members.get(acting_session).and_then(|m| m.friendly_name.clone());
+                                    (swarm_id, name)
+                                };
+
+                                if let Some(swarm_id) = swarm_id {
+                                    // Store context
+                                    {
+                                        let mut ctx = shared_context.write().await;
+                                        let swarm_ctx = ctx.entry(swarm_id.clone()).or_insert_with(HashMap::new);
+                                        let now = Instant::now();
+                                        let created_at = swarm_ctx.get(&key).map(|c| c.created_at).unwrap_or(now);
+                                        swarm_ctx.insert(key.clone(), SharedContext {
+                                            key: key.clone(),
+                                            value: value.clone(),
+                                            from_session: acting_session.to_string(),
+                                            from_name: friendly_name.clone(),
+                                            created_at,
+                                            updated_at: now,
+                                        });
+                                    }
+
+                                    // Notify other swarm members
+                                    let swarm_session_ids: Vec<String> = {
+                                        let swarms = swarms_by_id.read().await;
+                                        swarms.get(&swarm_id).map(|s| s.iter().cloned().collect()).unwrap_or_default()
+                                    };
+                                    let members = swarm_members.read().await;
+                                    for sid in &swarm_session_ids {
+                                        if sid != acting_session {
+                                            if let Some(member) = members.get(sid) {
+                                                let _ = member.event_tx.send(ServerEvent::Notification {
+                                                    from_session: acting_session.to_string(),
+                                                    from_name: friendly_name.clone(),
+                                                    notification_type: NotificationType::SharedContext {
+                                                        key: key.clone(),
+                                                        value: value.clone(),
+                                                    },
+                                                    message: format!("Shared context: {} = {}", key, value),
+                                                });
+                                            }
+                                        }
+                                    }
+                                    Ok(serde_json::json!({
+                                        "swarm_id": swarm_id,
+                                        "key": key,
+                                        "value": value,
+                                        "from_session": acting_session,
+                                    }).to_string())
+                                } else {
+                                    Err(anyhow::anyhow!("Session '{}' is not in a swarm", acting_session))
+                                }
+                            }
+                        } else if cmd.starts_with("swarm:approve_plan:") {
+                            // Approve plan: swarm:approve_plan:<coordinator_session> <proposer_session>
+                            let rest = cmd.strip_prefix("swarm:approve_plan:").unwrap_or("").trim();
+                            let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                            if parts.len() < 2 {
+                                Err(anyhow::anyhow!("Usage: swarm:approve_plan:<coordinator_session> <proposer_session>"))
+                            } else {
+                                let coord_session = parts[0];
+                                let proposer_session = parts[1];
+
+                                // Check coordinator status
+                                let (swarm_id, is_coordinator) = {
+                                    let members = swarm_members.read().await;
+                                    let swarm_id = members.get(coord_session).and_then(|m| m.swarm_id.clone());
+                                    let is_coord = if let Some(ref sid) = swarm_id {
+                                        let coordinators = swarm_coordinators.read().await;
+                                        coordinators.get(sid).map(|c| c == coord_session).unwrap_or(false)
+                                    } else { false };
+                                    (swarm_id, is_coord)
+                                };
+
+                                if !is_coordinator {
+                                    Err(anyhow::anyhow!("Only the coordinator can approve plan proposals."))
+                                } else if let Some(swarm_id) = swarm_id {
+                                    // Read proposal
+                                    let proposal_key = format!("plan_proposal:{}", proposer_session);
+                                    let proposal_value = {
+                                        let ctx = shared_context.read().await;
+                                        ctx.get(&swarm_id).and_then(|sc| sc.get(&proposal_key)).map(|c| c.value.clone())
+                                    };
+
+                                    match proposal_value {
+                                        None => Err(anyhow::anyhow!("No pending plan proposal from session '{}'", proposer_session)),
+                                        Some(proposal) => {
+                                            if let Ok(items) = serde_json::from_str::<Vec<TodoItem>>(&proposal) {
+                                                let version = {
+                                                    let mut plans = swarm_plans.write().await;
+                                                    let vp = plans.entry(swarm_id.clone()).or_insert_with(VersionedPlan::new);
+                                                    vp.items.extend(items.clone());
+                                                    vp.version += 1;
+                                                    vp.version
+                                                };
+                                                // Remove proposal
+                                                {
+                                                    let mut ctx = shared_context.write().await;
+                                                    if let Some(swarm_ctx) = ctx.get_mut(&swarm_id) {
+                                                        swarm_ctx.remove(&proposal_key);
+                                                    }
+                                                }
+                                                Ok(serde_json::json!({
+                                                    "approved": true,
+                                                    "items_added": items.len(),
+                                                    "plan_version": version,
+                                                    "swarm_id": swarm_id,
+                                                }).to_string())
+                                            } else {
+                                                Err(anyhow::anyhow!("Failed to parse plan proposal as Vec<TodoItem>"))
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    Err(anyhow::anyhow!("Not in a swarm."))
+                                }
+                            }
+                        } else if cmd.starts_with("swarm:reject_plan:") {
+                            // Reject plan: swarm:reject_plan:<coordinator_session> <proposer_session> [reason]
+                            let rest = cmd.strip_prefix("swarm:reject_plan:").unwrap_or("").trim();
+                            let parts: Vec<&str> = rest.splitn(3, ' ').collect();
+                            if parts.len() < 2 {
+                                Err(anyhow::anyhow!("Usage: swarm:reject_plan:<coordinator_session> <proposer_session> [reason]"))
+                            } else {
+                                let coord_session = parts[0];
+                                let proposer_session = parts[1];
+                                let reason = if parts.len() >= 3 { Some(parts[2].to_string()) } else { None };
+
+                                // Check coordinator status
+                                let (swarm_id, is_coordinator) = {
+                                    let members = swarm_members.read().await;
+                                    let swarm_id = members.get(coord_session).and_then(|m| m.swarm_id.clone());
+                                    let is_coord = if let Some(ref sid) = swarm_id {
+                                        let coordinators = swarm_coordinators.read().await;
+                                        coordinators.get(sid).map(|c| c == coord_session).unwrap_or(false)
+                                    } else { false };
+                                    (swarm_id, is_coord)
+                                };
+
+                                if !is_coordinator {
+                                    Err(anyhow::anyhow!("Only the coordinator can reject plan proposals."))
+                                } else if let Some(swarm_id) = swarm_id {
+                                    let proposal_key = format!("plan_proposal:{}", proposer_session);
+                                    let proposal_exists = {
+                                        let ctx = shared_context.read().await;
+                                        ctx.get(&swarm_id).and_then(|sc| sc.get(&proposal_key)).is_some()
+                                    };
+                                    if !proposal_exists {
+                                        Err(anyhow::anyhow!("No pending plan proposal from session '{}'", proposer_session))
+                                    } else {
+                                        // Remove proposal
+                                        {
+                                            let mut ctx = shared_context.write().await;
+                                            if let Some(swarm_ctx) = ctx.get_mut(&swarm_id) {
+                                                swarm_ctx.remove(&proposal_key);
+                                            }
+                                        }
+                                        let reason_msg = reason.as_ref().map(|r| format!(": {}", r)).unwrap_or_default();
+                                        Ok(serde_json::json!({
+                                            "rejected": true,
+                                            "proposer_session": proposer_session,
+                                            "reason": reason_msg,
+                                            "swarm_id": swarm_id,
+                                        }).to_string())
+                                    }
+                                } else {
+                                    Err(anyhow::anyhow!("Not in a swarm."))
+                                }
+                            }
+                        } else if false {
+                            // Placeholder (duplicates removed — swarm:roles, swarm:channels,
+                            // swarm:plan_version are handled earlier in the chain)
+                            Ok("unreachable".to_string())
                         } else if cmd == "events:recent" || cmd.starts_with("events:recent:") {
                             // Get recent events (default 50, or specify count)
                             let count: usize = cmd
@@ -6165,6 +6387,11 @@ EXECUTION STATE:
 
 CHANNELS:
   swarm:channels           - List channel subscriptions per swarm
+
+OPERATIONS (debug-only, bypass tool:communicate):
+  swarm:set_context:<sess> <key> <value> - Set shared context as session
+  swarm:approve_plan:<coord> <proposer>  - Approve plan proposal (coordinator only)
+  swarm:reject_plan:<coord> <proposer> [reason] - Reject plan proposal
 
 UTILITIES:
   swarm:id:<path>          - Compute swarm_id for a path and show provenance
