@@ -141,6 +141,10 @@ struct Args {
     #[arg(long, global = true, hide = true)]
     standalone: bool,
 
+    /// Disable auto-detection of jcode repository and self-dev mode
+    #[arg(long, global = true)]
+    no_selfdev: bool,
+
     /// Custom socket path for server/client communication
     #[arg(long, global = true)]
     socket: Option<String>,
@@ -464,10 +468,10 @@ async fn run_main(mut args: Args) -> Result<()> {
             let in_jcode_repo = build::is_jcode_repo(&cwd);
             let already_in_selfdev = std::env::var("JCODE_SELFDEV_MODE").is_ok();
 
-            if in_jcode_repo && !already_in_selfdev && !args.standalone {
+            if in_jcode_repo && !already_in_selfdev && !args.standalone && !args.no_selfdev {
                 // Auto-start self-dev mode with wrapper
                 eprintln!("📍 Detected jcode repository - enabling self-dev mode");
-                eprintln!("   (use --standalone to disable auto-detection)\n");
+                eprintln!("   (use --no-selfdev to disable auto-detection)\n");
 
                 // Set env var to prevent infinite loop
                 std::env::set_var("JCODE_SELFDEV_MODE", "1");
