@@ -166,15 +166,21 @@ pub fn list_claude_code_sessions() -> Result<Vec<ClaudeCodeSessionInfo>> {
             }
 
             let created = entry.created.as_ref().and_then(|s| {
-                DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&Utc))
+                DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&Utc))
             });
             let modified = entry.modified.as_ref().and_then(|s| {
-                DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&Utc))
+                DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&Utc))
             });
 
             all_sessions.push(ClaudeCodeSessionInfo {
                 session_id: entry.session_id,
-                first_prompt: entry.first_prompt.unwrap_or_else(|| "No prompt".to_string()),
+                first_prompt: entry
+                    .first_prompt
+                    .unwrap_or_else(|| "No prompt".to_string()),
                 summary: entry.summary,
                 message_count: entry.message_count.unwrap_or(0),
                 created,
@@ -239,39 +245,37 @@ fn convert_content_blocks(content: &ClaudeCodeContent) -> Vec<ContentBlock> {
                 }]
             }
         }
-        ClaudeCodeContent::Blocks(blocks) => {
-            blocks
-                .iter()
-                .filter_map(|block| match block {
-                    ClaudeCodeContentBlock::Text { text } => Some(ContentBlock::Text {
-                        text: text.clone(),
-                        cache_control: None,
-                    }),
-                    ClaudeCodeContentBlock::Thinking { thinking, .. } => {
-                        Some(ContentBlock::Reasoning {
-                            text: thinking.clone(),
-                        })
-                    }
-                    ClaudeCodeContentBlock::ToolUse { id, name, input } => {
-                        Some(ContentBlock::ToolUse {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: input.clone(),
-                        })
-                    }
-                    ClaudeCodeContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        is_error,
-                    } => Some(ContentBlock::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        content: content.clone(),
-                        is_error: *is_error,
-                    }),
-                    ClaudeCodeContentBlock::Unknown => None,
-                })
-                .collect()
-        }
+        ClaudeCodeContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|block| match block {
+                ClaudeCodeContentBlock::Text { text } => Some(ContentBlock::Text {
+                    text: text.clone(),
+                    cache_control: None,
+                }),
+                ClaudeCodeContentBlock::Thinking { thinking, .. } => {
+                    Some(ContentBlock::Reasoning {
+                        text: thinking.clone(),
+                    })
+                }
+                ClaudeCodeContentBlock::ToolUse { id, name, input } => {
+                    Some(ContentBlock::ToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                    })
+                }
+                ClaudeCodeContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => Some(ContentBlock::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    content: content.clone(),
+                    is_error: *is_error,
+                }),
+                ClaudeCodeContentBlock::Unknown => None,
+            })
+            .collect(),
     }
 }
 
@@ -328,8 +332,7 @@ pub fn import_session_from_file(path: &PathBuf, session_id: &str) -> Result<Sess
     let roots: Vec<&ClaudeCodeEntry> = message_entries
         .iter()
         .filter(|e| {
-            e.parent_uuid.is_none()
-                || !uuid_to_entry.contains_key(e.parent_uuid.as_ref().unwrap())
+            e.parent_uuid.is_none() || !uuid_to_entry.contains_key(e.parent_uuid.as_ref().unwrap())
         })
         .copied()
         .collect();
@@ -348,7 +351,11 @@ pub fn import_session_from_file(path: &PathBuf, session_id: &str) -> Result<Sess
 
             // Find next entry that has this one as parent
             let next = message_entries.iter().find(|e| {
-                e.parent_uuid.as_ref() == current.uuid.as_ref() && e.uuid.as_ref().map(|u| !visited.contains(u)).unwrap_or(true)
+                e.parent_uuid.as_ref() == current.uuid.as_ref()
+                    && e.uuid
+                        .as_ref()
+                        .map(|u| !visited.contains(u))
+                        .unwrap_or(true)
             });
 
             match next {
@@ -394,7 +401,9 @@ pub fn import_session_from_file(path: &PathBuf, session_id: &str) -> Result<Sess
         })
         .or_else(|| {
             // Try to get from index
-            list_claude_code_sessions().ok()?.into_iter()
+            list_claude_code_sessions()
+                .ok()?
+                .into_iter()
                 .find(|s| s.session_id == session_id)
                 .and_then(|s| s.summary.or(Some(s.first_prompt)))
         });
@@ -425,7 +434,10 @@ pub fn import_session_from_file(path: &PathBuf, session_id: &str) -> Result<Sess
             }
 
             // Generate message ID from uuid or create new
-            let msg_id = entry.uuid.clone().unwrap_or_else(|| crate::id::new_id("msg"));
+            let msg_id = entry
+                .uuid
+                .clone()
+                .unwrap_or_else(|| crate::id::new_id("msg"));
 
             session.messages.push(StoredMessage {
                 id: msg_id,
@@ -524,7 +536,9 @@ mod tests {
     #[test]
     fn test_convert_blocks_content() {
         let content = ClaudeCodeContent::Blocks(vec![
-            ClaudeCodeContentBlock::Text { text: "hello".to_string() },
+            ClaudeCodeContentBlock::Text {
+                text: "hello".to_string(),
+            },
             ClaudeCodeContentBlock::Thinking {
                 thinking: "let me think".to_string(),
                 signature: None,
