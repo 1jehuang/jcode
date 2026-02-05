@@ -1460,6 +1460,7 @@ impl App {
                 "server_version": self.remote_server_version.clone(),
                 "server_has_update": self.remote_server_has_update,
                 "version": env!("JCODE_VERSION"),
+                "diagram_mode": format!("{:?}", self.diagram_mode),
             })
             .to_string();
         }
@@ -8019,8 +8020,12 @@ impl super::TuiState for App {
             }
         };
 
-        // Get active mermaid diagrams
-        let diagrams = super::mermaid::get_active_diagrams();
+        // Get active mermaid diagrams - only for margin mode (pinned mode uses dedicated pane)
+        let diagrams = if self.diagram_mode == crate::config::DiagramDisplayMode::Margin {
+            super::mermaid::get_active_diagrams()
+        } else {
+            Vec::new()
+        };
 
         super::info_widget::InfoWidgetData {
             todos,
