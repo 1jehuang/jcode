@@ -885,23 +885,10 @@ pub fn render_mermaid_sized(content: &str, terminal_width: Option<u16>) -> Rende
     }
 
     // Pre-create the StatefulProtocol for this image
-    // Determine resize mode once at creation time to prevent flickering during scroll
+    // Always use Crop mode to prevent rescaling during scroll
     if let Some(Some(picker)) = PICKER.get() {
         if let Ok(img) = image::open(&png_path) {
             let protocol = picker.new_resize_protocol(img);
-
-            // Determine resize mode based on image size vs typical terminal
-            // Use Fit for large images, Crop for small ones
-            // This is locked at creation time to prevent mode switching during scroll
-            let font_size = picker.font_size();
-            let img_width_cells = (width as f32 / font_size.0 as f32).ceil() as u16;
-            let img_height_cells = (height as f32 / font_size.1 as f32).ceil() as u16;
-            // Default to Fit if image is larger than ~80 cols or ~30 rows (typical terminal)
-            let resize_mode = if img_width_cells > 80 || img_height_cells > 30 {
-                ResizeMode::Fit
-            } else {
-                ResizeMode::Crop
-            };
 
             let mut state = IMAGE_STATE.lock().unwrap();
             state.insert(
@@ -909,7 +896,7 @@ pub fn render_mermaid_sized(content: &str, terminal_width: Option<u16>) -> Rende
                 ImageState {
                     protocol,
                     last_area: None,
-                    resize_mode,
+                    resize_mode: ResizeMode::Crop,
                 },
             );
         }
@@ -1005,20 +992,14 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         image_area
     };
 
-    // Helper to create Resize enum from stored mode
-    fn make_resize(mode: ResizeMode) -> Resize {
-        match mode {
-            ResizeMode::Fit => Resize::Fit(None),
-            ResizeMode::Crop => Resize::Crop(None),
-        }
-    }
+    // Always use Crop mode - this prevents rescaling during scroll
+    // The image is rendered at native size and clipped to fit the area
 
     // Try to render from existing state (blocking lock)
-    // Use the stored resize_mode to prevent flickering during scroll
     let render_success = {
         let mut state = IMAGE_STATE.lock().unwrap();
         if let Some(img_state) = state.get_mut(&hash) {
-            let widget = StatefulImage::default().resize(make_resize(img_state.resize_mode));
+            let widget = StatefulImage::default().resize(Resize::Crop(None));
             widget.render(render_area, buf, &mut img_state.protocol);
             img_state.last_area = Some(render_area);
 
@@ -1050,15 +1031,8 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
             if let Ok(img) = image::open(&path) {
                 let protocol = picker.new_resize_protocol(img);
 
-                // Determine resize mode based on image size (locked at creation)
-                let font_size = picker.font_size();
-                let img_width_cells = (img_width as f32 / font_size.0 as f32).ceil() as u16;
-                let img_height_cells = (img_height as f32 / font_size.1 as f32).ceil() as u16;
-                let resize_mode = if img_width_cells > 80 || img_height_cells > 30 {
-                    ResizeMode::Fit
-                } else {
-                    ResizeMode::Crop
-                };
+                // Always use Crop mode - stored for consistency
+                let resize_mode = ResizeMode::Crop;
 
                 let mut state = IMAGE_STATE.lock().unwrap();
                 state.insert(
@@ -1071,7 +1045,7 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
                 );
 
                 if let Some(img_state) = state.get_mut(&hash) {
-                    let widget = StatefulImage::default().resize(make_resize(img_state.resize_mode));
+                    let widget = StatefulImage::default().resize(Resize::Crop(None));
                     widget.render(render_area, buf, &mut img_state.protocol);
 
                     // Update last render state
