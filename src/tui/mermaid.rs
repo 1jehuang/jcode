@@ -913,21 +913,8 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         return area.height;
     }
 
-    // Check if we can skip this render (same area, same settings)
+    // Track render state for debugging (but don't skip - StatefulImage needs render every frame)
     let current_state = LastRenderState { area, centered };
-    {
-        if let Ok(last_render) = LAST_RENDER.lock() {
-            if let Some(last) = last_render.get(&hash) {
-                if *last == current_state {
-                    // Nothing changed, skip render
-                    if let Ok(mut debug) = MERMAID_DEBUG.lock() {
-                        debug.stats.skipped_renders += 1;
-                    }
-                    return area.height;
-                }
-            }
-        }
-    }
 
     // Get cached image info (blocking lock for consistency)
     let (img_width, img_height, path) = {
