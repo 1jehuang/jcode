@@ -327,6 +327,8 @@ pub struct App {
     input: String,
     cursor_pos: usize,
     scroll_offset: usize,
+    /// Pauses auto-scroll when user scrolls up during streaming
+    auto_scroll_paused: bool,
     active_skill: Option<String>,
     is_processing: bool,
     streaming_text: String,
@@ -538,6 +540,7 @@ impl App {
             input: String::new(),
             cursor_pos: 0,
             scroll_offset: 0,
+            auto_scroll_paused: false,
             active_skill: None,
             is_processing: false,
             streaming_text: String::new(),
@@ -2265,10 +2268,18 @@ impl App {
                                     MouseEventKind::ScrollUp => {
                                         // Scroll up in the view (increase offset)
                                         self.scroll_offset = self.scroll_offset.saturating_add(3);
+                                        // Pause auto-scroll when scrolling up during streaming
+                                        if self.is_processing {
+                                            self.auto_scroll_paused = true;
+                                        }
                                     }
                                     MouseEventKind::ScrollDown => {
                                         // Scroll down in the view (decrease offset towards 0)
                                         self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                                        // Resume auto-scroll if at bottom
+                                        if self.scroll_offset == 0 {
+                                            self.auto_scroll_paused = false;
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -2667,10 +2678,18 @@ impl App {
                                     MouseEventKind::ScrollUp => {
                                         // Scroll up in the view (increase offset)
                                         self.scroll_offset = self.scroll_offset.saturating_add(3);
+                                        // Pause auto-scroll when scrolling up during streaming
+                                        if self.is_processing {
+                                            self.auto_scroll_paused = true;
+                                        }
                                     }
                                     MouseEventKind::ScrollDown => {
                                         // Scroll down in the view (decrease offset towards 0)
                                         self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                                        // Resume auto-scroll if at bottom
+                                        if self.scroll_offset == 0 {
+                                            self.auto_scroll_paused = false;
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -3465,11 +3484,19 @@ impl App {
                 let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
                 let inc = if code == KeyCode::PageUp { 10 } else { 1 };
                 self.scroll_offset = (self.scroll_offset + inc).min(max_estimate);
+                // Pause auto-scroll when user scrolls up during streaming
+                if self.is_processing {
+                    self.auto_scroll_paused = true;
+                }
             }
             KeyCode::Down | KeyCode::PageDown => {
                 // Scroll down (decrease offset, 0 = bottom)
                 let dec = if code == KeyCode::PageDown { 10 } else { 1 };
                 self.scroll_offset = self.scroll_offset.saturating_sub(dec);
+                // Resume auto-scroll if scrolled back to bottom
+                if self.scroll_offset == 0 {
+                    self.auto_scroll_paused = false;
+                }
             }
             KeyCode::Esc => {
                 if self.is_processing {
@@ -3477,6 +3504,7 @@ impl App {
                     self.set_status_notice("Interrupting...");
                 } else {
                     self.scroll_offset = 0;
+                    self.auto_scroll_paused = false;
                     self.input.clear();
                     self.cursor_pos = 0;
                 }
@@ -3800,11 +3828,19 @@ impl App {
                 let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
                 let inc = if code == KeyCode::PageUp { 10 } else { 1 };
                 self.scroll_offset = (self.scroll_offset + inc).min(max_estimate);
+                // Pause auto-scroll when user scrolls up during streaming
+                if self.is_processing {
+                    self.auto_scroll_paused = true;
+                }
             }
             KeyCode::Down | KeyCode::PageDown => {
                 // Scroll down (decrease offset, 0 = bottom)
                 let dec = if code == KeyCode::PageDown { 10 } else { 1 };
                 self.scroll_offset = self.scroll_offset.saturating_sub(dec);
+                // Resume auto-scroll if scrolled back to bottom
+                if self.scroll_offset == 0 {
+                    self.auto_scroll_paused = false;
+                }
             }
             KeyCode::Esc => {
                 if self.is_processing {
@@ -3815,6 +3851,7 @@ impl App {
                 } else {
                     // Reset scroll to bottom and clear input
                     self.scroll_offset = 0;
+                    self.auto_scroll_paused = false;
                     self.input.clear();
                     self.cursor_pos = 0;
                 }
@@ -3914,6 +3951,7 @@ impl App {
         self.pasted_contents.clear();
         self.cursor_pos = 0;
         self.scroll_offset = 0; // Reset to bottom on new input
+        self.auto_scroll_paused = false; // Resume auto-scroll on new input
 
         // Check for built-in commands
         let trimmed = input.trim();
@@ -7413,6 +7451,10 @@ impl super::TuiState for App {
 
     fn scroll_offset(&self) -> usize {
         self.scroll_offset
+    }
+
+    fn auto_scroll_paused(&self) -> bool {
+        self.auto_scroll_paused
     }
 
     fn provider_name(&self) -> String {

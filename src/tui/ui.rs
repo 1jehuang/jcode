@@ -2283,9 +2283,19 @@ fn draw_messages(
 
     // scroll_offset = 0 means bottom (auto-scroll), higher = further up
     // ratatui scroll = lines from top to hide
-    let scroll = if user_scroll > 0 {
+    //
+    // When auto_scroll_paused is true during streaming, we interpret scroll_offset
+    // as an absolute position from top (not distance from bottom), which keeps the
+    // user viewing the same lines even as new content is added at the bottom.
+    let scroll = if app.auto_scroll_paused() && user_scroll > 0 {
+        // Paused: treat scroll_offset as absolute position from top
+        // This keeps the view stable as content grows
+        user_scroll.min(max_scroll)
+    } else if user_scroll > 0 {
+        // Not paused but scrolled: distance from bottom
         max_scroll.saturating_sub(user_scroll)
     } else {
+        // At bottom: show newest content
         max_scroll
     };
 
