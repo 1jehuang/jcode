@@ -333,9 +333,8 @@ async fn main() -> Result<()> {
     }
 
     // Check for updates in background unless --no-update is specified or running Update command
-    let check_updates = !args.no_update
-        && !matches!(args.command, Some(Command::Update))
-        && args.resume.is_none();
+    let check_updates =
+        !args.no_update && !matches!(args.command, Some(Command::Update)) && args.resume.is_none();
     let auto_update = args.auto_update;
 
     if check_updates {
@@ -1207,7 +1206,10 @@ fn run_import_command(cmd: ImportCommand) -> Result<()> {
             };
             import::print_sessions_table(&sessions);
         }
-        ImportCommand::Session { session_id, start_session } => {
+        ImportCommand::Session {
+            session_id,
+            start_session,
+        } => {
             eprintln!("Importing Claude Code session {}...", session_id);
 
             let session = import::import_session(&session_id)?;

@@ -356,7 +356,7 @@ impl MultiProvider {
                 // Try to set the model to kimi-k2.5
                 let _ = openrouter.set_model("moonshotai/kimi-k2-5");
                 crate::logging::info(
-                    "Auto-switched to OpenRouter (kimi-k2.5) - Claude OAuth usage exhausted"
+                    "Auto-switched to OpenRouter (kimi-k2.5) - Claude OAuth usage exhausted",
                 );
                 return Some(openrouter);
             }
@@ -378,7 +378,9 @@ impl Provider for MultiProvider {
             ActiveProvider::Claude => {
                 // Check if Claude usage is exhausted and fallback is available
                 if let Some(openrouter) = self.try_fallback_to_openrouter() {
-                    return openrouter.complete(messages, tools, system, resume_session_id).await;
+                    return openrouter
+                        .complete(messages, tools, system, resume_session_id)
+                        .await;
                 }
 
                 // Prefer direct Anthropic API if available
