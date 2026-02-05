@@ -2256,15 +2256,13 @@ fn draw_messages(
             .extend(std::iter::repeat(Line::from("")).take(visible_height - visible_lines.len()));
     }
 
-    // Scan visible lines for mermaid image placeholders
-    // Images render when their marker line is visible; terminal handles bottom clipping
-    let mut image_regions: Vec<(usize, u64, u16)> = Vec::new(); // (screen_line_idx, hash, height)
-    for (idx, line) in visible_lines.iter().enumerate() {
+    // Scan ALL lines for mermaid images to handle both rendering and clearing
+    // This ensures images are cleared when they scroll off screen
+    let mut all_images: Vec<(usize, u64, u16)> = Vec::new(); // (abs_line_idx, hash, height)
+    for (idx, line) in wrapped_lines.iter().enumerate() {
         if let Some(hash) = super::mermaid::parse_image_placeholder(line) {
-            // Count how many lines are available for this image (until end of visible area or next content)
             let mut height = 1u16;
-            for subsequent in visible_lines.iter().skip(idx + 1) {
-                // Placeholder continuation lines are empty
+            for subsequent in wrapped_lines.iter().skip(idx + 1) {
                 if subsequent.spans.is_empty()
                     || (subsequent.spans.len() == 1 && subsequent.spans[0].content.is_empty())
                 {
@@ -2273,25 +2271,60 @@ fn draw_messages(
                     break;
                 }
             }
-            image_regions.push((idx, hash, height));
+            all_images.push((idx, hash, height));
         }
     }
 
-    // Render text first - mermaid widget handles its own clearing
+    // Render text first
     let paragraph = Paragraph::new(visible_lines);
     frame.render_widget(paragraph, area);
 
-    // Now render images over their placeholder regions
-    // Images will be clipped at the bottom if they don't fully fit
+    // Process each image: either render it or clear the area it would occupy
     let centered = app.centered_mode();
-    for (screen_y, hash, height) in image_regions {
-        let image_area = Rect {
-            x: area.x,
-            y: area.y + screen_y as u16,
-            width: area.width,
-            height: height.min(area.height.saturating_sub(screen_y as u16)),
-        };
-        super::mermaid::render_image_widget(hash, image_area, frame.buffer_mut(), centered);
+    for (abs_idx, hash, total_height) in all_images {
+        let image_end = abs_idx + total_height as usize;
+
+        // Check if this image overlaps the visible area at all
+        if image_end > scroll && abs_idx < visible_end {
+            // Image overlaps visible area
+            let marker_visible = abs_idx >= scroll && abs_idx < visible_end;
+
+            if marker_visible {
+                // Marker is visible - render the image
+                let screen_y = (abs_idx - scroll) as u16;
+                let available_height = (visible_height as u16).saturating_sub(screen_y);
+                let render_height = (total_height as u16).min(available_height);
+
+                if render_height > 0 {
+                    let image_area = Rect {
+                        x: area.x,
+                        y: area.y + screen_y,
+                        width: area.width,
+                        height: render_height,
+                    };
+                    super::mermaid::render_image_widget(hash, image_area, frame.buffer_mut(), centered);
+                }
+            } else {
+                // Marker is off-screen but image would overlap - clear the visible portion
+                // This removes stale images from the terminal graphics layer
+                let visible_start = scroll.max(abs_idx);
+                let visible_end_img = visible_end.min(image_end);
+                let screen_y = (visible_start - scroll) as u16;
+                let clear_height = (visible_end_img - visible_start) as u16;
+
+                if clear_height > 0 {
+                    super::mermaid::clear_image_area(
+                        Rect {
+                            x: area.x,
+                            y: area.y + screen_y,
+                            width: area.width,
+                            height: clear_height,
+                        },
+                        frame.buffer_mut(),
+                    );
+                }
+            }
+        }
     }
 
     // Draw right bar for visible user lines
