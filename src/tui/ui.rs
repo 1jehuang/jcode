@@ -1139,7 +1139,41 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         capture.render_order.push("draw_messages".to_string());
     }
     let draw_start = Instant::now();
-    let margins = draw_messages(frame, app, chunks[0], &prepared);
+
+    // Check if we have diagrams to show in pinned mode
+    let diagrams = super::mermaid::get_active_diagrams();
+    let pinned_diagram = diagrams.first().cloned();
+
+    // Split messages area for pinned diagram if we have one
+    let (messages_area, diagram_area) = if let Some(ref diagram) = pinned_diagram {
+        // Calculate diagram width - aim for ~40% of screen, min 30 cols
+        let diagram_width = (chunks[0].width * 2 / 5).max(30).min(chunks[0].width / 2);
+        let messages_width = chunks[0].width.saturating_sub(diagram_width);
+
+        let messages = Rect {
+            x: chunks[0].x,
+            y: chunks[0].y,
+            width: messages_width,
+            height: chunks[0].height,
+        };
+        let diagram = Rect {
+            x: chunks[0].x + messages_width,
+            y: chunks[0].y,
+            width: diagram_width,
+            height: chunks[0].height,
+        };
+        (messages, Some(diagram))
+    } else {
+        (chunks[0], None)
+    };
+
+    let margins = draw_messages(frame, app, messages_area, &prepared);
+
+    // Render pinned diagram if we have one
+    if let (Some(diagram_info), Some(area)) = (&pinned_diagram, diagram_area) {
+        draw_pinned_diagram(frame, diagram_info, area);
+    }
+
     let messages_draw = draw_start.elapsed();
 
     if let Some(ref mut capture) = debug_capture {
@@ -2263,6 +2297,30 @@ fn color_to_rgb(color: Color) -> Option<[u8; 3]> {
     match color {
         Color::Rgb(r, g, b) => Some([r, g, b]),
         _ => None,
+    }
+}
+
+/// Draw a pinned diagram in a dedicated pane
+fn draw_pinned_diagram(frame: &mut Frame, diagram: &info_widget::DiagramInfo, area: Rect) {
+    use ratatui::widgets::BorderType;
+
+    if area.width < 5 || area.height < 3 {
+        return;
+    }
+
+    // Draw border with title
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(DIM_COLOR))
+        .title(Span::styled(" diagram ", Style::default().fg(TOOL_COLOR)));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Render the diagram image inside the border
+    if inner.width > 0 && inner.height > 0 {
+        super::mermaid::render_image_widget(diagram.hash, inner, frame.buffer_mut(), false);
     }
 }
 
