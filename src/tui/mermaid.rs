@@ -538,6 +538,102 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
     0
 }
 
+/// Render an image with vertical clipping (for partially scrolled images)
+/// clip_top_rows specifies how many rows of the image are scrolled off the top
+///
+/// This function handles images that are partially visible at the top of the screen.
+/// The terminal's graphics protocol naturally clips content that extends off-screen.
+pub fn render_image_widget_clipped(
+    hash: u64,
+    area: Rect,
+    buf: &mut Buffer,
+    centered: bool,
+    clip_top_rows: u16,
+) -> u16 {
+    if clip_top_rows == 0 {
+        // No clipping needed, use standard render
+        return render_image_widget(hash, area, buf, centered);
+    }
+
+    // For partially visible images, we need to render with offset
+    // The image area logically extends above the visible area
+    // We create a virtual area that includes the clipped portion
+
+    // Skip if area is too small
+    if area.width == 0 || area.height == 0 {
+        return 0;
+    }
+
+    // Get the cached image path
+    let cached = RENDER_CACHE
+        .try_lock()
+        .ok()
+        .and_then(|cache| cache.get(hash).map(|c| (c.path.clone(), c.width)));
+
+    let Some((path, img_width)) = cached else {
+        return 0;
+    };
+
+    // Calculate the actual render area (potentially centered)
+    let render_area = if centered && img_width > 0 {
+        let rendered_width = if let Some(Some(picker)) = PICKER.get() {
+            let font_size = picker.font_size();
+            let img_width_cells = (img_width as f32 / font_size.0 as f32).ceil() as u16;
+            img_width_cells.min(area.width)
+        } else {
+            area.width
+        };
+
+        let x_offset = (area.width.saturating_sub(rendered_width)) / 2;
+        Rect {
+            x: area.x + x_offset,
+            y: area.y,
+            width: rendered_width,
+            height: area.height,
+        }
+    } else {
+        area
+    };
+
+    // For clipped rendering, we need to crop the image from the top
+    // Load a cropped version of the image
+    if let Some(Some(picker)) = PICKER.get() {
+        if let Ok(img) = image::open(&path) {
+            // Calculate how many pixels to crop from top based on rows
+            let font_size = picker.font_size();
+            let pixels_per_row = font_size.1 as u32;
+            let crop_pixels = (clip_top_rows as u32) * pixels_per_row;
+
+            // Crop the image from the top
+            let img_height = img.height();
+            let img_width = img.width();
+
+            if crop_pixels < img_height {
+                let cropped = img.crop_imm(0, crop_pixels, img_width, img_height - crop_pixels);
+                let protocol = picker.new_resize_protocol(cropped);
+
+                // Use a separate key for cropped images to avoid state conflicts
+                let cropped_hash = hash.wrapping_add((clip_top_rows as u64) << 48);
+
+                if let Ok(mut state) = IMAGE_STATE.try_lock() {
+                    state.insert(cropped_hash, protocol);
+
+                    if let Some(protocol) = state.get_mut(&cropped_hash) {
+                        let widget = StatefulImage::default().resize(Resize::Crop(Some(CropOptions {
+                            clip_top: true,
+                            clip_left: true,
+                        })));
+                        widget.render(render_area, buf, protocol);
+                        return area.height;
+                    }
+                }
+            }
+        }
+    }
+
+    0
+}
+
 /// Estimate the height needed for an image in terminal rows
 pub fn estimate_image_height(width: u32, height: u32, max_width: u16) -> u16 {
     if let Some(Some(picker)) = PICKER.get() {
