@@ -415,6 +415,7 @@ pub fn render_messages(session: &Session) -> Vec<RenderedMessage> {
                             id: id.clone(),
                             name: name.clone(),
                             input: input.clone(),
+                            intent: None,
                         },
                     );
                     tool_calls.push(name.clone());
@@ -438,6 +439,7 @@ pub fn render_messages(session: &Session) -> Vec<RenderedMessage> {
                             id: tool_use_id.clone(),
                             name: "tool".to_string(),
                             input: serde_json::Value::Null,
+                            intent: None,
                         })
                     });
 
