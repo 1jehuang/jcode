@@ -4002,6 +4002,22 @@ fn execute_client_debug_command(command: &str) -> String {
         return "Invalid hash (expected hex)".to_string();
     }
 
+    if trimmed == "mermaid:active" {
+        let diagrams = mermaid::get_active_diagrams();
+        let info: Vec<serde_json::Value> = diagrams.iter().map(|d| {
+            serde_json::json!({
+                "hash": format!("{:016x}", d.hash),
+                "width": d.width,
+                "height": d.height,
+                "label": d.label,
+            })
+        }).collect();
+        return serde_json::to_string_pretty(&serde_json::json!({
+            "count": diagrams.len(),
+            "diagrams": info,
+        })).unwrap_or_else(|_| "{}".to_string());
+    }
+
     if trimmed == "markdown:stats" {
         let stats = markdown::debug_stats();
         return serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string());
@@ -4026,6 +4042,7 @@ fn execute_client_debug_command(command: &str) -> String {
   mermaid:scroll           - Run scroll simulation test
   mermaid:render <content> - Render arbitrary mermaid content
   mermaid:stability <hash> - Test resize mode stability for hash
+  mermaid:active           - List active diagrams (for pinned widget)
   mermaid:evict            - Clear mermaid cache
   markdown:stats           - Get markdown render stats
   overlay:on/off/status    - Toggle overlay boxes
