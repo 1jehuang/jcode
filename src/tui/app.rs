@@ -642,26 +642,41 @@ impl App {
     }
 
     /// Check if there's a newer binary on disk than when we started
+    /// Only returns true if the SAME binary file has been modified (e.g., via /reload)
     fn has_newer_binary(&self) -> bool {
         let Some(startup_mtime) = self.client_binary_mtime else {
             return false;
         };
 
-        // Check the release binary in the repo
-        if let Some(repo_dir) = crate::build::get_repo_dir() {
-            let exe = repo_dir.join("target/release/jcode");
-            if let Ok(metadata) = std::fs::metadata(&exe) {
-                if let Ok(current_mtime) = metadata.modified() {
-                    return current_mtime > startup_mtime;
+        // Get the currently running executable path
+        let Ok(current_exe) = std::env::current_exe() else {
+            return false;
+        };
+
+        // Check if the current executable has been modified since startup
+        // This handles the case where the binary is recompiled in place
+        if let Ok(metadata) = std::fs::metadata(&current_exe) {
+            if let Ok(current_mtime) = metadata.modified() {
+                if current_mtime > startup_mtime {
+                    return true;
                 }
             }
         }
 
-        // Fallback: check the binary in PATH
-        if let Some(exe) = crate::build::jcode_path_in_path() {
-            if let Ok(metadata) = std::fs::metadata(&exe) {
-                if let Ok(current_mtime) = metadata.modified() {
-                    return current_mtime > startup_mtime;
+        // Also check the symlink target if we're running from a symlink
+        // This detects when install_release.sh updates the symlink to a newer binary
+        if let Ok(resolved) = std::fs::canonicalize(&current_exe) {
+            if resolved != current_exe {
+                // We're running from a symlink - check if the symlink now points elsewhere
+                // by comparing the canonical path to what it was at startup
+                if let Ok(link_target) = std::fs::read_link(&current_exe) {
+                    // The symlink itself might have changed to point to a different file
+                    // Check the target's mtime
+                    if let Ok(metadata) = std::fs::metadata(&link_target) {
+                        if let Ok(target_mtime) = metadata.modified() {
+                            return target_mtime > startup_mtime;
+                        }
+                    }
                 }
             }
         }
