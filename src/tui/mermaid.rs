@@ -436,16 +436,21 @@ pub fn render_mermaid(content: &str) -> RenderResult {
 /// If centered is true, the image will be horizontally centered within the area
 /// Returns the number of rows used
 ///
-/// OPTIMIZATION: This function tracks the last rendered position for each image hash.
-/// If the image was already rendered at the exact same position, we skip re-rendering
-/// to avoid scroll lag. The terminal graphics protocol maintains the image display.
+/// OPTIMIZATION: Uses try_lock for non-critical operations to reduce scroll lag.
+/// The terminal graphics protocol maintains the image display between frames.
 pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bool) -> u16 {
-    let render_start = Instant::now();
+    // Skip if area is too small
+    if area.width == 0 || area.height == 0 {
+        return 0;
+    }
+
     // Get the cached image dimensions to calculate centered area
-    let img_width = {
-        let cache = RENDER_CACHE.lock().unwrap();
-        cache.get(hash).map(|c| c.width).unwrap_or(0)
-    };
+    // Use try_lock to avoid blocking during scroll
+    let img_width = RENDER_CACHE
+        .try_lock()
+        .ok()
+        .and_then(|cache| cache.get(hash).map(|c| c.width))
+        .unwrap_or(0);
 
     // Calculate the actual render area (potentially centered)
     let render_area = if centered && img_width > 0 {
@@ -453,10 +458,9 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         let rendered_width = if let Some(Some(picker)) = PICKER.get() {
             let font_size = picker.font_size();
             let img_width_cells = (img_width as f32 / font_size.0 as f32).ceil() as u16;
-            // If image is wider than area, it will be scaled to fit
             img_width_cells.min(area.width)
         } else {
-            area.width // Fallback: assume full width
+            area.width
         };
 
         // Center horizontally
@@ -471,23 +475,17 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         area
     };
 
-    // Note: We intentionally do NOT clear the buffer here.
-    // ratatui-image handles clearing internally via cell.set_skip(true).
-    // Manual clearing causes flicker during scroll because it wipes the
-    // Unicode placeholders before ratatui-image can redraw them.
-
-    // Always use Crop to clip - never resize the image
-    // This prevents flickering during scroll when the available area changes
+    // Use Crop to clip the image when partially visible
+    // clip_top/clip_left control which edge to clip from
     let make_resize = || {
         Resize::Crop(Some(CropOptions {
-            clip_top: false,
-            clip_left: false,
+            clip_top: true,  // Allow clipping from top for partial visibility
+            clip_left: true, // Allow clipping from left
         }))
     };
 
-    // Try to render from existing state
-    let render_result = {
-        let mut state = IMAGE_STATE.lock().unwrap();
+    // Try to render from existing state (fast path)
+    let render_result = if let Ok(mut state) = IMAGE_STATE.try_lock() {
         if let Some(protocol) = state.get_mut(&hash) {
             let widget = StatefulImage::default().resize(make_resize());
             widget.render(render_area, buf, protocol);
@@ -495,41 +493,43 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         } else {
             false
         }
+    } else {
+        // Couldn't acquire lock, skip this frame
+        return area.height;
     };
 
     if render_result {
-        if let Ok(mut state) = MERMAID_DEBUG.lock() {
-            state.stats.image_state_hits += 1;
-            state.stats.last_image_render_ms = Some(render_start.elapsed().as_secs_f32() * 1000.0);
+        // Update debug stats non-blocking
+        if let Ok(mut debug) = MERMAID_DEBUG.try_lock() {
+            debug.stats.image_state_hits += 1;
         }
         return area.height;
     }
-    if let Ok(mut state) = MERMAID_DEBUG.lock() {
-        state.stats.image_state_misses += 1;
+
+    // Update debug stats non-blocking
+    if let Ok(mut debug) = MERMAID_DEBUG.try_lock() {
+        debug.stats.image_state_misses += 1;
     }
 
-    // No state available, try to load from cache
-    let cached_path = {
-        let cache = RENDER_CACHE.lock().unwrap();
-        cache.get(hash).map(|c| c.path.clone())
-    };
+    // No state available, try to load from cache (slow path - blocking is OK)
+    let cached_path = RENDER_CACHE
+        .try_lock()
+        .ok()
+        .and_then(|cache| cache.get(hash).map(|c| c.path.clone()));
 
     if let Some(path) = cached_path {
         if let Some(Some(picker)) = PICKER.get() {
             if let Ok(img) = image::open(&path) {
                 let protocol = picker.new_resize_protocol(img);
 
-                let mut state = IMAGE_STATE.lock().unwrap();
-                state.insert(hash, protocol);
+                if let Ok(mut state) = IMAGE_STATE.try_lock() {
+                    state.insert(hash, protocol);
 
-                if let Some(protocol) = state.get_mut(&hash) {
-                    let widget = StatefulImage::default().resize(make_resize());
-                    widget.render(render_area, buf, protocol);
-                    if let Ok(mut state) = MERMAID_DEBUG.lock() {
-                        state.stats.last_image_render_ms =
-                            Some(render_start.elapsed().as_secs_f32() * 1000.0);
+                    if let Some(protocol) = state.get_mut(&hash) {
+                        let widget = StatefulImage::default().resize(make_resize());
+                        widget.render(render_area, buf, protocol);
+                        return area.height;
                     }
-                    return area.height;
                 }
             }
         }
@@ -617,23 +617,25 @@ const MERMAID_MARKER_SUFFIX: &str = "\x00";
 /// Create placeholder lines for an image widget
 /// These will be recognized and replaced during rendering
 fn image_widget_placeholder(hash: u64, height: u16) -> Vec<Line<'static>> {
-    let dim = Style::default().fg(Color::Rgb(40, 40, 40));
+    // Use black foreground on default background to make marker invisible
+    // The marker will be completely overwritten by the image rendering
+    let invisible = Style::default().fg(Color::Black).bg(Color::Reset);
 
-    // First line contains the hash as a marker (invisible)
-    let mut lines = Vec::with_capacity(height as usize + 1);
+    let mut lines = Vec::with_capacity(height as usize);
 
-    // Header with hash marker
+    // First line contains the hash as a marker (invisible, zero-width prefix)
+    // We use null characters which won't render but can be detected
     lines.push(Line::from(Span::styled(
         format!(
             "{}{:016x}{}",
             MERMAID_MARKER_PREFIX, hash, MERMAID_MARKER_SUFFIX
         ),
-        dim,
+        invisible,
     )));
 
-    // Fill remaining height with blank lines
+    // Fill remaining height with empty lines (will be overwritten by image)
     for _ in 1..height {
-        lines.push(Line::from(Span::styled(" ", dim)));
+        lines.push(Line::from(""));
     }
 
     lines
