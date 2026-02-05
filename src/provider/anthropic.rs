@@ -30,7 +30,7 @@ const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/1.0.0";
 const OAUTH_BETA_HEADERS: &str = "oauth-2025-04-20,claude-code-20250219";
 
 /// Default model
-const DEFAULT_MODEL: &str = "claude-opus-4-5-20251101";
+const DEFAULT_MODEL: &str = "claude-opus-4-6";
 
 /// API version header
 const API_VERSION: &str = "2023-06-01";
@@ -80,6 +80,7 @@ const RETRY_BASE_DELAY_MS: u64 = 1000;
 
 /// Available models
 pub const AVAILABLE_MODELS: &[&str] = &[
+    "claude-opus-4-6",
     "claude-opus-4-5-20251101",
     "claude-sonnet-4-20250514",
     "claude-haiku-4-5-20241022",
