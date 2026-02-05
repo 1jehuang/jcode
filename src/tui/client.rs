@@ -47,6 +47,7 @@ pub struct ClientApp {
     streaming_text: String,
     queued_messages: Vec<String>,
     scroll_offset: usize,
+    auto_scroll_paused: bool,
     status: ProcessingStatus,
     streaming_tool_calls: Vec<ToolCall>,
     streaming_input_tokens: u64,
@@ -171,6 +172,7 @@ impl ClientApp {
             streaming_text: String::new(),
             queued_messages: Vec::new(),
             scroll_offset: 0,
+            auto_scroll_paused: false,
             status: ProcessingStatus::Idle,
             streaming_tool_calls: Vec::new(),
             streaming_input_tokens: 0,
@@ -721,6 +723,7 @@ impl ClientApp {
                     self.is_processing = false;
                     self.status = ProcessingStatus::Idle;
                     self.scroll_offset = 0;
+                    self.auto_scroll_paused = false;
                     self.queued_messages.clear();
                     self.pending_diffs.clear();
                     self.current_tool_id = None;
@@ -918,6 +921,7 @@ impl ClientApp {
                 } else {
                     // Reset scroll to bottom and clear input
                     self.scroll_offset = 0;
+                    self.auto_scroll_paused = false;
                     self.input.clear();
                     self.cursor_pos = 0;
                 }
@@ -984,6 +988,10 @@ impl TuiState for ClientApp {
 
     fn scroll_offset(&self) -> usize {
         self.scroll_offset
+    }
+
+    fn auto_scroll_paused(&self) -> bool {
+        self.auto_scroll_paused
     }
 
     fn provider_name(&self) -> String {
