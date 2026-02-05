@@ -1291,7 +1291,8 @@ async fn handle_client(
     let mut processing_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut processing_message_id: Option<u64> = None;
     let mut processing_session_id: Option<String> = None;
-    let mut client_selfdev = is_selfdev_env();
+    // Client selfdev status is determined by Subscribe request, not server's env
+    let mut client_selfdev = false;
 
     let provider = provider_template.fork();
     let registry = Registry::new(provider.clone()).await;
@@ -1321,12 +1322,6 @@ async fn handle_client(
         if current.is_empty() || *current != client_session_id {
             *current = client_session_id.clone();
         }
-    }
-
-    // Enable self-dev mode when running in a self-dev environment
-    if client_selfdev {
-        new_agent.set_canary("self-dev");
-        registry.register_selfdev_tools().await;
     }
 
     // Get a handle to the soft interrupt queue BEFORE wrapping in Mutex
