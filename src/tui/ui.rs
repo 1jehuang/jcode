@@ -2256,15 +2256,15 @@ fn draw_messages(
             .extend(std::iter::repeat(Line::from("")).take(visible_height - visible_lines.len()));
     }
 
-    // Scan ALL lines for mermaid image placeholders (not just visible)
-    // This allows images to render correctly when partially scrolled off-screen
-    let mut all_image_regions: Vec<(usize, u64, u16)> = Vec::new(); // (abs_line_idx, hash, height)
-    for (idx, line) in wrapped_lines.iter().enumerate() {
+    // Scan visible lines for mermaid image placeholders
+    // Images render when their marker line is visible; terminal handles bottom clipping
+    let mut image_regions: Vec<(usize, u64, u16)> = Vec::new(); // (screen_line_idx, hash, height)
+    for (idx, line) in visible_lines.iter().enumerate() {
         if let Some(hash) = super::mermaid::parse_image_placeholder(line) {
-            // Count consecutive placeholder lines for this image
+            // Count how many lines are available for this image (until end of visible area or next content)
             let mut height = 1u16;
-            for subsequent in wrapped_lines.iter().skip(idx + 1) {
-                // Placeholder lines after the header are empty lines
+            for subsequent in visible_lines.iter().skip(idx + 1) {
+                // Placeholder continuation lines are empty
                 if subsequent.spans.is_empty()
                     || (subsequent.spans.len() == 1 && subsequent.spans[0].content.is_empty())
                 {
@@ -2273,35 +2273,7 @@ fn draw_messages(
                     break;
                 }
             }
-            all_image_regions.push((idx, hash, height));
-        }
-    }
-
-    // Filter to images that overlap with visible area
-    let mut image_regions: Vec<(usize, u64, u16, u16)> = Vec::new(); // (screen_y, hash, render_height, clip_top)
-    for (abs_idx, hash, total_height) in all_image_regions {
-        let image_end = abs_idx + total_height as usize;
-        // Check if image overlaps visible range [scroll..visible_end)
-        if image_end > scroll && abs_idx < visible_end {
-            // Calculate how much of the image is clipped from the top (scrolled off)
-            let clip_top = if abs_idx < scroll {
-                (scroll - abs_idx) as u16
-            } else {
-                0
-            };
-            // Screen position (0 if image starts above visible area)
-            let screen_y = if abs_idx >= scroll {
-                (abs_idx - scroll) as u16
-            } else {
-                0
-            };
-            // Height of visible portion
-            let visible_portion = total_height.saturating_sub(clip_top);
-            let render_height = visible_portion.min((visible_height as u16).saturating_sub(screen_y));
-
-            if render_height > 0 {
-                image_regions.push((screen_y as usize, hash, render_height, clip_top));
-            }
+            image_regions.push((idx, hash, height));
         }
     }
 
@@ -2310,22 +2282,16 @@ fn draw_messages(
     frame.render_widget(paragraph, area);
 
     // Now render images over their placeholder regions
-    // Images will be clipped (not scaled) if they don't fully fit
+    // Images will be clipped at the bottom if they don't fully fit
     let centered = app.centered_mode();
-    for (screen_y, hash, render_height, clip_top) in image_regions {
+    for (screen_y, hash, height) in image_regions {
         let image_area = Rect {
             x: area.x,
             y: area.y + screen_y as u16,
             width: area.width,
-            height: render_height,
+            height: height.min(area.height.saturating_sub(screen_y as u16)),
         };
-        super::mermaid::render_image_widget_clipped(
-            hash,
-            image_area,
-            frame.buffer_mut(),
-            centered,
-            clip_top,
-        );
+        super::mermaid::render_image_widget(hash, image_area, frame.buffer_mut(), centered);
     }
 
     // Draw right bar for visible user lines
