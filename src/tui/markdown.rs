@@ -545,6 +545,48 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
         }
     }
 
+    // Handle incomplete code block (streaming case)
+    // If we're still inside a code block, render what we have so far
+    if in_code_block && !code_block_content.is_empty() {
+        let is_mermaid = code_block_lang
+            .as_ref()
+            .map(|l| mermaid::is_mermaid_lang(l))
+            .unwrap_or(false);
+
+        if is_mermaid {
+            // For mermaid, show "rendering..." placeholder while streaming
+            let dim = Style::default().fg(DIM_COLOR);
+            lines.push(Line::from(Span::styled("┌─ mermaid (streaming...) ", dim)));
+            // Show first few lines of the diagram source
+            for source_line in code_block_content.lines().take(5) {
+                lines.push(Line::from(vec![
+                    Span::styled("│ ", dim),
+                    Span::styled(source_line.to_string(), Style::default().fg(CODE_FG)),
+                ]));
+            }
+            if code_block_content.lines().count() > 5 {
+                lines.push(Line::from(Span::styled("│ ...", dim)));
+            }
+            lines.push(Line::from(Span::styled("└─", dim)));
+        } else {
+            // Regular code block - render what we have
+            let lang_str = code_block_lang.as_deref().unwrap_or("");
+            let header = format!("┌─ {} (streaming...)", if lang_str.is_empty() { "code" } else { lang_str });
+            lines.push(Line::from(Span::styled(header, Style::default().fg(DIM_COLOR))));
+
+            // Render code with syntax highlighting
+            let highlighted = highlight_code(&code_block_content, code_block_lang.as_deref());
+            for line in highlighted {
+                let mut prefixed = vec![Span::styled("│ ", Style::default().fg(DIM_COLOR))];
+                prefixed.extend(line.spans);
+                lines.push(Line::from(prefixed));
+            }
+            // Show cursor to indicate more content coming
+            lines.push(Line::from(Span::styled("│ ▌", Style::default().fg(DIM_COLOR))));
+            lines.push(Line::from(Span::styled("└─", Style::default().fg(DIM_COLOR))));
+        }
+    }
+
     // Flush remaining spans
     if !current_spans.is_empty() {
         lines.push(Line::from(current_spans));
