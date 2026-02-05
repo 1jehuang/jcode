@@ -1,6 +1,7 @@
 #![allow(unused_assignments)]
 #![allow(unused_assignments)]
 
+use crate::build;
 use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
 use crate::cache_tracker::CacheTracker;
 use crate::compaction::CompactionEvent;
@@ -11,14 +12,16 @@ use crate::message::{
 };
 use crate::protocol::{HistoryMessage, ServerEvent};
 use crate::provider::{NativeToolResult, Provider};
-use crate::session::{Session, StoredMessage};
+use crate::session::{EnvSnapshot, GitState, Session, StoredMessage};
 use crate::skill::SkillRegistry;
 use crate::tool::{Registry, ToolContext};
 use anyhow::Result;
+use chrono::Utc;
 use futures::StreamExt;
 use std::collections::HashSet;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{broadcast, mpsc};
@@ -86,6 +89,7 @@ impl Agent {
         };
         agent.session.model = Some(agent.provider.model());
         agent.seed_compaction_from_session();
+        agent.log_env_snapshot("create");
         agent
     }
 
@@ -121,6 +125,7 @@ impl Agent {
             agent.session.model = Some(agent.provider.model());
         }
         agent.seed_compaction_from_session();
+        agent.log_env_snapshot("attach");
         agent
     }
 
@@ -303,8 +308,50 @@ impl Agent {
         self.pending_alerts
             .iter()
             .take(10)
-            .map(|s| if s.len() > 100 { format!("{}...", &s[..100]) } else { s.clone() })
+            .map(|s| {
+                if s.len() > 100 {
+                    format!("{}...", &s[..100])
+                } else {
+                    s.clone()
+                }
+            })
             .collect()
+    }
+
+    /// Get comprehensive debug info about agent internal state
+    pub fn debug_info(&self) -> serde_json::Value {
+        serde_json::json!({
+            "provider": self.provider.name(),
+            "model": self.provider.model(),
+            "provider_session_id": self.provider_session_id,
+            "last_upstream_provider": self.last_upstream_provider,
+            "active_skill": self.active_skill,
+            "allowed_tools": self.allowed_tools,
+            "session": {
+                "id": self.session.id,
+                "is_canary": self.session.is_canary,
+                "model": self.session.model,
+                "working_dir": self.session.working_dir,
+                "message_count": self.session.messages.len(),
+            },
+            "interrupts": {
+                "soft_interrupt_count": self.soft_interrupt_count(),
+                "has_urgent": self.has_urgent_interrupt(),
+                "pending_alert_count": self.pending_alert_count(),
+                "soft_interrupts": self.soft_interrupts_preview(),
+                "pending_alerts": self.pending_alerts_preview(),
+            },
+            "cache_tracker": {
+                "turn_count": self.cache_tracker.turn_count(),
+                "had_violation": self.cache_tracker.had_violation(),
+            },
+            "token_usage": {
+                "input": self.last_usage.input_tokens,
+                "output": self.last_usage.output_tokens,
+                "cache_read": self.last_usage.cache_read_input_tokens,
+                "cache_write": self.last_usage.cache_creation_input_tokens,
+            },
+        })
     }
 
     /// Get soft interrupt previews (for debug visibility)
@@ -370,6 +417,54 @@ impl Agent {
     fn set_log_context(&self) {
         logging::set_session(&self.session.id);
         logging::set_provider_info(self.provider.name(), &self.provider.model());
+    }
+
+    /// Record a lightweight environment snapshot for post-mortem debugging
+    fn log_env_snapshot(&mut self, reason: &str) {
+        let snapshot = self.build_env_snapshot(reason);
+        self.session.record_env_snapshot(snapshot.clone());
+        let _ = self.session.save();
+        if let Ok(json) = serde_json::to_string(&snapshot) {
+            logging::info(&format!("ENV_SNAPSHOT {}", json));
+        } else {
+            logging::info("ENV_SNAPSHOT {}");
+        }
+    }
+
+    fn build_env_snapshot(&self, reason: &str) -> EnvSnapshot {
+        let (jcode_git_hash, jcode_git_dirty) = if let Some(repo_dir) = build::get_repo_dir() {
+            (
+                build::current_git_hash(&repo_dir).ok(),
+                build::is_working_tree_dirty(&repo_dir).ok(),
+            )
+        } else {
+            (None, None)
+        };
+
+        let working_dir = self.session.working_dir.clone();
+        let working_git = working_dir
+            .as_deref()
+            .and_then(|dir| git_state_for_dir(Path::new(dir)));
+
+        EnvSnapshot {
+            captured_at: Utc::now(),
+            reason: reason.to_string(),
+            session_id: self.session.id.clone(),
+            working_dir,
+            provider: self.provider.name().to_string(),
+            model: self.provider.model().to_string(),
+            jcode_version: env!("JCODE_VERSION").to_string(),
+            jcode_git_hash,
+            jcode_git_dirty,
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            pid: std::process::id(),
+            is_selfdev: self.session.is_self_dev(),
+            is_debug: self.session.is_debug,
+            is_canary: self.session.is_canary,
+            testing_build: self.session.testing_build.clone(),
+            working_git,
+        }
     }
 
     pub fn message_count(&self) -> usize {
@@ -459,7 +554,7 @@ impl Agent {
     pub fn set_model(&mut self, model: &str) -> Result<()> {
         self.provider.set_model(model)?;
         self.session.model = Some(self.provider.model());
-        let _ = self.session.save();
+        self.log_env_snapshot("set_model");
         Ok(())
     }
 
@@ -470,8 +565,11 @@ impl Agent {
 
     /// Set the working directory for this session
     pub fn set_working_dir(&mut self, dir: &str) {
+        if self.session.working_dir.as_deref() == Some(dir) {
+            return;
+        }
         self.session.working_dir = Some(dir.to_string());
-        let _ = self.session.save();
+        self.log_env_snapshot("working_dir");
     }
 
     /// Get the working directory for this session
@@ -709,6 +807,11 @@ impl Agent {
         self.registry.tool_names().await
     }
 
+    /// Get full tool definitions for debug introspection
+    pub async fn tool_definitions_for_debug(&self) -> Vec<crate::message::ToolDefinition> {
+        self.tool_definitions().await
+    }
+
     pub async fn execute_tool(
         &self,
         name: &str,
@@ -768,6 +871,7 @@ impl Agent {
             self.session.messages.len()
         ));
         self.seed_compaction_from_session();
+        self.log_env_snapshot("resume");
         logging::info(&format!(
             "Session restored: {} messages in session",
             self.session.messages.len()
@@ -2484,4 +2588,30 @@ fn trace_enabled() -> bool {
         }
         Err(_) => false,
     }
+}
+
+fn git_state_for_dir(dir: &Path) -> Option<GitState> {
+    let root = git_output(dir, &["rev-parse", "--show-toplevel"])?;
+    let head = git_output(dir, &["rev-parse", "HEAD"]);
+    let branch = git_output(dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let dirty = git_output(dir, &["status", "--porcelain"]).map(|out| !out.is_empty());
+
+    Some(GitState {
+        root,
+        head,
+        branch,
+        dirty,
+    })
+}
+
+fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

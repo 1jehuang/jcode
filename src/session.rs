@@ -152,6 +152,43 @@ pub struct Session {
     /// Whether this is a debug/test session (created via debug socket)
     #[serde(default)]
     pub is_debug: bool,
+    /// Environment snapshots for post-mortem debugging
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_snapshots: Vec<EnvSnapshot>,
+}
+
+/// Max number of environment snapshots to retain per session
+const MAX_ENV_SNAPSHOTS: usize = 8;
+
+/// Minimal git state for reproducibility
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitState {
+    pub root: String,
+    pub head: Option<String>,
+    pub branch: Option<String>,
+    pub dirty: Option<bool>,
+}
+
+/// Environment snapshot captured for a session
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvSnapshot {
+    pub captured_at: DateTime<Utc>,
+    pub reason: String,
+    pub session_id: String,
+    pub working_dir: Option<String>,
+    pub provider: String,
+    pub model: String,
+    pub jcode_version: String,
+    pub jcode_git_hash: Option<String>,
+    pub jcode_git_dirty: Option<bool>,
+    pub os: String,
+    pub arch: String,
+    pub pid: u32,
+    pub is_selfdev: bool,
+    pub is_debug: bool,
+    pub is_canary: bool,
+    pub testing_build: Option<String>,
+    pub working_git: Option<GitState>,
 }
 
 impl Session {
@@ -182,6 +219,7 @@ impl Session {
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
             is_debug: false,
+            env_snapshots: Vec::new(),
         }
     }
 
@@ -207,12 +245,22 @@ impl Session {
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
             is_debug: false,
+            env_snapshots: Vec::new(),
         }
     }
 
     /// Mark this session as a debug/test session
     pub fn set_debug(&mut self, is_debug: bool) {
         self.is_debug = is_debug;
+    }
+
+    /// Record an environment snapshot for post-mortem debugging
+    pub fn record_env_snapshot(&mut self, snapshot: EnvSnapshot) {
+        self.env_snapshots.push(snapshot);
+        if self.env_snapshots.len() > MAX_ENV_SNAPSHOTS {
+            let excess = self.env_snapshots.len() - MAX_ENV_SNAPSHOTS;
+            self.env_snapshots.drain(0..excess);
+        }
     }
 
     /// Get the display name for this session (short memorable name if available)
