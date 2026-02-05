@@ -956,10 +956,7 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         return area.height;
     }
 
-    // Track render state for debugging (but don't skip - StatefulImage needs render every frame)
-    let current_state = LastRenderState { area, centered };
-
-    // Get cached image info (blocking lock for consistency)
+    // Get cached image info
     let (img_width, img_height, path) = {
         let cache = RENDER_CACHE.lock().unwrap();
         if let Some(cached) = cache.get(hash) {
@@ -992,47 +989,23 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         image_area
     };
 
-    // Always use Crop mode - this prevents rescaling during scroll
-    // The image is rendered at native size and clipped to fit the area
-
-    // Try to render from existing state (blocking lock)
-    let render_success = {
+    // Try to render from existing state - single lock for the whole operation
+    {
         let mut state = IMAGE_STATE.lock().unwrap();
         if let Some(img_state) = state.get_mut(&hash) {
+            // Always use Crop mode - no rescaling during scroll
             let widget = StatefulImage::default().resize(Resize::Crop(None));
             widget.render(render_area, buf, &mut img_state.protocol);
             img_state.last_area = Some(render_area);
-
-            if let Ok(mut debug) = MERMAID_DEBUG.lock() {
-                debug.stats.image_state_hits += 1;
-            }
-            true
-        } else {
-            false
+            return area.height;
         }
-    };
-
-    if render_success {
-        // Update last render state
-        if let Ok(mut last_render) = LAST_RENDER.lock() {
-            last_render.insert(hash, current_state);
-        }
-        return area.height;
     }
 
-    // State miss - need to load image
-    if let Ok(mut debug) = MERMAID_DEBUG.lock() {
-        debug.stats.image_state_misses += 1;
-    }
-
-    // Try to load from cache
+    // State miss - need to load image from cache
     if let Some(path) = path {
         if let Some(Some(picker)) = PICKER.get() {
             if let Ok(img) = image::open(&path) {
                 let protocol = picker.new_resize_protocol(img);
-
-                // Always use Crop mode - stored for consistency
-                let resize_mode = ResizeMode::Crop;
 
                 let mut state = IMAGE_STATE.lock().unwrap();
                 state.insert(
@@ -1040,18 +1013,13 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
                     ImageState {
                         protocol,
                         last_area: Some(render_area),
-                        resize_mode,
+                        resize_mode: ResizeMode::Crop,
                     },
                 );
 
                 if let Some(img_state) = state.get_mut(&hash) {
                     let widget = StatefulImage::default().resize(Resize::Crop(None));
                     widget.render(render_area, buf, &mut img_state.protocol);
-
-                    // Update last render state
-                    if let Ok(mut last_render) = LAST_RENDER.lock() {
-                        last_render.insert(hash, current_state);
-                    }
                     return area.height;
                 }
             }
