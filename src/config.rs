@@ -60,6 +60,19 @@ impl Default for KeybindingsConfig {
     }
 }
 
+/// How to display mermaid diagrams
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagramDisplayMode {
+    /// Don't show diagrams in dedicated widgets (only inline in messages)
+    None,
+    /// Show diagrams in info widget margins (opportunistic, if space available)
+    Margin,
+    /// Show diagrams in a dedicated pinned pane (forces space allocation)
+    #[default]
+    Pinned,
+}
+
 /// Display/UI configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -76,6 +89,8 @@ pub struct DisplayConfig {
     pub centered: bool,
     /// Show thinking/reasoning content by default (default: false)
     pub show_thinking: bool,
+    /// How to display mermaid diagrams (none/margin/pinned, default: pinned)
+    pub diagram_mode: DiagramDisplayMode,
 }
 
 impl Default for DisplayConfig {
@@ -87,6 +102,7 @@ impl Default for DisplayConfig {
             debug_socket: false,
             centered: true,
             show_thinking: false,
+            diagram_mode: DiagramDisplayMode::default(),
         }
     }
 }

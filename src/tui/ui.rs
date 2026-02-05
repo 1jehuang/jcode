@@ -1140,12 +1140,17 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     }
     let draw_start = Instant::now();
 
-    // Check if we have diagrams to show in pinned mode
+    // Check diagram display mode and get active diagrams
+    let diagram_mode = app.diagram_mode();
     let diagrams = super::mermaid::get_active_diagrams();
-    let pinned_diagram = diagrams.first().cloned();
+    let pinned_diagram = if diagram_mode == crate::config::DiagramDisplayMode::Pinned {
+        diagrams.first().cloned()
+    } else {
+        None
+    };
 
-    // Split messages area for pinned diagram if we have one
-    let (messages_area, diagram_area) = if let Some(ref diagram) = pinned_diagram {
+    // Split messages area for pinned diagram if we have one in pinned mode
+    let (messages_area, diagram_area) = if let Some(ref _diagram) = pinned_diagram {
         // Calculate diagram width - aim for ~40% of screen, min 30 cols
         let diagram_width = (chunks[0].width * 2 / 5).max(30).min(chunks[0].width / 2);
         let messages_width = chunks[0].width.saturating_sub(diagram_width);
