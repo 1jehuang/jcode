@@ -147,7 +147,7 @@ pub trait Provider: Send + Sync {
 }
 
 /// Available models (shown in /model list)
-pub const ALL_CLAUDE_MODELS: &[&str] = &["claude-opus-4-5-20251101"];
+pub const ALL_CLAUDE_MODELS: &[&str] = &["claude-opus-4-6", "claude-opus-4-5-20251101"];
 
 pub const ALL_OPENAI_MODELS: &[&str] = &[
     "codex-mini-latest",
@@ -190,6 +190,10 @@ pub fn context_limit_for_model(model: &str) -> Option<usize> {
         || model.starts_with("gpt-5")
     {
         return Some(400_000);
+    }
+
+    if model.starts_with("claude-opus-4-6") || model.starts_with("claude-opus-4.6") {
+        return Some(200_000);
     }
 
     if model.starts_with("claude-opus-4-5") || model.starts_with("claude-opus-4.5") {
