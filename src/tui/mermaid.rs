@@ -752,6 +752,8 @@ pub fn render_mermaid_sized(content: &str, terminal_width: Option<u16>) -> Rende
                     state.stats.cache_hits += 1;
                     state.stats.last_hash = Some(format!("{:016x}", hash));
                 }
+                // Register as active diagram (for pinned widget display)
+                register_active_diagram(hash, cached.width, cached.height, None);
                 return RenderResult::Image {
                     hash,
                     path: cached.path.clone(),
