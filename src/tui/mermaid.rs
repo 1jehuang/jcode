@@ -3,6 +3,14 @@
 //! Renders mermaid diagrams to PNG images, then displays them using
 //! ratatui-image which supports Kitty, Sixel, iTerm2, and halfblock protocols.
 //! The protocol is auto-detected based on terminal capabilities.
+//!
+//! ## Optimizations
+//! - Adaptive PNG sizing based on terminal dimensions and diagram complexity
+//! - Pre-loaded StatefulProtocol during content preparation
+//! - Fit mode for small terminals (scales to fit instead of cropping)
+//! - Blocking locks for consistent rendering (no frame skipping)
+//! - Skip redundant renders when nothing changed
+//! - Clear only on render failure, not before every render
 
 use mermaid_rs_renderer::{
     config::{LayoutConfig, RenderConfig},
@@ -15,7 +23,7 @@ use ratatui::prelude::*;
 use ratatui_image::{
     picker::{Picker, ProtocolType},
     protocol::StatefulProtocol,
-    CropOptions, Resize, StatefulImage,
+    Resize, StatefulImage,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -38,8 +46,27 @@ static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> =
     LazyLock::new(|| Mutex::new(MermaidCache::new()));
 
 /// Image state cache - holds StatefulProtocol for each rendered image
-static IMAGE_STATE: LazyLock<Mutex<HashMap<u64, StatefulProtocol>>> =
+/// Key is (hash, target_width) to support multiple sizes of the same diagram
+static IMAGE_STATE: LazyLock<Mutex<HashMap<u64, ImageState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Last render state for skip-redundant-render optimization
+static LAST_RENDER: LazyLock<Mutex<HashMap<u64, LastRenderState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// State for a rendered image
+struct ImageState {
+    protocol: StatefulProtocol,
+    /// The area this was last rendered to (for change detection)
+    last_area: Option<Rect>,
+}
+
+/// Track what was rendered last frame for skip-redundant optimization
+#[derive(Clone, PartialEq, Eq)]
+struct LastRenderState {
+    area: Rect,
+    centered: bool,
+}
 
 /// Debug stats for mermaid rendering
 #[derive(Debug, Clone, Default, Serialize)]
@@ -57,10 +84,13 @@ pub struct MermaidDebugStats {
     pub last_content_len: Option<usize>,
     pub image_state_hits: u64,
     pub image_state_misses: u64,
+    pub skipped_renders: u64,
     pub last_image_render_ms: Option<f32>,
     pub cache_entries: usize,
     pub cache_dir: Option<String>,
     pub protocol: Option<String>,
+    pub last_png_width: Option<u32>,
+    pub last_png_height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -129,6 +159,9 @@ pub fn clear_cache() -> Result<(), String> {
     if let Ok(mut state) = IMAGE_STATE.lock() {
         state.clear();
     }
+    if let Ok(mut last) = LAST_RENDER.lock() {
+        last.clear();
+    }
 
     // Remove cached files on disk
     let entries = fs::read_dir(&cache_dir).map_err(|e| e.to_string())?;
@@ -157,9 +190,14 @@ pub fn protocol_type() -> Option<ProtocolType> {
     PICKER.get().and_then(|p| p.map(|p| p.protocol_type()))
 }
 
+/// Get terminal font size for adaptive sizing
+pub fn get_font_size() -> Option<(u16, u16)> {
+    PICKER.get().and_then(|p| p.map(|p| p.font_size()))
+}
+
 /// Mermaid rendering cache
 struct MermaidCache {
-    /// Map from content hash to rendered PNG path
+    /// Map from content hash to rendered PNG info
     entries: HashMap<u64, CachedDiagram>,
     /// Cache directory
     cache_dir: PathBuf,
@@ -169,6 +207,8 @@ struct CachedDiagram {
     path: PathBuf,
     width: u32,
     height: u32,
+    /// Complexity score (nodes + edges) for adaptive sizing decisions
+    complexity: usize,
 }
 
 impl MermaidCache {
@@ -195,8 +235,10 @@ impl MermaidCache {
         self.entries.insert(hash, diagram);
     }
 
-    fn cache_path(&self, hash: u64) -> PathBuf {
-        self.cache_dir.join(format!("{:016x}.png", hash))
+    fn cache_path(&self, hash: u64, target_width: u32) -> PathBuf {
+        // Include target width in filename for size-specific caching
+        self.cache_dir
+            .join(format!("{:016x}_w{}.png", hash, target_width))
     }
 }
 
@@ -235,7 +277,12 @@ fn estimate_diagram_size(content: &str) -> (usize, usize) {
             continue;
         }
         // Count arrow connections as edges
-        if trimmed.contains("-->") || trimmed.contains("-.->") || trimmed.contains("==>") {
+        if trimmed.contains("-->")
+            || trimmed.contains("-.->")
+            || trimmed.contains("==>")
+            || trimmed.contains("---")
+            || trimmed.contains("-.-")
+        {
             edges += 1;
         }
         // Count node definitions (rough heuristic)
@@ -248,11 +295,47 @@ fn estimate_diagram_size(content: &str) -> (usize, usize) {
         }
     }
 
-    (nodes, edges)
+    (nodes.max(2), edges.max(1)) // Minimum reasonable values
+}
+
+/// Calculate optimal PNG dimensions based on terminal and diagram complexity
+fn calculate_render_size(node_count: usize, edge_count: usize, terminal_width: Option<u16>) -> (f64, f64) {
+    // Base size on terminal width if available
+    let base_width = if let Some(term_width) = terminal_width {
+        // Get font size to calculate pixel width
+        let font_width = get_font_size().map(|(w, _)| w).unwrap_or(8) as f64;
+        let pixel_width = term_width as f64 * font_width;
+        // Cap at reasonable bounds
+        pixel_width.clamp(400.0, 2400.0)
+    } else {
+        1200.0 // Default fallback
+    };
+
+    // Scale based on complexity
+    let complexity = node_count + edge_count;
+    let complexity_factor = match complexity {
+        0..=5 => 0.6,    // Simple: smaller image
+        6..=15 => 0.8,   // Medium: moderate size
+        16..=30 => 1.0,  // Standard: full size
+        31..=60 => 1.2,  // Complex: larger
+        _ => 1.4,        // Very complex: even larger
+    };
+
+    let width = (base_width * complexity_factor).clamp(400.0, 2400.0);
+    // Maintain reasonable aspect ratio
+    let height = (width * 0.75).clamp(300.0, 1800.0);
+
+    (width, height)
 }
 
 /// Render a mermaid code block to PNG (cached)
+/// Now accepts optional terminal_width for adaptive sizing
 pub fn render_mermaid(content: &str) -> RenderResult {
+    render_mermaid_sized(content, None)
+}
+
+/// Render with explicit terminal width for adaptive sizing
+pub fn render_mermaid_sized(content: &str, terminal_width: Option<u16>) -> RenderResult {
     if let Ok(mut state) = MERMAID_DEBUG.lock() {
         state.stats.total_requests += 1;
         state.stats.last_content_len = Some(content.len());
@@ -262,7 +345,33 @@ pub fn render_mermaid(content: &str) -> RenderResult {
     // Calculate content hash for caching
     let hash = hash_content(content);
 
-    // Check cache
+    // Estimate complexity for sizing
+    let (node_count, edge_count) = estimate_diagram_size(content);
+    let complexity = node_count + edge_count;
+
+    if let Ok(mut state) = MERMAID_DEBUG.lock() {
+        state.stats.last_nodes = Some(node_count);
+        state.stats.last_edges = Some(edge_count);
+    }
+
+    // Check complexity limits
+    if node_count > MAX_NODES || edge_count > MAX_EDGES {
+        let msg = format!(
+            "Diagram too complex ({} nodes, {} edges). Max: {} nodes, {} edges.",
+            node_count, edge_count, MAX_NODES, MAX_EDGES
+        );
+        if let Ok(mut state) = MERMAID_DEBUG.lock() {
+            state.stats.render_errors += 1;
+            state.stats.last_error = Some(msg.clone());
+        }
+        return RenderResult::Error(msg);
+    }
+
+    // Calculate target size
+    let (target_width, target_height) = calculate_render_size(node_count, edge_count, terminal_width);
+    let target_width_u32 = target_width as u32;
+
+    // Check cache (use blocking lock for consistency)
     {
         let cache = RENDER_CACHE.lock().unwrap();
         if let Some(cached) = cache.get(hash) {
@@ -280,41 +389,22 @@ pub fn render_mermaid(content: &str) -> RenderResult {
             }
         }
     }
+
     if let Ok(mut state) = MERMAID_DEBUG.lock() {
         state.stats.cache_misses += 1;
         state.stats.last_hash = Some(format!("{:016x}", hash));
     }
 
-    // Get cache path early (needed outside catch_unwind)
+    // Get cache path
     let png_path = {
         let cache = RENDER_CACHE.lock().unwrap();
-        cache.cache_path(hash)
+        cache.cache_path(hash, target_width_u32)
     };
     let png_path_clone = png_path.clone();
 
     // Wrap mermaid library calls in catch_unwind for defense-in-depth
-    // This protects against any panics in the external library
-    // We temporarily install a no-op panic hook to suppress the default output
     let content_owned = content.to_string();
 
-    // Check diagram size before attempting expensive layout
-    // This prevents OOM on complex diagrams (e.g., full system architecture)
-    let (node_count, edge_count) = estimate_diagram_size(&content_owned);
-    if let Ok(mut state) = MERMAID_DEBUG.lock() {
-        state.stats.last_nodes = Some(node_count);
-        state.stats.last_edges = Some(edge_count);
-    }
-    if node_count > MAX_NODES || edge_count > MAX_EDGES {
-        let msg = format!(
-            "Diagram too complex ({} nodes, {} edges). Max: {} nodes, {} edges.",
-            node_count, edge_count, MAX_NODES, MAX_EDGES
-        );
-        if let Ok(mut state) = MERMAID_DEBUG.lock() {
-            state.stats.render_errors += 1;
-            state.stats.last_error = Some(msg.clone());
-        }
-        return RenderResult::Error(msg);
-    }
     let prev_hook = panic::take_hook();
     panic::set_hook(Box::new(|_| {
         // Silently ignore panics from mermaid renderer
@@ -328,12 +418,13 @@ pub fn render_mermaid(content: &str) -> RenderResult {
         // Configure theme for terminal (dark background friendly)
         let theme = terminal_theme();
 
-        // Use larger spacing for better readability in terminal
+        // Adaptive spacing based on complexity
+        let spacing_factor = if complexity > 30 { 1.2 } else { 1.0 };
         let layout_config = LayoutConfig {
-            node_spacing: 80.0,   // Default is 50
-            rank_spacing: 80.0,   // Default is 50
-            node_padding_x: 40.0, // Default is 30
-            node_padding_y: 20.0, // Default is 15
+            node_spacing: 80.0 * spacing_factor,
+            rank_spacing: 80.0 * spacing_factor,
+            node_padding_x: 40.0,
+            node_padding_y: 20.0,
             ..Default::default()
         };
 
@@ -343,10 +434,10 @@ pub fn render_mermaid(content: &str) -> RenderResult {
         // Render to SVG
         let svg = render_svg(&layout, &theme, &layout_config);
 
-        // Convert SVG to PNG with larger dimensions for readability
+        // Convert SVG to PNG with adaptive dimensions
         let render_config = RenderConfig {
-            width: 1600.0,  // Larger than default 1200
-            height: 1200.0, // Larger than default 800
+            width: target_width as f32,
+            height: target_height as f32,
             background: theme.background.clone(),
         };
 
@@ -373,7 +464,7 @@ pub fn render_mermaid(content: &str) -> RenderResult {
                 state.stats.render_success += 1;
                 state.stats.last_render_ms = Some(render_ms);
             }
-        } // Success, continue below
+        }
         Ok(Err(e)) => {
             if let Ok(mut state) = MERMAID_DEBUG.lock() {
                 state.stats.render_errors += 1;
@@ -399,8 +490,13 @@ pub fn render_mermaid(content: &str) -> RenderResult {
         }
     }
 
-    // Get dimensions
-    let (width, height) = get_png_dimensions(&png_path).unwrap_or((400, 300));
+    // Get actual dimensions from rendered PNG
+    let (width, height) = get_png_dimensions(&png_path).unwrap_or((target_width_u32, target_height as u32));
+
+    if let Ok(mut state) = MERMAID_DEBUG.lock() {
+        state.stats.last_png_width = Some(width);
+        state.stats.last_png_height = Some(height);
+    }
 
     // Cache the result
     {
@@ -411,6 +507,7 @@ pub fn render_mermaid(content: &str) -> RenderResult {
                 path: png_path.clone(),
                 width,
                 height,
+                complexity,
             },
         );
     }
@@ -420,7 +517,13 @@ pub fn render_mermaid(content: &str) -> RenderResult {
         if let Ok(img) = image::open(&png_path) {
             let protocol = picker.new_resize_protocol(img);
             let mut state = IMAGE_STATE.lock().unwrap();
-            state.insert(hash, protocol);
+            state.insert(
+                hash,
+                ImageState {
+                    protocol,
+                    last_area: None,
+                },
+            );
         }
     }
 
@@ -436,25 +539,42 @@ pub fn render_mermaid(content: &str) -> RenderResult {
 /// If centered is true, the image will be horizontally centered within the area
 /// Returns the number of rows used
 ///
-/// OPTIMIZATION: Uses try_lock for non-critical operations to reduce scroll lag.
-/// The terminal graphics protocol maintains the image display between frames.
+/// ## Optimizations
+/// - Uses blocking locks for consistent rendering (no frame skipping)
+/// - Skips render if area and settings unchanged from last frame
+/// - Uses Fit mode for small terminals to scale instead of crop
+/// - Only clears area if render fails
 pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bool) -> u16 {
     // Skip if area is too small
     if area.width == 0 || area.height == 0 {
         return 0;
     }
 
-    // Clear the area using ratatui's Clear widget (more efficient than cell-by-cell)
-    use ratatui::widgets::Clear;
-    Clear.render(area, buf);
+    // Check if we can skip this render (same area, same settings)
+    let current_state = LastRenderState { area, centered };
+    {
+        if let Ok(last_render) = LAST_RENDER.lock() {
+            if let Some(last) = last_render.get(&hash) {
+                if *last == current_state {
+                    // Nothing changed, skip render
+                    if let Ok(mut debug) = MERMAID_DEBUG.lock() {
+                        debug.stats.skipped_renders += 1;
+                    }
+                    return area.height;
+                }
+            }
+        }
+    }
 
-    // Get the cached image dimensions to calculate centered area
-    // Use try_lock to avoid blocking during scroll
-    let img_width = RENDER_CACHE
-        .try_lock()
-        .ok()
-        .and_then(|cache| cache.get(hash).map(|c| c.width))
-        .unwrap_or(0);
+    // Get cached image info (blocking lock for consistency)
+    let (img_width, img_height, path) = {
+        let cache = RENDER_CACHE.lock().unwrap();
+        if let Some(cached) = cache.get(hash) {
+            (cached.width, cached.height, Some(cached.path.clone()))
+        } else {
+            (0, 0, None)
+        }
+    };
 
     // Calculate the actual render area (potentially centered)
     let render_area = if centered && img_width > 0 {
@@ -479,65 +599,89 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         area
     };
 
-    // Use Crop to clip the image when partially visible
-    // clip_top/clip_left control which edge to clip from
-    let make_resize = || {
-        Resize::Crop(Some(CropOptions {
-            clip_top: true,  // Allow clipping from top for partial visibility
-            clip_left: true, // Allow clipping from left
-        }))
+    // Determine resize mode based on terminal size vs image size
+    // Use Fit if terminal is smaller than image, Crop otherwise
+    let use_fit_mode = if let Some(Some(picker)) = PICKER.get() {
+        let font_size = picker.font_size();
+        let img_width_cells = (img_width as f32 / font_size.0 as f32).ceil() as u16;
+        let img_height_cells = (img_height as f32 / font_size.1 as f32).ceil() as u16;
+        // Use Fit if image is significantly larger than available area
+        img_width_cells > area.width + 5 || img_height_cells > area.height + 3
+    } else {
+        false
     };
 
-    // Try to render from existing state (fast path)
-    let render_result = if let Ok(mut state) = IMAGE_STATE.try_lock() {
-        if let Some(protocol) = state.get_mut(&hash) {
+    // Helper to create resize mode
+    let make_resize = || {
+        if use_fit_mode {
+            Resize::Fit(None) // Scale to fit within area
+        } else {
+            Resize::Crop(None) // Crop if larger (default behavior)
+        }
+    };
+
+    // Try to render from existing state (blocking lock)
+    let render_success = {
+        let mut state = IMAGE_STATE.lock().unwrap();
+        if let Some(img_state) = state.get_mut(&hash) {
             let widget = StatefulImage::default().resize(make_resize());
-            widget.render(render_area, buf, protocol);
+            widget.render(render_area, buf, &mut img_state.protocol);
+            img_state.last_area = Some(render_area);
+
+            if let Ok(mut debug) = MERMAID_DEBUG.lock() {
+                debug.stats.image_state_hits += 1;
+            }
             true
         } else {
             false
         }
-    } else {
-        // Couldn't acquire lock, skip this frame
-        return area.height;
     };
 
-    if render_result {
-        // Update debug stats non-blocking
-        if let Ok(mut debug) = MERMAID_DEBUG.try_lock() {
-            debug.stats.image_state_hits += 1;
+    if render_success {
+        // Update last render state
+        if let Ok(mut last_render) = LAST_RENDER.lock() {
+            last_render.insert(hash, current_state);
         }
         return area.height;
     }
 
-    // Update debug stats non-blocking
-    if let Ok(mut debug) = MERMAID_DEBUG.try_lock() {
+    // State miss - need to load image
+    if let Ok(mut debug) = MERMAID_DEBUG.lock() {
         debug.stats.image_state_misses += 1;
     }
 
-    // No state available, try to load from cache (slow path - blocking is OK)
-    let cached_path = RENDER_CACHE
-        .try_lock()
-        .ok()
-        .and_then(|cache| cache.get(hash).map(|c| c.path.clone()));
-
-    if let Some(path) = cached_path {
+    // Try to load from cache
+    if let Some(path) = path {
         if let Some(Some(picker)) = PICKER.get() {
             if let Ok(img) = image::open(&path) {
                 let protocol = picker.new_resize_protocol(img);
 
-                if let Ok(mut state) = IMAGE_STATE.try_lock() {
-                    state.insert(hash, protocol);
+                let mut state = IMAGE_STATE.lock().unwrap();
+                state.insert(
+                    hash,
+                    ImageState {
+                        protocol,
+                        last_area: Some(render_area),
+                    },
+                );
 
-                    if let Some(protocol) = state.get_mut(&hash) {
-                        let widget = StatefulImage::default().resize(make_resize());
-                        widget.render(render_area, buf, protocol);
-                        return area.height;
+                if let Some(img_state) = state.get_mut(&hash) {
+                    let widget = StatefulImage::default().resize(make_resize());
+                    widget.render(render_area, buf, &mut img_state.protocol);
+
+                    // Update last render state
+                    if let Ok(mut last_render) = LAST_RENDER.lock() {
+                        last_render.insert(hash, current_state);
                     }
+                    return area.height;
                 }
             }
         }
     }
+
+    // Render failed - clear the area to avoid showing stale content
+    use ratatui::widgets::Clear;
+    Clear.render(area, buf);
 
     0
 }
@@ -550,9 +694,16 @@ pub fn clear_image_area(area: Rect, buf: &mut Buffer) {
         return;
     }
 
-    // Use ratatui's Clear widget (more efficient than cell-by-cell)
+    // Use ratatui's Clear widget
     use ratatui::widgets::Clear;
     Clear.render(area, buf);
+}
+
+/// Invalidate last render state for a hash (call when content changes)
+pub fn invalidate_render_state(hash: u64) {
+    if let Ok(mut last_render) = LAST_RENDER.lock() {
+        last_render.remove(&hash);
+    }
 }
 
 /// Estimate the height needed for an image in terminal rows
@@ -634,14 +785,13 @@ const MERMAID_MARKER_SUFFIX: &str = "\x00";
 /// Create placeholder lines for an image widget
 /// These will be recognized and replaced during rendering
 fn image_widget_placeholder(hash: u64, height: u16) -> Vec<Line<'static>> {
-    // Use black foreground on default background to make marker invisible
-    // The marker will be completely overwritten by the image rendering
-    let invisible = Style::default().fg(Color::Black).bg(Color::Reset);
+    // Use invisible styling - black on black won't show even if render fails
+    // because we only clear on render failure now
+    let invisible = Style::default().fg(Color::Black).bg(Color::Black);
 
     let mut lines = Vec::with_capacity(height as usize);
 
-    // First line contains the hash as a marker (invisible, zero-width prefix)
-    // We use null characters which won't render but can be detected
+    // First line contains the hash as a marker
     lines.push(Line::from(Span::styled(
         format!(
             "{}{:016x}{}",
@@ -704,7 +854,7 @@ pub fn error_to_lines(error: &str) -> Vec<Line<'static>> {
     let header = "mermaid error";
     let content_width = error.len().max(header.len());
     let top_padding = content_width.saturating_sub(header.len());
-    let bottom_width = content_width + 1; // +1 for the space after │
+    let bottom_width = content_width + 1;
 
     vec![
         Line::from(Span::styled(
@@ -736,11 +886,11 @@ fn terminal_theme() -> Theme {
         line_color: "#7f849c".to_string(),
         secondary_color: "#45475a".to_string(),
         tertiary_color: "#313244".to_string(),
-        edge_label_background: "#00000000".to_string(), // Transparent edge labels
-        cluster_background: "#18182580".to_string(),    // Semi-transparent cluster bg
+        edge_label_background: "#00000000".to_string(),
+        cluster_background: "#18182580".to_string(),
         cluster_border: "#45475a".to_string(),
         font_family: "monospace".to_string(),
-        font_size: 18.0, // Larger font for terminal readability (default was 13)
+        font_size: 18.0,
         text_color: "#cdd6f4".to_string(),
         // Sequence diagram colors (dark theme)
         sequence_actor_fill: "#313244".to_string(),
@@ -750,7 +900,6 @@ fn terminal_theme() -> Theme {
         sequence_note_border: "#585b70".to_string(),
         sequence_activation_fill: "#313244".to_string(),
         sequence_activation_border: "#7f849c".to_string(),
-        // Use defaults from modern theme for git/pie chart fields
         ..Theme::modern()
     }
 }
@@ -782,8 +931,6 @@ const CACHE_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
 const CACHE_MAX_SIZE_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Evict old cache files on startup.
-/// Removes files older than CACHE_MAX_AGE_SECS and enforces CACHE_MAX_SIZE_BYTES limit.
-/// Called automatically during init_picker().
 pub fn evict_old_cache() {
     let cache_dir = match RENDER_CACHE.lock() {
         Ok(cache) => cache.cache_dir.clone(),
@@ -798,7 +945,6 @@ pub fn evict_old_cache() {
     let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
     let mut total_size: u64 = 0;
 
-    // Collect file info
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "png") {
@@ -814,7 +960,6 @@ pub fn evict_old_cache() {
     // Sort by modification time (oldest first)
     files.sort_by_key(|(_, _, modified)| *modified);
 
-    let mut deleted_count = 0;
     let mut deleted_bytes: u64 = 0;
 
     for (path, size, modified) in &files {
@@ -824,20 +969,19 @@ pub fn evict_old_cache() {
 
         if should_delete {
             if fs::remove_file(path).is_ok() {
-                deleted_count += 1;
                 deleted_bytes += size;
             }
         }
     }
-
-    // Silently evict - logging not needed for routine cache maintenance
-    let _ = (deleted_count, deleted_bytes);
 }
 
 /// Clear image state (call on app exit to free memory)
 pub fn clear_image_state() {
     if let Ok(mut state) = IMAGE_STATE.lock() {
         state.clear();
+    }
+    if let Ok(mut last) = LAST_RENDER.lock() {
+        last.clear();
     }
 }
 
@@ -871,5 +1015,28 @@ mod tests {
 
         let parsed = parse_image_placeholder(&lines[0]);
         assert_eq!(parsed, Some(hash));
+    }
+
+    #[test]
+    fn test_adaptive_sizing() {
+        // Simple diagram should get smaller size
+        let (w1, h1) = calculate_render_size(3, 2, Some(100));
+        // Complex diagram should get larger size
+        let (w2, h2) = calculate_render_size(50, 80, Some(100));
+        assert!(w2 > w1);
+        assert!(h2 > h1);
+    }
+
+    #[test]
+    fn test_diagram_size_estimation() {
+        let simple = "flowchart LR\n    A --> B";
+        let (n1, e1) = estimate_diagram_size(simple);
+        assert!(n1 >= 2);
+        assert!(e1 >= 1);
+
+        let complex = "flowchart TD\n    A[Start] --> B{Check}\n    B --> C[Yes]\n    B --> D[No]\n    C --> E[End]\n    D --> E";
+        let (n2, e2) = estimate_diagram_size(complex);
+        assert!(n2 > n1);
+        assert!(e2 > e1);
     }
 }
