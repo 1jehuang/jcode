@@ -212,6 +212,61 @@ impl AnthropicProvider {
             ));
         }
 
+        // Validate: check each assistant message with tool_use has matching tool_result in next user message
+        for (i, msg) in merged.iter().enumerate() {
+            if msg.role == "assistant" {
+                let tool_uses: Vec<&String> = msg
+                    .content
+                    .iter()
+                    .filter_map(|b| {
+                        if let ApiContentBlock::ToolUse { id, .. } = b {
+                            Some(id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if !tool_uses.is_empty() {
+                    // Check next message
+                    if let Some(next) = merged.get(i + 1) {
+                        if next.role != "user" {
+                            crate::logging::warn(&format!(
+                                "[anthropic] Message {} has tool_use but next message is {} (should be user)",
+                                i, next.role
+                            ));
+                        } else {
+                            let tool_results: std::collections::HashSet<&String> = next
+                                .content
+                                .iter()
+                                .filter_map(|b| {
+                                    if let ApiContentBlock::ToolResult { tool_use_id, .. } = b {
+                                        Some(tool_use_id)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+
+                            for tu_id in &tool_uses {
+                                if !tool_results.contains(*tu_id) {
+                                    crate::logging::warn(&format!(
+                                        "[anthropic] Message {} has tool_use {} but no matching tool_result in message {}",
+                                        i, tu_id, i + 1
+                                    ));
+                                }
+                            }
+                        }
+                    } else {
+                        crate::logging::warn(&format!(
+                            "[anthropic] Message {} has tool_use but no next message",
+                            i
+                        ));
+                    }
+                }
+            }
+        }
+
         merged
     }
 
