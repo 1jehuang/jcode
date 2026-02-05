@@ -190,7 +190,29 @@ impl AnthropicProvider {
             }
         }
 
-        result
+        // Third pass: merge consecutive messages of the same role
+        // Anthropic API requires strictly alternating user/assistant messages
+        let pre_merge_count = result.len();
+        let mut merged: Vec<ApiMessage> = Vec::new();
+        for msg in result {
+            if let Some(last) = merged.last_mut() {
+                if last.role == msg.role {
+                    // Same role - merge content blocks
+                    last.content.extend(msg.content);
+                    continue;
+                }
+            }
+            merged.push(msg);
+        }
+
+        if merged.len() != pre_merge_count {
+            crate::logging::info(&format!(
+                "[anthropic] Merged {} consecutive same-role messages",
+                pre_merge_count - merged.len()
+            ));
+        }
+
+        merged
     }
 
     /// Convert our ContentBlock to Anthropic API format
