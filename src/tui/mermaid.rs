@@ -444,15 +444,9 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         return 0;
     }
 
-    // Clear the area first to remove any placeholder text
-    // This ensures no marker text shows through if image rendering fails
-    for y in area.y..area.y + area.height {
-        for x in area.x..area.x + area.width {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.reset();
-            }
-        }
-    }
+    // Clear the area using ratatui's Clear widget (more efficient than cell-by-cell)
+    use ratatui::widgets::Clear;
+    Clear.render(area, buf);
 
     // Get the cached image dimensions to calculate centered area
     // Use try_lock to avoid blocking during scroll
@@ -556,14 +550,9 @@ pub fn clear_image_area(area: Rect, buf: &mut Buffer) {
         return;
     }
 
-    // Reset all cells in the area to clear any terminal graphics
-    for y in area.y..area.y + area.height {
-        for x in area.x..area.x + area.width {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.reset();
-            }
-        }
-    }
+    // Use ratatui's Clear widget (more efficient than cell-by-cell)
+    use ratatui::widgets::Clear;
+    Clear.render(area, buf);
 }
 
 /// Estimate the height needed for an image in terminal rows
