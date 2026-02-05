@@ -5,6 +5,7 @@
 
 use super::{EventStream, NativeToolResultSender, Provider};
 use crate::auth;
+use crate::auth::oauth;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -12,8 +13,8 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::{Arc, RwLock};
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 
 /// Anthropic Messages API endpoint
@@ -84,10 +85,20 @@ pub const AVAILABLE_MODELS: &[&str] = &[
     "claude-haiku-4-5-20241022",
 ];
 
+/// Cached OAuth credentials
+#[derive(Clone)]
+struct CachedCredentials {
+    access_token: String,
+    refresh_token: String,
+    expires_at: i64,
+}
+
 /// Direct Anthropic API provider
 pub struct AnthropicProvider {
     client: Client,
-    model: Arc<RwLock<String>>,
+    model: Arc<std::sync::RwLock<String>>,
+    /// Cached OAuth credentials (None if using API key)
+    credentials: Arc<RwLock<Option<CachedCredentials>>>,
 }
 
 impl AnthropicProvider {
@@ -97,22 +108,72 @@ impl AnthropicProvider {
 
         Self {
             client: Client::new(),
-            model: Arc::new(RwLock::new(model)),
+            model: Arc::new(std::sync::RwLock::new(model)),
+            credentials: Arc::new(RwLock::new(None)),
         }
     }
 
     /// Get the access token from credentials
     /// Supports both OAuth tokens and direct API keys
+    /// Automatically refreshes OAuth tokens when expired
     async fn get_access_token(&self) -> Result<(String, bool)> {
         // First check for direct API key in environment
         if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
             return Ok((key, false)); // false = not OAuth
         }
 
-        // Fall back to OAuth credentials
-        let creds =
+        // Check cached credentials
+        {
+            let cached = self.credentials.read().await;
+            if let Some(ref creds) = *cached {
+                let now = chrono::Utc::now().timestamp_millis();
+                // Return cached token if not expired (with 5 min buffer)
+                if creds.expires_at > now + 300_000 {
+                    return Ok((creds.access_token.clone(), true));
+                }
+            }
+        }
+
+        // Load fresh credentials or refresh expired ones
+        let fresh_creds =
             auth::claude::load_credentials().context("Failed to load Claude credentials")?;
-        Ok((creds.access_token, true)) // true = OAuth
+
+        let now = chrono::Utc::now().timestamp_millis();
+
+        // Check if token needs refresh (expired or expiring within 5 minutes)
+        if fresh_creds.expires_at < now + 300_000 && !fresh_creds.refresh_token.is_empty() {
+            crate::logging::info("OAuth token expired or expiring soon, attempting refresh...");
+
+            match oauth::refresh_claude_tokens(&fresh_creds.refresh_token).await {
+                Ok(refreshed) => {
+                    crate::logging::info("OAuth token refreshed successfully");
+
+                    // Cache the refreshed credentials
+                    let mut cached = self.credentials.write().await;
+                    *cached = Some(CachedCredentials {
+                        access_token: refreshed.access_token.clone(),
+                        refresh_token: refreshed.refresh_token,
+                        expires_at: refreshed.expires_at,
+                    });
+
+                    return Ok((refreshed.access_token, true));
+                }
+                Err(e) => {
+                    crate::logging::error(&format!("OAuth token refresh failed: {}", e));
+                    // Fall through to try the possibly-expired token
+                }
+            }
+        }
+
+        // Cache and return the loaded credentials (even if expired, let the API reject it)
+        let mut cached = self.credentials.write().await;
+        *cached = Some(CachedCredentials {
+            access_token: fresh_creds.access_token.clone(),
+            refresh_token: fresh_creds.refresh_token,
+            expires_at: fresh_creds.expires_at,
+        });
+
+        Ok((fresh_creds.access_token, true))
     }
 
     /// Convert our Message type to Anthropic API format
@@ -457,7 +518,8 @@ impl Provider for AnthropicProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
             client: self.client.clone(),
-            model: Arc::new(RwLock::new(self.model.read().unwrap().clone())),
+            model: Arc::new(std::sync::RwLock::new(self.model.read().unwrap().clone())),
+            credentials: Arc::new(RwLock::new(None)), // Fresh credentials cache for fork
         })
     }
 
