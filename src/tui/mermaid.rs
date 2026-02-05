@@ -54,6 +54,20 @@ static IMAGE_STATE: LazyLock<Mutex<HashMap<u64, ImageState>>> =
 static LAST_RENDER: LazyLock<Mutex<HashMap<u64, LastRenderState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Active diagrams for info widget display
+/// Updated during markdown rendering, queried by info_widget_data()
+static ACTIVE_DIAGRAMS: LazyLock<Mutex<Vec<ActiveDiagram>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Info about an active diagram (for info widget)
+#[derive(Clone)]
+struct ActiveDiagram {
+    hash: u64,
+    width: u32,
+    height: u32,
+    label: Option<String>,
+}
+
 /// State for a rendered image
 struct ImageState {
     protocol: StatefulProtocol,
@@ -152,6 +166,45 @@ pub fn debug_cache() -> Vec<MermaidCacheEntry> {
             .collect();
     }
     Vec::new()
+}
+
+/// Register a diagram as active (call during markdown rendering)
+pub fn register_active_diagram(hash: u64, width: u32, height: u32, label: Option<String>) {
+    if let Ok(mut diagrams) = ACTIVE_DIAGRAMS.lock() {
+        // Avoid duplicates
+        if !diagrams.iter().any(|d| d.hash == hash) {
+            diagrams.push(ActiveDiagram {
+                hash,
+                width,
+                height,
+                label,
+            });
+        }
+    }
+}
+
+/// Get active diagrams for info widget display
+pub fn get_active_diagrams() -> Vec<super::info_widget::DiagramInfo> {
+    if let Ok(diagrams) = ACTIVE_DIAGRAMS.lock() {
+        diagrams
+            .iter()
+            .map(|d| super::info_widget::DiagramInfo {
+                hash: d.hash,
+                width: d.width,
+                height: d.height,
+                label: d.label.clone(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Clear active diagrams (call at start of render cycle)
+pub fn clear_active_diagrams() {
+    if let Ok(mut diagrams) = ACTIVE_DIAGRAMS.lock() {
+        diagrams.clear();
+    }
 }
 
 pub fn clear_cache() -> Result<(), String> {
@@ -861,6 +914,9 @@ pub fn render_mermaid_sized(content: &str, terminal_width: Option<u16>) -> Rende
             );
         }
     }
+
+    // Register this diagram as active for info widget display
+    register_active_diagram(hash, width, height, None);
 
     RenderResult::Image {
         hash,

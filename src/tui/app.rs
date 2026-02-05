@@ -8016,6 +8016,9 @@ impl super::TuiState for App {
             }
         };
 
+        // Get active mermaid diagrams
+        let diagrams = super::mermaid::get_active_diagrams();
+
         super::info_widget::InfoWidgetData {
             todos,
             context_info,
@@ -8032,6 +8035,7 @@ impl super::TuiState for App {
             tokens_per_second,
             auth_method,
             upstream_provider: self.upstream_provider.clone(),
+            diagrams,
         }
     }
 
