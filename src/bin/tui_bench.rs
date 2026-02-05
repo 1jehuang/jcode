@@ -315,6 +315,10 @@ impl TuiState for BenchState {
     fn auth_status(&self) -> jcode::auth::AuthStatus {
         jcode::auth::AuthStatus::default()
     }
+
+    fn diagram_mode(&self) -> jcode::config::DiagramDisplayMode {
+        jcode::config::DiagramDisplayMode::Pinned
+    }
 }
 
 fn make_text(len: usize) -> String {

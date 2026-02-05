@@ -103,6 +103,8 @@ pub trait TuiState {
     fn auth_status(&self) -> crate::auth::AuthStatus;
     /// Update cost calculation based on token usage (for API-key providers)
     fn update_cost(&mut self);
+    /// Diagram display mode (none/margin/pinned)
+    fn diagram_mode(&self) -> crate::config::DiagramDisplayMode;
 }
 
 pub(crate) fn subscribe_metadata() -> (Option<String>, Option<bool>) {
