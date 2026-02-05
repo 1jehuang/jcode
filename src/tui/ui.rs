@@ -2256,21 +2256,52 @@ fn draw_messages(
             .extend(std::iter::repeat(Line::from("")).take(visible_height - visible_lines.len()));
     }
 
-    // Scan for mermaid image placeholders and render them separately
-    let mut image_regions: Vec<(usize, u64, u16)> = Vec::new(); // (line_idx, hash, height)
-    for (idx, line) in visible_lines.iter().enumerate() {
+    // Scan ALL lines for mermaid image placeholders (not just visible)
+    // This allows images to render correctly when partially scrolled off-screen
+    let mut all_image_regions: Vec<(usize, u64, u16)> = Vec::new(); // (abs_line_idx, hash, height)
+    for (idx, line) in wrapped_lines.iter().enumerate() {
         if let Some(hash) = super::mermaid::parse_image_placeholder(line) {
             // Count consecutive placeholder lines for this image
             let mut height = 1u16;
-            for subsequent in visible_lines.iter().skip(idx + 1) {
-                // Placeholder lines after the header are single spaces with dim styling
-                if subsequent.spans.len() == 1 && subsequent.spans[0].content.trim().is_empty() {
+            for subsequent in wrapped_lines.iter().skip(idx + 1) {
+                // Placeholder lines after the header are empty lines
+                if subsequent.spans.is_empty()
+                    || (subsequent.spans.len() == 1 && subsequent.spans[0].content.is_empty())
+                {
                     height += 1;
                 } else {
                     break;
                 }
             }
-            image_regions.push((idx, hash, height));
+            all_image_regions.push((idx, hash, height));
+        }
+    }
+
+    // Filter to images that overlap with visible area
+    let mut image_regions: Vec<(usize, u64, u16, u16)> = Vec::new(); // (screen_y, hash, render_height, clip_top)
+    for (abs_idx, hash, total_height) in all_image_regions {
+        let image_end = abs_idx + total_height as usize;
+        // Check if image overlaps visible range [scroll..visible_end)
+        if image_end > scroll && abs_idx < visible_end {
+            // Calculate how much of the image is clipped from the top (scrolled off)
+            let clip_top = if abs_idx < scroll {
+                (scroll - abs_idx) as u16
+            } else {
+                0
+            };
+            // Screen position (0 if image starts above visible area)
+            let screen_y = if abs_idx >= scroll {
+                (abs_idx - scroll) as u16
+            } else {
+                0
+            };
+            // Height of visible portion
+            let visible_portion = total_height.saturating_sub(clip_top);
+            let render_height = visible_portion.min((visible_height as u16).saturating_sub(screen_y));
+
+            if render_height > 0 {
+                image_regions.push((screen_y as usize, hash, render_height, clip_top));
+            }
         }
     }
 
@@ -2281,23 +2312,20 @@ fn draw_messages(
     // Now render images over their placeholder regions
     // Images will be clipped (not scaled) if they don't fully fit
     let centered = app.centered_mode();
-    for (line_idx, hash, height) in image_regions {
-        // Calculate available height - image will be clipped if it doesn't fit
-        let available_height = area.height.saturating_sub(line_idx as u16);
-        let render_height = height.min(available_height);
-
-        // Skip if no space at all
-        if render_height == 0 {
-            continue;
-        }
-
+    for (screen_y, hash, render_height, clip_top) in image_regions {
         let image_area = Rect {
             x: area.x,
-            y: area.y + line_idx as u16,
+            y: area.y + screen_y as u16,
             width: area.width,
             height: render_height,
         };
-        super::mermaid::render_image_widget(hash, image_area, frame.buffer_mut(), centered);
+        super::mermaid::render_image_widget_clipped(
+            hash,
+            image_area,
+            frame.buffer_mut(),
+            centered,
+            clip_top,
+        );
     }
 
     // Draw right bar for visible user lines
