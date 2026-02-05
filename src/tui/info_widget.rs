@@ -33,12 +33,15 @@ pub enum WidgetKind {
     UsageLimits,
     /// Current model name
     ModelInfo,
+    /// Mermaid diagrams
+    Diagrams,
 }
 
 impl WidgetKind {
     /// Priority for display (lower = higher priority)
     pub fn priority(self) -> u8 {
         match self {
+            WidgetKind::Diagrams => 0, // Highest priority - user explicitly wants to see it
             WidgetKind::Todos => 1,
             WidgetKind::ContextUsage => 2,
             WidgetKind::MemoryActivity => 3,
@@ -52,6 +55,7 @@ impl WidgetKind {
     /// Preferred side for this widget
     pub fn preferred_side(self) -> Side {
         match self {
+            WidgetKind::Diagrams => Side::Right, // Diagrams on right
             WidgetKind::Todos => Side::Right,
             WidgetKind::ContextUsage => Side::Right,
             WidgetKind::MemoryActivity => Side::Right,
@@ -65,6 +69,7 @@ impl WidgetKind {
     /// Minimum height needed for this widget
     pub fn min_height(self) -> u16 {
         match self {
+            WidgetKind::Diagrams => 10, // Diagrams need more space
             WidgetKind::Todos => 3,
             WidgetKind::ContextUsage => 2,
             WidgetKind::MemoryActivity => 3,
@@ -78,6 +83,7 @@ impl WidgetKind {
     /// All widget kinds in priority order
     pub fn all_by_priority() -> &'static [WidgetKind] {
         &[
+            WidgetKind::Diagrams,
             WidgetKind::Todos,
             WidgetKind::ContextUsage,
             WidgetKind::MemoryActivity,
@@ -90,6 +96,7 @@ impl WidgetKind {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            WidgetKind::Diagrams => "diagrams",
             WidgetKind::Todos => "todos",
             WidgetKind::ContextUsage => "context",
             WidgetKind::MemoryActivity => "memory",
@@ -300,6 +307,19 @@ pub enum MemoryEventKind {
     Error { message: String },
 }
 
+/// Info about a mermaid diagram for display in the info widget
+#[derive(Debug, Clone)]
+pub struct DiagramInfo {
+    /// Hash for mermaid cache lookup
+    pub hash: u64,
+    /// Original PNG width
+    pub width: u32,
+    /// Original PNG height
+    pub height: u32,
+    /// Optional label/title
+    pub label: Option<String>,
+}
+
 /// Minimum width needed to show the widget
 const MIN_WIDGET_WIDTH: u16 = 24;
 /// Maximum width the widget can take
@@ -333,6 +353,8 @@ pub struct InfoWidgetData {
     pub auth_method: AuthMethod,
     /// Upstream provider (e.g., which OpenRouter provider served the request: fireworks, etc.)
     pub upstream_provider: Option<String>,
+    /// Mermaid diagrams to display
+    pub diagrams: Vec<DiagramInfo>,
 }
 
 impl InfoWidgetData {
@@ -344,11 +366,13 @@ impl InfoWidgetData {
             && self.memory_info.is_none()
             && self.swarm_info.is_none()
             && self.background_info.is_none()
+            && self.diagrams.is_empty()
     }
 
     /// Check if a specific widget kind has data to display
     pub fn has_data_for(&self, kind: WidgetKind) -> bool {
         match kind {
+            WidgetKind::Diagrams => !self.diagrams.is_empty(),
             WidgetKind::Todos => !self.todos.is_empty(),
             WidgetKind::ContextUsage => self
                 .context_info
@@ -637,6 +661,13 @@ fn calculate_widget_height(
     let border_height = 2u16;
 
     let content_height = match kind {
+        WidgetKind::Diagrams => {
+            if data.diagrams.is_empty() {
+                return 0;
+            }
+            // Diagrams need significant height to be useful
+            15
+        }
         WidgetKind::Todos => {
             if data.todos.is_empty() {
                 return 0;
@@ -854,9 +885,29 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
+    // Diagrams need special handling - render image instead of text
+    if placement.kind == WidgetKind::Diagrams {
+        render_diagrams_widget(frame, inner, data);
+        return;
+    }
+
     let lines = render_widget_content(placement.kind, data, inner);
     let para = Paragraph::new(lines);
     frame.render_widget(para, inner);
+}
+
+/// Render mermaid diagrams widget (renders images, not text)
+fn render_diagrams_widget(frame: &mut Frame, inner: Rect, data: &InfoWidgetData) {
+    if data.diagrams.is_empty() {
+        return;
+    }
+
+    // For now, just render the first/most recent diagram
+    // Could add pagination later for multiple diagrams
+    let diagram = &data.diagrams[0];
+
+    // Render the image using mermaid module
+    super::mermaid::render_image_widget(diagram.hash, inner, frame.buffer_mut(), false);
 }
 
 /// Render content for a specific widget type
@@ -866,6 +917,7 @@ fn render_widget_content(
     inner: Rect,
 ) -> Vec<Line<'static>> {
     match kind {
+        WidgetKind::Diagrams => Vec::new(), // Handled specially in render_single_widget
         WidgetKind::Todos => render_todos_widget(data, inner),
         WidgetKind::ContextUsage => render_context_widget(data, inner),
         WidgetKind::MemoryActivity => render_memory_widget(data, inner),
