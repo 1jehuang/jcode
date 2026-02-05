@@ -1065,6 +1065,7 @@ impl App {
                             ProcessingStatus::RunningTool(_) => "running".to_string(),
                         },
                         detail: self.subagent_status.clone(),
+                        role: None,
                     }],
                 })
                 .to_string()
@@ -2751,6 +2752,7 @@ impl App {
                     id,
                     name,
                     input: serde_json::Value::Null,
+                    intent: None,
                 });
                 false
             }
@@ -2809,6 +2811,7 @@ impl App {
                         id,
                         name,
                         input: tool_input,
+                        intent: None,
                     }),
                 });
                 self.streaming_tool_calls.clear();
@@ -5269,6 +5272,7 @@ impl App {
                             id,
                             name,
                             input: serde_json::Value::Null,
+                            intent: None,
                         });
                         current_tool_input.clear();
                     }
@@ -5932,11 +5936,13 @@ impl App {
                                             id: id.clone(),
                                             name: name.clone(),
                                             input: serde_json::Value::Null,
+                                            intent: None,
                                         });
                                         current_tool = Some(ToolCall {
                                             id,
                                             name,
                                             input: serde_json::Value::Null,
+                                            intent: None,
                                         });
                                         current_tool_input.clear();
                                     }
@@ -7868,6 +7874,7 @@ impl super::TuiState for App {
                         friendly_name: Some(self.session.display_name().to_string()),
                         status,
                         detail,
+                        role: None,
                     });
                 }
                 (

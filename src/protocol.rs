@@ -189,6 +189,83 @@ pub enum Request {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+
+    /// Spawn a new agent session (coordinator only)
+    #[serde(rename = "comm_spawn")]
+    CommSpawn {
+        id: u64,
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initial_message: Option<String>,
+    },
+
+    /// Stop/destroy an agent session (coordinator only)
+    #[serde(rename = "comm_stop")]
+    CommStop {
+        id: u64,
+        session_id: String,
+        target_session: String,
+    },
+
+    /// Assign a role to an agent (coordinator only)
+    #[serde(rename = "comm_assign_role")]
+    CommAssignRole {
+        id: u64,
+        session_id: String,
+        target_session: String,
+        role: String,
+    },
+
+    /// Get a summary of an agent's recent tool calls
+    #[serde(rename = "comm_summary")]
+    CommSummary {
+        id: u64,
+        session_id: String,
+        target_session: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+
+    /// Read another agent's full conversation context
+    #[serde(rename = "comm_read_context")]
+    CommReadContext {
+        id: u64,
+        session_id: String,
+        target_session: String,
+    },
+
+    /// Re-sync the swarm plan to this session
+    #[serde(rename = "comm_resync_plan")]
+    CommResyncPlan { id: u64, session_id: String },
+
+    /// Assign a task from the plan to a specific agent (coordinator only)
+    #[serde(rename = "comm_assign_task")]
+    CommAssignTask {
+        id: u64,
+        session_id: String,
+        target_session: String,
+        task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+
+    /// Subscribe to a named channel in the swarm
+    #[serde(rename = "comm_subscribe_channel")]
+    CommSubscribeChannel {
+        id: u64,
+        session_id: String,
+        channel: String,
+    },
+
+    /// Unsubscribe from a named channel in the swarm
+    #[serde(rename = "comm_unsubscribe_channel")]
+    CommUnsubscribeChannel {
+        id: u64,
+        session_id: String,
+        channel: String,
+    },
 }
 
 /// Server event sent to client
@@ -401,6 +478,39 @@ pub enum ServerEvent {
     /// Response to comm_list request
     #[serde(rename = "comm_members")]
     CommMembers { id: u64, members: Vec<AgentInfo> },
+
+    /// Response to comm_summary request
+    #[serde(rename = "comm_summary_response")]
+    CommSummaryResponse {
+        id: u64,
+        session_id: String,
+        tool_calls: Vec<ToolCallSummary>,
+    },
+
+    /// Response to comm_read_context request
+    #[serde(rename = "comm_context_history")]
+    CommContextHistory {
+        id: u64,
+        session_id: String,
+        messages: Vec<HistoryMessage>,
+    },
+
+    /// Response to comm_spawn request
+    #[serde(rename = "comm_spawn_response")]
+    CommSpawnResponse {
+        id: u64,
+        session_id: String,
+        new_session_id: String,
+    },
+}
+
+/// Summary of a tool call for the comm_summary response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallSummary {
+    pub tool_name: String,
+    pub brief_output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp_secs: Option<u64>,
 }
 
 /// A shared context entry
@@ -421,6 +531,9 @@ pub struct AgentInfo {
     pub friendly_name: Option<String>,
     /// Files this agent has touched
     pub files_touched: Vec<String>,
+    /// Role: "agent", "coordinator", "worktree_manager"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// Swarm member status for lifecycle updates
@@ -434,6 +547,9 @@ pub struct SwarmMemberStatus {
     /// Optional detail (task, error, etc.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Role: "agent", "coordinator", "worktree_manager"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// Type of notification from another agent
@@ -490,6 +606,15 @@ impl Request {
             Request::CommList { id, .. } => *id,
             Request::CommApprovePlan { id, .. } => *id,
             Request::CommRejectPlan { id, .. } => *id,
+            Request::CommSpawn { id, .. } => *id,
+            Request::CommStop { id, .. } => *id,
+            Request::CommAssignRole { id, .. } => *id,
+            Request::CommSummary { id, .. } => *id,
+            Request::CommReadContext { id, .. } => *id,
+            Request::CommResyncPlan { id, .. } => *id,
+            Request::CommAssignTask { id, .. } => *id,
+            Request::CommSubscribeChannel { id, .. } => *id,
+            Request::CommUnsubscribeChannel { id, .. } => *id,
         }
     }
 }

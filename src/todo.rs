@@ -9,6 +9,10 @@ pub struct TodoItem {
     pub status: String,
     pub priority: String,
     pub id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_to: Option<String>,
 }
 
 pub fn load_todos(session_id: &str) -> Result<Vec<TodoItem>> {

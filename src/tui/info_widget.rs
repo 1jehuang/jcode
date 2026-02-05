@@ -994,28 +994,47 @@ fn render_todos_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
     // Render todos (limit based on available height)
     let available_lines = inner.height.saturating_sub(2) as usize; // Account for header + bar
     for todo in sorted_todos.iter().take(available_lines.min(5)) {
-        let (icon, status_color) = match todo.status.as_str() {
-            "completed" => ("✓", Color::Rgb(100, 180, 100)),
-            "in_progress" => ("▶", Color::Rgb(255, 200, 100)),
-            "cancelled" => ("✗", Color::Rgb(120, 80, 80)),
-            _ => ("○", Color::Rgb(120, 120, 130)),
+        let is_blocked = !todo.blocked_by.is_empty();
+        let (icon, status_color) = if is_blocked && todo.status != "completed" {
+            ("⊳", Color::Rgb(180, 140, 100))
+        } else {
+            match todo.status.as_str() {
+                "completed" => ("✓", Color::Rgb(100, 180, 100)),
+                "in_progress" => ("▶", Color::Rgb(255, 200, 100)),
+                "cancelled" => ("✗", Color::Rgb(120, 80, 80)),
+                _ => ("○", Color::Rgb(120, 120, 130)),
+            }
         };
 
-        let max_len = inner.width.saturating_sub(3) as usize;
+        let suffix = if is_blocked && todo.status != "completed" {
+            " (blocked)"
+        } else {
+            ""
+        };
+        let max_len = inner.width.saturating_sub(3 + suffix.len() as u16) as usize;
         let content = truncate_smart(&todo.content, max_len);
 
         let text_color = if todo.status == "completed" {
             Color::Rgb(100, 100, 110)
+        } else if is_blocked {
+            Color::Rgb(120, 120, 130)
         } else if todo.status == "in_progress" {
             Color::Rgb(200, 200, 210)
         } else {
             Color::Rgb(160, 160, 170)
         };
 
-        lines.push(Line::from(vec![
+        let mut spans = vec![
             Span::styled(format!("{} ", icon), Style::default().fg(status_color)),
             Span::styled(content, Style::default().fg(text_color)),
-        ]));
+        ];
+        if !suffix.is_empty() {
+            spans.push(Span::styled(
+                suffix.to_string(),
+                Style::default().fg(Color::Rgb(100, 100, 110)),
+            ));
+        }
+        lines.push(Line::from(spans));
     }
 
     // Show count of remaining items
@@ -1197,16 +1216,29 @@ fn swarm_status_style(status: &str) -> (Color, &'static str) {
     }
 }
 
+fn swarm_role_prefix(member: &SwarmMemberStatus) -> &'static str {
+    match member.role.as_deref() {
+        Some("coordinator") => "★ ",
+        Some("worktree_manager") => "◆ ",
+        _ => "  ",
+    }
+}
+
 fn swarm_member_line(member: &SwarmMemberStatus, max_width: usize) -> Line<'static> {
     let name = swarm_member_label(member);
     let mut detail = member.detail.clone().unwrap_or_default();
     if !detail.is_empty() {
         detail = format!(" — {}", detail);
     }
+    let role_prefix = swarm_role_prefix(member);
     let line_text = truncate_smart(&format!("{} {}{}", name, member.status, detail), max_width);
     let (color, icon) = swarm_status_style(&member.status);
     Line::from(vec![
-        Span::styled(format!("  {} ", icon), Style::default().fg(color)),
+        Span::styled(
+            role_prefix.to_string(),
+            Style::default().fg(Color::Rgb(255, 200, 100)),
+        ),
+        Span::styled(format!("{} ", icon), Style::default().fg(color)),
         Span::styled(line_text, Style::default().fg(Color::Rgb(140, 140, 150))),
     ])
 }
@@ -2022,11 +2054,16 @@ fn render_todos_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
     // Render todos with priority colors
     let available_lines = MAX_TODO_LINES.saturating_sub(2); // Account for header + bar
     for todo in sorted_todos.iter().take(available_lines) {
-        let (icon, status_color) = match todo.status.as_str() {
-            "completed" => ("✓", Color::Rgb(100, 180, 100)),
-            "in_progress" => ("▶", Color::Rgb(255, 200, 100)),
-            "cancelled" => ("✗", Color::Rgb(120, 80, 80)),
-            _ => ("○", Color::Rgb(120, 120, 130)),
+        let is_blocked = !todo.blocked_by.is_empty();
+        let (icon, status_color) = if is_blocked && todo.status != "completed" {
+            ("⊳", Color::Rgb(180, 140, 100))
+        } else {
+            match todo.status.as_str() {
+                "completed" => ("✓", Color::Rgb(100, 180, 100)),
+                "in_progress" => ("▶", Color::Rgb(255, 200, 100)),
+                "cancelled" => ("✗", Color::Rgb(120, 80, 80)),
+                _ => ("○", Color::Rgb(120, 120, 130)),
+            }
         };
 
         // Priority indicator
@@ -2036,12 +2073,19 @@ fn render_todos_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
             _ => ("", Color::Rgb(120, 120, 130)),
         };
 
-        let max_len = inner.width.saturating_sub(4) as usize;
+        let suffix = if is_blocked && todo.status != "completed" {
+            " (blocked)"
+        } else {
+            ""
+        };
+        let max_len = inner.width.saturating_sub(4 + suffix.len() as u16) as usize;
         let content = truncate_smart(&todo.content, max_len);
 
-        // Dim completed items
+        // Dim completed and blocked items
         let text_color = if todo.status == "completed" {
             Color::Rgb(100, 100, 110)
+        } else if is_blocked {
+            Color::Rgb(120, 120, 130)
         } else if todo.status == "in_progress" {
             Color::Rgb(200, 200, 210)
         } else {
@@ -2061,6 +2105,13 @@ fn render_todos_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
         }
 
         spans.push(Span::styled(content, Style::default().fg(text_color)));
+
+        if !suffix.is_empty() {
+            spans.push(Span::styled(
+                suffix.to_string(),
+                Style::default().fg(Color::Rgb(100, 100, 110)),
+            ));
+        }
 
         lines.push(Line::from(spans));
     }
@@ -2535,17 +2586,73 @@ fn render_swarm_expanded(info: &SwarmInfo, inner: Rect) -> Vec<Line<'static>> {
         }
     }
 
-    let max_name_len = inner.width.saturating_sub(6) as usize;
+    let max_name_len = inner.width.saturating_sub(8) as usize;
     if !info.members.is_empty() {
-        for member in info.members.iter().take(4) {
-            lines.push(swarm_member_line(member, max_name_len));
-        }
-        if info.members.len() > 4 {
-            let remaining = info.members.len() - 4;
-            lines.push(Line::from(vec![Span::styled(
-                format!("  +{} more", remaining),
-                Style::default().fg(Color::Rgb(100, 100, 110)),
-            )]));
+        let remaining_height = inner.height.saturating_sub(lines.len() as u16) as usize;
+        let need_graph = remaining_height >= info.members.len() + 3;
+
+        if need_graph {
+            // Graph view: coordinator on top, connector, agents below
+            let coordinator = info
+                .members
+                .iter()
+                .find(|m| m.role.as_deref() == Some("coordinator"));
+            let agents: Vec<_> = info
+                .members
+                .iter()
+                .filter(|m| m.role.as_deref() != Some("coordinator"))
+                .collect();
+
+            if let Some(coord) = coordinator {
+                let coord_label = swarm_member_label(coord);
+                let (color, icon) = swarm_status_style(&coord.status);
+                lines.push(Line::from(vec![
+                    Span::styled("★ ", Style::default().fg(Color::Rgb(255, 200, 100))),
+                    Span::styled(format!("{} ", icon), Style::default().fg(color)),
+                    Span::styled(
+                        truncate_smart(&coord_label, max_name_len),
+                        Style::default().fg(Color::Rgb(200, 200, 210)),
+                    ),
+                ]));
+
+                // Connector line
+                if !agents.is_empty() {
+                    let connector_width = inner.width.saturating_sub(4).min(20) as usize;
+                    let connector = format!(
+                        "  {}",
+                        "├".to_string()
+                            + &"─".repeat(connector_width.saturating_sub(2))
+                            + "┤"
+                    );
+                    lines.push(Line::from(vec![Span::styled(
+                        connector,
+                        Style::default().fg(Color::Rgb(80, 80, 90)),
+                    )]));
+                }
+            }
+
+            for agent in agents.iter().take(4) {
+                lines.push(swarm_member_line(agent, max_name_len));
+            }
+            if agents.len() > 4 {
+                let remaining = agents.len() - 4;
+                lines.push(Line::from(vec![Span::styled(
+                    format!("  +{} more", remaining),
+                    Style::default().fg(Color::Rgb(100, 100, 110)),
+                )]));
+            }
+        } else {
+            // Flat list when not enough height for graph
+            for member in info.members.iter().take(4) {
+                lines.push(swarm_member_line(member, max_name_len));
+            }
+            if info.members.len() > 4 {
+                let remaining = info.members.len() - 4;
+                lines.push(Line::from(vec![Span::styled(
+                    format!("  +{} more", remaining),
+                    Style::default().fg(Color::Rgb(100, 100, 110)),
+                )]));
+            }
         }
     } else {
         // Session names (up to 4)
