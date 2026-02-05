@@ -106,11 +106,16 @@ pub struct ToolDefinition {
 }
 
 /// A tool call from the model
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub input: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
 }
 
 /// Streaming event from provider

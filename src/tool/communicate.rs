@@ -32,6 +32,14 @@ fn send_request(request: &Value) -> Result<Value> {
     Ok(value)
 }
 
+fn check_error(response: &Value) -> Option<String> {
+    if response.get("type").and_then(|t| t.as_str()) == Some("error") {
+        response.get("message").and_then(|m| m.as_str()).map(|s| s.to_string())
+    } else {
+        None
+    }
+}
+
 pub struct CommunicateTool;
 
 impl CommunicateTool {
@@ -57,6 +65,18 @@ struct CommunicateInput {
     proposer_session: Option<String>,
     #[serde(default)]
     reason: Option<String>,
+    #[serde(default)]
+    target_session: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    working_dir: Option<String>,
+    #[serde(default)]
+    initial_message: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    task_id: Option<String>,
 }
 
 #[async_trait]
@@ -76,7 +96,16 @@ impl Tool for CommunicateTool {
          - \"channel\": Send a message to a named channel in this swarm.\n\
          - \"list\": See who else is working in this codebase and what files they've touched.\n\
          - \"approve_plan\": (Coordinator only) Approve a plan proposal from another agent.\n\
-         - \"reject_plan\": (Coordinator only) Reject a plan proposal with an optional reason."
+         - \"reject_plan\": (Coordinator only) Reject a plan proposal with an optional reason.\n\
+         - \"spawn\": (Coordinator only) Spawn a new agent session.\n\
+         - \"stop\": (Coordinator only) Stop/destroy an agent session.\n\
+         - \"assign_role\": (Coordinator only) Assign a role to an agent.\n\
+         - \"summary\": Get a summary of another agent's recent tool calls.\n\
+         - \"read_context\": Read another agent's full conversation context.\n\
+         - \"resync_plan\": Re-sync the swarm plan to your session.\n\
+         - \"assign_task\": (Coordinator only) Assign a plan task to a specific agent.\n\
+         - \"subscribe_channel\": Subscribe to a named channel.\n\
+         - \"unsubscribe_channel\": Unsubscribe from a named channel."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -86,7 +115,10 @@ impl Tool for CommunicateTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["share", "read", "message", "broadcast", "dm", "channel", "list", "approve_plan", "reject_plan"],
+                    "enum": ["share", "read", "message", "broadcast", "dm", "channel", "list",
+                             "approve_plan", "reject_plan", "spawn", "stop", "assign_role",
+                             "summary", "read_context", "resync_plan", "assign_task",
+                             "subscribe_channel", "unsubscribe_channel"],
                     "description": "The communication action to perform"
                 },
                 "key": {
@@ -99,7 +131,7 @@ impl Tool for CommunicateTool {
                 },
                 "message": {
                     "type": "string",
-                    "description": "For 'message'/'broadcast'/'dm'/'channel': the message to send."
+                    "description": "For 'message'/'broadcast'/'dm'/'channel': the message to send. For 'assign_task': optional additional message."
                 },
                 "to_session": {
                     "type": "string",
@@ -107,7 +139,7 @@ impl Tool for CommunicateTool {
                 },
                 "channel": {
                     "type": "string",
-                    "description": "For 'channel': the channel name (without #)."
+                    "description": "For 'channel'/'subscribe_channel'/'unsubscribe_channel': the channel name (without #)."
                 },
                 "proposer_session": {
                     "type": "string",
@@ -116,6 +148,31 @@ impl Tool for CommunicateTool {
                 "reason": {
                     "type": "string",
                     "description": "For 'reject_plan': optional reason for rejection."
+                },
+                "target_session": {
+                    "type": "string",
+                    "description": "For 'stop'/'assign_role'/'summary'/'read_context'/'assign_task': the target session ID."
+                },
+                "role": {
+                    "type": "string",
+                    "enum": ["agent", "coordinator", "worktree_manager"],
+                    "description": "For 'assign_role': the role to assign."
+                },
+                "working_dir": {
+                    "type": "string",
+                    "description": "For 'spawn': optional working directory for the new agent."
+                },
+                "initial_message": {
+                    "type": "string",
+                    "description": "For 'spawn': optional initial message to send to the new agent."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "For 'summary': max number of tool calls to return (default 10)."
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": "For 'assign_task': the ID of the task in the swarm plan to assign."
                 }
             }
         })
@@ -287,6 +344,10 @@ impl Tool for CommunicateTool {
                                         .get("session_id")
                                         .and_then(|s| s.as_str())
                                         .unwrap_or("?");
+                                    let role = member
+                                        .get("role")
+                                        .and_then(|r| r.as_str())
+                                        .unwrap_or("agent");
                                     let files = member
                                         .get("files_touched")
                                         .and_then(|f| f.as_array())
@@ -299,9 +360,15 @@ impl Tool for CommunicateTool {
                                         .unwrap_or_default();
 
                                     let is_me = session == ctx.session_id;
+                                    let role_label = if role != "agent" {
+                                        format!(" [{}]", role)
+                                    } else {
+                                        String::new()
+                                    };
                                     output.push_str(&format!(
-                                        "  {} ({}){}\n",
+                                        "  {}{} ({}){}\n",
                                         name,
+                                        role_label,
                                         if is_me { "you" } else { session },
                                         if files.is_empty() {
                                             String::new()
@@ -334,10 +401,8 @@ impl Tool for CommunicateTool {
 
                 match send_request(&request) {
                     Ok(response) => {
-                        if let Some(error) = response.get("message").and_then(|m| m.as_str()) {
-                            if response.get("type").and_then(|t| t.as_str()) == Some("error") {
-                                return Err(anyhow::anyhow!("{}", error));
-                            }
+                        if let Some(err) = check_error(&response) {
+                            return Err(anyhow::anyhow!("{}", err));
                         }
                         Ok(ToolOutput::new(format!(
                             "Approved plan proposal from {}",
@@ -363,10 +428,8 @@ impl Tool for CommunicateTool {
 
                 match send_request(&request) {
                     Ok(response) => {
-                        if let Some(error) = response.get("message").and_then(|m| m.as_str()) {
-                            if response.get("type").and_then(|t| t.as_str()) == Some("error") {
-                                return Err(anyhow::anyhow!("{}", error));
-                            }
+                        if let Some(err) = check_error(&response) {
+                            return Err(anyhow::anyhow!("{}", err));
                         }
                         let reason_msg = params
                             .reason
@@ -382,8 +445,286 @@ impl Tool for CommunicateTool {
                 }
             }
 
+            "spawn" => {
+                let request = json!({
+                    "type": "comm_spawn",
+                    "id": 1,
+                    "session_id": ctx.session_id,
+                    "working_dir": params.working_dir,
+                    "initial_message": params.initial_message
+                });
+
+                match send_request(&request) {
+                    Ok(response) => {
+                        if let Some(err) = check_error(&response) {
+                            return Err(anyhow::anyhow!("{}", err));
+                        }
+                        let new_id = response
+                            .get("new_session_id")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("unknown");
+                        Ok(ToolOutput::new(format!("Spawned new agent: {}", new_id)))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to spawn agent: {}", e)),
+                }
+            }
+
+            "stop" => {
+                let target = params.target_session.ok_or_else(|| {
+                    anyhow::anyhow!("'target_session' is required for stop action")
+                })?;
+
+                let request = json!({
+                    "type": "comm_stop",
+                    "id": 1,
+                    "session_id": ctx.session_id,
+                    "target_session": target
+                });
+
+                match send_request(&request) {
+                    Ok(response) => {
+                        if let Some(err) = check_error(&response) {
+                            return Err(anyhow::anyhow!("{}", err));
+                        }
+                        Ok(ToolOutput::new(format!("Stopped agent: {}", target)))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to stop agent: {}", e)),
+                }
+            }
+
+            "assign_role" => {
+                let target = params.target_session.ok_or_else(|| {
+                    anyhow::anyhow!("'target_session' is required for assign_role action")
+                })?;
+                let role = params.role.ok_or_else(|| {
+                    anyhow::anyhow!("'role' is required for assign_role action")
+                })?;
+
+                let request = json!({
+                    "type": "comm_assign_role",
+                    "id": 1,
+                    "session_id": ctx.session_id,
+                    "target_session": target,
+                    "role": role
+                });
+
+                match send_request(&request) {
+                    Ok(response) => {
+                        if let Some(err) = check_error(&response) {
+                            return Err(anyhow::anyhow!("{}", err));
+                        }
+                        Ok(ToolOutput::new(format!(
+                            "Assigned role '{}' to {}",
+                            role, target
+                        )))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to assign role: {}", e)),
+                }
+            }
+
+            "summary" => {
+                let target = params.target_session.ok_or_else(|| {
+                    anyhow::anyhow!("'target_session' is required for summary action")
+                })?;
+
+                let request = json!({
+                    "type": "comm_summary",
+                    "id": 1,
+                    "session_id": ctx.session_id,
+                    "target_session": target,
+                    "limit": params.limit
+                });
+
+                match send_request(&request) {
+                    Ok(response) => {
+                        if let Some(err) = check_error(&response) {
+                            return Err(anyhow::anyhow!("{}", err));
+                        }
+                        if let Some(calls) =
+                            response.get("tool_calls").and_then(|t| t.as_array())
+                        {
+                            if calls.is_empty() {
+                                Ok(ToolOutput::new(format!(
+                                    "No tool calls found for {}",
+                                    target
+                                )))
+                            } else {
+                                let mut output = format!("Tool call summary for {}:\n\n", target);
+                                for call in calls {
+                                    let name = call
+                                        .get("tool_name")
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("?");
+                                    let brief = call
+                                        .get("brief_output")
+                                        .and_then(|b| b.as_str())
+                                        .unwrap_or("");
+                                    output.push_str(&format!("  {} — {}\n", name, brief));
+                                }
+                                Ok(ToolOutput::new(output))
+                            }
+                        } else {
+                            Ok(ToolOutput::new("No tool call data returned."))
+                        }
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to get summary: {}", e)),
+                }
+            }
+
+            "read_context" => {
+                let target = params.target_session.ok_or_else(|| {
+                    anyhow::anyhow!("'target_session' is required for read_context action")
+                })?;
+
+                let request = json!({
+                    "type": "comm_read_context",
+                    "id": 1,
+                    "session_id": ctx.session_id,
+                    "target_session": target
+                });
+
+                match send_request(&request) {
+                    Ok(response) => {
+                        if let Some(err) = check_error(&response) {
+                            return Err(anyhow::anyhow!("{}", err));
+                        }
+                        if let Some(messages) =
+                            response.get("messages").and_then(|m| m.as_array())
+                        {
+                            if messages.is_empty() {
+                                Ok(ToolOutput::new(format!(
+                                    "No conversation history for {}",
+                                    target
+                                )))
+                            } else {
+                                let mut output =
+                                    format!("Conversation context for {} ({} messages):\n\n", target, messages.len());
+                                for msg in messages {
+                                    let role = msg
+                                        .get("role")
+                                        .and_then(|r| r.as_str())
+                                        .unwrap_or("?");
+                                    let content = msg
+                                        .get("content")
+                                        .and_then(|c| c.as_str())
+                                        .unwrap_or("");
+                                    // Truncate long messages
+                                    let truncated = if content.len() > 500 {
+                                        format!("{}...", &content[..500])
+                                    } else {
+                                        content.to_string()
+                                    };
+                                    output.push_str(&format!("[{}] {}\n\n", role, truncated));
+                                }
+                                Ok(ToolOutput::new(output))
+                            }
+                        } else {
+                            Ok(ToolOutput::new("No context data returned."))
+                        }
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to read context: {}", e)),
+                }
+            }
+
+            "resync_plan" => {
+                let request = json!({
+                    "type": "comm_resync_plan",
+                    "id": 1,
+                    "session_id": ctx.session_id
+                });
+
+                match send_request(&request) {
+                    Ok(response) => {
+                        if let Some(err) = check_error(&response) {
+                            return Err(anyhow::anyhow!("{}", err));
+                        }
+                        Ok(ToolOutput::new("Swarm plan re-synced to your session."))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to resync plan: {}", e)),
+                }
+            }
+
+            "assign_task" => {
+                let target = params.target_session.ok_or_else(|| {
+                    anyhow::anyhow!("'target_session' is required for assign_task action")
+                })?;
+                let task_id = params.task_id.ok_or_else(|| {
+                    anyhow::anyhow!("'task_id' is required for assign_task action")
+                })?;
+
+                let request = json!({
+                    "type": "comm_assign_task",
+                    "id": 1,
+                    "session_id": ctx.session_id,
+                    "target_session": target,
+                    "task_id": task_id,
+                    "message": params.message
+                });
+
+                match send_request(&request) {
+                    Ok(response) => {
+                        if let Some(err) = check_error(&response) {
+                            return Err(anyhow::anyhow!("{}", err));
+                        }
+                        Ok(ToolOutput::new(format!(
+                            "Task '{}' assigned to {}",
+                            task_id, target
+                        )))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to assign task: {}", e)),
+                }
+            }
+
+            "subscribe_channel" => {
+                let channel = params.channel.ok_or_else(|| {
+                    anyhow::anyhow!("'channel' is required for subscribe_channel action")
+                })?;
+
+                let request = json!({
+                    "type": "comm_subscribe_channel",
+                    "id": 1,
+                    "session_id": ctx.session_id,
+                    "channel": channel
+                });
+
+                match send_request(&request) {
+                    Ok(response) => {
+                        if let Some(err) = check_error(&response) {
+                            return Err(anyhow::anyhow!("{}", err));
+                        }
+                        Ok(ToolOutput::new(format!("Subscribed to #{}", channel)))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to subscribe: {}", e)),
+                }
+            }
+
+            "unsubscribe_channel" => {
+                let channel = params.channel.ok_or_else(|| {
+                    anyhow::anyhow!("'channel' is required for unsubscribe_channel action")
+                })?;
+
+                let request = json!({
+                    "type": "comm_unsubscribe_channel",
+                    "id": 1,
+                    "session_id": ctx.session_id,
+                    "channel": channel
+                });
+
+                match send_request(&request) {
+                    Ok(response) => {
+                        if let Some(err) = check_error(&response) {
+                            return Err(anyhow::anyhow!("{}", err));
+                        }
+                        Ok(ToolOutput::new(format!("Unsubscribed from #{}", channel)))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to unsubscribe: {}", e)),
+                }
+            }
+
             _ => Err(anyhow::anyhow!(
-                "Unknown action '{}'. Valid actions: share, read, message, broadcast, dm, channel, list, approve_plan, reject_plan",
+                "Unknown action '{}'. Valid actions: share, read, message, broadcast, dm, channel, list, \
+                 approve_plan, reject_plan, spawn, stop, assign_role, summary, read_context, \
+                 resync_plan, assign_task, subscribe_channel, unsubscribe_channel",
                 params.action
             )),
         }

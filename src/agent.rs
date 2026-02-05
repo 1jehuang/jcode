@@ -1205,6 +1205,7 @@ impl Agent {
                             id,
                             name,
                             input: serde_json::Value::Null,
+                            intent: None,
                         });
                         current_tool_input.clear();
                     }
@@ -1750,6 +1751,7 @@ impl Agent {
                             id,
                             name,
                             input: serde_json::Value::Null,
+                            intent: None,
                         });
                         current_tool_input.clear();
                     }
@@ -2207,6 +2209,7 @@ impl Agent {
                             id,
                             name,
                             input: serde_json::Value::Null,
+                            intent: None,
                         });
                         current_tool_input.clear();
                     }
