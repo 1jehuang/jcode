@@ -2,12 +2,17 @@
 """
 Test swarm coordination features via the debug socket.
 
-This script tests:
-1. Coordinator election (deterministic, alphabetically first)
-2. Communication (broadcast, DM, channel)
-3. Plan approval workflow
-4. Invalid DM recipient validation
-5. Swarm_id error feedback
+Uses debug commands directly (not tool:communicate) to avoid
+blocking I/O issues with the main socket.
+
+Tests:
+1. Coordinator election (first-created session gets coordinator)
+2. Communication (broadcast, DM via debug commands)
+3. Invalid DM recipient validation
+4. Swarm_id for non-git directories
+5. Plan approval workflow
+6. Plan rejection workflow
+7. Coordinator-only approval enforcement
 """
 
 import socket
@@ -21,7 +26,7 @@ TEST_DIR = "/tmp/swarm-test"
 
 
 def send_cmd(cmd: str, session_id: str = None, timeout: float = 30) -> tuple:
-    """Send a debug command and get response."""
+    """Send a debug command and get response. Returns (ok, output, error)."""
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(DEBUG_SOCKET)
     sock.settimeout(timeout)
@@ -50,7 +55,7 @@ def create_session(working_dir: str = TEST_DIR) -> str:
     """Create a new session and return its ID."""
     ok, output, err = send_cmd(f"create_session:{working_dir}")
     if not ok:
-        raise RuntimeError(f"Failed to create session: {err}")
+        raise RuntimeError(f"Failed to create session: {err or output}")
     return json.loads(output)['session_id']
 
 
@@ -59,99 +64,122 @@ def destroy_session(session_id: str):
     send_cmd(f"destroy_session:{session_id}")
 
 
-def get_state(session_id: str) -> dict:
-    """Get session state."""
-    ok, output, _ = send_cmd("state", session_id)
+def get_swarm_id(path: str = TEST_DIR) -> str:
+    """Get the swarm_id for a directory."""
+    ok, output, _ = send_cmd(f"swarm:id:{path}")
     if ok:
-        return json.loads(output)
-    return {}
+        return json.loads(output).get('swarm_id', '')
+    return ''
+
+
+def get_coordinator(swarm_id: str) -> str:
+    """Get the coordinator session_id for a swarm."""
+    ok, output, _ = send_cmd("swarm:coordinators")
+    if ok:
+        coords = json.loads(output)
+        for c in coords:
+            if c['swarm_id'] == swarm_id:
+                return c['coordinator_session']
+    return ''
 
 
 def test_coordinator_election():
-    """Test that coordinator selection is deterministic (alphabetically first)."""
+    """Test that the first-created session becomes coordinator."""
     print("\n" + "=" * 60)
-    print("Test: Coordinator Election (deterministic)")
+    print("Test: Coordinator Election")
     print("=" * 60)
 
-    # Ensure test directory exists
     os.makedirs(TEST_DIR, exist_ok=True)
 
-    # Create two sessions - the first one becomes coordinator
     s1 = create_session()
     s2 = create_session()
+    swarm_id = get_swarm_id()
 
-    print(f"Session 1: {s1[:12]}...")
-    print(f"Session 2: {s2[:12]}...")
+    print(f"Session 1 (first): {s1[:20]}...")
+    print(f"Session 2 (second): {s2[:20]}...")
 
-    # Check which is alphabetically first
-    expected_coordinator = min(s1, s2)
-    print(f"Expected coordinator (alphabetically first): {expected_coordinator[:12]}...")
+    # First-created session should be coordinator
+    actual_coordinator = get_coordinator(swarm_id)
+    print(f"Actual coordinator: {actual_coordinator[:20]}...")
 
-    # Get state to verify coordinator
-    state1 = get_state(s1)
-    state2 = get_state(s2)
+    success = actual_coordinator == s1
+    if success:
+        print("✓ First-created session is the coordinator")
+    else:
+        print("✗ Coordinator is not the first-created session")
 
-    print(f"S1 is_coordinator: {state1.get('is_coordinator', 'N/A')}")
-    print(f"S2 is_coordinator: {state2.get('is_coordinator', 'N/A')}")
+    # Also verify via swarm:roles
+    ok, output, _ = send_cmd("swarm:roles")
+    if ok:
+        roles = json.loads(output)
+        coord_roles = [r for r in roles if r.get('is_coordinator')]
+        if coord_roles:
+            print(f"  Role-based coordinator: {coord_roles[0]['session_id'][:20]}...")
+        else:
+            print("  Warning: No coordinator found via swarm:roles")
 
-    # Cleanup
     destroy_session(s1)
     destroy_session(s2)
-
-    # For now we just verify sessions were created and destroyed
-    print("✓ Sessions created and destroyed successfully")
-    return True
+    return success
 
 
 def test_communication():
-    """Test broadcast, DM, and channel communication."""
+    """Test broadcast and DM communication via debug commands."""
     print("\n" + "=" * 60)
-    print("Test: Communication (broadcast, DM, channel)")
+    print("Test: Communication (broadcast, DM, members)")
     print("=" * 60)
 
     os.makedirs(TEST_DIR, exist_ok=True)
 
     s1 = create_session()
     s2 = create_session()
+    swarm_id = get_swarm_id()
 
-    print(f"Session 1: {s1[:12]}...")
-    print(f"Session 2: {s2[:12]}...")
+    print(f"Session 1: {s1[:20]}...")
+    print(f"Session 2: {s2[:20]}...")
+
+    success = True
 
     # Test broadcast
-    ok, output, err = send_cmd(
-        'tool:communicate {"action":"broadcast","message":"Hello swarm!"}',
-        s1
-    )
-    print(f"Broadcast result: ok={ok}, err={err}")
-
-    # Test DM
-    ok, output, err = send_cmd(
-        f'tool:communicate {{"action":"dm","to_session":"{s2}","message":"Hello agent!"}}',
-        s1
-    )
-    print(f"DM result: ok={ok}, err={err}")
-
-    # Test channel
-    ok, output, err = send_cmd(
-        'tool:communicate {"action":"channel","channel":"test","message":"Hello channel!"}',
-        s1
-    )
-    print(f"Channel result: ok={ok}, err={err}")
-
-    # Test list
-    ok, output, err = send_cmd(
-        'tool:communicate {"action":"list"}',
-        s1
-    )
-    print(f"List result: ok={ok}")
+    ok, output, err = send_cmd(f"swarm:broadcast:{swarm_id} Hello swarm!", s1)
+    print(f"Broadcast: ok={ok}")
     if ok:
-        print(f"  Output: {output[:200]}")
+        data = json.loads(output)
+        print(f"  Sent to {data.get('sent_to', 0)} members")
+    else:
+        print(f"  Error: {err or output}")
+        success = False
+
+    # Test DM (notify)
+    ok, output, err = send_cmd(f"swarm:notify:{s2} Hello agent!", s1)
+    print(f"DM: ok={ok}")
+    if ok:
+        data = json.loads(output)
+        print(f"  Sent to: {data.get('sent_to', '')[:20]}...")
+    else:
+        print(f"  Error: {err or output}")
+        success = False
+
+    # Test list members
+    ok, output, err = send_cmd("swarm:members")
+    print(f"Members list: ok={ok}")
+    if ok:
+        members = json.loads(output)
+        member_ids = [m['session_id'] for m in members]
+        if s1 in member_ids and s2 in member_ids:
+            print(f"  Both sessions found in {len(members)} members")
+        else:
+            print("  ✗ Missing sessions in member list")
+            success = False
 
     destroy_session(s1)
     destroy_session(s2)
 
-    print("✓ Communication tests completed")
-    return True
+    if success:
+        print("✓ Communication tests passed")
+    else:
+        print("✗ Communication tests had failures")
+    return success
 
 
 def test_invalid_dm():
@@ -163,19 +191,17 @@ def test_invalid_dm():
     os.makedirs(TEST_DIR, exist_ok=True)
 
     s1 = create_session()
-    print(f"Session: {s1[:12]}...")
+    print(f"Session: {s1[:20]}...")
 
-    # Try to DM a non-existent session
     fake_session = "nonexistent_session_12345"
-    ok, output, err = send_cmd(
-        f'tool:communicate {{"action":"dm","to_session":"{fake_session}","message":"Hello?"}}',
-        s1
-    )
+    ok, output, err = send_cmd(f"swarm:notify:{fake_session} Hello?", s1)
 
-    print(f"DM to fake session: ok={ok}, err={err}")
+    print(f"DM to fake session: ok={ok}")
+    combined = (err + output).lower()
+    if not ok:
+        print(f"  Error (expected): {output[:80]}")
 
-    # Should fail with an error about session not in swarm
-    success = not ok or "not in swarm" in (err + output).lower()
+    success = not ok and ("unknown session" in combined or "not in swarm" in combined)
 
     destroy_session(s1)
 
@@ -183,21 +209,18 @@ def test_invalid_dm():
         print("✓ Invalid DM correctly rejected")
     else:
         print("✗ Invalid DM was not properly rejected")
-
     return success
 
 
-def test_swarm_id_error():
-    """Test that operations fail gracefully without swarm_id."""
+def test_swarm_id_non_git():
+    """Test that non-git directories get a raw path swarm_id (not .git-based)."""
     print("\n" + "=" * 60)
-    print("Test: Swarm ID Error Feedback")
+    print("Test: Non-Git Directory Swarm ID")
     print("=" * 60)
 
-    # Create session in a non-git directory
     non_git_dir = "/tmp/non-git-test"
     os.makedirs(non_git_dir, exist_ok=True)
 
-    # Remove any git directory if it exists
     import shutil
     git_dir = os.path.join(non_git_dir, ".git")
     if os.path.exists(git_dir):
@@ -205,29 +228,37 @@ def test_swarm_id_error():
 
     try:
         s1 = create_session(non_git_dir)
-        print(f"Session: {s1[:12]}...")
+        print(f"Session: {s1[:20]}...")
 
-        # Try to use swarm features
-        ok, output, err = send_cmd(
-            'tool:communicate {"action":"list"}',
-            s1
-        )
+        # Check swarm:id — non-git dirs get raw path, is_git_repo=false
+        ok, output, _ = send_cmd(f"swarm:id:{non_git_dir}")
+        print(f"Swarm ID check: ok={ok}")
+        not_git = False
+        if ok:
+            data = json.loads(output)
+            not_git = data.get('is_git_repo') == False
+            print(f"  swarm_id: {data.get('swarm_id')}")
+            print(f"  is_git_repo: {data.get('is_git_repo')}")
+            print(f"  source: {data.get('source')}")
 
-        print(f"List in non-swarm: ok={ok}")
-        print(f"  Output: {output[:100] if output else 'none'}")
-        print(f"  Error: {err[:100] if err else 'none'}")
-
-        # Should get an error about not being in a swarm
-        error_found = "not in a swarm" in (output + err).lower()
+        # Verify the session's swarm_id doesn't contain .git
+        ok2, output2, _ = send_cmd(f"swarm:session:{s1}")
+        no_git_in_swarm = False
+        if ok2:
+            sess_data = json.loads(output2)
+            swarm_id = sess_data.get('swarm_id') or ''
+            no_git_in_swarm = '.git' not in swarm_id
+            print(f"  Session swarm_id: {swarm_id}")
 
         destroy_session(s1)
 
-        if error_found:
-            print("✓ Swarm ID error correctly returned")
+        success = not_git and no_git_in_swarm
+        if success:
+            print("✓ Non-git directory correctly identified")
         else:
-            print("✗ Missing swarm ID error message")
+            print("✗ Non-git directory handling incorrect")
+        return success
 
-        return error_found
     except Exception as e:
         print(f"✗ Error: {e}")
         return False
@@ -241,53 +272,83 @@ def test_plan_approval():
 
     os.makedirs(TEST_DIR, exist_ok=True)
 
-    # Create coordinator and agent sessions
-    coordinator = create_session()
-    agent = create_session()
+    s1 = create_session()
+    s2 = create_session()
+    swarm_id = get_swarm_id()
+    coordinator = get_coordinator(swarm_id)
+    agent = s2 if coordinator == s1 else s1
 
-    print(f"Coordinator: {coordinator[:12]}...")
-    print(f"Agent: {agent[:12]}...")
+    print(f"Coordinator: {coordinator[:20]}...")
+    print(f"Agent: {agent[:20]}...")
 
-    # Simulate agent proposing a plan via shared context
+    success = True
+
+    # Get plan item count before approval
+    ok, output, _ = send_cmd(f"swarm:plan_version:{swarm_id}")
+    items_before = 0
+    if ok:
+        items_before = json.loads(output).get('item_count', 0)
+        print(f"Plan items before: {items_before}")
+
+    # Agent proposes a plan via shared context
     plan_items = [
-        {"id": "1", "subject": "Implement feature X", "description": "Add feature X", "status": "pending"}
+        {"id": "approval_test_1", "content": "Implement feature X", "status": "pending", "priority": "normal"}
     ]
     plan_json = json.dumps(plan_items)
     proposal_key = f"plan_proposal:{agent}"
 
-    # Share the plan proposal
     ok, output, err = send_cmd(
-        f'tool:communicate {{"action":"share","key":"{proposal_key}","value":{json.dumps(plan_json)}}}',
-        agent
+        f"swarm:set_context:{agent} {proposal_key} {plan_json}"
     )
-    print(f"Plan proposal shared: ok={ok}, err={err}")
+    print(f"Plan proposal shared: ok={ok}")
+    if not ok:
+        print(f"  Error: {err or output}")
+        success = False
 
-    # Read to verify it's there
-    ok, output, err = send_cmd(
-        f'tool:communicate {{"action":"read","key":"{proposal_key}"}}',
-        coordinator
-    )
+    # Verify proposal is in context
+    ok, output, err = send_cmd(f"swarm:context:{swarm_id}:{proposal_key}")
     print(f"Read proposal: ok={ok}")
+    if not ok:
+        print(f"  Error: {err or output}")
+        success = False
 
-    # Coordinator approves the plan
-    ok, output, err = send_cmd(
-        f'tool:communicate {{"action":"approve_plan","proposer_session":"{agent}"}}',
-        coordinator
-    )
-    print(f"Approve plan: ok={ok}, err={err}")
+    # Coordinator approves
+    ok, output, err = send_cmd(f"swarm:approve_plan:{coordinator} {agent}")
+    print(f"Approve plan: ok={ok}")
+    if ok:
+        data = json.loads(output)
+        print(f"  Items added: {data.get('items_added')}")
+        print(f"  Plan version: {data.get('plan_version')}")
+    else:
+        print(f"  Error: {err or output}")
+        success = False
 
-    # Verify proposal was removed
-    ok, output, err = send_cmd(
-        f'tool:communicate {{"action":"read","key":"{proposal_key}"}}',
-        coordinator
-    )
-    print(f"Read after approval: ok={ok}")
+    # Verify proposal was removed from context
+    ok, _, _ = send_cmd(f"swarm:context:{swarm_id}:{proposal_key}")
+    proposal_removed = not ok
+    print(f"Proposal removed after approval: {proposal_removed}")
+    if not proposal_removed:
+        print("  ✗ Proposal still exists after approval")
+        success = False
 
-    destroy_session(coordinator)
-    destroy_session(agent)
+    # Verify plan grew
+    ok, output, _ = send_cmd(f"swarm:plan_version:{swarm_id}")
+    if ok:
+        data = json.loads(output)
+        items_after = data.get('item_count', 0)
+        print(f"Plan items after: {items_after} (was {items_before})")
+        if items_after <= items_before:
+            print("  ✗ Plan did not grow after approval")
+            success = False
 
-    print("✓ Plan approval workflow completed")
-    return True
+    destroy_session(s1)
+    destroy_session(s2)
+
+    if success:
+        print("✓ Plan approval workflow completed successfully")
+    else:
+        print("✗ Plan approval workflow had failures")
+    return success
 
 
 def test_plan_rejection():
@@ -298,35 +359,70 @@ def test_plan_rejection():
 
     os.makedirs(TEST_DIR, exist_ok=True)
 
-    coordinator = create_session()
-    agent = create_session()
+    s1 = create_session()
+    s2 = create_session()
+    swarm_id = get_swarm_id()
+    coordinator = get_coordinator(swarm_id)
+    agent = s2 if coordinator == s1 else s1
 
-    print(f"Coordinator: {coordinator[:12]}...")
-    print(f"Agent: {agent[:12]}...")
+    print(f"Coordinator: {coordinator[:20]}...")
+    print(f"Agent: {agent[:20]}...")
+
+    success = True
+
+    # Get plan version before
+    ok, output, _ = send_cmd(f"swarm:plan_version:{swarm_id}")
+    version_before = 0
+    if ok:
+        version_before = json.loads(output).get('version', 0)
 
     # Share a plan proposal
-    plan_items = [{"id": "1", "subject": "Bad idea", "status": "pending"}]
+    plan_items = [{"id": "reject_test_1", "content": "Bad idea", "status": "pending", "priority": "normal"}]
     plan_json = json.dumps(plan_items)
     proposal_key = f"plan_proposal:{agent}"
 
-    ok, _, _ = send_cmd(
-        f'tool:communicate {{"action":"share","key":"{proposal_key}","value":{json.dumps(plan_json)}}}',
-        agent
-    )
+    ok, _, err = send_cmd(f"swarm:set_context:{agent} {proposal_key} {plan_json}")
     print(f"Plan proposal shared: ok={ok}")
+    if not ok:
+        print(f"  Error: {err}")
+        success = False
 
     # Coordinator rejects the plan
     ok, output, err = send_cmd(
-        f'tool:communicate {{"action":"reject_plan","proposer_session":"{agent}","reason":"Not aligned with goals"}}',
-        coordinator
+        f"swarm:reject_plan:{coordinator} {agent} Not aligned with goals"
     )
-    print(f"Reject plan: ok={ok}, err={err}")
+    print(f"Reject plan: ok={ok}")
+    if ok:
+        data = json.loads(output)
+        print(f"  Rejected: {data.get('rejected')}")
+    else:
+        print(f"  Error: {err or output}")
+        success = False
 
-    destroy_session(coordinator)
-    destroy_session(agent)
+    # Verify proposal was removed
+    ok, _, _ = send_cmd(f"swarm:context:{swarm_id}:{proposal_key}")
+    proposal_removed = not ok
+    print(f"Proposal removed after rejection: {proposal_removed}")
+    if not proposal_removed:
+        success = False
 
-    print("✓ Plan rejection workflow completed")
-    return True
+    # Verify plan version didn't change (rejected plans don't modify the plan)
+    ok, output, _ = send_cmd(f"swarm:plan_version:{swarm_id}")
+    if ok:
+        version_after = json.loads(output).get('version', 0)
+        plan_unchanged = version_after == version_before
+        print(f"Plan version unchanged: {plan_unchanged} ({version_before} → {version_after})")
+        if not plan_unchanged:
+            success = False
+
+    destroy_session(s1)
+    destroy_session(s2)
+
+    if success:
+        print("✓ Plan rejection workflow completed successfully")
+    else:
+        print("✗ Plan rejection workflow had failures")
+    return success
 
 
 def test_coordinator_only_approval():
@@ -337,21 +433,25 @@ def test_coordinator_only_approval():
 
     os.makedirs(TEST_DIR, exist_ok=True)
 
-    s1 = create_session()  # This will be coordinator (first session)
-    s2 = create_session()  # This is not coordinator
+    s1 = create_session()
+    s2 = create_session()
+    swarm_id = get_swarm_id()
+    coordinator = get_coordinator(swarm_id)
+    non_coordinator = s2 if coordinator == s1 else s1
 
-    print(f"Session 1 (coordinator): {s1[:12]}...")
-    print(f"Session 2 (agent): {s2[:12]}...")
+    print(f"Coordinator: {coordinator[:20]}...")
+    print(f"Non-coordinator: {non_coordinator[:20]}...")
 
     # Try to approve from non-coordinator
     ok, output, err = send_cmd(
-        f'tool:communicate {{"action":"approve_plan","proposer_session":"{s1}"}}',
-        s2
+        f"swarm:approve_plan:{non_coordinator} {coordinator}"
     )
-    print(f"Non-coordinator approve attempt: ok={ok}, err={err}")
+    print(f"Non-coordinator approve attempt: ok={ok}")
+    if not ok:
+        print(f"  Error (expected): {output[:80]}")
 
-    # Should fail
-    success = not ok or "coordinator" in (err + output).lower()
+    combined = (err + output).lower()
+    success = not ok and "coordinator" in combined
 
     destroy_session(s1)
     destroy_session(s2)
@@ -360,7 +460,6 @@ def test_coordinator_only_approval():
         print("✓ Non-coordinator approval correctly rejected")
     else:
         print("✗ Non-coordinator was not properly rejected")
-
     return success
 
 
@@ -370,7 +469,6 @@ def main():
     print("Swarm Integration Tests")
     print("=" * 60)
 
-    # Check if debug socket exists
     if not os.path.exists(DEBUG_SOCKET):
         print(f"Error: Debug socket not found: {DEBUG_SOCKET}")
         print("Make sure jcode server is running with debug_control enabled:")
@@ -384,7 +482,7 @@ def main():
         ("Coordinator Election", test_coordinator_election),
         ("Communication", test_communication),
         ("Invalid DM", test_invalid_dm),
-        ("Swarm ID Error", test_swarm_id_error),
+        ("Non-Git Swarm ID", test_swarm_id_non_git),
         ("Plan Approval", test_plan_approval),
         ("Plan Rejection", test_plan_rejection),
         ("Coordinator-Only Approval", test_coordinator_only_approval),
@@ -396,6 +494,8 @@ def main():
             results.append((name, result))
         except Exception as e:
             print(f"✗ {name} failed with exception: {e}")
+            import traceback
+            traceback.print_exc()
             results.append((name, False))
 
     # Summary
