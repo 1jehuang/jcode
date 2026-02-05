@@ -548,6 +548,24 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
     0
 }
 
+/// Clear an area that previously had an image (removes stale terminal graphics)
+/// This is called when an image's marker scrolls off-screen but its area still overlaps
+/// the visible region - we need to explicitly clear the terminal graphics layer.
+pub fn clear_image_area(area: Rect, buf: &mut Buffer) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    // Reset all cells in the area to clear any terminal graphics
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.reset();
+            }
+        }
+    }
+}
+
 /// Estimate the height needed for an image in terminal rows
 pub fn estimate_image_height(width: u32, height: u32, max_width: u16) -> u16 {
     if let Some(Some(picker)) = PICKER.get() {
