@@ -905,10 +905,23 @@ fn format_status_for_debug(app: &dyn TuiState) -> String {
     }
 }
 
+/// Pre-computed image region from line scanning
+#[derive(Clone)]
+struct ImageRegion {
+    /// Absolute line index in wrapped_lines
+    abs_line_idx: usize,
+    /// Hash of the mermaid content (for cache lookup)
+    hash: u64,
+    /// Total height of the image placeholder in lines
+    height: u16,
+}
+
 #[derive(Clone)]
 struct PreparedMessages {
     wrapped_lines: Vec<Line<'static>>,
     wrapped_user_indices: Vec<usize>,
+    /// Pre-scanned image regions (computed once, not every frame)
+    image_regions: Vec<ImageRegion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1258,11 +1271,13 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
         PreparedMessages {
             wrapped_lines: Vec::new(),
             wrapped_user_indices: Vec::new(),
+            image_regions: Vec::new(),
         }
     };
 
     let mut wrapped_lines = header_prepared.wrapped_lines;
     let header_len = wrapped_lines.len();
+    let body_len = body_prepared.wrapped_lines.len();
     wrapped_lines.extend(body_prepared.wrapped_lines);
     wrapped_lines.extend(streaming_prepared.wrapped_lines);
 
@@ -1271,9 +1286,21 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
         *idx += header_len;
     }
 
+    // Combine image regions with adjusted indices
+    let mut image_regions = Vec::new();
+    for mut region in body_prepared.image_regions {
+        region.abs_line_idx += header_len;
+        image_regions.push(region);
+    }
+    for mut region in streaming_prepared.image_regions {
+        region.abs_line_idx += header_len + body_len;
+        image_regions.push(region);
+    }
+
     PreparedMessages {
         wrapped_lines,
         wrapped_user_indices,
+        image_regions,
     }
 }
 
@@ -1570,6 +1597,7 @@ fn prepare_streaming_cached(
         return PreparedMessages {
             wrapped_lines: Vec::new(),
             wrapped_user_indices: Vec::new(),
+            image_regions: Vec::new(),
         };
     }
 
@@ -1988,9 +2016,33 @@ fn wrap_lines(
         wrapped_idx += count;
     }
 
+    // Scan for mermaid image placeholders (once during preparation, not every frame)
+    let mut image_regions = Vec::new();
+    for (idx, line) in wrapped_lines.iter().enumerate() {
+        if let Some(hash) = super::mermaid::parse_image_placeholder(line) {
+            // Count consecutive empty lines for image height
+            let mut height = 1u16;
+            for subsequent in wrapped_lines.iter().skip(idx + 1) {
+                if subsequent.spans.is_empty()
+                    || (subsequent.spans.len() == 1 && subsequent.spans[0].content.is_empty())
+                {
+                    height += 1;
+                } else {
+                    break;
+                }
+            }
+            image_regions.push(ImageRegion {
+                abs_line_idx: idx,
+                hash,
+                height,
+            });
+        }
+    }
+
     PreparedMessages {
         wrapped_lines,
         wrapped_user_indices,
+        image_regions,
     }
 }
 
@@ -2256,32 +2308,16 @@ fn draw_messages(
             .extend(std::iter::repeat(Line::from("")).take(visible_height - visible_lines.len()));
     }
 
-    // Scan ALL lines for mermaid images to handle both rendering and clearing
-    // This ensures images are cleared when they scroll off screen
-    let mut all_images: Vec<(usize, u64, u16)> = Vec::new(); // (abs_line_idx, hash, height)
-    for (idx, line) in wrapped_lines.iter().enumerate() {
-        if let Some(hash) = super::mermaid::parse_image_placeholder(line) {
-            let mut height = 1u16;
-            for subsequent in wrapped_lines.iter().skip(idx + 1) {
-                if subsequent.spans.is_empty()
-                    || (subsequent.spans.len() == 1 && subsequent.spans[0].content.is_empty())
-                {
-                    height += 1;
-                } else {
-                    break;
-                }
-            }
-            all_images.push((idx, hash, height));
-        }
-    }
-
     // Render text first
     let paragraph = Paragraph::new(visible_lines);
     frame.render_widget(paragraph, area);
 
-    // Process each image: either render it or clear the area it would occupy
+    // Use pre-computed image regions (scanned once during preparation, not every frame)
     let centered = app.centered_mode();
-    for (abs_idx, hash, total_height) in all_images {
+    for region in &prepared.image_regions {
+        let abs_idx = region.abs_line_idx;
+        let hash = region.hash;
+        let total_height = region.height;
         let image_end = abs_idx + total_height as usize;
 
         // Check if this image overlaps the visible area at all
