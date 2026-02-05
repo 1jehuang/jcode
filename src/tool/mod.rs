@@ -124,11 +124,25 @@ pub trait Tool: Send + Sync {
 }
 
 /// Registry of available tools (Arc-wrapped for sharing)
-#[derive(Clone)]
+///
+/// Clone creates a fresh CompactionManager so each subagent gets independent
+/// message history tracking. Tools and skills are shared via Arc.
 pub struct Registry {
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     skills: Arc<RwLock<SkillRegistry>>,
     compaction: Arc<RwLock<CompactionManager>>,
+}
+
+impl Clone for Registry {
+    fn clone(&self) -> Self {
+        Self {
+            tools: self.tools.clone(),
+            skills: self.skills.clone(),
+            // Each clone gets a fresh CompactionManager to prevent parallel
+            // subagents from corrupting each other's message history
+            compaction: Arc::new(RwLock::new(CompactionManager::new())),
+        }
+    }
 }
 
 impl Registry {
