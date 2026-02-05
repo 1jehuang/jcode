@@ -162,6 +162,10 @@ impl TuiState for BenchState {
         self.scroll_offset
     }
 
+    fn auto_scroll_paused(&self) -> bool {
+        false
+    }
+
     fn provider_name(&self) -> String {
         self.provider_name.clone()
     }

@@ -31,6 +31,9 @@ pub struct TuiCore {
     pub scroll_offset: usize,
     pub status: ProcessingStatus,
     pub subagent_status: Option<String>,
+    /// When true, don't auto-scroll to bottom during streaming
+    /// Set when user scrolls up during processing, cleared on new message
+    pub auto_scroll_paused: bool,
 
     // Processing state
     pub is_processing: bool,
@@ -63,6 +66,7 @@ impl TuiCore {
             scroll_offset: 0,
             status: ProcessingStatus::Idle,
             subagent_status: None,
+            auto_scroll_paused: false,
             is_processing: false,
             should_quit: false,
             processing_started: None,
@@ -173,19 +177,35 @@ impl TuiCore {
     // ========== Scrolling ==========
 
     /// Scroll up by given amount
+    /// If processing, this pauses auto-scroll to let user review content
     pub fn scroll_up(&mut self, amount: usize) {
         // Use generous estimate - UI will clamp to actual content
         let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
         self.scroll_offset = (self.scroll_offset + amount).min(max_estimate);
+        // Pause auto-scroll when user scrolls up during streaming
+        if self.is_processing {
+            self.auto_scroll_paused = true;
+        }
     }
 
     /// Scroll down by given amount
     pub fn scroll_down(&mut self, amount: usize) {
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+        // If scrolled back to bottom, resume auto-scroll
+        if self.scroll_offset == 0 {
+            self.auto_scroll_paused = false;
+        }
     }
 
-    /// Reset scroll to bottom
+    /// Reset scroll to bottom and resume auto-scroll
     pub fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = 0;
+        self.auto_scroll_paused = false;
+    }
+
+    /// Resume auto-scroll (call when new message is submitted)
+    pub fn resume_auto_scroll(&mut self) {
+        self.auto_scroll_paused = false;
         self.scroll_offset = 0;
     }
 

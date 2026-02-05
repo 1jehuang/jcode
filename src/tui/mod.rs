@@ -41,6 +41,8 @@ pub trait TuiState {
     /// Message sent as soft interrupt but not yet injected (shown in queue preview)
     fn pending_soft_interrupt(&self) -> Option<&str>;
     fn scroll_offset(&self) -> usize;
+    /// Whether auto-scroll to bottom is paused (user scrolled up during streaming)
+    fn auto_scroll_paused(&self) -> bool;
     fn provider_name(&self) -> String;
     fn provider_model(&self) -> String;
     /// Upstream provider (e.g., which provider OpenRouter routed to)
