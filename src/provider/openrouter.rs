@@ -155,7 +155,10 @@ fn normalize_provider_name(raw: &str) -> String {
         }
     }
 
-    let simplified: String = lower.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let simplified: String = lower
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
     for known in KNOWN_PROVIDERS {
         let known_simple: String = known
             .to_lowercase()
@@ -1112,7 +1115,9 @@ impl Provider for OpenRouterProvider {
                         assistant_msg["tool_calls"] = serde_json::json!(tool_calls);
                     }
 
-                    if allow_reasoning && (include_reasoning_content || !reasoning_content.is_empty()) {
+                    if allow_reasoning
+                        && (include_reasoning_content || !reasoning_content.is_empty())
+                    {
                         if !reasoning_content.is_empty() || !tool_calls.is_empty() {
                             let reasoning_payload =
                                 if reasoning_content.is_empty() && !tool_calls.is_empty() {
@@ -1212,10 +1217,7 @@ impl Provider for OpenRouterProvider {
             if role == "assistant" && allow_reasoning {
                 if msg.get("tool_calls").and_then(|v| v.as_array()).is_some() {
                     let needs_reasoning = match msg.get("reasoning_content") {
-                        Some(value) => value
-                            .as_str()
-                            .map(|s| s.trim().is_empty())
-                            .unwrap_or(true),
+                        Some(value) => value.as_str().map(|s| s.trim().is_empty()).unwrap_or(true),
                         None => true,
                     };
                     if needs_reasoning {
@@ -1741,9 +1743,7 @@ impl OpenRouterStream {
         drop(stats);
         save_provider_stats(&snapshot);
 
-        if usage.cache_read_input_tokens.is_some()
-            || usage.cache_creation_input_tokens.is_some()
-        {
+        if usage.cache_read_input_tokens.is_some() || usage.cache_creation_input_tokens.is_some() {
             let mut pin = self.provider_pin.lock().unwrap();
             if let Some(existing) = pin.as_mut() {
                 if existing.model == self.model && existing.provider == provider {
