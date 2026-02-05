@@ -435,6 +435,8 @@ pub struct App {
     show_diffs: bool,
     // Center all content (from config)
     centered: bool,
+    // Diagram display mode (from config)
+    diagram_mode: crate::config::DiagramDisplayMode,
     // Keybindings for model switching
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for scrolling
@@ -601,6 +603,7 @@ impl App {
             requested_exit_code: None,
             show_diffs: display.show_diffs,
             centered: display.centered,
+            diagram_mode: display.diagram_mode,
             model_switch_keys: super::keybind::load_model_switch_keys(),
             scroll_keys: super::keybind::load_scroll_keys(),
             status_notice: None,
@@ -8051,6 +8054,10 @@ impl super::TuiState for App {
 
     fn auth_status(&self) -> crate::auth::AuthStatus {
         crate::auth::AuthStatus::check()
+    }
+
+    fn diagram_mode(&self) -> crate::config::DiagramDisplayMode {
+        self.diagram_mode
     }
 }
 

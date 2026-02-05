@@ -1263,4 +1263,8 @@ impl TuiState for ClientApp {
     fn auth_status(&self) -> crate::auth::AuthStatus {
         crate::auth::AuthStatus::check()
     }
+
+    fn diagram_mode(&self) -> crate::config::DiagramDisplayMode {
+        crate::config::DiagramDisplayMode::Pinned // Default for deprecated client
+    }
 }
