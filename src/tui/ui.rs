@@ -1524,9 +1524,11 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
         }
     }
 
-    // Line 4: MCPs (if any) - show server names with tool counts
+    // Line 4: MCPs - show server names with tool counts, or (none)
     let mcps = app.mcp_servers();
-    if !mcps.is_empty() {
+    let mcp_text = if mcps.is_empty() {
+        "mcp: (none)".to_string()
+    } else {
         let mcp_parts: Vec<String> = mcps
             .iter()
             .map(|(name, count)| {
@@ -1537,14 +1539,11 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
                 }
             })
             .collect();
-        lines.push(
-            Line::from(Span::styled(
-                format!("mcp: {}", mcp_parts.join(", ")),
-                Style::default().fg(DIM_COLOR),
-            ))
-            .alignment(align),
-        );
-    }
+        format!("mcp: {}", mcp_parts.join(", "))
+    };
+    lines.push(
+        Line::from(Span::styled(mcp_text, Style::default().fg(DIM_COLOR))).alignment(align),
+    );
 
     // Line 4: Skills (if any)
     let skills = app.available_skills();
