@@ -372,8 +372,8 @@ pub struct App {
     cancel_requested: bool,
     // Quit confirmation: tracks when first Ctrl+C was pressed
     quit_pending: Option<Instant>,
-    // Cached MCP server names (updated on connect/disconnect)
-    mcp_server_names: Vec<String>,
+    // Cached MCP server names and tool counts (updated on connect/disconnect)
+    mcp_server_names: Vec<(String, usize)>,
     // Semantic stream buffer for chunked output
     stream_buffer: StreamBuffer,
     // Track thinking start time for extended thinking display
@@ -570,7 +570,7 @@ impl App {
             provider_session_id: None,
             cancel_requested: false,
             quit_pending: None,
-            mcp_server_names: Vec::new(),
+            mcp_server_names: Vec::new(), // Vec<(name, tool_count)>
             stream_buffer: StreamBuffer::new(),
             thinking_start: None,
             thought_line_inserted: false,
@@ -693,7 +693,8 @@ impl App {
     /// Initialize MCP servers (call after construction)
     pub async fn init_mcp(&mut self) {
         // Always register the MCP management tool so agent can connect servers
-        let mcp_tool = crate::tool::mcp::McpManagementTool::new(Arc::clone(&self.mcp_manager));
+        let mcp_tool = crate::tool::mcp::McpManagementTool::new(Arc::clone(&self.mcp_manager))
+            .with_registry(self.registry.clone());
         self.registry
             .register("mcp".to_string(), Arc::new(mcp_tool))
             .await;
@@ -709,8 +710,16 @@ impl App {
             let (successes, failures) = {
                 let manager = self.mcp_manager.write().await;
                 let result = manager.connect_all().await.unwrap_or((0, Vec::new()));
-                // Cache server names
-                self.mcp_server_names = manager.connected_servers().await;
+                // Cache server names with tool counts
+                let servers = manager.connected_servers().await;
+                let all_tools = manager.all_tools().await;
+                self.mcp_server_names = servers
+                    .into_iter()
+                    .map(|name| {
+                        let count = all_tools.iter().filter(|(s, _)| s == &name).count();
+                        (name, count)
+                    })
+                    .collect();
                 result
             };
 
@@ -7148,8 +7157,8 @@ impl App {
         self.upstream_provider.as_deref()
     }
 
-    pub fn mcp_servers(&self) -> &[String] {
-        &self.mcp_server_names
+    pub fn mcp_servers(&self) -> Vec<(String, usize)> {
+        self.mcp_server_names.clone()
     }
 
     /// Calculate approximate line heights for each message (from bottom to top)
@@ -7294,7 +7303,7 @@ impl App {
             status: format!("{:?}", self.status),
             provider_name: self.provider.name().to_string(),
             provider_model: self.provider.model().to_string(),
-            mcp_servers: self.mcp_server_names.clone(),
+            mcp_servers: self.mcp_server_names.iter().map(|(name, _)| name.clone()).collect(),
             skills: self.skills.list().iter().map(|s| s.name.clone()).collect(),
             session_id: self.provider_session_id.clone(),
             input_tokens: self.streaming_input_tokens,
@@ -7483,7 +7492,7 @@ impl super::TuiState for App {
         self.upstream_provider.clone()
     }
 
-    fn mcp_servers(&self) -> Vec<String> {
+    fn mcp_servers(&self) -> Vec<(String, usize)> {
         self.mcp_server_names.clone()
     }
 
