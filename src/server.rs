@@ -268,6 +268,83 @@ pub fn debug_socket_path() -> PathBuf {
     main_path.with_file_name(debug_filename)
 }
 
+fn sibling_socket_path(path: &std::path::Path) -> Option<PathBuf> {
+    let filename = path.file_name()?.to_str()?;
+
+    if let Some(base) = filename.strip_suffix("-debug.sock") {
+        return Some(path.with_file_name(format!("{}.sock", base)));
+    }
+
+    if let Some(base) = filename.strip_suffix(".sock") {
+        return Some(path.with_file_name(format!("{}-debug.sock", base)));
+    }
+
+    None
+}
+
+/// Remove a socket file and its sibling (main/debug) if present.
+pub fn cleanup_socket_pair(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    if let Some(sibling) = sibling_socket_path(path) {
+        let _ = std::fs::remove_file(sibling);
+    }
+}
+
+/// Connect to a Unix socket, cleaning up stale socket files on connection-refused.
+pub async fn connect_socket(path: &std::path::Path) -> Result<UnixStream> {
+    match UnixStream::connect(path).await {
+        Ok(stream) => Ok(stream),
+        Err(err) => {
+            let is_stale = err.kind() == std::io::ErrorKind::ConnectionRefused && path.exists();
+            if is_stale {
+                cleanup_socket_pair(path);
+                anyhow::bail!(
+                    "Stale socket removed at {}. Start/restart jcode and retry.",
+                    path.display()
+                );
+            }
+            Err(err.into())
+        }
+    }
+}
+
+#[cfg(test)]
+mod socket_tests {
+    use super::{cleanup_socket_pair, sibling_socket_path};
+
+    #[test]
+    fn sibling_socket_path_roundtrip() {
+        let main = std::path::PathBuf::from("/tmp/jcode.sock");
+        let debug = std::path::PathBuf::from("/tmp/jcode-debug.sock");
+
+        assert_eq!(sibling_socket_path(&main), Some(debug.clone()));
+        assert_eq!(sibling_socket_path(&debug), Some(main));
+    }
+
+    #[test]
+    fn cleanup_socket_pair_removes_main_and_debug_files() {
+        let stamp = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir();
+        let main = dir.join(format!("jcode-test-{}.sock", stamp));
+        let debug = dir.join(format!("jcode-test-{}-debug.sock", stamp));
+
+        std::fs::write(&main, b"").expect("create main socket placeholder");
+        std::fs::write(&debug, b"").expect("create debug socket placeholder");
+
+        cleanup_socket_pair(&main);
+
+        assert!(!main.exists(), "main socket file should be removed");
+        assert!(!debug.exists(), "debug socket file should be removed");
+    }
+}
+
 /// Set custom socket path (sets JCODE_SOCKET env var)
 pub fn set_socket_path(path: &str) {
     std::env::set_var("JCODE_SOCKET", path);
@@ -6458,6 +6535,9 @@ fn load_testers() -> Result<Vec<serde_json::Value>> {
     let path = crate::storage::jcode_dir()?.join("testers.json");
     if path.exists() {
         let content = std::fs::read_to_string(&path)?;
+        if content.trim().is_empty() {
+            return Ok(vec![]);
+        }
         Ok(serde_json::from_str(&content)?)
     } else {
         Ok(vec![])
@@ -6635,7 +6715,7 @@ impl Client {
     }
 
     pub async fn connect_with_path(path: PathBuf) -> Result<Self> {
-        let stream = UnixStream::connect(&path).await?;
+        let stream = connect_socket(&path).await?;
         let (reader, writer) = stream.into_split();
         Ok(Self {
             reader: BufReader::new(reader),
@@ -6649,7 +6729,7 @@ impl Client {
     }
 
     pub async fn connect_debug_with_path(path: PathBuf) -> Result<Self> {
-        let stream = UnixStream::connect(&path).await?;
+        let stream = connect_socket(&path).await?;
         let (reader, writer) = stream.into_split();
         Ok(Self {
             reader: BufReader::new(reader),
@@ -6698,7 +6778,10 @@ impl Client {
     /// Read the next event from the server
     pub async fn read_event(&mut self) -> Result<ServerEvent> {
         let mut line = String::new();
-        self.reader.read_line(&mut line).await?;
+        let n = self.reader.read_line(&mut line).await?;
+        if n == 0 {
+            anyhow::bail!("Server disconnected");
+        }
         let event: ServerEvent = serde_json::from_str(&line)?;
         Ok(event)
     }
@@ -6712,7 +6795,10 @@ impl Client {
         self.writer.write_all(json.as_bytes()).await?;
 
         let mut line = String::new();
-        self.reader.read_line(&mut line).await?;
+        let n = self.reader.read_line(&mut line).await?;
+        if n == 0 {
+            anyhow::bail!("Server disconnected");
+        }
         let event: ServerEvent = serde_json::from_str(&line)?;
 
         match event {
@@ -6730,7 +6816,10 @@ impl Client {
         self.writer.write_all(json.as_bytes()).await?;
 
         let mut line = String::new();
-        self.reader.read_line(&mut line).await?;
+        let n = self.reader.read_line(&mut line).await?;
+        if n == 0 {
+            anyhow::bail!("Server disconnected");
+        }
         let event: ServerEvent = serde_json::from_str(&line)?;
         Ok(event)
     }
@@ -6762,7 +6851,10 @@ impl Client {
         self.writer.write_all(json.as_bytes()).await?;
         for _ in 0..10 {
             let mut line = String::new();
-            self.reader.read_line(&mut line).await?;
+            let n = self.reader.read_line(&mut line).await?;
+            if n == 0 {
+                anyhow::bail!("Server disconnected");
+            }
             let event: ServerEvent = serde_json::from_str(&line)?;
             match event {
                 ServerEvent::Ack { .. } => continue,
