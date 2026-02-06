@@ -218,7 +218,8 @@ impl ClientApp {
 
     /// Connect to server and sync state
     pub async fn connect(&mut self) -> Result<UnixStream> {
-        let stream = UnixStream::connect(server::socket_path()).await?;
+        let socket = server::socket_path();
+        let stream = server::connect_socket(&socket).await?;
 
         // Will sync history after connection is established
         Ok(stream)
@@ -240,7 +241,10 @@ impl ClientApp {
 
         // Read response
         let mut line = String::new();
-        reader.read_line(&mut line).await?;
+        let n = reader.read_line(&mut line).await?;
+        if n == 0 {
+            anyhow::bail!("Server disconnected");
+        }
         let event: ServerEvent = serde_json::from_str(&line)?;
 
         if let ServerEvent::History {
