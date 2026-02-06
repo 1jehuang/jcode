@@ -1524,12 +1524,22 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
         }
     }
 
-    // Line 4: MCPs (if any)
+    // Line 4: MCPs (if any) - show server names with tool counts
     let mcps = app.mcp_servers();
     if !mcps.is_empty() {
+        let mcp_parts: Vec<String> = mcps
+            .iter()
+            .map(|(name, count)| {
+                if *count > 0 {
+                    format!("{} ({} tools)", name, count)
+                } else {
+                    name.clone()
+                }
+            })
+            .collect();
         lines.push(
             Line::from(Span::styled(
-                format!("mcp: {}", mcps.join(", ")),
+                format!("mcp: {}", mcp_parts.join(", ")),
                 Style::default().fg(DIM_COLOR),
             ))
             .alignment(align),

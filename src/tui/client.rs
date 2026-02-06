@@ -1011,7 +1011,7 @@ impl TuiState for ClientApp {
         None
     }
 
-    fn mcp_servers(&self) -> Vec<String> {
+    fn mcp_servers(&self) -> Vec<(String, usize)> {
         Vec::new() // Client doesn't track MCP servers yet
     }
 

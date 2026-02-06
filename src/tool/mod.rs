@@ -356,8 +356,9 @@ impl Registry {
 
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
 
-        // Register MCP management tool immediately
-        let mcp_tool = mcp::McpManagementTool::new(Arc::clone(&mcp_manager));
+        // Register MCP management tool immediately (with registry for dynamic tool registration)
+        let mcp_tool = mcp::McpManagementTool::new(Arc::clone(&mcp_manager))
+            .with_registry(self.clone());
         self.register("mcp".to_string(), Arc::new(mcp_tool) as Arc<dyn Tool>)
             .await;
 

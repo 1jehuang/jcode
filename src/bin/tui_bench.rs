@@ -178,7 +178,7 @@ impl TuiState for BenchState {
         None
     }
 
-    fn mcp_servers(&self) -> Vec<String> {
+    fn mcp_servers(&self) -> Vec<(String, usize)> {
         Vec::new()
     }
 

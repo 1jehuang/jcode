@@ -31,9 +31,9 @@ impl McpTool {
         }
     }
 
-    /// Generate a prefixed tool name (server__toolname)
+    /// Generate a prefixed tool name (mcp__server__toolname)
     pub fn prefixed_name(&self) -> String {
-        format!("mcp__{}_{}", self.server_name, self.tool_def.name)
+        format!("mcp__{}__{}", self.server_name, self.tool_def.name)
     }
 }
 

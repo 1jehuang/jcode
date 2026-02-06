@@ -192,27 +192,29 @@ impl McpConfig {
         Ok(serde_json::from_str(&content)?)
     }
 
-    /// Load from default locations
+    /// Load from default locations (merges global + local, local overrides)
     pub fn load() -> Self {
-        // Try project-local first
-        let local = std::path::Path::new(".claude/mcp.json");
-        if local.exists() {
-            if let Ok(config) = Self::load_from_file(local) {
-                return config;
-            }
-        }
+        let mut merged = Self::default();
 
-        // Try global
+        // Load global first (base)
         if let Some(home) = dirs::home_dir() {
             let global = home.join(".claude/mcp.json");
             if global.exists() {
                 if let Ok(config) = Self::load_from_file(&global) {
-                    return config;
+                    merged.servers.extend(config.servers);
                 }
             }
         }
 
-        Self::default()
+        // Load local (overrides global for same-named servers)
+        let local = std::path::Path::new(".claude/mcp.json");
+        if local.exists() {
+            if let Ok(config) = Self::load_from_file(local) {
+                merged.servers.extend(config.servers);
+            }
+        }
+
+        merged
     }
 }
 
