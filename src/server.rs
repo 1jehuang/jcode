@@ -4337,6 +4337,68 @@ async fn execute_debug_command(
         .unwrap_or_else(|_| "{}".to_string()));
     }
 
+    // mcp:tools - list all registered MCP tools
+    if trimmed == "mcp:tools" {
+        let agent = agent.lock().await;
+        let tool_names = agent.tool_names().await;
+        let mcp_tools: Vec<&str> = tool_names
+            .iter()
+            .filter(|n| n.starts_with("mcp__"))
+            .map(|n| n.as_str())
+            .collect();
+        return Ok(serde_json::to_string_pretty(&mcp_tools)
+            .unwrap_or_else(|_| "[]".to_string()));
+    }
+
+    // mcp:connect:<server> <json> - connect to an MCP server
+    if let Some(rest) = trimmed.strip_prefix("mcp:connect:") {
+        let (server_name, config_json) = match rest.find(' ') {
+            Some(idx) => (rest[..idx].trim(), &rest[idx + 1..]),
+            None => return Err(anyhow::anyhow!("Usage: mcp:connect:<server> {{\"command\":\"...\",\"args\":[...]}}")),
+        };
+        let mut input: serde_json::Value = serde_json::from_str(config_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON: {}", e))?;
+        input["action"] = serde_json::json!("connect");
+        input["server"] = serde_json::json!(server_name);
+        let agent = agent.lock().await;
+        let result = agent.execute_tool("mcp", input).await?;
+        return Ok(result.output);
+    }
+
+    // mcp:disconnect:<server> - disconnect from an MCP server
+    if let Some(server_name) = trimmed.strip_prefix("mcp:disconnect:") {
+        let server_name = server_name.trim();
+        let input = serde_json::json!({"action": "disconnect", "server": server_name});
+        let agent = agent.lock().await;
+        let result = agent.execute_tool("mcp", input).await?;
+        return Ok(result.output);
+    }
+
+    // mcp:reload - reload MCP config and reconnect
+    if trimmed == "mcp:reload" {
+        let input = serde_json::json!({"action": "reload"});
+        let agent = agent.lock().await;
+        let result = agent.execute_tool("mcp", input).await?;
+        return Ok(result.output);
+    }
+
+    // mcp:call:<server>:<tool> <json> - call an MCP tool directly
+    if let Some(rest) = trimmed.strip_prefix("mcp:call:") {
+        let (tool_path, args_json) = match rest.find(' ') {
+            Some(idx) => (rest[..idx].trim(), rest[idx + 1..].trim()),
+            None => (rest.trim(), "{}"),
+        };
+        let mut parts = tool_path.splitn(2, ':');
+        let server = parts.next().unwrap_or("");
+        let tool = parts.next().ok_or_else(|| anyhow::anyhow!("Usage: mcp:call:<server>:<tool> <json>"))?;
+        let tool_name = format!("mcp__{}__{}", server, tool);
+        let input: serde_json::Value = serde_json::from_str(args_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON: {}", e))?;
+        let agent = agent.lock().await;
+        let result = agent.execute_tool(&tool_name, input).await?;
+        return Ok(result.output);
+    }
+
     if trimmed == "cancel" {
         // Queue an urgent interrupt to cancel in-flight generation
         let agent = agent.lock().await;
@@ -4397,7 +4459,7 @@ async fn execute_debug_command(
 
     if trimmed == "help" {
         return Ok(
-            "debug commands: state, usage, history, tools, tools:full, mcp:servers, last_response, message:<text>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, jobs, job_status:<id>, job_wait:<id>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
+            "debug commands: state, usage, history, tools, tools:full, mcp:servers, mcp:tools, mcp:connect:<server> <json>, mcp:disconnect:<server>, mcp:reload, mcp:call:<server>:<tool> <json>, last_response, message:<text>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, jobs, job_status:<id>, job_wait:<id>, sessions, create_session, create_session:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
         );
     }
 
