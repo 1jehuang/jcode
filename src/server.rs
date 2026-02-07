@@ -1109,6 +1109,10 @@ impl Server {
         crate::logging::info(&format!("Server listening on {:?}", self.socket_path));
         crate::logging::info(&format!("Debug socket on {:?}", self.debug_socket_path));
 
+        // Write server git hash next to socket so clients can detect version mismatches
+        let hash_path = format!("{}.hash", self.socket_path.display());
+        let _ = std::fs::write(&hash_path, env!("JCODE_GIT_HASH"));
+
         // Spawn selfdev signal monitor (checks for reload/rollback signals)
         tokio::spawn(async {
             monitor_selfdev_signals().await;
