@@ -907,7 +907,7 @@ fn render_diagrams_widget(frame: &mut Frame, inner: Rect, data: &InfoWidgetData)
     let diagram = &data.diagrams[0];
 
     // Render the image using mermaid module
-    super::mermaid::render_image_widget(diagram.hash, inner, frame.buffer_mut(), false);
+    super::mermaid::render_image_widget(diagram.hash, inner, frame.buffer_mut(), false, false);
 }
 
 /// Render content for a specific widget type
@@ -2620,9 +2620,7 @@ fn render_swarm_expanded(info: &SwarmInfo, inner: Rect) -> Vec<Line<'static>> {
                     let connector_width = inner.width.saturating_sub(4).min(20) as usize;
                     let connector = format!(
                         "  {}",
-                        "├".to_string()
-                            + &"─".repeat(connector_width.saturating_sub(2))
-                            + "┤"
+                        "├".to_string() + &"─".repeat(connector_width.saturating_sub(2)) + "┤"
                     );
                     lines.push(Line::from(vec![Span::styled(
                         connector,

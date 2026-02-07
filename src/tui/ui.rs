@@ -1541,9 +1541,7 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
             .collect();
         format!("mcp: {}", mcp_parts.join(", "))
     };
-    lines.push(
-        Line::from(Span::styled(mcp_text, Style::default().fg(DIM_COLOR))).alignment(align),
-    );
+    lines.push(Line::from(Span::styled(mcp_text, Style::default().fg(DIM_COLOR))).alignment(align));
 
     // Line 4: Skills (if any)
     let skills = app.available_skills();
@@ -2334,7 +2332,7 @@ fn draw_pinned_diagram(frame: &mut Frame, diagram: &info_widget::DiagramInfo, ar
 
     // Render the diagram image inside the border
     if inner.width > 0 && inner.height > 0 {
-        super::mermaid::render_image_widget(diagram.hash, inner, frame.buffer_mut(), false);
+        super::mermaid::render_image_widget(diagram.hash, inner, frame.buffer_mut(), false, false);
     }
 }
 
@@ -2420,25 +2418,34 @@ fn draw_messages(
                         width: area.width,
                         height: render_height,
                     };
-                    super::mermaid::render_image_widget(hash, image_area, frame.buffer_mut(), centered);
+                    super::mermaid::render_image_widget(
+                        hash,
+                        image_area,
+                        frame.buffer_mut(),
+                        centered,
+                        false,
+                    );
                 }
             } else {
-                // Marker is off-screen but image would overlap - clear the visible portion
-                // This removes stale images from the terminal graphics layer
+                // Marker is off-screen but image would overlap - render the visible portion
                 let visible_start = scroll.max(abs_idx);
                 let visible_end_img = visible_end.min(image_end);
                 let screen_y = (visible_start - scroll) as u16;
-                let clear_height = (visible_end_img - visible_start) as u16;
+                let render_height = (visible_end_img - visible_start) as u16;
 
-                if clear_height > 0 {
-                    super::mermaid::clear_image_area(
-                        Rect {
-                            x: area.x,
-                            y: area.y + screen_y,
-                            width: area.width,
-                            height: clear_height,
-                        },
+                if render_height > 0 {
+                    let image_area = Rect {
+                        x: area.x,
+                        y: area.y + screen_y,
+                        width: area.width,
+                        height: render_height,
+                    };
+                    super::mermaid::render_image_widget(
+                        hash,
+                        image_area,
                         frame.buffer_mut(),
+                        centered,
+                        true,
                     );
                 }
             }
