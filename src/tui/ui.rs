@@ -1535,7 +1535,8 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
                 if *count > 0 {
                     format!("{} ({} tools)", name, count)
                 } else {
-                    name.clone()
+                    // count 0 means still connecting
+                    format!("{} (...)", name)
                 }
             })
             .collect();

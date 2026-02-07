@@ -384,6 +384,23 @@ impl Registry {
         if server_count > 0 {
             crate::logging::info(&format!("MCP: Found {} server(s) in config", server_count));
 
+            // Send immediate "connecting" status so the TUI shows loading state
+            // Server names with count 0 means "connecting..."
+            if let Some(ref tx) = event_tx {
+                let server_names: Vec<String> = {
+                    let manager = mcp_manager.read().await;
+                    manager
+                        .config()
+                        .servers
+                        .keys()
+                        .map(|name| format!("{}:0", name))
+                        .collect()
+                };
+                let _ = tx.send(crate::protocol::ServerEvent::McpStatus {
+                    servers: server_names,
+                });
+            }
+
             // Spawn connection and tool registration in background
             let registry = self.clone();
             tokio::spawn(async move {
