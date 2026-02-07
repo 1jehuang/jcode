@@ -295,7 +295,16 @@ impl Registry {
         let mut defs: Vec<ToolDefinition> = tools
             .iter()
             .filter(|(name, _)| allowed_tools.map(|set| set.contains(*name)).unwrap_or(true))
-            .map(|(_, tool)| tool.to_definition())
+            .map(|(name, tool)| {
+                let mut def = tool.to_definition();
+                // Use registry key as the tool name (important for MCP tools where
+                // the registry key is "mcp__server__tool" but Tool::name() returns
+                // just the raw tool name)
+                if def.name != *name {
+                    def.name = name.clone();
+                }
+                def
+            })
             .collect();
         // Sort by name for deterministic ordering - critical for prompt cache hits
         defs.sort_by(|a, b| a.name.cmp(&b.name));
