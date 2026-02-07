@@ -192,24 +192,151 @@ impl McpConfig {
         Ok(serde_json::from_str(&content)?)
     }
 
-    /// Load from default locations (merges global + local, local overrides)
+    /// Save config to a JSON file
+    pub fn save_to_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Import MCP servers from Claude Code and Codex CLI on first run.
+    /// Only runs if ~/.jcode/mcp.json doesn't exist yet.
+    fn import_from_external() {
+        let jcode_mcp = match crate::storage::jcode_dir() {
+            Ok(dir) => dir.join("mcp.json"),
+            Err(_) => return,
+        };
+
+        if jcode_mcp.exists() {
+            return; // Not first run
+        }
+
+        let mut imported = Self::default();
+        let mut sources = Vec::new();
+
+        // Import from Claude Code (~/.claude/mcp.json)
+        if let Some(home) = dirs::home_dir() {
+            let claude_mcp = home.join(".claude/mcp.json");
+            if claude_mcp.exists() {
+                if let Ok(config) = Self::load_from_file(&claude_mcp) {
+                    let count = config.servers.len();
+                    if count > 0 {
+                        sources.push(format!("{} from Claude Code", count));
+                        imported.servers.extend(config.servers);
+                    }
+                }
+            }
+
+            // Import from Codex CLI (~/.codex/config.toml)
+            let codex_config = home.join(".codex/config.toml");
+            if codex_config.exists() {
+                if let Ok(config) = Self::load_from_codex_toml(&codex_config) {
+                    let count = config.servers.len();
+                    if count > 0 {
+                        sources.push(format!("{} from Codex CLI", count));
+                        // Codex overrides Claude for same-named servers
+                        imported.servers.extend(config.servers);
+                    }
+                }
+            }
+        }
+
+        if !imported.servers.is_empty() {
+            if let Err(e) = imported.save_to_file(&jcode_mcp) {
+                crate::logging::error(&format!("Failed to save imported MCP config: {}", e));
+                return;
+            }
+            let names: Vec<&str> = imported.servers.keys().map(|s| s.as_str()).collect();
+            crate::logging::info(&format!(
+                "MCP: Imported {} servers ({}) from {}",
+                imported.servers.len(),
+                names.join(", "),
+                sources.join(" + "),
+            ));
+        }
+    }
+
+    /// Parse MCP servers from Codex CLI's config.toml ([mcp_servers.*] sections)
+    fn load_from_codex_toml(
+        path: &std::path::Path,
+    ) -> anyhow::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let table: toml::Table = content.parse()?;
+
+        let mut config = Self::default();
+        if let Some(toml::Value::Table(mcp_servers)) = table.get("mcp_servers") {
+            for (name, value) in mcp_servers {
+                if let toml::Value::Table(server) = value {
+                    let command = server
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if command.is_empty() {
+                        continue;
+                    }
+                    let args = server
+                        .get("args")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let env = server
+                        .get("env")
+                        .and_then(|v| v.as_table())
+                        .map(|t| {
+                            t.iter()
+                                .filter_map(|(k, v)| {
+                                    v.as_str().map(|s| (k.clone(), s.to_string()))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    config.servers.insert(
+                        name.clone(),
+                        McpServerConfig { command, args, env },
+                    );
+                }
+            }
+        }
+        Ok(config)
+    }
+
+    /// Load from default locations (merges jcode global + local, local overrides)
     pub fn load() -> Self {
+        // First-run import from Claude Code / Codex CLI
+        Self::import_from_external();
+
         let mut merged = Self::default();
 
-        // Load global first (base)
-        if let Some(home) = dirs::home_dir() {
-            let global = home.join(".claude/mcp.json");
-            if global.exists() {
-                if let Ok(config) = Self::load_from_file(&global) {
+        // Load jcode's own global config (~/.jcode/mcp.json)
+        if let Ok(jcode_dir) = crate::storage::jcode_dir() {
+            let jcode_mcp = jcode_dir.join("mcp.json");
+            if jcode_mcp.exists() {
+                if let Ok(config) = Self::load_from_file(&jcode_mcp) {
                     merged.servers.extend(config.servers);
                 }
             }
         }
 
-        // Load local (overrides global for same-named servers)
-        let local = std::path::Path::new(".claude/mcp.json");
-        if local.exists() {
-            if let Ok(config) = Self::load_from_file(local) {
+        // Load project-local jcode config (.jcode/mcp.json)
+        let local_jcode = std::path::Path::new(".jcode/mcp.json");
+        if local_jcode.exists() {
+            if let Ok(config) = Self::load_from_file(local_jcode) {
+                merged.servers.extend(config.servers);
+            }
+        }
+
+        // Fallback: project-local Claude config (.claude/mcp.json) for compatibility
+        let local_claude = std::path::Path::new(".claude/mcp.json");
+        if local_claude.exists() {
+            if let Ok(config) = Self::load_from_file(local_claude) {
                 merged.servers.extend(config.servers);
             }
         }
