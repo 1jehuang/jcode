@@ -26,6 +26,25 @@ use ratatui::prelude::Frame;
 use ratatui::text::Line;
 use std::time::Duration;
 
+/// Enable Kitty keyboard protocol for unambiguous key reporting.
+/// Returns true if successfully enabled, false if the terminal doesn't support it.
+pub fn enable_keyboard_enhancement() -> bool {
+    use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+    crossterm::execute!(
+        std::io::stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )
+    .is_ok()
+}
+
+/// Disable Kitty keyboard protocol, restoring default key reporting.
+pub fn disable_keyboard_enhancement() {
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::PopKeyboardEnhancementFlags
+    );
+}
+
 /// Trait for TUI state - implemented by both App and ClientApp
 /// This allows sharing the UI rendering code between standalone and client modes
 pub trait TuiState {
