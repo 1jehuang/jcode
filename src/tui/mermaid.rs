@@ -23,7 +23,7 @@ use ratatui::prelude::*;
 use ratatui_image::{
     picker::{Picker, ProtocolType},
     protocol::StatefulProtocol,
-    Resize, StatefulImage,
+    CropOptions, Resize, StatefulImage,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -75,6 +75,8 @@ struct ImageState {
     last_area: Option<Rect>,
     /// Resize mode locked at creation time (prevents flickering on scroll)
     resize_mode: ResizeMode,
+    /// Whether the last render clipped from the top (to show bottom portion)
+    last_crop_top: bool,
 }
 
 /// Resize mode for images - locked at creation time
@@ -255,9 +257,9 @@ pub fn debug_image_state() -> Vec<ImageStateInfo> {
                     ResizeMode::Fit => "Fit".to_string(),
                     ResizeMode::Crop => "Crop".to_string(),
                 },
-                last_area: img_state.last_area.map(|r| {
-                    format!("{}x{}+{}+{}", r.width, r.height, r.x, r.y)
-                }),
+                last_area: img_state
+                    .last_area
+                    .map(|r| format!("{}x{}+{}+{}", r.width, r.height, r.x, r.y)),
             })
             .collect()
     } else {
@@ -300,7 +302,12 @@ pub fn debug_render(content: &str) -> TestRenderResult {
     let protocol = protocol_type().map(|p| format!("{:?}", p));
 
     match result {
-        RenderResult::Image { hash, path, width, height } => {
+        RenderResult::Image {
+            hash,
+            path,
+            width,
+            height,
+        } => {
             // Check what resize mode was assigned
             let resize_mode = if let Ok(state) = IMAGE_STATE.lock() {
                 state.get(&hash).map(|s| match s.resize_mode {
@@ -341,10 +348,30 @@ pub fn debug_render(content: &str) -> TestRenderResult {
 /// Returns true if resize mode stayed consistent across all renders
 pub fn debug_test_resize_stability(hash: u64) -> serde_json::Value {
     let areas = [
-        Rect { x: 0, y: 0, width: 80, height: 24 },
-        Rect { x: 0, y: 0, width: 120, height: 40 },
-        Rect { x: 0, y: 0, width: 60, height: 20 },
-        Rect { x: 10, y: 5, width: 80, height: 24 },
+        Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        },
+        Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 40,
+        },
+        Rect {
+            x: 0,
+            y: 0,
+            width: 60,
+            height: 20,
+        },
+        Rect {
+            x: 10,
+            y: 5,
+            width: 80,
+            height: 24,
+        },
     ];
 
     let mut results: Vec<serde_json::Value> = Vec::new();
@@ -409,13 +436,15 @@ pub struct ScrollFrameInfo {
 /// 4. Clearing when scrolled off-screen
 pub fn debug_test_scroll(content: Option<&str>) -> ScrollTestResult {
     // First, render a test diagram
-    let test_content = content.unwrap_or(r#"flowchart TD
+    let test_content = content.unwrap_or(
+        r#"flowchart TD
     A[Start] --> B{Decision}
     B -->|Yes| C[Process 1]
     B -->|No| D[Process 2]
     C --> E[Merge]
     D --> E
-    E --> F[End]"#);
+    E --> F[End]"#,
+    );
 
     let render_result = render_mermaid_sized(test_content, Some(80));
     let hash = match render_result {
@@ -468,7 +497,11 @@ pub fn debug_test_scroll(content: Option<&str>) -> ScrollTestResult {
         let visible_bottom = (image_bottom.min(term_height as i32)) as u16;
 
         let visible = visible_top < visible_bottom && visible_bottom > 0;
-        let visible_rows = if visible { visible_bottom - visible_top } else { 0 };
+        let visible_rows = if visible {
+            visible_bottom - visible_top
+        } else {
+            0
+        };
 
         let mut frame_info = ScrollFrameInfo {
             frame: frame_idx,
@@ -487,7 +520,8 @@ pub fn debug_test_scroll(content: Option<&str>) -> ScrollTestResult {
                 height: visible_rows,
             };
 
-            let rows_used = render_image_widget(hash, area, &mut buf, false);
+            let crop_top = y_offset < 0;
+            let rows_used = render_image_widget(hash, area, &mut buf, false, crop_top);
             frame_info.rendered = rows_used > 0;
 
             // Check resize mode
@@ -671,7 +705,11 @@ fn estimate_diagram_size(content: &str) -> (usize, usize) {
 }
 
 /// Calculate optimal PNG dimensions based on terminal and diagram complexity
-fn calculate_render_size(node_count: usize, edge_count: usize, terminal_width: Option<u16>) -> (f64, f64) {
+fn calculate_render_size(
+    node_count: usize,
+    edge_count: usize,
+    terminal_width: Option<u16>,
+) -> (f64, f64) {
     // Base size on terminal width if available
     let base_width = if let Some(term_width) = terminal_width {
         // Get font size to calculate pixel width
@@ -686,11 +724,11 @@ fn calculate_render_size(node_count: usize, edge_count: usize, terminal_width: O
     // Scale based on complexity
     let complexity = node_count + edge_count;
     let complexity_factor = match complexity {
-        0..=5 => 0.6,    // Simple: smaller image
-        6..=15 => 0.8,   // Medium: moderate size
-        16..=30 => 1.0,  // Standard: full size
-        31..=60 => 1.2,  // Complex: larger
-        _ => 1.4,        // Very complex: even larger
+        0..=5 => 0.6,   // Simple: smaller image
+        6..=15 => 0.8,  // Medium: moderate size
+        16..=30 => 1.0, // Standard: full size
+        31..=60 => 1.2, // Complex: larger
+        _ => 1.4,       // Very complex: even larger
     };
 
     let width = (base_width * complexity_factor).clamp(400.0, 2400.0);
@@ -740,7 +778,8 @@ pub fn render_mermaid_sized(content: &str, terminal_width: Option<u16>) -> Rende
     }
 
     // Calculate target size
-    let (target_width, target_height) = calculate_render_size(node_count, edge_count, terminal_width);
+    let (target_width, target_height) =
+        calculate_render_size(node_count, edge_count, terminal_width);
     let target_width_u32 = target_width as u32;
 
     // Check cache (use blocking lock for consistency)
@@ -865,7 +904,8 @@ pub fn render_mermaid_sized(content: &str, terminal_width: Option<u16>) -> Rende
     }
 
     // Get actual dimensions from rendered PNG
-    let (width, height) = get_png_dimensions(&png_path).unwrap_or((target_width_u32, target_height as u32));
+    let (width, height) =
+        get_png_dimensions(&png_path).unwrap_or((target_width_u32, target_height as u32));
 
     if let Ok(mut state) = MERMAID_DEBUG.lock() {
         state.stats.last_png_width = Some(width);
@@ -899,6 +939,7 @@ pub fn render_mermaid_sized(content: &str, terminal_width: Option<u16>) -> Rende
                     protocol,
                     last_area: None,
                     resize_mode: ResizeMode::Crop,
+                    last_crop_top: false,
                 },
             );
         }
@@ -920,6 +961,7 @@ const BORDER_WIDTH: u16 = 2;
 
 /// Render an image at the given area using ratatui-image
 /// If centered is true, the image will be horizontally centered within the area
+/// If crop_top is true, clip from the top to show the bottom portion when partially visible
 /// Returns the number of rows used
 ///
 /// ## Optimizations
@@ -928,7 +970,13 @@ const BORDER_WIDTH: u16 = 2;
 /// - Uses Fit mode for small terminals to scale instead of crop
 /// - Only clears area if render fails
 /// - Draws a left border (like code blocks) for visual consistency
-pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bool) -> u16 {
+pub fn render_image_widget(
+    hash: u64,
+    area: Rect,
+    buf: &mut Buffer,
+    centered: bool,
+    crop_top: bool,
+) -> u16 {
     // Skip if area is too small (need room for border + image)
     if area.width <= BORDER_WIDTH || area.height == 0 {
         return 0;
@@ -938,7 +986,9 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
     let border_style = Style::default().fg(Color::Rgb(100, 100, 100)); // DIM_COLOR
     for row in area.y..area.y.saturating_add(area.height) {
         if row < buf.area().height {
-            buf.get_mut(area.x, row).set_char('│').set_style(border_style);
+            buf.get_mut(area.x, row)
+                .set_char('│')
+                .set_style(border_style);
             if area.x + 1 < buf.area().width {
                 buf.get_mut(area.x + 1, row).set_char(' ');
             }
@@ -996,7 +1046,27 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
         let mut state = IMAGE_STATE.lock().unwrap();
         if let Some(img_state) = state.get_mut(&hash) {
             // Always use Crop mode - no rescaling during scroll
-            let widget = StatefulImage::default().resize(Resize::Crop(None));
+            let crop_opts = CropOptions {
+                clip_top: crop_top,
+                clip_left: false,
+            };
+
+            // If crop direction changed, force a re-encode so we don't reuse stale data
+            if img_state.last_crop_top != crop_top {
+                let background = img_state.protocol.background_color();
+                let mut force_area = img_state.protocol.area();
+                if force_area.width == 0 || force_area.height == 0 {
+                    force_area = render_area;
+                }
+                img_state.protocol.resize_encode(
+                    &Resize::Crop(Some(crop_opts.clone())),
+                    background,
+                    force_area,
+                );
+                img_state.last_crop_top = crop_top;
+            }
+
+            let widget = StatefulImage::default().resize(Resize::Crop(Some(crop_opts)));
             widget.render(render_area, buf, &mut img_state.protocol);
             img_state.last_area = Some(render_area);
             return area.height;
@@ -1016,11 +1086,17 @@ pub fn render_image_widget(hash: u64, area: Rect, buf: &mut Buffer, centered: bo
                         protocol,
                         last_area: Some(render_area),
                         resize_mode: ResizeMode::Crop,
+                        last_crop_top: false,
                     },
                 );
 
                 if let Some(img_state) = state.get_mut(&hash) {
-                    let widget = StatefulImage::default().resize(Resize::Crop(None));
+                    let crop_opts = CropOptions {
+                        clip_top: crop_top,
+                        clip_left: false,
+                    };
+                    img_state.last_crop_top = crop_top;
+                    let widget = StatefulImage::default().resize(Resize::Crop(Some(crop_opts)));
                     widget.render(render_area, buf, &mut img_state.protocol);
                     return area.height;
                 }
