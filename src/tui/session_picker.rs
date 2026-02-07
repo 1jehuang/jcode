@@ -1078,6 +1078,7 @@ impl SessionPicker {
         let mut terminal = ratatui::init();
         // Initialize mermaid image picker (queries terminal for graphics protocol support)
         super::mermaid::init_picker();
+        let keyboard_enhanced = super::enable_keyboard_enhancement();
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
         let mouse_capture = crate::config::config().display.mouse_capture;
         if mouse_capture {
@@ -1171,6 +1172,9 @@ impl SessionPicker {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
         if mouse_capture {
             let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+        }
+        if keyboard_enhanced {
+            super::disable_keyboard_enhancement();
         }
         ratatui::restore();
         super::mermaid::clear_image_state();

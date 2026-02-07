@@ -421,7 +421,11 @@ async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Promote) => {
             run_promote()?;
         }
-        Some(Command::CanaryWrapper { session_id, binary, git_hash }) => {
+        Some(Command::CanaryWrapper {
+            session_id,
+            binary,
+            git_hash,
+        }) => {
             run_canary_wrapper(&session_id, &binary, &git_hash).await?;
         }
         Some(Command::Debug {
@@ -600,6 +604,8 @@ async fn run_tui(
     // Initialize mermaid image picker (queries terminal for graphics protocol support)
     crate::tui::mermaid::init_picker();
     let mouse_capture = crate::config::config().display.mouse_capture;
+    // Enable Kitty keyboard protocol for unambiguous key reporting (Ctrl+J != Enter, etc.)
+    let keyboard_enhanced = tui::enable_keyboard_enhancement();
     // Enable bracketed paste mode for proper paste handling in terminals like Kitty
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
     if mouse_capture {
@@ -647,6 +653,9 @@ async fn run_tui(
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
     if mouse_capture {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    }
+    if keyboard_enhanced {
+        tui::disable_keyboard_enhancement();
     }
     ratatui::restore();
     crate::tui::mermaid::clear_image_state();
@@ -1500,6 +1509,7 @@ async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
     // Initialize mermaid image picker (queries terminal for graphics protocol support)
     crate::tui::mermaid::init_picker();
     let mouse_capture = crate::config::config().display.mouse_capture;
+    let keyboard_enhanced = tui::enable_keyboard_enhancement();
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
     if mouse_capture {
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
@@ -1512,6 +1522,9 @@ async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
     if mouse_capture {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    }
+    if keyboard_enhanced {
+        tui::disable_keyboard_enhancement();
     }
     ratatui::restore();
     crate::tui::mermaid::clear_image_state();
@@ -1960,7 +1973,11 @@ async fn is_server_alive(socket_path: &str) -> bool {
 }
 
 /// Wrapper that runs client, spawning server as detached daemon if needed
-async fn run_canary_wrapper(session_id: &str, initial_binary: &str, current_hash: &str) -> Result<()> {
+async fn run_canary_wrapper(
+    session_id: &str,
+    initial_binary: &str,
+    current_hash: &str,
+) -> Result<()> {
     let initial_binary_path = std::path::PathBuf::from(initial_binary);
     let socket_path = SELFDEV_SOCKET.to_string();
 
@@ -2022,7 +2039,11 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str, current_hash
         let server_hash = std::fs::read_to_string(&hash_path).unwrap_or_default();
 
         if !server_hash.is_empty() && server_hash.trim() != current_hash {
-            eprintln!("Server hash {} != current {}, reloading...", server_hash.trim(), current_hash);
+            eprintln!(
+                "Server hash {} != current {}, reloading...",
+                server_hash.trim(),
+                current_hash
+            );
 
             // Install version and update canary symlink for the reload
             if let Some(repo_dir) = build::get_repo_dir() {
@@ -2055,7 +2076,11 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str, current_hash
         } else {
             eprintln!(
                 "Connecting to existing self-dev server ({}) on {}...",
-                if server_hash.is_empty() { "unknown version" } else { server_hash.trim() },
+                if server_hash.is_empty() {
+                    "unknown version"
+                } else {
+                    server_hash.trim()
+                },
                 socket_path
             );
         }
@@ -2072,6 +2097,7 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str, current_hash
     // Initialize mermaid image picker (queries terminal for graphics protocol support)
     crate::tui::mermaid::init_picker();
     let mouse_capture = crate::config::config().display.mouse_capture;
+    let keyboard_enhanced = tui::enable_keyboard_enhancement();
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
     if mouse_capture {
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
@@ -2091,6 +2117,9 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str, current_hash
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
     if mouse_capture {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    }
+    if keyboard_enhanced {
+        tui::disable_keyboard_enhancement();
     }
     ratatui::restore();
     crate::tui::mermaid::clear_image_state();
