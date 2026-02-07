@@ -2964,6 +2964,8 @@ impl App {
                 provider_name,
                 provider_model,
                 available_models,
+                mcp_servers,
+                skills,
                 all_sessions,
                 client_count,
                 is_canary,
@@ -3014,6 +3016,18 @@ impl App {
                 self.remote_server_version = server_version;
                 self.remote_server_has_update = server_has_update;
 
+                // Parse MCP servers from "name:count" format
+                if !mcp_servers.is_empty() {
+                    self.mcp_server_names = mcp_servers
+                        .iter()
+                        .filter_map(|s| {
+                            let (name, count_str) = s.split_once(':')?;
+                            let count = count_str.parse::<usize>().unwrap_or(0);
+                            Some((name.to_string(), count))
+                        })
+                        .collect();
+                }
+
                 if session_changed || !remote.has_loaded_history() {
                     remote.mark_history_loaded();
                     for msg in messages {
@@ -3031,6 +3045,18 @@ impl App {
             }
             ServerEvent::SwarmStatus { members } => {
                 self.remote_swarm_members = members;
+                false
+            }
+            ServerEvent::McpStatus { servers } => {
+                // Parse MCP servers from "name:count" format
+                self.mcp_server_names = servers
+                    .iter()
+                    .filter_map(|s| {
+                        let (name, count_str) = s.split_once(':')?;
+                        let count = count_str.parse::<usize>().unwrap_or(0);
+                        Some((name.to_string(), count))
+                    })
+                    .collect();
                 false
             }
             ServerEvent::ModelChanged { model, error, .. } => {
@@ -7303,7 +7329,11 @@ impl App {
             status: format!("{:?}", self.status),
             provider_name: self.provider.name().to_string(),
             provider_model: self.provider.model().to_string(),
-            mcp_servers: self.mcp_server_names.iter().map(|(name, _)| name.clone()).collect(),
+            mcp_servers: self
+                .mcp_server_names
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect(),
             skills: self.skills.list().iter().map(|s| s.name.clone()).collect(),
             session_id: self.provider_session_id.clone(),
             input_tokens: self.streaming_input_tokens,
