@@ -200,6 +200,8 @@ enum Command {
         session_id: String,
         /// Binary path to run
         binary: String,
+        /// Git hash of the current build
+        git_hash: String,
     },
 
     /// Debug socket CLI - interact with running jcode server
@@ -419,8 +421,8 @@ async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Promote) => {
             run_promote()?;
         }
-        Some(Command::CanaryWrapper { session_id, binary }) => {
-            run_canary_wrapper(&session_id, &binary).await?;
+        Some(Command::CanaryWrapper { session_id, binary, git_hash }) => {
+            run_canary_wrapper(&session_id, &binary, &git_hash).await?;
         }
         Some(Command::Debug {
             command,
@@ -1933,6 +1935,7 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
         .arg("canary-wrapper")
         .arg(&session_id)
         .arg(binary_path.to_string_lossy().as_ref())
+        .arg(&hash)
         .current_dir(cwd)
         .exec();
 
@@ -1956,38 +1959,8 @@ async fn is_server_alive(socket_path: &str) -> bool {
     tokio::net::UnixStream::connect(socket_path).await.is_ok()
 }
 
-/// Check if the initial binary is newer than what the server is running
-fn is_binary_newer_than_server(initial_binary: &std::path::Path) -> bool {
-    // Get mtime of initial binary
-    let initial_mtime = match std::fs::metadata(initial_binary) {
-        Ok(m) => m.modified().ok(),
-        Err(_) => return false,
-    };
-
-    // Get mtime of stable and canary binaries (what the server would use)
-    let stable_mtime = build::stable_binary_path()
-        .ok()
-        .and_then(|p| std::fs::metadata(&p).ok())
-        .and_then(|m| m.modified().ok());
-
-    let canary_mtime = build::canary_binary_path()
-        .ok()
-        .and_then(|p| std::fs::metadata(&p).ok())
-        .and_then(|m| m.modified().ok());
-
-    // If initial is newer than both stable and canary, server needs update
-    match (initial_mtime, stable_mtime, canary_mtime) {
-        (Some(initial), stable, canary) => {
-            let newer_than_stable = stable.map(|s| initial > s).unwrap_or(true);
-            let newer_than_canary = canary.map(|c| initial > c).unwrap_or(true);
-            newer_than_stable && newer_than_canary
-        }
-        _ => false,
-    }
-}
-
 /// Wrapper that runs client, spawning server as detached daemon if needed
-async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()> {
+async fn run_canary_wrapper(session_id: &str, initial_binary: &str, current_hash: &str) -> Result<()> {
     let initial_binary_path = std::path::PathBuf::from(initial_binary);
     let socket_path = SELFDEV_SOCKET.to_string();
 
@@ -2000,8 +1973,9 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
         // Server not running - spawn it as a detached daemon
         eprintln!("Starting self-dev server...");
 
-        // Cleanup stale socket
+        // Cleanup stale socket and hash file
         let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_file(format!("{}.hash", socket_path));
         let _ = std::fs::remove_file(server::debug_socket_path());
 
         // Select binary to use - prefer the initial binary (target/release/jcode)
@@ -2043,44 +2017,45 @@ async fn run_canary_wrapper(session_id: &str, initial_binary: &str) -> Result<()
         }
         eprintln!("Self-dev server ready on {}", socket_path);
     } else {
-        // Server is running - check if we have a newer binary
-        if is_binary_newer_than_server(&initial_binary_path) {
-            eprintln!("Newer binary detected, reloading server...");
+        // Server is running - compare git hashes to detect version mismatch
+        let hash_path = format!("{}.hash", socket_path);
+        let server_hash = std::fs::read_to_string(&hash_path).unwrap_or_default();
 
-            // Get repo dir and hash for the reload
+        if !server_hash.is_empty() && server_hash.trim() != current_hash {
+            eprintln!("Server hash {} != current {}, reloading...", server_hash.trim(), current_hash);
+
+            // Install version and update canary symlink for the reload
             if let Some(repo_dir) = build::get_repo_dir() {
-                if let Ok(hash) = build::current_git_hash(&repo_dir) {
-                    // Install version and update canary symlink
-                    let _ = build::install_version(&repo_dir, &hash);
-                    let _ = build::update_canary_symlink(&hash);
+                let _ = build::install_version(&repo_dir, current_hash);
+                let _ = build::update_canary_symlink(current_hash);
+            }
 
-                    // Write rebuild signal to trigger server restart
-                    if let Ok(jcode_dir) = storage::jcode_dir() {
-                        let signal_path = jcode_dir.join("rebuild-signal");
-                        let _ = std::fs::write(&signal_path, &hash);
+            // Write rebuild signal to trigger server restart
+            if let Ok(jcode_dir) = storage::jcode_dir() {
+                let signal_path = jcode_dir.join("rebuild-signal");
+                let _ = std::fs::write(&signal_path, current_hash);
 
-                        // Wait for server to restart (socket will briefly disconnect)
-                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                // Wait for server to restart (socket will briefly disconnect)
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-                        // Wait for server to come back up
-                        let start = std::time::Instant::now();
-                        loop {
-                            if start.elapsed() > std::time::Duration::from_secs(30) {
-                                eprintln!("Warning: Server reload timed out, continuing anyway");
-                                break;
-                            }
-                            if is_server_alive(&socket_path).await {
-                                eprintln!("Server reloaded with {}", hash);
-                                break;
-                            }
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        }
+                // Wait for server to come back up
+                let start = std::time::Instant::now();
+                loop {
+                    if start.elapsed() > std::time::Duration::from_secs(30) {
+                        eprintln!("Warning: Server reload timed out, continuing anyway");
+                        break;
                     }
+                    if is_server_alive(&socket_path).await {
+                        eprintln!("Server reloaded with {}", current_hash);
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
             }
         } else {
             eprintln!(
-                "Connecting to existing self-dev server on {}...",
+                "Connecting to existing self-dev server ({}) on {}...",
+                if server_hash.is_empty() { "unknown version" } else { server_hash.trim() },
                 socket_path
             );
         }
