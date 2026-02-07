@@ -1951,7 +1951,7 @@ async fn handle_client(
                 }
 
                 // Register MCP tools (management tool + server tool proxies)
-                registry.register_mcp_tools().await;
+                registry.register_mcp_tools(Some(client_event_tx.clone())).await;
 
                 // Note: Don't send SessionId here - it's included in the History response
                 // from GetHistory. Sending it here causes race conditions when ResumeSession
@@ -1961,7 +1961,7 @@ async fn handle_client(
 
             Request::GetHistory { id } => {
                 let _ = provider.prefetch_models().await;
-                let (messages, is_canary, provider_name, provider_model, available_models) = {
+                let (messages, is_canary, provider_name, provider_model, available_models, tool_names) = {
                     let agent_guard = agent.lock().await;
                     (
                         agent_guard.get_history(),
@@ -1969,8 +1969,28 @@ async fn handle_client(
                         agent_guard.provider_name(),
                         agent_guard.provider_model(),
                         agent_guard.available_models_display(),
+                        agent_guard.tool_names().await,
                     )
                 };
+
+                // Build MCP server list with tool counts from registered tool names
+                let mut mcp_map: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+                for name in &tool_names {
+                    if let Some(rest) = name.strip_prefix("mcp__") {
+                        if let Some((server, _tool)) = rest.split_once("__") {
+                            *mcp_map.entry(server.to_string()).or_default() += 1;
+                        }
+                    }
+                }
+                let mcp_servers: Vec<String> = mcp_map
+                    .into_iter()
+                    .map(|(name, count)| format!("{}:{}", name, count))
+                    .collect();
+
+                // Build skills list
+                let skills = crate::skill::SkillRegistry::load()
+                    .map(|r| r.list().iter().map(|s| s.name.clone()).collect())
+                    .unwrap_or_default();
 
                 // Get all session IDs and client count
                 let (all_sessions, current_client_count) = {
@@ -1987,8 +2007,8 @@ async fn handle_client(
                     provider_name: Some(provider_name),
                     provider_model: Some(provider_model),
                     available_models,
-                    mcp_servers: Vec::new(),
-                    skills: Vec::new(),
+                    mcp_servers,
+                    skills,
                     total_tokens: None,
                     all_sessions,
                     client_count: Some(current_client_count),
@@ -2062,7 +2082,7 @@ async fn handle_client(
 
                 // Register MCP tools for resumed sessions
                 if result.is_ok() {
-                    registry.register_mcp_tools().await;
+                    registry.register_mcp_tools(Some(client_event_tx.clone())).await;
                 }
 
                 match result {
@@ -2119,7 +2139,7 @@ async fn handle_client(
 
                         // Send updated history to client
                         let _ = provider.prefetch_models().await;
-                        let (messages, is_canary, provider_name, provider_model, available_models) = {
+                        let (messages, is_canary, provider_name, provider_model, available_models, tool_names) = {
                             let agent_guard = agent.lock().await;
                             (
                                 agent_guard.get_history(),
@@ -2127,8 +2147,27 @@ async fn handle_client(
                                 agent_guard.provider_name(),
                                 agent_guard.provider_model(),
                                 agent_guard.available_models_display(),
+                                agent_guard.tool_names().await,
                             )
                         };
+
+                        // Build MCP server list with tool counts
+                        let mut mcp_map: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+                        for name in &tool_names {
+                            if let Some(rest) = name.strip_prefix("mcp__") {
+                                if let Some((server, _tool)) = rest.split_once("__") {
+                                    *mcp_map.entry(server.to_string()).or_default() += 1;
+                                }
+                            }
+                        }
+                        let mcp_servers: Vec<String> = mcp_map
+                            .into_iter()
+                            .map(|(name, count)| format!("{}:{}", name, count))
+                            .collect();
+
+                        let skills = crate::skill::SkillRegistry::load()
+                            .map(|r| r.list().iter().map(|s| s.name.clone()).collect())
+                            .unwrap_or_default();
 
                         let (all_sessions, current_client_count) = {
                             let sessions_guard = sessions.read().await;
@@ -2144,8 +2183,8 @@ async fn handle_client(
                             provider_name: Some(provider_name),
                             provider_model: Some(provider_model),
                             available_models,
-                            mcp_servers: Vec::new(),
-                            skills: Vec::new(),
+                            mcp_servers,
+                            skills,
                             total_tokens: None,
                             all_sessions,
                             client_count: Some(current_client_count),
@@ -3776,8 +3815,8 @@ async fn create_headless_session(
         registry.register_selfdev_tools().await;
     }
 
-    // Register MCP tools for headless sessions
-    registry.register_mcp_tools().await;
+    // Register MCP tools for headless sessions (no event channel)
+    registry.register_mcp_tools(None).await;
 
     // Create a new agent
     let mut new_agent = Agent::new(Arc::clone(&provider), registry);

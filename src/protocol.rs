@@ -366,6 +366,13 @@ pub enum ServerEvent {
     #[serde(rename = "debug_response")]
     DebugResponse { id: u64, ok: bool, output: String },
 
+    /// MCP status update (sent after background MCP connections complete)
+    #[serde(rename = "mcp_status")]
+    McpStatus {
+        /// Server names with tool counts in "name:count" format
+        servers: Vec<String>,
+    },
+
     /// Client debug command forwarded from debug socket to TUI
     #[serde(rename = "client_debug_request")]
     ClientDebugRequest { id: u64, command: String },

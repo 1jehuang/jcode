@@ -349,7 +349,11 @@ impl Registry {
 
     /// Register MCP tools (MCP management and server tools)
     /// Connections happen in background to avoid blocking startup.
-    pub async fn register_mcp_tools(&self) {
+    /// If `event_tx` is provided, sends an McpStatus event when connections complete.
+    pub async fn register_mcp_tools(
+        &self,
+        event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::protocol::ServerEvent>>,
+    ) {
         use crate::mcp::McpManager;
         use std::sync::Arc;
         use tokio::sync::RwLock;
@@ -357,8 +361,8 @@ impl Registry {
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
 
         // Register MCP management tool immediately (with registry for dynamic tool registration)
-        let mcp_tool = mcp::McpManagementTool::new(Arc::clone(&mcp_manager))
-            .with_registry(self.clone());
+        let mcp_tool =
+            mcp::McpManagementTool::new(Arc::clone(&mcp_manager)).with_registry(self.clone());
         self.register("mcp".to_string(), Arc::new(mcp_tool) as Arc<dyn Tool>)
             .await;
 
@@ -388,10 +392,26 @@ impl Registry {
                     }
                 }
 
-                // Register MCP server tools
+                // Register MCP server tools and collect server info
                 let tools = crate::mcp::create_mcp_tools(Arc::clone(&mcp_manager)).await;
-                for (name, tool) in tools {
-                    registry.register(name, tool).await;
+                let mut server_counts: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for (name, tool) in &tools {
+                    if let Some(rest) = name.strip_prefix("mcp__") {
+                        if let Some((server, _)) = rest.split_once("__") {
+                            *server_counts.entry(server.to_string()).or_default() += 1;
+                        }
+                    }
+                    registry.register(name.clone(), tool.clone()).await;
+                }
+
+                // Notify client of MCP status
+                if let Some(tx) = event_tx {
+                    let servers: Vec<String> = server_counts
+                        .into_iter()
+                        .map(|(name, count)| format!("{}:{}", name, count))
+                        .collect();
+                    let _ = tx.send(crate::protocol::ServerEvent::McpStatus { servers });
                 }
             });
         }
