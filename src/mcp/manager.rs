@@ -32,24 +32,41 @@ impl McpManager {
         }
     }
 
-    /// Connect to all configured servers
+    /// Connect to all configured servers in parallel
     /// Returns number of successful connections and list of failures
     pub async fn connect_all(&self) -> Result<(usize, Vec<(String, String)>)> {
+        let mut handles = Vec::new();
+
+        for (name, config) in &self.config.servers {
+            let name = name.clone();
+            let config = config.clone();
+            let handle = tokio::spawn(async move {
+                let result = McpClient::connect(name.clone(), &config).await;
+                (name, result)
+            });
+            handles.push(handle);
+        }
+
         let mut successes = 0;
         let mut failures = Vec::new();
 
-        for (name, config) in &self.config.servers {
-            match self.connect(name, config).await {
-                Ok(()) => {
+        for handle in handles {
+            match handle.await {
+                Ok((name, Ok(client))) => {
+                    let mut clients = self.clients.write().await;
+                    clients.insert(name, client);
                     successes += 1;
                 }
-                Err(e) => {
+                Ok((name, Err(e))) => {
                     let error_msg = format!("{:#}", e);
                     crate::logging::error(&format!(
                         "Failed to connect to MCP server '{}': {}",
                         name, error_msg
                     ));
-                    failures.push((name.clone(), error_msg));
+                    failures.push((name, error_msg));
+                }
+                Err(e) => {
+                    crate::logging::error(&format!("MCP connection task panicked: {}", e));
                 }
             }
         }
