@@ -18,7 +18,7 @@ use crate::tool::{Registry, ToolContext};
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use futures::StreamExt;
-use ratatui::DefaultTerminal;
+use ratatui::{layout::Rect, DefaultTerminal};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -290,6 +290,34 @@ struct ScrollTestConfig {
     include_frames: Option<bool>,
     include_paused: Option<bool>,
     diagram: Option<String>,
+    diagram_mode: Option<crate::config::DiagramDisplayMode>,
+    expect_inline: Option<bool>,
+    expect_pane: Option<bool>,
+    expect_widget: Option<bool>,
+    require_no_anomalies: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct ScrollTestExpectations {
+    expect_inline: bool,
+    expect_pane: bool,
+    expect_widget: bool,
+    require_no_anomalies: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ScrollSuiteConfig {
+    widths: Option<Vec<u16>>,
+    heights: Option<Vec<u16>>,
+    diagram_modes: Option<Vec<crate::config::DiagramDisplayMode>>,
+    diagrams: Option<usize>,
+    step: Option<usize>,
+    max_steps: Option<usize>,
+    padding: Option<usize>,
+    include_frames: Option<bool>,
+    include_paused: Option<bool>,
+    diagram: Option<String>,
+    require_no_anomalies: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -343,6 +371,40 @@ struct ScrollTestState {
     status: ProcessingStatus,
     processing_started: Option<Instant>,
     status_notice: Option<(String, Instant)>,
+    diagram_mode: crate::config::DiagramDisplayMode,
+}
+
+fn rect_from_capture(rect: super::visual_debug::RectCapture) -> Rect {
+    Rect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    }
+}
+
+fn rect_contains(outer: Rect, inner: Rect) -> bool {
+    inner.x >= outer.x
+        && inner.y >= outer.y
+        && inner.x.saturating_add(inner.width) <= outer.x.saturating_add(outer.width)
+        && inner.y.saturating_add(inner.height) <= outer.y.saturating_add(outer.height)
+}
+
+fn parse_area_spec(spec: &str) -> Option<Rect> {
+    let mut parts = spec.split('+');
+    let size = parts.next()?;
+    let x = parts.next()?;
+    let y = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let (w, h) = size.split_once('x')?;
+    Some(Rect {
+        width: w.parse::<u16>().ok()?,
+        height: h.parse::<u16>().ok()?,
+        x: x.parse::<u16>().ok()?,
+        y: y.parse::<u16>().ok()?,
+    })
 }
 
 /// TUI Application state
@@ -517,6 +579,7 @@ impl ScrollTestState {
             status: app.status.clone(),
             processing_started: app.processing_started,
             status_notice: app.status_notice.clone(),
+            diagram_mode: app.diagram_mode,
         }
     }
 
@@ -535,6 +598,7 @@ impl ScrollTestState {
         app.status = self.status;
         app.processing_started = self.processing_started;
         app.status_notice = self.status_notice;
+        app.diagram_mode = self.diagram_mode;
     }
 }
 
@@ -1127,6 +1191,7 @@ impl App {
         scroll_offset: usize,
         max_scroll: usize,
         include_frames: bool,
+        expectations: &ScrollTestExpectations,
     ) -> Result<serde_json::Value, String> {
         self.scroll_offset = scroll_offset;
         self.auto_scroll_paused = mode == "paused";
@@ -1163,6 +1228,87 @@ impl App {
 
         let mermaid_stats = crate::tui::mermaid::debug_stats_json();
         let mermaid_state = serde_json::to_value(crate::tui::mermaid::debug_image_state()).ok();
+        let active_diagrams = crate::tui::mermaid::get_active_diagrams();
+
+        let (diagram_area_capture, diagram_widget_present, diagram_mode_label) = match frame {
+            Some(ref frame) => {
+                let widget_present = frame
+                    .info_widgets
+                    .as_ref()
+                    .map(|info| info.placements.iter().any(|p| p.kind == "diagrams"))
+                    .unwrap_or(false);
+                let mode = frame
+                    .state
+                    .diagram_mode
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}", self.diagram_mode));
+                (frame.layout.diagram_area, widget_present, mode)
+            }
+            None => (None, false, format!("{:?}", self.diagram_mode)),
+        };
+
+        let diagram_area_rect = diagram_area_capture.map(rect_from_capture);
+        let diagram_area_json = diagram_area_capture.map(|rect| {
+            serde_json::json!({
+                "x": rect.x,
+                "y": rect.y,
+                "width": rect.width,
+                "height": rect.height,
+            })
+        });
+
+        let mut diagram_rendered_in_pane = false;
+        if let (Some(area), Some(state)) = (
+            diagram_area_rect,
+            mermaid_state.as_ref().and_then(|v| v.as_array()),
+        ) {
+            for entry in state {
+                let last_area = entry
+                    .get("last_area")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_area_spec);
+                if let Some(render_area) = last_area {
+                    if rect_contains(area, render_area) {
+                        diagram_rendered_in_pane = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let active_hashes: Vec<String> = active_diagrams
+            .iter()
+            .map(|d| format!("{:016x}", d.hash))
+            .collect();
+        let inline_placeholders = image_regions.len();
+
+        let mut problems: Vec<String> = Vec::new();
+        if expectations.require_no_anomalies && !anomalies.is_empty() {
+            problems.push(format!("anomalies: {}", anomalies.join("; ")));
+        }
+        if expectations.expect_pane {
+            if diagram_area_rect.is_none() {
+                problems.push("missing pinned diagram area".to_string());
+            }
+            if active_hashes.is_empty() {
+                problems.push("no active diagrams registered".to_string());
+            }
+            if !diagram_rendered_in_pane {
+                problems.push("diagram not rendered in pinned pane".to_string());
+            }
+        }
+        if expectations.expect_inline {
+            if inline_placeholders == 0 {
+                problems.push("expected inline diagram placeholders but none found".to_string());
+            }
+        } else if inline_placeholders > 0 {
+            problems.push("unexpected inline diagram placeholders".to_string());
+        }
+        if expectations.expect_widget && !diagram_widget_present {
+            problems.push("expected diagram widget but none present".to_string());
+        }
+
+        let checks_ok = problems.is_empty();
 
         Ok(serde_json::json!({
             "label": label,
@@ -1175,6 +1321,24 @@ impl App {
             "image_regions": image_regions,
             "mermaid_stats": mermaid_stats,
             "mermaid_state": mermaid_state,
+            "diagram": {
+                "mode": diagram_mode_label,
+                "area": diagram_area_json,
+                "active_diagrams": active_hashes,
+                "widget_present": diagram_widget_present,
+                "inline_placeholders": inline_placeholders,
+                "rendered_in_pane": diagram_rendered_in_pane,
+            },
+            "checks": {
+                "ok": checks_ok,
+                "problems": problems,
+                "expectations": {
+                    "expect_inline": expectations.expect_inline,
+                    "expect_pane": expectations.expect_pane,
+                    "expect_widget": expectations.expect_widget,
+                    "require_no_anomalies": expectations.require_no_anomalies,
+                }
+            },
             "frame": normalized_frame,
         }))
     }
@@ -1192,6 +1356,11 @@ impl App {
                     include_frames: None,
                     include_paused: None,
                     diagram: None,
+                    diagram_mode: None,
+                    expect_inline: None,
+                    expect_pane: None,
+                    expect_widget: None,
+                    require_no_anomalies: None,
                 }
             } else {
                 match serde_json::from_str(raw) {
@@ -1210,7 +1379,24 @@ impl App {
                 include_frames: None,
                 include_paused: None,
                 diagram: None,
+                diagram_mode: None,
+                expect_inline: None,
+                expect_pane: None,
+                expect_widget: None,
+                require_no_anomalies: None,
             }
+        };
+
+        let diagram_mode = cfg.diagram_mode.unwrap_or(self.diagram_mode);
+        let expectations = ScrollTestExpectations {
+            expect_inline: cfg
+                .expect_inline
+                .unwrap_or(diagram_mode != crate::config::DiagramDisplayMode::Pinned),
+            expect_pane: cfg
+                .expect_pane
+                .unwrap_or(diagram_mode == crate::config::DiagramDisplayMode::Pinned),
+            expect_widget: cfg.expect_widget.unwrap_or(false),
+            require_no_anomalies: cfg.require_no_anomalies.unwrap_or(true),
         };
 
         let width = cfg.width.unwrap_or(100).max(40);
@@ -1224,8 +1410,13 @@ impl App {
         let diagram_override = cfg.diagram.as_deref();
 
         let saved_state = ScrollTestState::capture(self);
+        let saved_diagram_override = super::markdown::get_diagram_mode_override();
+        let saved_active_diagrams = crate::tui::mermaid::snapshot_active_diagrams();
         let was_visual_debug = super::visual_debug::is_enabled();
         super::visual_debug::enable();
+
+        self.diagram_mode = diagram_mode;
+        super::markdown::set_diagram_mode_override(Some(diagram_mode));
 
         let test_content = Self::build_scroll_test_content(diagrams, padding, diagram_override);
         self.display_messages = vec![
@@ -1269,6 +1460,8 @@ impl App {
             Ok(t) => t,
             Err(e) => {
                 saved_state.restore(self);
+                super::markdown::set_diagram_mode_override(saved_diagram_override);
+                crate::tui::mermaid::restore_active_diagrams(saved_active_diagrams);
                 if !was_visual_debug {
                     super::visual_debug::disable();
                 }
@@ -1351,6 +1544,7 @@ impl App {
                 offset,
                 max_scroll,
                 include_frames,
+                &expectations,
             ) {
                 Ok(step) => steps.push(step),
                 Err(e) => errors.push(e),
@@ -1368,6 +1562,7 @@ impl App {
                     offset,
                     max_scroll,
                     include_frames,
+                    &expectations,
                 ) {
                     Ok(step) => steps.push(step),
                     Err(e) => errors.push(e),
@@ -1378,8 +1573,31 @@ impl App {
         let mermaid_scroll_sim =
             serde_json::to_value(crate::tui::mermaid::debug_test_scroll(None)).ok();
 
+        let mut step_failures: Vec<String> = Vec::new();
+        for step in &steps {
+            let checks = step.get("checks");
+            let ok = checks
+                .and_then(|c| c.get("ok"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if !ok {
+                let label = step.get("label").and_then(|v| v.as_str()).unwrap_or("step");
+                let problems = checks
+                    .and_then(|c| c.get("problems"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    })
+                    .unwrap_or_else(|| "unknown failure".to_string());
+                step_failures.push(format!("{}: {}", label, problems));
+            }
+        }
+
         let report = serde_json::json!({
-            "ok": errors.is_empty(),
+            "ok": errors.is_empty() && step_failures.is_empty(),
             "config": {
                 "width": width,
                 "height": height,
@@ -1390,6 +1608,13 @@ impl App {
                 "include_frames": include_frames,
                 "include_paused": include_paused,
                 "diagram_override": diagram_override,
+                "diagram_mode": format!("{:?}", diagram_mode),
+                "expectations": {
+                    "expect_inline": expectations.expect_inline,
+                    "expect_pane": expectations.expect_pane,
+                    "expect_widget": expectations.expect_widget,
+                    "require_no_anomalies": expectations.require_no_anomalies,
+                },
             },
             "layout": {
                 "total_lines": total_lines,
@@ -1399,12 +1624,138 @@ impl App {
             "steps": steps,
             "mermaid_scroll_sim": mermaid_scroll_sim,
             "errors": errors,
+            "problems": step_failures,
         });
 
         saved_state.restore(self);
+        super::markdown::set_diagram_mode_override(saved_diagram_override);
+        crate::tui::mermaid::restore_active_diagrams(saved_active_diagrams);
         if !was_visual_debug {
             super::visual_debug::disable();
         }
+
+        serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    fn run_scroll_suite(&mut self, raw: Option<&str>) -> String {
+        let cfg: ScrollSuiteConfig = if let Some(raw) = raw {
+            if raw.trim().is_empty() {
+                ScrollSuiteConfig {
+                    widths: None,
+                    heights: None,
+                    diagram_modes: None,
+                    diagrams: None,
+                    step: None,
+                    max_steps: None,
+                    padding: None,
+                    include_frames: None,
+                    include_paused: None,
+                    diagram: None,
+                    require_no_anomalies: None,
+                }
+            } else {
+                match serde_json::from_str(raw) {
+                    Ok(cfg) => cfg,
+                    Err(e) => return format!("scroll-suite parse error: {}", e),
+                }
+            }
+        } else {
+            ScrollSuiteConfig {
+                widths: None,
+                heights: None,
+                diagram_modes: None,
+                diagrams: None,
+                step: None,
+                max_steps: None,
+                padding: None,
+                include_frames: None,
+                include_paused: None,
+                diagram: None,
+                require_no_anomalies: None,
+            }
+        };
+
+        let widths = cfg.widths.unwrap_or_else(|| vec![80, 100, 120]);
+        let heights = cfg.heights.unwrap_or_else(|| vec![24, 40]);
+        let diagram_modes = cfg.diagram_modes.unwrap_or_else(|| vec![self.diagram_mode]);
+        let diagrams = cfg.diagrams.unwrap_or(2).clamp(1, 3);
+        let step = cfg.step.unwrap_or(5).max(1);
+        let max_steps = cfg.max_steps.unwrap_or(12).max(4).min(100);
+        let padding = cfg.padding.unwrap_or(12).max(4);
+        let include_frames = cfg.include_frames.unwrap_or(false);
+        let include_paused = cfg.include_paused.unwrap_or(true);
+        let diagram_override = cfg.diagram.as_deref();
+        let require_no_anomalies = cfg.require_no_anomalies.unwrap_or(true);
+
+        let mut results: Vec<serde_json::Value> = Vec::new();
+        let mut failures: Vec<String> = Vec::new();
+        let mut total = 0usize;
+        let max_cases = 12usize;
+
+        for mode in &diagram_modes {
+            for width in &widths {
+                for height in &heights {
+                    if total >= max_cases {
+                        break;
+                    }
+                    total += 1;
+                    let mode_str = match mode {
+                        crate::config::DiagramDisplayMode::None => "none",
+                        crate::config::DiagramDisplayMode::Margin => "margin",
+                        crate::config::DiagramDisplayMode::Pinned => "pinned",
+                    };
+                    let case_label = format!("{}x{}_{}", width, height, mode_str);
+                    let cfg_json = serde_json::json!({
+                        "width": width,
+                        "height": height,
+                        "step": step,
+                        "max_steps": max_steps,
+                        "padding": padding,
+                        "diagrams": diagrams,
+                        "include_frames": include_frames,
+                        "include_paused": include_paused,
+                        "diagram": diagram_override,
+                        "diagram_mode": mode_str,
+                        "require_no_anomalies": require_no_anomalies,
+                    });
+                    let cfg_str = cfg_json.to_string();
+                    let report_str = self.run_scroll_test(Some(&cfg_str));
+                    let report_value: serde_json::Value = serde_json::from_str(&report_str)
+                        .unwrap_or_else(
+                            |_| serde_json::json!({"ok": false, "error": "invalid report json"}),
+                        );
+                    let ok = report_value
+                        .get("ok")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if !ok {
+                        failures.push(case_label.clone());
+                    }
+                    results.push(serde_json::json!({
+                        "name": case_label,
+                        "config": cfg_json,
+                        "report": report_value,
+                    }));
+                }
+                if total >= max_cases {
+                    break;
+                }
+            }
+            if total >= max_cases {
+                break;
+            }
+        }
+
+        let report = serde_json::json!({
+            "ok": failures.is_empty(),
+            "summary": {
+                "total": total,
+                "failed": failures.len(),
+                "failures": failures,
+                "max_cases": max_cases,
+            },
+            "cases": results,
+        });
 
         serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
     }
@@ -1703,6 +2054,9 @@ impl App {
         } else if cmd == "scroll-test" || cmd.starts_with("scroll-test:") {
             let raw = cmd.strip_prefix("scroll-test:");
             self.run_scroll_test(raw)
+        } else if cmd == "scroll-suite" || cmd.starts_with("scroll-suite:") {
+            let raw = cmd.strip_prefix("scroll-suite:");
+            self.run_scroll_suite(raw)
         } else if cmd == "quit" {
             self.should_quit = true;
             "OK: quitting".to_string()
@@ -1876,6 +2230,7 @@ impl App {
                  - wait:<ms> - block until idle or timeout\n\
                  - scroll:<up|down|top|bottom> - control scroll\n\
                  - scroll-test[:<json>] - run offscreen scroll+diagram test\n\
+                 - scroll-suite[:<json>] - run scroll+diagram test suite\n\
                  - keys:<keyspec> - inject key events (e.g. keys:ctrl+r)\n\
                  - input - get current input buffer\n\
                  - set_input:<text> - set input buffer\n\
@@ -9299,5 +9654,285 @@ mod tests {
             result
         );
         assert_eq!(app.interleave_message.as_deref(), Some("interleave_msg"));
+    }
+
+    // ====================================================================
+    // Scroll testing with rendering verification
+    // ====================================================================
+
+    /// Extract plain text from a TestBackend buffer after rendering.
+    fn buffer_to_text(
+        terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+    ) -> String {
+        let buf = terminal.backend().buffer();
+        let width = buf.area.width as usize;
+        let height = buf.area.height as usize;
+        let mut lines = Vec::with_capacity(height);
+        for y in 0..height {
+            let mut line = String::with_capacity(width);
+            for x in 0..width {
+                let cell = &buf[(x as u16, y as u16)];
+                line.push_str(cell.symbol());
+            }
+            lines.push(line.trim_end().to_string());
+        }
+        // Trim trailing empty lines
+        while lines.last().map_or(false, |l| l.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
+    }
+
+    /// Create a test app pre-populated with scrollable content (text + mermaid diagrams).
+    fn create_scroll_test_app(
+        width: u16,
+        height: u16,
+        diagrams: usize,
+        padding: usize,
+    ) -> (App, ratatui::Terminal<ratatui::backend::TestBackend>) {
+        let mut app = create_test_app();
+        let content = App::build_scroll_test_content(diagrams, padding, None);
+        app.display_messages = vec![
+            DisplayMessage {
+                role: "user".to_string(),
+                content: "Scroll test".to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            },
+            DisplayMessage {
+                role: "assistant".to_string(),
+                content,
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            },
+        ];
+        app.bump_display_messages_version();
+        app.scroll_offset = 0;
+        app.auto_scroll_paused = false;
+        app.is_processing = false;
+        app.streaming_text.clear();
+        app.status = ProcessingStatus::Idle;
+
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let terminal =
+            ratatui::Terminal::new(backend).expect("failed to create test terminal");
+        (app, terminal)
+    }
+
+    /// Get the configured scroll up key binding (code, modifiers).
+    fn scroll_up_key(app: &App) -> (KeyCode, KeyModifiers) {
+        (app.scroll_keys.up.code.clone(), app.scroll_keys.up.modifiers)
+    }
+
+    /// Get the configured scroll down key binding (code, modifiers).
+    fn scroll_down_key(app: &App) -> (KeyCode, KeyModifiers) {
+        (
+            app.scroll_keys.down.code.clone(),
+            app.scroll_keys.down.modifiers,
+        )
+    }
+
+    /// Render app to TestBackend and return the buffer text.
+    fn render_and_snap(
+        app: &App,
+        terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+    ) -> String {
+        terminal
+            .draw(|f| crate::tui::ui::draw(f, app))
+            .expect("draw failed");
+        buffer_to_text(terminal)
+    }
+
+    #[test]
+    fn test_scroll_ctrl_k_j_offset() {
+        let (mut app, _terminal) = create_scroll_test_app(100, 30, 1, 20);
+
+        assert_eq!(app.scroll_offset, 0);
+
+        let (up_code, up_mods) = scroll_up_key(&app);
+        let (down_code, down_mods) = scroll_down_key(&app);
+
+        // Scroll up (increases offset by 3)
+        app.handle_key(up_code.clone(), up_mods).unwrap();
+        assert_eq!(app.scroll_offset, 3);
+
+        app.handle_key(up_code.clone(), up_mods).unwrap();
+        assert_eq!(app.scroll_offset, 6);
+
+        // Scroll down (decreases offset by 3)
+        app.handle_key(down_code.clone(), down_mods).unwrap();
+        assert_eq!(app.scroll_offset, 3);
+
+        // Back to 0
+        app.handle_key(down_code.clone(), down_mods).unwrap();
+        assert_eq!(app.scroll_offset, 0);
+
+        // Stays at 0 (clamped)
+        app.handle_key(down_code.clone(), down_mods).unwrap();
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_scroll_offset_capped() {
+        let (mut app, _terminal) = create_scroll_test_app(100, 30, 1, 4);
+
+        let (up_code, up_mods) = scroll_up_key(&app);
+
+        // Spam scroll-up many times
+        for _ in 0..500 {
+            app.handle_key(up_code.clone(), up_mods)
+                .unwrap();
+        }
+
+        // Should be capped at max estimate, not 1500
+        let max_estimate = app.display_messages.len() * 100 + app.streaming_text.len();
+        assert!(app.scroll_offset <= max_estimate);
+        assert!(app.scroll_offset > 0);
+    }
+
+    #[test]
+    fn test_scroll_render_bottom() {
+        let (app, mut terminal) = create_scroll_test_app(80, 25, 1, 8);
+        let text = render_and_snap(&app, &mut terminal);
+        insta::assert_snapshot!(text);
+    }
+
+    #[test]
+    fn test_scroll_render_scrolled_up() {
+        let (mut app, mut terminal) = create_scroll_test_app(80, 25, 1, 8);
+        app.scroll_offset = 10;
+        let text = render_and_snap(&app, &mut terminal);
+
+        // ↓ indicator should appear when user has scrolled up
+        assert!(
+            text.contains('↓'),
+            "expected ↓ indicator when scrolled up from bottom"
+        );
+        insta::assert_snapshot!(text);
+    }
+
+    #[test]
+    fn test_scroll_content_shifts() {
+        let (mut app, mut terminal) = create_scroll_test_app(80, 25, 1, 12);
+
+        // Render at bottom
+        app.scroll_offset = 0;
+        let text_bottom = render_and_snap(&app, &mut terminal);
+
+        // Render scrolled up
+        app.scroll_offset = 10;
+        let text_scrolled = render_and_snap(&app, &mut terminal);
+
+        assert_ne!(
+            text_bottom, text_scrolled,
+            "content should change when scrolled"
+        );
+    }
+
+    #[test]
+    fn test_scroll_render_with_mermaid() {
+        let (mut app, mut terminal) = create_scroll_test_app(100, 30, 2, 10);
+
+        // Render at several positions without crashing
+        for offset in [0, 5, 10, 20, 50] {
+            app.scroll_offset = offset;
+            terminal
+                .draw(|f| crate::tui::ui::draw(f, &app))
+                .unwrap_or_else(|e| panic!("draw failed at scroll_offset={}: {}", offset, e));
+        }
+
+        // Snapshot at bottom
+        app.scroll_offset = 0;
+        let text = render_and_snap(&app, &mut terminal);
+        insta::assert_snapshot!("mermaid_bottom", text);
+
+        // Snapshot scrolled past first diagram
+        app.scroll_offset = 20;
+        let text = render_and_snap(&app, &mut terminal);
+        insta::assert_snapshot!("mermaid_scrolled_20", text);
+    }
+
+    #[test]
+    fn test_scroll_visual_debug_frame() {
+        let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 10);
+
+        crate::tui::visual_debug::enable();
+
+        app.scroll_offset = 0;
+        terminal
+            .draw(|f| crate::tui::ui::draw(f, &app))
+            .expect("draw failed");
+
+        let frame = crate::tui::visual_debug::latest_frame();
+        assert!(frame.is_some(), "visual debug frame should be captured");
+        let frame = frame.unwrap();
+        assert_eq!(frame.state.scroll_offset, 0);
+
+        // Scroll up and re-render
+        app.scroll_offset = 10;
+        terminal
+            .draw(|f| crate::tui::ui::draw(f, &app))
+            .expect("draw failed");
+
+        let frame = crate::tui::visual_debug::latest_frame().unwrap();
+        assert_eq!(frame.state.scroll_offset, 10);
+
+        crate::tui::visual_debug::disable();
+    }
+
+    #[test]
+    fn test_scroll_key_then_render() {
+        let (mut app, mut terminal) = create_scroll_test_app(80, 25, 1, 15);
+
+        let (up_code, up_mods) = scroll_up_key(&app);
+
+        // Render at bottom
+        let text_before = render_and_snap(&app, &mut terminal);
+
+        // Scroll up three times (9 lines total)
+        for _ in 0..3 {
+            app.handle_key(up_code.clone(), up_mods).unwrap();
+        }
+        assert_eq!(app.scroll_offset, 9);
+
+        // Render again
+        let text_after = render_and_snap(&app, &mut terminal);
+
+        assert_ne!(
+            text_before, text_after,
+            "rendering should change after scrolling"
+        );
+    }
+
+    #[test]
+    fn test_scroll_round_trip() {
+        let (mut app, mut terminal) = create_scroll_test_app(80, 25, 1, 12);
+
+        let (up_code, up_mods) = scroll_up_key(&app);
+        let (down_code, down_mods) = scroll_down_key(&app);
+
+        let text_original = render_and_snap(&app, &mut terminal);
+
+        // Scroll up 3x
+        for _ in 0..3 {
+            app.handle_key(up_code.clone(), up_mods).unwrap();
+        }
+        assert_eq!(app.scroll_offset, 9);
+
+        // Scroll back down 3x
+        for _ in 0..3 {
+            app.handle_key(down_code.clone(), down_mods).unwrap();
+        }
+        assert_eq!(app.scroll_offset, 0);
+
+        let text_restored = render_and_snap(&app, &mut terminal);
+        assert_eq!(
+            text_original, text_restored,
+            "round-trip scroll should restore identical output"
+        );
     }
 }

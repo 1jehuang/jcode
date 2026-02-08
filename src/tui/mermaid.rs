@@ -210,6 +210,35 @@ pub fn get_active_diagrams() -> Vec<super::info_widget::DiagramInfo> {
     }
 }
 
+/// Snapshot active diagrams (internal order) for temporary overrides in tests/debug
+pub fn snapshot_active_diagrams() -> Vec<super::info_widget::DiagramInfo> {
+    if let Ok(diagrams) = ACTIVE_DIAGRAMS.lock() {
+        return diagrams
+            .iter()
+            .map(|d| super::info_widget::DiagramInfo {
+                hash: d.hash,
+                width: d.width,
+                height: d.height,
+                label: d.label.clone(),
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+/// Restore active diagrams from a snapshot
+pub fn restore_active_diagrams(snapshot: Vec<super::info_widget::DiagramInfo>) {
+    if let Ok(mut diagrams) = ACTIVE_DIAGRAMS.lock() {
+        diagrams.clear();
+        diagrams.extend(snapshot.into_iter().map(|d| ActiveDiagram {
+            hash: d.hash,
+            width: d.width,
+            height: d.height,
+            label: d.label,
+        }));
+    }
+}
+
 /// Clear active diagrams (call at start of render cycle)
 pub fn clear_active_diagrams() {
     if let Ok(mut diagrams) = ACTIVE_DIAGRAMS.lock() {

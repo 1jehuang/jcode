@@ -72,6 +72,8 @@ pub struct LayoutCapture {
     pub estimated_content_height: usize,
     /// Messages area
     pub messages_area: Option<RectCapture>,
+    /// Diagram area (pinned diagram pane)
+    pub diagram_area: Option<RectCapture>,
     /// Status line area
     pub status_area: Option<RectCapture>,
     /// Queued messages area
@@ -182,6 +184,7 @@ pub struct StateSnapshot {
     pub streaming_text_len: usize,
     pub has_suggestions: bool,
     pub status: String,
+    pub diagram_mode: Option<String>,
 }
 
 /// Actual rendered text content

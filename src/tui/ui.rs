@@ -1051,12 +1051,39 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         .filter(|m| m.role == "user")
         .count();
 
+    let diagram_mode = app.diagram_mode();
     let total_start = Instant::now();
     if let Some(ref mut capture) = debug_capture {
         capture.render_order.push("prepare_messages".to_string());
     }
     let prep_start = Instant::now();
-    let prepared = prepare_messages(app, area.width);
+    let mut prepared = prepare_messages(app, area.width);
+
+    // Check diagram display mode and get active diagrams
+    let diagrams = super::mermaid::get_active_diagrams();
+    let pinned_diagram = if diagram_mode == crate::config::DiagramDisplayMode::Pinned {
+        diagrams.first().cloned()
+    } else {
+        None
+    };
+
+    let mut diagram_width = 0u16;
+    let mut messages_width = area.width;
+    let mut has_pinned_area = false;
+    if pinned_diagram.is_some() {
+        // Calculate diagram width - aim for ~40% of screen, min 30 cols
+        diagram_width = (area.width * 2 / 5).max(30).min(area.width / 2);
+        messages_width = area.width.saturating_sub(diagram_width);
+        has_pinned_area = diagram_width > 0 && messages_width > 0;
+        if messages_width > 0 && messages_width != area.width {
+            if let Some(ref mut capture) = debug_capture {
+                capture
+                    .render_order
+                    .push("prepare_messages_rewrap".to_string());
+            }
+            prepared = prepare_messages(app, messages_width);
+        }
+    }
     if let Some(ref mut capture) = debug_capture {
         capture.image_regions = prepared
             .image_regions
@@ -1120,6 +1147,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         capture.state.streaming_text_len = app.streaming_text().len();
         capture.state.has_suggestions = !suggestions.is_empty();
         capture.state.status = format!("{:?}", app.status());
+        capture.state.diagram_mode = Some(format!("{:?}", diagram_mode));
 
         // Capture rendered content
         // Queued messages
@@ -1153,21 +1181,8 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     }
     let draw_start = Instant::now();
 
-    // Check diagram display mode and get active diagrams
-    let diagram_mode = app.diagram_mode();
-    let diagrams = super::mermaid::get_active_diagrams();
-    let pinned_diagram = if diagram_mode == crate::config::DiagramDisplayMode::Pinned {
-        diagrams.first().cloned()
-    } else {
-        None
-    };
-
     // Split messages area for pinned diagram if we have one in pinned mode
-    let (messages_area, diagram_area) = if let Some(ref _diagram) = pinned_diagram {
-        // Calculate diagram width - aim for ~40% of screen, min 30 cols
-        let diagram_width = (chunks[0].width * 2 / 5).max(30).min(chunks[0].width / 2);
-        let messages_width = chunks[0].width.saturating_sub(diagram_width);
-
+    let (messages_area, diagram_area) = if has_pinned_area {
         let messages = Rect {
             x: chunks[0].x,
             y: chunks[0].y,
@@ -1185,10 +1200,18 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         (chunks[0], None)
     };
 
+    if let Some(ref mut capture) = debug_capture {
+        capture.layout.messages_area = Some(messages_area.into());
+        capture.layout.diagram_area = diagram_area.map(|r| r.into());
+    }
+
     let margins = draw_messages(frame, app, messages_area, &prepared);
 
     // Render pinned diagram if we have one
     if let (Some(diagram_info), Some(area)) = (&pinned_diagram, diagram_area) {
+        if let Some(ref mut capture) = debug_capture {
+            capture.render_order.push("draw_pinned_diagram".to_string());
+        }
         draw_pinned_diagram(frame, diagram_info, area);
     }
 
