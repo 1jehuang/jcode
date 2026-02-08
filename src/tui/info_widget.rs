@@ -686,8 +686,7 @@ pub fn calculate_placements(
         };
 
         let fits = dampened_row_end <= widths.len()
-            && (dampened_row_start..dampened_row_end)
-                .all(|row| widths[row] >= MIN_WIDGET_WIDTH);
+            && (dampened_row_start..dampened_row_end).all(|row| widths[row] >= MIN_WIDGET_WIDTH);
 
         if !fits {
             continue; // Can't use dampened position — keep the ideal

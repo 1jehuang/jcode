@@ -992,6 +992,34 @@ fn profile_state() -> &'static Mutex<RenderProfile> {
     PROFILE_STATE.get_or_init(|| Mutex::new(RenderProfile::default()))
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct LayoutSnapshot {
+    pub messages_area: Rect,
+    pub diagram_area: Option<Rect>,
+}
+
+static LAST_LAYOUT: OnceLock<Mutex<Option<LayoutSnapshot>>> = OnceLock::new();
+
+fn last_layout_state() -> &'static Mutex<Option<LayoutSnapshot>> {
+    LAST_LAYOUT.get_or_init(|| Mutex::new(None))
+}
+
+pub fn record_layout_snapshot(messages_area: Rect, diagram_area: Option<Rect>) {
+    if let Ok(mut snapshot) = last_layout_state().lock() {
+        *snapshot = Some(LayoutSnapshot {
+            messages_area,
+            diagram_area,
+        });
+    }
+}
+
+pub fn last_layout_snapshot() -> Option<LayoutSnapshot> {
+    last_layout_state()
+        .lock()
+        .ok()
+        .and_then(|snapshot| *snapshot)
+}
+
 fn profile_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("JCODE_TUI_PROFILE").is_ok())
@@ -1078,11 +1106,13 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     } else {
         0
     };
-    let pinned_diagram = if diagram_mode == crate::config::DiagramDisplayMode::Pinned {
-        diagrams.get(selected_index).cloned()
-    } else {
-        None
-    };
+    let pane_enabled = app.diagram_pane_enabled();
+    let pinned_diagram =
+        if diagram_mode == crate::config::DiagramDisplayMode::Pinned && pane_enabled {
+            diagrams.get(selected_index).cloned()
+        } else {
+            None
+        };
     let diagram_focus = app.diagram_focus();
     let (diagram_scroll_x, diagram_scroll_y) = app.diagram_scroll();
 
@@ -1179,6 +1209,8 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         capture.state.diagram_scroll_x = diagram_scroll_x;
         capture.state.diagram_scroll_y = diagram_scroll_y;
         capture.state.diagram_pane_ratio = app.diagram_pane_ratio();
+        capture.state.diagram_pane_enabled = app.diagram_pane_enabled();
+        capture.state.diagram_zoom = app.diagram_zoom();
 
         // Capture rendered content
         // Queued messages
@@ -1235,6 +1267,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         capture.layout.messages_area = Some(messages_area.into());
         capture.layout.diagram_area = diagram_area.map(|r| r.into());
     }
+    record_layout_snapshot(messages_area, diagram_area);
 
     let margins = draw_messages(frame, app, messages_area, &prepared);
 
@@ -1252,6 +1285,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
             diagram_focus,
             diagram_scroll_x,
             diagram_scroll_y,
+            app.diagram_zoom(),
         );
     }
 
@@ -1289,11 +1323,16 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     let widget_data = app.info_widget_data();
     let mut widget_render_ms: Option<f32> = None;
     let mut placements: Vec<info_widget::WidgetPlacement> = Vec::new();
+    let widget_bounds = if has_pinned_area {
+        messages_area
+    } else {
+        chunks[0]
+    };
     if !widget_data.is_empty() {
         if let Some(ref mut capture) = debug_capture {
             capture.render_order.push("render_info_widgets".to_string());
         }
-        placements = info_widget::calculate_placements(chunks[0], &margins, &widget_data);
+        placements = info_widget::calculate_placements(widget_bounds, &margins, &widget_data);
 
         if let Some(ref mut capture) = debug_capture {
             let placement_captures = capture_widget_placements(&placements);
@@ -1305,7 +1344,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
 
             // Detect overlaps with message area
             for placement in &placements {
-                if rects_overlap(placement.rect, chunks[0]) {
+                if rects_overlap(placement.rect, widget_bounds) {
                     capture.anomaly(format!(
                         "Info widget {:?} overlaps messages area",
                         placement.kind
@@ -1316,6 +1355,14 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
                         "Info widget {:?} out of bounds {:?}",
                         placement.kind, placement.rect
                     ));
+                }
+                if let Some(diagram_area) = diagram_area {
+                    if rects_overlap(placement.rect, diagram_area) {
+                        capture.anomaly(format!(
+                            "Info widget {:?} overlaps diagram area",
+                            placement.kind
+                        ));
+                    }
                 }
             }
             for i in 0..placements.len() {
@@ -2401,6 +2448,7 @@ fn draw_pinned_diagram(
     focused: bool,
     scroll_x: i32,
     scroll_y: i32,
+    zoom_percent: u8,
 ) {
     use ratatui::widgets::{BorderType, Clear, Paragraph, Wrap};
 
@@ -2421,12 +2469,26 @@ fn draw_pinned_diagram(
         mode_label,
         Style::default().fg(if focused { ACCENT_COLOR } else { DIM_COLOR }),
     ));
+    if focused || zoom_percent != 100 {
+        title_parts.push(Span::styled(
+            format!(" zoom {}%", zoom_percent),
+            Style::default().fg(if focused { ACCENT_COLOR } else { DIM_COLOR }),
+        ));
+    }
     if total > 1 {
         title_parts.push(Span::styled(
             " Ctrl+Left/Right",
             Style::default().fg(DIM_COLOR),
         ));
     }
+    title_parts.push(Span::styled(
+        " Ctrl+H/L focus",
+        Style::default().fg(DIM_COLOR),
+    ));
+    title_parts.push(Span::styled(
+        " Alt+M toggle",
+        Style::default().fg(DIM_COLOR),
+    ));
 
     // Draw border with title
     let block = Block::default()
@@ -2449,6 +2511,7 @@ fn draw_pinned_diagram(
                     frame.buffer_mut(),
                     scroll_x,
                     scroll_y,
+                    zoom_percent,
                     false,
                 );
             } else {

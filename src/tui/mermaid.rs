@@ -1399,6 +1399,7 @@ pub fn render_image_widget_viewport(
     buf: &mut Buffer,
     scroll_x: i32,
     scroll_y: i32,
+    zoom_percent: u8,
     draw_border: bool,
 ) -> u16 {
     let buf_area = *buf.area();
@@ -1449,8 +1450,15 @@ pub fn render_image_widget_viewport(
     };
 
     let font_size = picker.font_size();
-    let view_w_px = image_area.width as u32 * font_size.0 as u32;
-    let view_h_px = image_area.height as u32 * font_size.1 as u32;
+    let zoom = zoom_percent.clamp(50, 200) as u32;
+    let view_w_px = (image_area.width as u32)
+        .saturating_mul(font_size.0 as u32)
+        .saturating_mul(100)
+        / zoom;
+    let view_h_px = (image_area.height as u32)
+        .saturating_mul(font_size.1 as u32)
+        .saturating_mul(100)
+        / zoom;
     if view_w_px == 0 || view_h_px == 0 {
         return 0;
     }
@@ -1460,11 +1468,13 @@ pub fn render_image_widget_viewport(
     let max_scroll_x = img_width.saturating_sub(view_w_px);
     let max_scroll_y = img_height.saturating_sub(view_h_px);
 
+    let cell_w_px = (font_size.0 as u32).saturating_mul(100) / zoom;
+    let cell_h_px = (font_size.1 as u32).saturating_mul(100) / zoom;
     let scroll_x_px = (scroll_x.max(0) as u32)
-        .saturating_mul(font_size.0 as u32)
+        .saturating_mul(cell_w_px)
         .min(max_scroll_x);
     let scroll_y_px = (scroll_y.max(0) as u32)
-        .saturating_mul(font_size.1 as u32)
+        .saturating_mul(cell_h_px)
         .min(max_scroll_y);
 
     let crop_w = view_w_px.min(img_width.saturating_sub(scroll_x_px));

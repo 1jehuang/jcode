@@ -16,7 +16,10 @@ use crate::skill::SkillRegistry;
 use crate::tool::selfdev::ReloadContext;
 use crate::tool::{Registry, ToolContext};
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use futures::StreamExt;
 use ratatui::{layout::Rect, DefaultTerminal};
 use serde::{Deserialize, Serialize};
@@ -377,6 +380,8 @@ struct ScrollTestState {
     diagram_scroll_x: i32,
     diagram_scroll_y: i32,
     diagram_pane_ratio: u8,
+    diagram_pane_enabled: bool,
+    diagram_zoom: u8,
 }
 
 fn rect_from_capture(rect: super::visual_debug::RectCapture) -> Rect {
@@ -393,6 +398,13 @@ fn rect_contains(outer: Rect, inner: Rect) -> bool {
         && inner.y >= outer.y
         && inner.x.saturating_add(inner.width) <= outer.x.saturating_add(outer.width)
         && inner.y.saturating_add(inner.height) <= outer.y.saturating_add(outer.height)
+}
+
+fn point_in_rect(col: u16, row: u16, rect: Rect) -> bool {
+    col >= rect.x
+        && row >= rect.y
+        && col < rect.x.saturating_add(rect.width)
+        && row < rect.y.saturating_add(rect.height)
 }
 
 fn parse_area_spec(spec: &str) -> Option<Rect> {
@@ -544,6 +556,10 @@ pub struct App {
     diagram_scroll_y: i32,
     // Diagram pane width ratio (percentage)
     diagram_pane_ratio: u8,
+    // Whether the pinned diagram pane is visible
+    diagram_pane_enabled: bool,
+    // Diagram zoom percentage (100 = normal)
+    diagram_zoom: u8,
     // Keybindings for model switching
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for scrolling
@@ -599,6 +615,8 @@ impl ScrollTestState {
             diagram_scroll_x: app.diagram_scroll_x,
             diagram_scroll_y: app.diagram_scroll_y,
             diagram_pane_ratio: app.diagram_pane_ratio,
+            diagram_pane_enabled: app.diagram_pane_enabled,
+            diagram_zoom: app.diagram_zoom,
         }
     }
 
@@ -623,6 +641,8 @@ impl ScrollTestState {
         app.diagram_scroll_x = self.diagram_scroll_x;
         app.diagram_scroll_y = self.diagram_scroll_y;
         app.diagram_pane_ratio = self.diagram_pane_ratio;
+        app.diagram_pane_enabled = self.diagram_pane_enabled;
+        app.diagram_zoom = self.diagram_zoom;
     }
 }
 
@@ -766,6 +786,8 @@ impl App {
             diagram_scroll_x: 0,
             diagram_scroll_y: 0,
             diagram_pane_ratio: 40,
+            diagram_pane_enabled: true,
+            diagram_zoom: 100,
             model_switch_keys: super::keybind::load_model_switch_keys(),
             scroll_keys: super::keybind::load_scroll_keys(),
             status_notice: None,
@@ -1135,6 +1157,7 @@ impl App {
 
     fn diagram_available(&self) -> bool {
         self.diagram_mode == crate::config::DiagramDisplayMode::Pinned
+            && self.diagram_pane_enabled
             && !crate::tui::mermaid::get_active_diagrams().is_empty()
     }
 
@@ -1145,6 +1168,9 @@ impl App {
             self.diagram_scroll_x = 0;
             self.diagram_scroll_y = 0;
             return;
+        }
+        if !self.diagram_pane_enabled {
+            self.diagram_focus = false;
         }
 
         let diagram_count = crate::tui::mermaid::get_active_diagrams().len();
@@ -1169,7 +1195,7 @@ impl App {
         }
         self.diagram_focus = focus;
         if focus {
-            self.set_status_notice("Focus: diagram (hjkl pan, +/- resize)");
+            self.set_status_notice("Focus: diagram (hjkl pan, [/] zoom, +/- resize)");
         } else {
             self.set_status_notice("Focus: chat");
         }
@@ -1214,6 +1240,31 @@ impl App {
         }
     }
 
+    fn adjust_diagram_zoom(&mut self, delta: i8) {
+        let next = (self.diagram_zoom as i16 + delta as i16).clamp(50, 200) as u8;
+        if next != self.diagram_zoom {
+            self.diagram_zoom = next;
+            self.set_status_notice(format!("Diagram zoom: {}%", next));
+        }
+    }
+
+    fn toggle_diagram_pane(&mut self) {
+        if self.diagram_mode != crate::config::DiagramDisplayMode::Pinned {
+            self.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
+        }
+        super::markdown::set_diagram_mode_override(Some(self.diagram_mode));
+        self.diagram_pane_enabled = !self.diagram_pane_enabled;
+        if !self.diagram_pane_enabled {
+            self.diagram_focus = false;
+        }
+        let status = if self.diagram_pane_enabled {
+            "Diagram pane: ON"
+        } else {
+            "Diagram pane: OFF"
+        };
+        self.set_status_notice(status);
+    }
+
     fn handle_diagram_ctrl_key(&mut self, code: KeyCode, diagram_available: bool) -> bool {
         if !diagram_available {
             return false;
@@ -1256,6 +1307,8 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => self.pan_diagram(0, 1),
             KeyCode::Char('+') | KeyCode::Char('=') => self.adjust_diagram_pane_ratio(5),
             KeyCode::Char('-') | KeyCode::Char('_') => self.adjust_diagram_pane_ratio(-5),
+            KeyCode::Char(']') => self.adjust_diagram_zoom(10),
+            KeyCode::Char('[') => self.adjust_diagram_zoom(-10),
             KeyCode::Esc => {
                 self.set_diagram_focus(false);
             }
@@ -1263,6 +1316,77 @@ impl App {
         }
 
         true
+    }
+
+    fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        self.normalize_diagram_state();
+        let diagram_available = self.diagram_available();
+        let layout = super::ui::last_layout_snapshot();
+        let mut over_diagram = false;
+        if let Some(layout) = layout {
+            if let Some(diagram_area) = layout.diagram_area {
+                over_diagram = point_in_rect(mouse.column, mouse.row, diagram_area);
+            }
+            if diagram_available && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if over_diagram {
+                    self.set_diagram_focus(true);
+                } else {
+                    self.set_diagram_focus(false);
+                }
+            }
+        }
+
+        let mut handled_scroll = false;
+        if diagram_available
+            && over_diagram
+            && matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp
+                    | MouseEventKind::ScrollDown
+                    | MouseEventKind::ScrollLeft
+                    | MouseEventKind::ScrollRight
+            )
+        {
+            if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => self.adjust_diagram_zoom(10),
+                    MouseEventKind::ScrollDown => self.adjust_diagram_zoom(-10),
+                    _ => {}
+                }
+                self.set_diagram_focus(true);
+                handled_scroll = true;
+            } else if self.diagram_focus {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => self.pan_diagram(0, -1),
+                    MouseEventKind::ScrollDown => self.pan_diagram(0, 1),
+                    MouseEventKind::ScrollLeft => self.pan_diagram(-1, 0),
+                    MouseEventKind::ScrollRight => self.pan_diagram(1, 0),
+                    _ => {}
+                }
+                handled_scroll = true;
+            }
+        }
+
+        if handled_scroll {
+            return;
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                let max = self.scroll_max_estimate();
+                self.scroll_offset = (self.scroll_offset + 3).min(max);
+                if self.is_processing {
+                    self.auto_scroll_paused = true;
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                if self.scroll_offset == 0 {
+                    self.auto_scroll_paused = false;
+                }
+            }
+            _ => {}
+        }
     }
 
     fn debug_scroll_up(&mut self, amount: usize) {
@@ -2020,6 +2144,8 @@ impl App {
                 "diagram_index": self.diagram_index,
                 "diagram_scroll": [self.diagram_scroll_x, self.diagram_scroll_y],
                 "diagram_pane_ratio": self.diagram_pane_ratio,
+                "diagram_pane_enabled": self.diagram_pane_enabled,
+                "diagram_zoom": self.diagram_zoom,
                 "diagram_count": crate::tui::mermaid::get_active_diagrams().len(),
                 "version": env!("JCODE_VERSION"),
             })
@@ -2476,6 +2602,8 @@ impl App {
                 "diagram_index": self.diagram_index,
                 "diagram_scroll": [self.diagram_scroll_x, self.diagram_scroll_y],
                 "diagram_pane_ratio": self.diagram_pane_ratio,
+                "diagram_pane_enabled": self.diagram_pane_enabled,
+                "diagram_zoom": self.diagram_zoom,
                 "diagram_count": crate::tui::mermaid::get_active_diagrams().len(),
                 "remote": true,
                 "server_version": self.remote_server_version.clone(),
@@ -2627,6 +2755,9 @@ impl App {
                 "queued_messages": self.queued_messages.len(),
                 "provider_session_id": self.provider_session_id,
                 "model": self.provider.name(),
+                "diagram_mode": format!("{:?}", self.diagram_mode),
+                "diagram_pane_enabled": self.diagram_pane_enabled,
+                "diagram_zoom": self.diagram_zoom,
                 "version": env!("JCODE_VERSION"),
             }),
             frame,
@@ -3285,28 +3416,7 @@ impl App {
                                 self.handle_paste(text);
                             }
                             Some(Ok(Event::Mouse(mouse))) => {
-                                // Handle mouse scroll wheel for scrolling
-                                // Note: scroll_offset 0 = bottom, higher = scrolled up
-                                match mouse.kind {
-                                    MouseEventKind::ScrollUp => {
-                                        // Scroll up in the view (increase offset)
-                                        let max = self.scroll_max_estimate();
-                                        self.scroll_offset = (self.scroll_offset + 3).min(max);
-                                        // Pause auto-scroll when scrolling up during streaming
-                                        if self.is_processing {
-                                            self.auto_scroll_paused = true;
-                                        }
-                                    }
-                                    MouseEventKind::ScrollDown => {
-                                        // Scroll down in the view (decrease offset towards 0)
-                                        self.scroll_offset = self.scroll_offset.saturating_sub(3);
-                                        // Resume auto-scroll if at bottom
-                                        if self.scroll_offset == 0 {
-                                            self.auto_scroll_paused = false;
-                                        }
-                                    }
-                                    _ => {}
-                                }
+                                self.handle_mouse_event(mouse);
                             }
                             _ => {}
                         }
@@ -3695,28 +3805,7 @@ impl App {
                                 self.handle_paste(text);
                             }
                             Some(Ok(Event::Mouse(mouse))) => {
-                                // Handle mouse scroll wheel for scrolling
-                                // Note: scroll_offset 0 = bottom, higher = scrolled up
-                                match mouse.kind {
-                                    MouseEventKind::ScrollUp => {
-                                        // Scroll up in the view (increase offset)
-                                        let max = self.scroll_max_estimate();
-                                        self.scroll_offset = (self.scroll_offset + 3).min(max);
-                                        // Pause auto-scroll when scrolling up during streaming
-                                        if self.is_processing {
-                                            self.auto_scroll_paused = true;
-                                        }
-                                    }
-                                    MouseEventKind::ScrollDown => {
-                                        // Scroll down in the view (decrease offset towards 0)
-                                        self.scroll_offset = self.scroll_offset.saturating_sub(3);
-                                        // Resume auto-scroll if at bottom
-                                        if self.scroll_offset == 0 {
-                                            self.auto_scroll_paused = false;
-                                        }
-                                    }
-                                    _ => {}
-                                }
+                                self.handle_mouse_event(mouse);
                             }
                             _ => {}
                         }
@@ -4642,6 +4731,10 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+        if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('m')) {
+            self.toggle_diagram_pane();
+            return Ok(());
+        }
         if let Some(direction) = self
             .model_switch_keys
             .direction_for(code.clone(), modifiers)
@@ -5068,7 +5161,9 @@ impl App {
                      • `Ctrl+H` / `Ctrl+L` - Focus chat/diagram (pinned mode)\n\
                      • `Ctrl+Left/Right` - Cycle diagrams in side pane\n\
                      • `h/j/k/l` or arrow keys - Pan diagram (when focused)\n\
+                     • `[` / `]` - Zoom diagram (when focused)\n\
                      • `+` / `-` - Resize diagram pane (when focused)\n\
+                     • `Alt+M` - Toggle diagram pane\n\
                      • `Ctrl+R` - Recover from missing tool outputs\n\
                      • `PageUp/Down` or `Up/Down` - Scroll history\n\
                      • `{}`/`{}` - Scroll up/down (see `/config`)\n\
@@ -9157,6 +9252,14 @@ impl super::TuiState for App {
 
     fn diagram_pane_ratio(&self) -> u8 {
         self.diagram_pane_ratio
+    }
+
+    fn diagram_pane_enabled(&self) -> bool {
+        self.diagram_pane_enabled
+    }
+
+    fn diagram_zoom(&self) -> u8 {
+        self.diagram_zoom
     }
 }
 

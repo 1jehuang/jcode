@@ -132,6 +132,10 @@ pub trait TuiState {
     fn diagram_scroll(&self) -> (i32, i32);
     /// Diagram pane width ratio percentage
     fn diagram_pane_ratio(&self) -> u8;
+    /// Whether the pinned diagram pane is visible
+    fn diagram_pane_enabled(&self) -> bool;
+    /// Diagram zoom percentage (100 = normal)
+    fn diagram_zoom(&self) -> u8;
 }
 
 pub(crate) fn subscribe_metadata() -> (Option<String>, Option<bool>) {
