@@ -36,9 +36,10 @@ fn main() {
 
     let dirty = output.map(|o| !o.stdout.is_empty()).unwrap_or(false);
 
-    // Get recent commit messages (last 5 commits, one-line format)
+    // Get recent commit messages (last 20 commits, with short hash for tracking "last seen")
+    // Format: "hash:subject" per line so runtime can filter to only new-since-last-seen
     let output = Command::new("git")
-        .args(["log", "--oneline", "-5", "--format=%s"])
+        .args(["log", "--oneline", "-20", "--format=%h:%s"])
         .output()
         .ok();
 
