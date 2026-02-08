@@ -16,6 +16,105 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
 
+/// Build graph topology (nodes + edges) from a MemoryGraph for visualization.
+/// Combines project and global graphs, sampling nodes if there are too many.
+pub fn build_graph_topology(
+    project: Option<&crate::memory_graph::MemoryGraph>,
+    global: Option<&crate::memory_graph::MemoryGraph>,
+) -> (Vec<GraphNode>, Vec<(usize, usize)>) {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut id_to_idx: HashMap<String, usize> = HashMap::new();
+
+    // Collect all memory nodes from both graphs
+    let graphs: Vec<&crate::memory_graph::MemoryGraph> =
+        [project, global].into_iter().flatten().collect();
+
+    for graph in &graphs {
+        for (id, entry) in &graph.memories {
+            if !id_to_idx.contains_key(id) {
+                let idx = nodes.len();
+                id_to_idx.insert(id.clone(), idx);
+                nodes.push(GraphNode {
+                    kind: entry.category.to_string(),
+                    degree: 0,
+                });
+            }
+        }
+
+        // Add tag nodes
+        for (id, _tag) in &graph.tags {
+            if !id_to_idx.contains_key(id) {
+                let idx = nodes.len();
+                id_to_idx.insert(id.clone(), idx);
+                nodes.push(GraphNode {
+                    kind: "tag".to_string(),
+                    degree: 0,
+                });
+            }
+        }
+    }
+
+    // Collect edges
+    for graph in &graphs {
+        for (src_id, edge_list) in &graph.edges {
+            let Some(&src_idx) = id_to_idx.get(src_id) else {
+                continue;
+            };
+            for edge in edge_list {
+                let Some(&tgt_idx) = id_to_idx.get(&edge.target) else {
+                    continue;
+                };
+                if src_idx != tgt_idx {
+                    edges.push((src_idx, tgt_idx));
+                    if src_idx < nodes.len() {
+                        nodes[src_idx].degree += 1;
+                    }
+                    if tgt_idx < nodes.len() {
+                        nodes[tgt_idx].degree += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // If too many nodes, sample the most connected ones + some random
+    let max_nodes = 40;
+    if nodes.len() > max_nodes {
+        // Sort indices by degree (most connected first)
+        let mut indices: Vec<usize> = (0..nodes.len()).collect();
+        indices.sort_by(|&a, &b| nodes[b].degree.cmp(&nodes[a].degree));
+
+        // Take top connected nodes
+        let keep: std::collections::HashSet<usize> =
+            indices.into_iter().take(max_nodes).collect();
+
+        // Rebuild with only kept nodes
+        let mut new_nodes = Vec::new();
+        let mut old_to_new: HashMap<usize, usize> = HashMap::new();
+        for old_idx in 0..nodes.len() {
+            if keep.contains(&old_idx) {
+                let new_idx = new_nodes.len();
+                old_to_new.insert(old_idx, new_idx);
+                new_nodes.push(nodes[old_idx].clone());
+            }
+        }
+
+        let new_edges: Vec<(usize, usize)> = edges
+            .iter()
+            .filter_map(|&(a, b)| {
+                let na = old_to_new.get(&a)?;
+                let nb = old_to_new.get(&b)?;
+                Some((*na, *nb))
+            })
+            .collect();
+
+        return (new_nodes, new_edges);
+    }
+
+    (nodes, edges)
+}
+
 /// Types of info widgets that can be displayed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WidgetKind {
@@ -240,6 +339,19 @@ pub struct MemoryInfo {
     pub sidecar_available: bool,
     /// Current memory activity
     pub activity: Option<MemoryActivity>,
+    /// Graph topology for visualization (node positions + edges)
+    pub graph_nodes: Vec<GraphNode>,
+    /// Edges as (source_index, target_index) into graph_nodes
+    pub graph_edges: Vec<(usize, usize)>,
+}
+
+/// A node in the mini graph visualization
+#[derive(Debug, Clone)]
+pub struct GraphNode {
+    /// Category: "fact", "preference", "correction", "tag"
+    pub kind: String,
+    /// Number of connections (degree)
+    pub degree: usize,
 }
 
 /// Represents current memory system activity
@@ -751,6 +863,9 @@ fn calculate_widget_height(
                 return 0;
             };
             let mut h = 1u16; // Title
+            if !info.graph_nodes.is_empty() {
+                h += 4.min(max_height.saturating_sub(border_height + 2)); // Graph rows
+            }
             if info.activity.is_some() {
                 h += 1; // State line
                 h += info
@@ -1159,6 +1274,13 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
         ),
     ]));
 
+    // Mini graph visualization (if we have graph data and enough space)
+    let graph_height = inner.height.saturating_sub(2); // leave room for title + activity
+    if !info.graph_nodes.is_empty() && graph_height >= 2 {
+        let graph_lines = render_mini_graph(info, inner.width, graph_height.min(6));
+        lines.extend(graph_lines);
+    }
+
     // Activity state if active
     if let Some(activity) = &info.activity {
         let state_line = match &activity.state {
@@ -1255,6 +1377,214 @@ fn format_memory_event(event: &MemoryEvent, max_width: usize) -> (&'static str, 
         MemoryEventKind::Error { message } => {
             let msg = truncate_smart(message, max_width.saturating_sub(2));
             ("!", msg, Color::Rgb(255, 100, 100))
+        }
+    }
+}
+
+/// Render a tiny ASCII graph visualization of memory nodes and edges.
+/// Each node is a single character, edges are drawn as connecting chars.
+/// Returns lines of styled spans representing the graph.
+fn render_mini_graph(info: &MemoryInfo, width: u16, height: u16) -> Vec<Line<'static>> {
+    let w = width as usize;
+    let h = height as usize;
+    if w < 4 || h < 2 || info.graph_nodes.is_empty() {
+        return Vec::new();
+    }
+
+    let nodes = &info.graph_nodes;
+    let edges = &info.graph_edges;
+
+    // Assign positions using a deterministic layout
+    // Use a simple grid-based approach with some jitter based on node index
+    let positions = layout_nodes(nodes.len(), edges, w, h);
+
+    // Build a character grid
+    let mut grid: Vec<Vec<(char, Color)>> = vec![vec![(' ', Color::Reset); w]; h];
+
+    // Draw edges first (behind nodes)
+    for &(src, tgt) in edges {
+        if src >= positions.len() || tgt >= positions.len() {
+            continue;
+        }
+        let (sx, sy) = positions[src];
+        let (tx, ty) = positions[tgt];
+        draw_edge(&mut grid, sx, sy, tx, ty, Color::Rgb(60, 60, 70));
+    }
+
+    // Draw nodes on top
+    for (i, node) in nodes.iter().enumerate() {
+        if i >= positions.len() {
+            break;
+        }
+        let (x, y) = positions[i];
+        if x < w && y < h {
+            let (ch, color) = node_char(node);
+            grid[y][x] = (ch, color);
+        }
+    }
+
+    // Convert grid to Lines
+    grid.iter()
+        .map(|row| {
+            let spans: Vec<Span<'static>> = row
+                .iter()
+                .map(|&(ch, color)| {
+                    if color == Color::Reset {
+                        Span::raw(ch.to_string())
+                    } else {
+                        Span::styled(ch.to_string(), Style::default().fg(color))
+                    }
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// Pick character and color for a graph node
+fn node_char(node: &GraphNode) -> (char, Color) {
+    match node.kind.as_str() {
+        "preference" => ('●', Color::Rgb(140, 200, 255)),
+        "correction" => ('●', Color::Rgb(255, 160, 100)),
+        "tag" => ('◆', Color::Rgb(160, 140, 200)),
+        _ => ('●', Color::Rgb(130, 200, 130)), // fact = green
+    }
+}
+
+/// Simple deterministic layout: place nodes in a spiral/circle pattern
+/// with connected nodes pulled closer together
+fn layout_nodes(
+    count: usize,
+    edges: &[(usize, usize)],
+    w: usize,
+    h: usize,
+) -> Vec<(usize, usize)> {
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let cx = w as f64 / 2.0;
+    let cy = h as f64 / 2.0;
+    let rx = (w as f64 / 2.0 - 1.0).max(1.0);
+    let ry = (h as f64 / 2.0 - 0.5).max(0.5);
+
+    // Start with circular layout
+    let mut pos: Vec<(f64, f64)> = (0..count)
+        .map(|i| {
+            let angle = 2.0 * std::f64::consts::PI * (i as f64) / (count as f64)
+                - std::f64::consts::FRAC_PI_2;
+            let x = cx + rx * angle.cos();
+            let y = cy + ry * angle.sin();
+            (x, y)
+        })
+        .collect();
+
+    // Run a few iterations of force-directed adjustment
+    // Pull connected nodes together, push overlapping nodes apart
+    for _ in 0..20 {
+        let mut forces: Vec<(f64, f64)> = vec![(0.0, 0.0); count];
+
+        // Attraction along edges
+        for &(a, b) in edges {
+            if a >= count || b >= count {
+                continue;
+            }
+            let dx = pos[b].0 - pos[a].0;
+            let dy = pos[b].1 - pos[a].1;
+            let dist = (dx * dx + dy * dy).sqrt().max(0.1);
+            let force = (dist - 2.0) * 0.05;
+            let fx = dx / dist * force;
+            let fy = dy / dist * force;
+            forces[a].0 += fx;
+            forces[a].1 += fy;
+            forces[b].0 -= fx;
+            forces[b].1 -= fy;
+        }
+
+        // Repulsion between all nodes (only nearby)
+        for i in 0..count {
+            for j in (i + 1)..count {
+                let dx = pos[j].0 - pos[i].0;
+                let dy = pos[j].1 - pos[i].1;
+                let dist_sq = dx * dx + dy * dy;
+                if dist_sq < 9.0 {
+                    let dist = dist_sq.sqrt().max(0.1);
+                    let force = 0.5 / dist;
+                    let fx = dx / dist * force;
+                    let fy = dy / dist * force;
+                    forces[i].0 -= fx;
+                    forces[i].1 -= fy;
+                    forces[j].0 += fx;
+                    forces[j].1 += fy;
+                }
+            }
+        }
+
+        // Apply forces with clamping
+        for i in 0..count {
+            pos[i].0 = (pos[i].0 + forces[i].0).clamp(0.5, w as f64 - 0.5);
+            pos[i].1 = (pos[i].1 + forces[i].1).clamp(0.2, h as f64 - 0.2);
+        }
+    }
+
+    // Convert to integer grid positions
+    pos.iter()
+        .map(|&(x, y)| {
+            (
+                (x.round() as usize).min(w.saturating_sub(1)),
+                (y.round() as usize).min(h.saturating_sub(1)),
+            )
+        })
+        .collect()
+}
+
+/// Draw a line between two points on the character grid using Bresenham's
+fn draw_edge(
+    grid: &mut [Vec<(char, Color)>],
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+    color: Color,
+) {
+    let dx = (x1 as i32 - x0 as i32).abs();
+    let dy = (y1 as i32 - y0 as i32).abs();
+    let sx: i32 = if x0 < x1 { 1 } else { -1 };
+    let sy: i32 = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx - dy;
+    let mut x = x0 as i32;
+    let mut y = y0 as i32;
+    let h = grid.len() as i32;
+    let w = if h > 0 { grid[0].len() as i32 } else { 0 };
+
+    loop {
+        if x >= 0 && x < w && y >= 0 && y < h {
+            let gy = y as usize;
+            let gx = x as usize;
+            // Don't overwrite nodes
+            if grid[gy][gx].0 == ' ' {
+                // Pick edge character based on direction
+                let ch = if dx == 0 {
+                    '│'
+                } else if dy == 0 {
+                    '─'
+                } else {
+                    '·'
+                };
+                grid[gy][gx] = (ch, color);
+            }
+        }
+        if x == x1 as i32 && y == y1 as i32 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 > -dy {
+            err -= dy;
+            x += sx;
+        }
+        if e2 < dx {
+            err += dx;
+            y += sy;
         }
     }
 }
