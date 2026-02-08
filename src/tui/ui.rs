@@ -929,6 +929,7 @@ struct BodyCacheKey {
     width: u16,
     show_diffs: bool,
     messages_version: u64,
+    diagram_mode: crate::config::DiagramDisplayMode,
 }
 
 #[derive(Default)]
@@ -949,6 +950,7 @@ struct MessageCacheKey {
     show_diffs: bool,
     message_hash: u64,
     content_len: usize,
+    diagram_mode: crate::config::DiagramDisplayMode,
 }
 
 #[derive(Default)]
@@ -1630,6 +1632,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> PreparedMessages {
         width,
         show_diffs: app.show_diffs(),
         messages_version: app.display_messages_version(),
+        diagram_mode: app.diagram_mode(),
     };
 
     let mut cache = body_cache().lock().unwrap();
@@ -1829,6 +1832,7 @@ where
         show_diffs,
         message_hash: hash_display_message(msg),
         content_len: msg.content.len(),
+        diagram_mode: crate::config::config().display.diagram_mode,
     };
 
     let mut cache = message_cache().lock().unwrap();
@@ -2406,59 +2410,62 @@ fn draw_messages(
 
     // Use pre-computed image regions (scanned once during preparation, not every frame)
     let centered = app.centered_mode();
-    for region in &prepared.image_regions {
-        let abs_idx = region.abs_line_idx;
-        let hash = region.hash;
-        let total_height = region.height;
-        let image_end = abs_idx + total_height as usize;
+    let diagram_mode = app.diagram_mode();
+    if diagram_mode != crate::config::DiagramDisplayMode::Pinned {
+        for region in &prepared.image_regions {
+            let abs_idx = region.abs_line_idx;
+            let hash = region.hash;
+            let total_height = region.height;
+            let image_end = abs_idx + total_height as usize;
 
-        // Check if this image overlaps the visible area at all
-        if image_end > scroll && abs_idx < visible_end {
-            // Image overlaps visible area
-            let marker_visible = abs_idx >= scroll && abs_idx < visible_end;
+            // Check if this image overlaps the visible area at all
+            if image_end > scroll && abs_idx < visible_end {
+                // Image overlaps visible area
+                let marker_visible = abs_idx >= scroll && abs_idx < visible_end;
 
-            if marker_visible {
-                // Marker is visible - render the image
-                let screen_y = (abs_idx - scroll) as u16;
-                let available_height = (visible_height as u16).saturating_sub(screen_y);
-                let render_height = (total_height as u16).min(available_height);
+                if marker_visible {
+                    // Marker is visible - render the image
+                    let screen_y = (abs_idx - scroll) as u16;
+                    let available_height = (visible_height as u16).saturating_sub(screen_y);
+                    let render_height = (total_height as u16).min(available_height);
 
-                if render_height > 0 {
-                    let image_area = Rect {
-                        x: area.x,
-                        y: area.y + screen_y,
-                        width: area.width,
-                        height: render_height,
-                    };
-                    super::mermaid::render_image_widget(
-                        hash,
-                        image_area,
-                        frame.buffer_mut(),
-                        centered,
-                        false,
-                    );
-                }
-            } else {
-                // Marker is off-screen but image would overlap - render the visible portion
-                let visible_start = scroll.max(abs_idx);
-                let visible_end_img = visible_end.min(image_end);
-                let screen_y = (visible_start - scroll) as u16;
-                let render_height = (visible_end_img - visible_start) as u16;
+                    if render_height > 0 {
+                        let image_area = Rect {
+                            x: area.x,
+                            y: area.y + screen_y,
+                            width: area.width,
+                            height: render_height,
+                        };
+                        super::mermaid::render_image_widget(
+                            hash,
+                            image_area,
+                            frame.buffer_mut(),
+                            centered,
+                            false,
+                        );
+                    }
+                } else {
+                    // Marker is off-screen but image would overlap - render the visible portion
+                    let visible_start = scroll.max(abs_idx);
+                    let visible_end_img = visible_end.min(image_end);
+                    let screen_y = (visible_start - scroll) as u16;
+                    let render_height = (visible_end_img - visible_start) as u16;
 
-                if render_height > 0 {
-                    let image_area = Rect {
-                        x: area.x,
-                        y: area.y + screen_y,
-                        width: area.width,
-                        height: render_height,
-                    };
-                    super::mermaid::render_image_widget(
-                        hash,
-                        image_area,
-                        frame.buffer_mut(),
-                        centered,
-                        true,
-                    );
+                    if render_height > 0 {
+                        let image_area = Rect {
+                            x: area.x,
+                            y: area.y + screen_y,
+                            width: area.width,
+                            height: render_height,
+                        };
+                        super::mermaid::render_image_widget(
+                            hash,
+                            image_area,
+                            frame.buffer_mut(),
+                            centered,
+                            true,
+                        );
+                    }
                 }
             }
         }
