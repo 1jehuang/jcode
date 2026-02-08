@@ -124,6 +124,10 @@ impl ClientApp {
             let input_tokens = self.streaming_input_tokens;
             let output_tokens = self.streaming_output_tokens;
 
+            // Format as Option to distinguish None vs Some(0)
+            let cache_creation_dbg = format!("{:?}", self.streaming_cache_creation_tokens);
+            let cache_read_dbg = format!("{:?}", self.streaming_cache_read_tokens);
+
             // Count message types in conversation
             let mut user_msgs = 0;
             let mut assistant_msgs = 0;
@@ -146,8 +150,8 @@ impl ClientApp {
                  msgs: user={} assistant={} tool={} other={} | \
                  (client mode)",
                 user_turn_count,
-                cache_creation,
-                cache_read,
+                cache_creation_dbg,
+                cache_read_dbg,
                 input_tokens,
                 output_tokens,
                 session_id,
