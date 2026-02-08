@@ -555,10 +555,10 @@ pub fn calculate_placements(
         let rects = find_all_empty_rects(&margin.widths, MIN_WIDGET_WIDTH, MIN_WIDGET_HEIGHT);
         for (top, height, width) in rects {
             let clamped_width = width.min(MAX_WIDGET_WIDTH);
-            // Position the widget at the start of the margin (where content ends),
-            // not at the right edge minus widget width. This prevents overlap.
+            // Anchor widget flush against the edge — right edge stays at x_offset,
+            // left edge stays at x_offset. Only the widget width varies.
             let x = match margin.side {
-                Side::Right => margin.x_offset.saturating_sub(width),
+                Side::Right => margin.x_offset.saturating_sub(clamped_width),
                 Side::Left => margin.x_offset,
             };
             all_rects.push((margin.side, top, height, clamped_width, x, margin_idx));
@@ -592,32 +592,10 @@ pub fn calculate_placements(
                 .all(|row| widths[row] + STICKY_WIDTH_TOLERANCE >= prev.rect.width);
 
         if still_fits {
-            // Keep the widget at the same viewport-relative position, but update x
-            // so it doesn't overlap text if margin narrowed slightly
-            let actual_min_width = widths[row_start..row_end]
-                .iter()
-                .copied()
-                .min()
-                .unwrap_or(0);
-            // Use the actual available width (clamped), keeping the widget honest
-            // about what space it actually has — but it stays in position.
-            let use_width = actual_min_width.min(MAX_WIDGET_WIDTH);
-
-            // Find the matching margin_space for x calculation
-            let x = if let Some(ms) = margin_spaces.iter().find(|m| m.side == prev.side) {
-                match prev.side {
-                    Side::Right => ms.x_offset.saturating_sub(actual_min_width),
-                    Side::Left => ms.x_offset,
-                }
-            } else {
-                prev.rect.x
-            };
-
-            placements.push(WidgetPlacement {
-                kind: prev.kind,
-                rect: Rect::new(x, prev.rect.y, use_width, prev.rect.height),
-                side: prev.side,
-            });
+            // Keep the widget at the exact same position — x, y, width all preserved.
+            // The widget is anchored to the edge; only a side panel change (which
+            // invalidates the position entirely) should move it horizontally.
+            placements.push(prev.clone());
             kept.insert(prev.kind);
 
             // Remove the kept widget's rows from available rects so greedy placement
@@ -716,9 +694,9 @@ pub fn calculate_placements(
                     // Widget width is clamped to MAX_WIDGET_WIDTH
                     let new_min_width = actual_min_width.min(MAX_WIDGET_WIDTH);
                     all_rects[idx].3 = new_min_width; // new widget width (clamped)
-                                                      // Position x at the start of the margin (use actual margin width)
+                    // Anchor flush against the edge
                     all_rects[idx].4 = match side {
-                        Side::Right => margin.x_offset.saturating_sub(actual_min_width),
+                        Side::Right => margin.x_offset.saturating_sub(new_min_width),
                         Side::Left => margin.x_offset,
                     };
                 } else {
