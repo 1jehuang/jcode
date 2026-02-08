@@ -173,8 +173,15 @@ pub fn debug_cache() -> Vec<MermaidCacheEntry> {
 /// Register a diagram as active (call during markdown rendering)
 pub fn register_active_diagram(hash: u64, width: u32, height: u32, label: Option<String>) {
     if let Ok(mut diagrams) = ACTIVE_DIAGRAMS.lock() {
-        // Avoid duplicates
-        if !diagrams.iter().any(|d| d.hash == hash) {
+        if let Some(pos) = diagrams.iter().position(|d| d.hash == hash) {
+            let mut existing = diagrams.remove(pos);
+            existing.width = width;
+            existing.height = height;
+            if label.is_some() {
+                existing.label = label;
+            }
+            diagrams.push(existing);
+        } else {
             diagrams.push(ActiveDiagram {
                 hash,
                 width,
@@ -190,6 +197,7 @@ pub fn get_active_diagrams() -> Vec<super::info_widget::DiagramInfo> {
     if let Ok(diagrams) = ACTIVE_DIAGRAMS.lock() {
         diagrams
             .iter()
+            .rev()
             .map(|d| super::info_widget::DiagramInfo {
                 hash: d.hash,
                 width: d.width,

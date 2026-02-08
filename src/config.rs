@@ -61,7 +61,7 @@ impl Default for KeybindingsConfig {
 }
 
 /// How to display mermaid diagrams
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DiagramDisplayMode {
     /// Don't show diagrams in dedicated widgets (only inline in messages)

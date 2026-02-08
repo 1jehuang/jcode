@@ -12,6 +12,7 @@ use syntect::highlighting::{Style as SynStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use unicode_width::UnicodeWidthStr;
 
+use crate::config::{config, DiagramDisplayMode};
 use crate::tui::mermaid;
 
 // Syntax highlighting resources (loaded once)
@@ -246,6 +247,17 @@ const HEADING_H2_COLOR: Color = Color::Rgb(240, 190, 90); // Gold for ## H2
 const HEADING_H3_COLOR: Color = Color::Rgb(220, 170, 80); // Amber for ### H3
 const HEADING_COLOR: Color = Color::Rgb(200, 155, 75); // Darker amber for #### and below
 const DIM_COLOR: Color = Color::Rgb(100, 100, 100);
+
+fn diagram_side_only() -> bool {
+    matches!(config().display.diagram_mode, DiagramDisplayMode::Pinned)
+}
+
+fn mermaid_sidebar_placeholder(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        text.to_string(),
+        Style::default().fg(DIM_COLOR),
+    ))
+}
 const TABLE_COLOR: Color = Color::Rgb(150, 150, 150); // Table borders/separators
 
 /// Render markdown text to styled ratatui Lines
@@ -269,6 +281,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
     let render_start = Instant::now();
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let side_only = diagram_side_only();
 
     // Style stack for nested formatting
     let mut bold = false;
@@ -357,10 +370,17 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
 
                 if is_mermaid {
                     dbg_mermaid_blocks += 1;
-                    // Render mermaid diagram
+                    // Render mermaid diagram (registers active diagram for sidebar)
                     let result = mermaid::render_mermaid(&code_block_content);
-                    let mermaid_lines = mermaid::result_to_lines(result, max_width);
-                    lines.extend(mermaid_lines);
+                    match result {
+                        mermaid::RenderResult::Image { .. } if side_only => {
+                            lines.push(mermaid_sidebar_placeholder("↗ mermaid diagram (sidebar)"));
+                        }
+                        other => {
+                            let mermaid_lines = mermaid::result_to_lines(other, max_width);
+                            lines.extend(mermaid_lines);
+                        }
+                    }
                 } else {
                     // Render code block with syntax highlighting (cached)
                     let highlighted =
@@ -554,20 +574,26 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
             .unwrap_or(false);
 
         if is_mermaid {
-            // For mermaid, show "rendering..." placeholder while streaming
-            let dim = Style::default().fg(DIM_COLOR);
-            lines.push(Line::from(Span::styled("┌─ mermaid (streaming...) ", dim)));
-            // Show first few lines of the diagram source
-            for source_line in code_block_content.lines().take(5) {
-                lines.push(Line::from(vec![
-                    Span::styled("│ ", dim),
-                    Span::styled(source_line.to_string(), Style::default().fg(CODE_FG)),
-                ]));
+            if side_only {
+                lines.push(mermaid_sidebar_placeholder(
+                    "↗ mermaid diagram (sidebar, streaming...)",
+                ));
+            } else {
+                // For mermaid, show "rendering..." placeholder while streaming
+                let dim = Style::default().fg(DIM_COLOR);
+                lines.push(Line::from(Span::styled("┌─ mermaid (streaming...) ", dim)));
+                // Show first few lines of the diagram source
+                for source_line in code_block_content.lines().take(5) {
+                    lines.push(Line::from(vec![
+                        Span::styled("│ ", dim),
+                        Span::styled(source_line.to_string(), Style::default().fg(CODE_FG)),
+                    ]));
+                }
+                if code_block_content.lines().count() > 5 {
+                    lines.push(Line::from(Span::styled("│ ...", dim)));
+                }
+                lines.push(Line::from(Span::styled("└─", dim)));
             }
-            if code_block_content.lines().count() > 5 {
-                lines.push(Line::from(Span::styled("│ ...", dim)));
-            }
-            lines.push(Line::from(Span::styled("└─", dim)));
         } else {
             // Regular code block - render what we have
             let lang_str = code_block_lang.as_deref().unwrap_or("");
@@ -882,6 +908,7 @@ pub fn render_markdown_lazy(
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let side_only = diagram_side_only();
 
     // Style stack for nested formatting
     let mut bold = false;
@@ -959,8 +986,15 @@ pub fn render_markdown_lazy(
 
                 if is_mermaid {
                     let result = mermaid::render_mermaid(&code_block_content);
-                    let mermaid_lines = mermaid::result_to_lines(result, max_width);
-                    lines.extend(mermaid_lines);
+                    match result {
+                        mermaid::RenderResult::Image { .. } if side_only => {
+                            lines.push(mermaid_sidebar_placeholder("↗ mermaid diagram (sidebar)"));
+                        }
+                        other => {
+                            let mermaid_lines = mermaid::result_to_lines(other, max_width);
+                            lines.extend(mermaid_lines);
+                        }
+                    }
                 } else {
                     // Calculate the line range this code block will occupy
                     let code_line_count = code_block_content.lines().count();
