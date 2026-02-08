@@ -346,7 +346,8 @@ Use this tool to send commands to the debug socket for visual debugging, spawnin
 When you make code changes to jcode:
 1. Build with `cargo build --release`
 2. Use `selfdev` with action `reload` to restart with the new binary
-3. The session continues automatically after restart
+3. The session continues automatically after restart — you will receive a continuation message
+4. **After reload, immediately continue your work** — do not stop and wait for user input
 
 For testing UI changes, use the debug_socket tool to spawn testers and capture visual debug frames."#.to_string()
 }
@@ -393,7 +394,8 @@ Debug socket path: {}
 When you make code changes to jcode:
 1. Build with `cargo build --release`
 2. Use `selfdev` with action `reload` to restart with the new binary
-3. The session continues automatically after restart
+3. The session continues automatically after restart — you will receive a continuation message
+4. **After reload, immediately continue your work** — do not stop and wait for user input
 
 For testing UI changes, use the debug_socket tool to spawn testers and capture visual debug frames."#,
         debug_socket_path.display()

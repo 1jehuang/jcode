@@ -3709,6 +3709,24 @@ impl App {
                         }
                         // Check for debug commands (remote mode)
                         let _ = self.check_debug_command_remote(&mut remote).await;
+                        // Process queued messages (e.g. reload continuation)
+                        if !self.is_processing && !self.queued_messages.is_empty() {
+                            let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
+                            self.push_display_message(DisplayMessage {
+                                role: "user".to_string(),
+                                content: combined.clone(),
+                                tool_calls: vec![],
+                                duration_secs: None,
+                                title: None,
+                                tool_data: None,
+                            });
+                            if let Ok(msg_id) = remote.send_message(combined).await {
+                                self.current_message_id = Some(msg_id);
+                                self.is_processing = true;
+                                self.status = ProcessingStatus::Sending;
+                                self.processing_started = Some(Instant::now());
+                            }
+                        }
                     }
                     event = remote.next_event() => {
                         match event {
