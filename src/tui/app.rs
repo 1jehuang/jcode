@@ -372,6 +372,11 @@ struct ScrollTestState {
     processing_started: Option<Instant>,
     status_notice: Option<(String, Instant)>,
     diagram_mode: crate::config::DiagramDisplayMode,
+    diagram_focus: bool,
+    diagram_index: usize,
+    diagram_scroll_x: i32,
+    diagram_scroll_y: i32,
+    diagram_pane_ratio: u8,
 }
 
 fn rect_from_capture(rect: super::visual_debug::RectCapture) -> Rect {
@@ -530,6 +535,15 @@ pub struct App {
     centered: bool,
     // Diagram display mode (from config)
     diagram_mode: crate::config::DiagramDisplayMode,
+    // Whether the pinned diagram pane has focus
+    diagram_focus: bool,
+    // Selected diagram index in pinned mode (most recent = 0)
+    diagram_index: usize,
+    // Diagram scroll offsets in cells (only used when focused)
+    diagram_scroll_x: i32,
+    diagram_scroll_y: i32,
+    // Diagram pane width ratio (percentage)
+    diagram_pane_ratio: u8,
     // Keybindings for model switching
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for scrolling
@@ -580,6 +594,11 @@ impl ScrollTestState {
             processing_started: app.processing_started,
             status_notice: app.status_notice.clone(),
             diagram_mode: app.diagram_mode,
+            diagram_focus: app.diagram_focus,
+            diagram_index: app.diagram_index,
+            diagram_scroll_x: app.diagram_scroll_x,
+            diagram_scroll_y: app.diagram_scroll_y,
+            diagram_pane_ratio: app.diagram_pane_ratio,
         }
     }
 
@@ -599,6 +618,11 @@ impl ScrollTestState {
         app.processing_started = self.processing_started;
         app.status_notice = self.status_notice;
         app.diagram_mode = self.diagram_mode;
+        app.diagram_focus = self.diagram_focus;
+        app.diagram_index = self.diagram_index;
+        app.diagram_scroll_x = self.diagram_scroll_x;
+        app.diagram_scroll_y = self.diagram_scroll_y;
+        app.diagram_pane_ratio = self.diagram_pane_ratio;
     }
 }
 
@@ -737,6 +761,11 @@ impl App {
             show_diffs: display.show_diffs,
             centered: display.centered,
             diagram_mode: display.diagram_mode,
+            diagram_focus: false,
+            diagram_index: 0,
+            diagram_scroll_x: 0,
+            diagram_scroll_y: 0,
+            diagram_pane_ratio: 40,
             model_switch_keys: super::keybind::load_model_switch_keys(),
             scroll_keys: super::keybind::load_scroll_keys(),
             status_notice: None,
@@ -1093,10 +1122,147 @@ impl App {
     /// Check for and process debug commands from file
     /// Commands: "message:<text>", "reload", "state", "quit"
     fn scroll_max_estimate(&self) -> usize {
-        self.display_messages
-            .len()
-            .saturating_mul(100)
-            .saturating_add(self.streaming_text.len())
+        let renderer_max = super::ui::last_max_scroll();
+        if renderer_max > 0 {
+            renderer_max
+        } else {
+            self.display_messages
+                .len()
+                .saturating_mul(100)
+                .saturating_add(self.streaming_text.len())
+        }
+    }
+
+    fn diagram_available(&self) -> bool {
+        self.diagram_mode == crate::config::DiagramDisplayMode::Pinned
+            && !crate::tui::mermaid::get_active_diagrams().is_empty()
+    }
+
+    fn normalize_diagram_state(&mut self) {
+        if self.diagram_mode != crate::config::DiagramDisplayMode::Pinned {
+            self.diagram_focus = false;
+            self.diagram_index = 0;
+            self.diagram_scroll_x = 0;
+            self.diagram_scroll_y = 0;
+            return;
+        }
+
+        let diagram_count = crate::tui::mermaid::get_active_diagrams().len();
+        if diagram_count == 0 {
+            self.diagram_focus = false;
+            self.diagram_index = 0;
+            self.diagram_scroll_x = 0;
+            self.diagram_scroll_y = 0;
+            return;
+        }
+
+        if self.diagram_index >= diagram_count {
+            self.diagram_index = 0;
+            self.diagram_scroll_x = 0;
+            self.diagram_scroll_y = 0;
+        }
+    }
+
+    fn set_diagram_focus(&mut self, focus: bool) {
+        if self.diagram_focus == focus {
+            return;
+        }
+        self.diagram_focus = focus;
+        if focus {
+            self.set_status_notice("Focus: diagram (hjkl pan, +/- resize)");
+        } else {
+            self.set_status_notice("Focus: chat");
+        }
+    }
+
+    fn cycle_diagram(&mut self, direction: i32) {
+        let diagrams = crate::tui::mermaid::get_active_diagrams();
+        let count = diagrams.len();
+        if count == 0 {
+            return;
+        }
+        let current = self.diagram_index.min(count - 1);
+        let next = if direction < 0 {
+            if current == 0 {
+                count - 1
+            } else {
+                current - 1
+            }
+        } else {
+            if current + 1 >= count {
+                0
+            } else {
+                current + 1
+            }
+        };
+        self.diagram_index = next;
+        self.diagram_scroll_x = 0;
+        self.diagram_scroll_y = 0;
+        self.set_status_notice(format!("Diagram {}/{}", next + 1, count));
+    }
+
+    fn pan_diagram(&mut self, dx: i32, dy: i32) {
+        self.diagram_scroll_x = (self.diagram_scroll_x + dx).max(0);
+        self.diagram_scroll_y = (self.diagram_scroll_y + dy).max(0);
+    }
+
+    fn adjust_diagram_pane_ratio(&mut self, delta: i8) {
+        let next = (self.diagram_pane_ratio as i16 + delta as i16).clamp(25, 70) as u8;
+        if next != self.diagram_pane_ratio {
+            self.diagram_pane_ratio = next;
+            self.set_status_notice(format!("Diagram pane: {}%", next));
+        }
+    }
+
+    fn handle_diagram_ctrl_key(&mut self, code: KeyCode, diagram_available: bool) -> bool {
+        if !diagram_available {
+            return false;
+        }
+        match code {
+            KeyCode::Left => {
+                self.cycle_diagram(-1);
+                true
+            }
+            KeyCode::Right => {
+                self.cycle_diagram(1);
+                true
+            }
+            KeyCode::Char('h') => {
+                self.set_diagram_focus(false);
+                true
+            }
+            KeyCode::Char('l') => {
+                self.set_diagram_focus(true);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_diagram_focus_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        diagram_available: bool,
+    ) -> bool {
+        if !diagram_available || !self.diagram_focus || modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+
+        match code {
+            KeyCode::Char('h') | KeyCode::Left => self.pan_diagram(-1, 0),
+            KeyCode::Char('l') | KeyCode::Right => self.pan_diagram(1, 0),
+            KeyCode::Char('k') | KeyCode::Up => self.pan_diagram(0, -1),
+            KeyCode::Char('j') | KeyCode::Down => self.pan_diagram(0, 1),
+            KeyCode::Char('+') | KeyCode::Char('=') => self.adjust_diagram_pane_ratio(5),
+            KeyCode::Char('-') | KeyCode::Char('_') => self.adjust_diagram_pane_ratio(-5),
+            KeyCode::Esc => {
+                self.set_diagram_focus(false);
+            }
+            _ => {}
+        }
+
+        true
     }
 
     fn debug_scroll_up(&mut self, amount: usize) {
@@ -1849,6 +2015,12 @@ impl App {
                 "queued_messages": self.queued_messages.len(),
                 "provider_session_id": self.provider_session_id,
                 "model": self.provider.name(),
+                "diagram_mode": format!("{:?}", self.diagram_mode),
+                "diagram_focus": self.diagram_focus,
+                "diagram_index": self.diagram_index,
+                "diagram_scroll": [self.diagram_scroll_x, self.diagram_scroll_y],
+                "diagram_pane_ratio": self.diagram_pane_ratio,
+                "diagram_count": crate::tui::mermaid::get_active_diagrams().len(),
                 "version": env!("JCODE_VERSION"),
             })
             .to_string()
@@ -2299,6 +2471,12 @@ impl App {
                     .remote_provider_model
                     .as_deref()
                     .unwrap_or(self.provider.name()),
+                "diagram_mode": format!("{:?}", self.diagram_mode),
+                "diagram_focus": self.diagram_focus,
+                "diagram_index": self.diagram_index,
+                "diagram_scroll": [self.diagram_scroll_x, self.diagram_scroll_y],
+                "diagram_pane_ratio": self.diagram_pane_ratio,
+                "diagram_count": crate::tui::mermaid::get_active_diagrams().len(),
                 "remote": true,
                 "server_version": self.remote_server_version.clone(),
                 "server_has_update": self.remote_server_has_update,
@@ -3112,7 +3290,8 @@ impl App {
                                 match mouse.kind {
                                     MouseEventKind::ScrollUp => {
                                         // Scroll up in the view (increase offset)
-                                        self.scroll_offset = self.scroll_offset.saturating_add(3);
+                                        let max = self.scroll_max_estimate();
+                                        self.scroll_offset = (self.scroll_offset + 3).min(max);
                                         // Pause auto-scroll when scrolling up during streaming
                                         if self.is_processing {
                                             self.auto_scroll_paused = true;
@@ -3271,8 +3450,7 @@ impl App {
                                         .scroll_keys
                                         .scroll_amount(key.code.clone(), key.modifiers)
                                     {
-                                        let max_estimate = self.display_messages.len() * 100
-                                            + self.streaming_text.len();
+                                        let max_estimate = self.scroll_max_estimate();
                                         if amount < 0 {
                                             self.scroll_offset = (self.scroll_offset
                                                 + (-amount) as usize)
@@ -3522,7 +3700,8 @@ impl App {
                                 match mouse.kind {
                                     MouseEventKind::ScrollUp => {
                                         // Scroll up in the view (increase offset)
-                                        self.scroll_offset = self.scroll_offset.saturating_add(3);
+                                        let max = self.scroll_max_estimate();
+                                        self.scroll_offset = (self.scroll_offset + 3).min(max);
                                         // Pause auto-scroll when scrolling up during streaming
                                         if self.is_processing {
                                             self.auto_scroll_paused = true;
@@ -3954,6 +4133,11 @@ impl App {
             remote.cycle_model(direction).await?;
             return Ok(());
         }
+        self.normalize_diagram_state();
+        let diagram_available = self.diagram_available();
+        if self.handle_diagram_focus_key(code.clone(), modifiers, diagram_available) {
+            return Ok(());
+        }
         // Most key handling is the same as local mode
         // Handle Alt combos
         if modifiers.contains(KeyModifiers::ALT) {
@@ -3983,7 +4167,7 @@ impl App {
 
         // Handle configurable scroll keys (default: Ctrl+K/J, Alt+U/D for page)
         if let Some(amount) = self.scroll_keys.scroll_amount(code.clone(), modifiers) {
-            let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
+            let max_estimate = self.scroll_max_estimate();
             if amount < 0 {
                 // Scroll up (increase offset)
                 self.scroll_offset = (self.scroll_offset + (-amount) as usize).min(max_estimate);
@@ -4008,6 +4192,9 @@ impl App {
 
         // Ctrl combos
         if modifiers.contains(KeyModifiers::CONTROL) {
+            if self.handle_diagram_ctrl_key(code.clone(), diagram_available) {
+                return Ok(());
+            }
             match code {
                 KeyCode::Char('c') | KeyCode::Char('d') => {
                     self.handle_quit_request();
@@ -4017,7 +4204,7 @@ impl App {
                     self.recover_session_without_tools();
                     return Ok(());
                 }
-                KeyCode::Char('l') if !self.is_processing => {
+                KeyCode::Char('l') if !self.is_processing && !diagram_available => {
                     self.clear_display_messages();
                     self.queued_messages.clear();
                     return Ok(());
@@ -4354,7 +4541,7 @@ impl App {
             }
             KeyCode::Up | KeyCode::PageUp => {
                 // Scroll up (increase offset from bottom)
-                let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
+                let max_estimate = self.scroll_max_estimate();
                 let inc = if code == KeyCode::PageUp { 10 } else { 1 };
                 self.scroll_offset = (self.scroll_offset + inc).min(max_estimate);
                 // Pause auto-scroll when user scrolls up during streaming
@@ -4462,6 +4649,11 @@ impl App {
             self.cycle_model(direction);
             return Ok(());
         }
+        self.normalize_diagram_state();
+        let diagram_available = self.diagram_available();
+        if self.handle_diagram_focus_key(code.clone(), modifiers, diagram_available) {
+            return Ok(());
+        }
         // Handle Alt combos (readline word movement)
         if modifiers.contains(KeyModifiers::ALT) {
             match code {
@@ -4505,7 +4697,7 @@ impl App {
 
         // Handle configurable scroll keys (default: Ctrl+K/J, Alt+U/D for page)
         if let Some(amount) = self.scroll_keys.scroll_amount(code.clone(), modifiers) {
-            let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
+            let max_estimate = self.scroll_max_estimate();
             if amount < 0 {
                 // Scroll up (increase offset)
                 self.scroll_offset = (self.scroll_offset + (-amount) as usize).min(max_estimate);
@@ -4530,6 +4722,9 @@ impl App {
 
         // Handle ctrl combos regardless of processing state
         if modifiers.contains(KeyModifiers::CONTROL) {
+            if self.handle_diagram_ctrl_key(code.clone(), diagram_available) {
+                return Ok(());
+            }
             match code {
                 KeyCode::Char('c') | KeyCode::Char('d') => {
                     self.handle_quit_request();
@@ -4539,7 +4734,7 @@ impl App {
                     self.recover_session_without_tools();
                     return Ok(());
                 }
-                KeyCode::Char('l') if !self.is_processing => {
+                KeyCode::Char('l') if !self.is_processing && !diagram_available => {
                     self.messages.clear();
                     self.clear_display_messages();
                     self.queued_messages.clear();
@@ -4697,8 +4892,7 @@ impl App {
             }
             KeyCode::Up | KeyCode::PageUp => {
                 // Scroll up (increase offset from bottom)
-                // Use generous estimate - UI will clamp to actual content
-                let max_estimate = self.display_messages.len() * 100 + self.streaming_text.len();
+                let max_estimate = self.scroll_max_estimate();
                 let inc = if code == KeyCode::PageUp { 10 } else { 1 };
                 self.scroll_offset = (self.scroll_offset + inc).min(max_estimate);
                 // Pause auto-scroll when user scrolls up during streaming
@@ -4863,7 +5057,7 @@ impl App {
                      • `/model <name>@<provider>` - Pin OpenRouter provider (`@auto` clears)\n\
                      • `/reload` - Smart reload (client/server if newer binary exists)\n\
                      • `/rebuild` - Full rebuild (git pull + cargo build + tests){}\n\
-                     • `/clear` - Clear conversation (Ctrl+L)\n\
+                     • `/clear` - Clear conversation\n\
                      • `/rewind` - Show history with numbers, `/rewind N` to rewind\n\
                      • `/compact` - Manually compact context (summarize old messages)\n\
                      • `/debug-visual` - Enable visual debugging for TUI issues\n\
@@ -4871,7 +5065,10 @@ impl App {
                      **Available skills:** {}\n\n\
                      **Keyboard shortcuts:**\n\
                      • `Ctrl+C` / `Ctrl+D` - Quit (press twice to confirm)\n\
-                     • `Ctrl+L` - Clear conversation\n\
+                     • `Ctrl+H` / `Ctrl+L` - Focus chat/diagram (pinned mode)\n\
+                     • `Ctrl+Left/Right` - Cycle diagrams in side pane\n\
+                     • `h/j/k/l` or arrow keys - Pan diagram (when focused)\n\
+                     • `+` / `-` - Resize diagram pane (when focused)\n\
                      • `Ctrl+R` - Recover from missing tool outputs\n\
                      • `PageUp/Down` or `Up/Down` - Scroll history\n\
                      • `{}`/`{}` - Scroll up/down (see `/config`)\n\
@@ -8945,6 +9142,22 @@ impl super::TuiState for App {
     fn diagram_mode(&self) -> crate::config::DiagramDisplayMode {
         self.diagram_mode
     }
+
+    fn diagram_focus(&self) -> bool {
+        self.diagram_focus
+    }
+
+    fn diagram_index(&self) -> usize {
+        self.diagram_index
+    }
+
+    fn diagram_scroll(&self) -> (i32, i32) {
+        (self.diagram_scroll_x, self.diagram_scroll_y)
+    }
+
+    fn diagram_pane_ratio(&self) -> u8 {
+        self.diagram_pane_ratio
+    }
 }
 
 #[cfg(test)]
@@ -9032,6 +9245,59 @@ mod tests {
 
         assert_eq!(app.input(), "a");
         assert_eq!(app.cursor_pos(), 1);
+    }
+
+    #[test]
+    fn test_diagram_focus_toggle_and_pan() {
+        let mut app = create_test_app();
+        app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
+        crate::tui::mermaid::clear_active_diagrams();
+        crate::tui::mermaid::register_active_diagram(0x1, 100, 80, None);
+        crate::tui::mermaid::register_active_diagram(0x2, 120, 90, None);
+
+        // Ctrl+L focuses diagram when available
+        app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(app.diagram_focus);
+
+        // Pan should update scroll offsets and not type into input
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
+            .unwrap();
+        assert_eq!(app.diagram_scroll_y, 1);
+        assert!(app.input.is_empty());
+
+        // Ctrl+H returns focus to chat
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(!app.diagram_focus);
+
+        crate::tui::mermaid::clear_active_diagrams();
+    }
+
+    #[test]
+    fn test_diagram_cycle_ctrl_arrows() {
+        let mut app = create_test_app();
+        app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
+        crate::tui::mermaid::clear_active_diagrams();
+        crate::tui::mermaid::register_active_diagram(0x1, 100, 80, None);
+        crate::tui::mermaid::register_active_diagram(0x2, 120, 90, None);
+        crate::tui::mermaid::register_active_diagram(0x3, 140, 100, None);
+
+        assert_eq!(app.diagram_index, 0);
+        app.handle_key(KeyCode::Right, KeyModifiers::CONTROL)
+            .unwrap();
+        assert_eq!(app.diagram_index, 1);
+        app.handle_key(KeyCode::Right, KeyModifiers::CONTROL)
+            .unwrap();
+        assert_eq!(app.diagram_index, 2);
+        app.handle_key(KeyCode::Right, KeyModifiers::CONTROL)
+            .unwrap();
+        assert_eq!(app.diagram_index, 0);
+        app.handle_key(KeyCode::Left, KeyModifiers::CONTROL)
+            .unwrap();
+        assert_eq!(app.diagram_index, 2);
+
+        crate::tui::mermaid::clear_active_diagrams();
     }
 
     #[test]
@@ -9665,9 +9931,7 @@ mod tests {
     // ====================================================================
 
     /// Extract plain text from a TestBackend buffer after rendering.
-    fn buffer_to_text(
-        terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
-    ) -> String {
+    fn buffer_to_text(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
         let buf = terminal.backend().buffer();
         let width = buf.area.width as usize;
         let height = buf.area.height as usize;
@@ -9724,14 +9988,16 @@ mod tests {
         app.session.short_name = Some("test".to_string());
 
         let backend = ratatui::backend::TestBackend::new(width, height);
-        let terminal =
-            ratatui::Terminal::new(backend).expect("failed to create test terminal");
+        let terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
         (app, terminal)
     }
 
     /// Get the configured scroll up key binding (code, modifiers).
     fn scroll_up_key(app: &App) -> (KeyCode, KeyModifiers) {
-        (app.scroll_keys.up.code.clone(), app.scroll_keys.up.modifiers)
+        (
+            app.scroll_keys.up.code.clone(),
+            app.scroll_keys.up.modifiers,
+        )
     }
 
     /// Get the configured scroll down key binding (code, modifiers).
@@ -9790,8 +10056,7 @@ mod tests {
 
         // Spam scroll-up many times
         for _ in 0..500 {
-            app.handle_key(up_code.clone(), up_mods)
-                .unwrap();
+            app.handle_key(up_code.clone(), up_mods).unwrap();
         }
 
         // Should be capped at max estimate, not 1500
@@ -9905,7 +10170,10 @@ mod tests {
         // Note: latest_frame() is global and may be overwritten by parallel tests,
         // so we only verify the frame capture mechanism works, not exact values.
         let frame = crate::tui::visual_debug::latest_frame();
-        assert!(frame.is_some(), "frame should still be available after second draw");
+        assert!(
+            frame.is_some(),
+            "frame should still be available after second draw"
+        );
 
         crate::tui::visual_debug::disable();
     }
@@ -9958,7 +10226,10 @@ mod tests {
         for _ in 0..3 {
             app.handle_key(down_code.clone(), down_mods).unwrap();
         }
-        assert_eq!(app.scroll_offset, 0, "scroll_offset should return to 0 after round-trip");
+        assert_eq!(
+            app.scroll_offset, 0,
+            "scroll_offset should return to 0 after round-trip"
+        );
 
         // Verify we're back at the bottom (status bar / input prompt visible)
         let text_restored = render_and_snap(&app, &mut terminal);

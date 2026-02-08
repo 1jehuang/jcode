@@ -85,6 +85,8 @@ pub struct ClientApp {
     context_info: crate::prompt::ContextInfo,
     // Incremental markdown renderer for streaming text
     streaming_md_renderer: RefCell<IncrementalMarkdownRenderer>,
+    // Scroll keybindings
+    scroll_keys: super::keybind::ScrollKeys,
 }
 
 impl ClientApp {
@@ -217,6 +219,7 @@ impl ClientApp {
                 info
             },
             streaming_md_renderer: RefCell::new(IncrementalMarkdownRenderer::new(None)),
+            scroll_keys: super::keybind::load_scroll_keys(),
         }
     }
 
@@ -506,12 +509,31 @@ impl ClientApp {
                             }
                         }
                     }
-                    // Handle keyboard input
+                    // Handle keyboard and mouse input
                     event = event_stream.next() => {
                         match event {
                             Some(Ok(Event::Key(key))) => {
                                 if key.kind == KeyEventKind::Press {
                                     self.handle_key(key.code, key.modifiers, &writer).await?;
+                                }
+                            }
+                            Some(Ok(Event::Mouse(mouse))) => {
+                                use crossterm::event::MouseEventKind;
+                                let max = super::ui::last_max_scroll();
+                                match mouse.kind {
+                                    MouseEventKind::ScrollUp => {
+                                        self.scroll_offset = (self.scroll_offset + 3).min(max);
+                                        if self.is_processing {
+                                            self.auto_scroll_paused = true;
+                                        }
+                                    }
+                                    MouseEventKind::ScrollDown => {
+                                        self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                                        if self.scroll_offset == 0 {
+                                            self.auto_scroll_paused = false;
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                             _ => {}
@@ -826,6 +848,23 @@ impl ClientApp {
         modifiers: KeyModifiers,
         writer: &std::sync::Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
     ) -> Result<()> {
+        // Handle configurable scroll keys first (before character input)
+        if let Some(amount) = self.scroll_keys.scroll_amount(code.clone(), modifiers) {
+            let max = super::ui::last_max_scroll();
+            if amount < 0 {
+                self.scroll_offset = (self.scroll_offset + (-amount) as usize).min(max);
+                if self.is_processing {
+                    self.auto_scroll_paused = true;
+                }
+            } else {
+                self.scroll_offset = self.scroll_offset.saturating_sub(amount as usize);
+                if self.scroll_offset == 0 {
+                    self.auto_scroll_paused = false;
+                }
+            }
+            return Ok(());
+        }
+
         match code {
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
@@ -932,6 +971,21 @@ impl ClientApp {
                     self.auto_scroll_paused = false;
                     self.input.clear();
                     self.cursor_pos = 0;
+                }
+            }
+            KeyCode::Up | KeyCode::PageUp => {
+                let max = super::ui::last_max_scroll();
+                let inc = if code == KeyCode::PageUp { 10 } else { 1 };
+                self.scroll_offset = (self.scroll_offset + inc).min(max);
+                if self.is_processing {
+                    self.auto_scroll_paused = true;
+                }
+            }
+            KeyCode::Down | KeyCode::PageDown => {
+                let dec = if code == KeyCode::PageDown { 10 } else { 1 };
+                self.scroll_offset = self.scroll_offset.saturating_sub(dec);
+                if self.scroll_offset == 0 {
+                    self.auto_scroll_paused = false;
                 }
             }
             _ => {}
@@ -1274,5 +1328,21 @@ impl TuiState for ClientApp {
 
     fn diagram_mode(&self) -> crate::config::DiagramDisplayMode {
         crate::config::DiagramDisplayMode::Pinned // Default for deprecated client
+    }
+
+    fn diagram_focus(&self) -> bool {
+        false
+    }
+
+    fn diagram_index(&self) -> usize {
+        0
+    }
+
+    fn diagram_scroll(&self) -> (i32, i32) {
+        (0, 0)
+    }
+
+    fn diagram_pane_ratio(&self) -> u8 {
+        40
     }
 }
