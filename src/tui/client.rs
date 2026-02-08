@@ -1311,7 +1311,7 @@ impl TuiState for ClientApp {
             let project_graph = manager.load_project_graph().ok();
             let global_graph = manager.load_global_graph().ok();
 
-            let (project_count, global_count, by_category) = match (project_graph, global_graph) {
+            let (project_count, global_count, by_category) = match (&project_graph, &global_graph) {
                 (Some(p), Some(g)) => {
                     let project_count = p.memory_count();
                     let global_count = g.memory_count();
@@ -1327,6 +1327,12 @@ impl TuiState for ClientApp {
             let total_count = project_count + global_count;
             let activity = crate::memory::get_activity();
 
+            // Build graph topology for visualization
+            let (graph_nodes, graph_edges) = super::info_widget::build_graph_topology(
+                project_graph.as_ref(),
+                global_graph.as_ref(),
+            );
+
             if total_count > 0 || activity.is_some() {
                 Some(super::info_widget::MemoryInfo {
                     total_count,
@@ -1335,6 +1341,8 @@ impl TuiState for ClientApp {
                     by_category,
                     sidecar_available: true,
                     activity,
+                    graph_nodes,
+                    graph_edges,
                 })
             } else {
                 None
