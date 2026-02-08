@@ -27,7 +27,7 @@ const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
 const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/1.0.0";
 
 /// Beta headers required for OAuth
-const OAUTH_BETA_HEADERS: &str = "oauth-2025-04-20,claude-code-20250219";
+const OAUTH_BETA_HEADERS: &str = "oauth-2025-04-20,claude-code-20250219,prompt-caching-2024-07-31";
 
 /// Default model
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
@@ -358,6 +358,7 @@ impl AnthropicProvider {
                     } else {
                         input.clone()
                     },
+                    cache_control: None,
                 }),
                 ContentBlock::ToolResult {
                     tool_use_id,
@@ -1054,13 +1055,17 @@ fn add_message_cache_breakpoint(messages: &mut [ApiMessage]) {
     // Add cache_control to the last content block of that message
     if let Some(idx) = cache_index {
         if let Some(msg) = messages.get_mut(idx) {
-            // Find any Text block to add cache_control to (prefer last, but accept any)
+            // Find any Text or ToolUse block to add cache_control to (prefer last, but accept any)
             let mut added_cache = false;
             for block in msg.content.iter_mut().rev() {
-                if let ApiContentBlock::Text { cache_control, .. } = block {
-                    *cache_control = Some(CacheControlParam::ephemeral());
-                    added_cache = true;
-                    break;
+                match block {
+                    ApiContentBlock::Text { cache_control, .. }
+                    | ApiContentBlock::ToolUse { cache_control, .. } => {
+                        *cache_control = Some(CacheControlParam::ephemeral());
+                        added_cache = true;
+                        break;
+                    }
+                    _ => {}
                 }
             }
             if added_cache {
@@ -1100,6 +1105,8 @@ enum ApiContentBlock {
         id: String,
         name: String,
         input: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControlParam>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
@@ -1439,6 +1446,7 @@ mod tests {
                         id: "tool_1".to_string(),
                         name: "bash".to_string(),
                         input: serde_json::json!({"command": "ls"}),
+                        cache_control: None,
                     },
                 ],
             },
@@ -1453,21 +1461,21 @@ mod tests {
 
         add_message_cache_breakpoint(&mut messages);
 
-        // The Text block in the assistant message should have cache_control
-        // (we look for any text block, preferring the last one but accepting any)
+        // The last block (ToolUse) in the assistant message should have cache_control
+        // (we prefer the last block for maximum cache coverage)
         let assistant_msg = &messages[2];
-        let has_cached_text = assistant_msg.content.iter().any(|block| {
+        let has_cached_block = assistant_msg.content.iter().any(|block| {
             matches!(
                 block,
-                ApiContentBlock::Text {
+                ApiContentBlock::ToolUse {
                     cache_control: Some(_),
                     ..
                 }
             )
         });
         assert!(
-            has_cached_text,
-            "Should have added cache_control to text block in assistant message"
+            has_cached_block,
+            "Should have added cache_control to last block (ToolUse) in assistant message"
         );
     }
 
