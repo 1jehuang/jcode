@@ -14,8 +14,19 @@ use ratatui::{
 };
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+/// Last known max scroll value from the renderer. Updated each frame.
+/// Scroll handlers use this to clamp scroll_offset and prevent overshoot.
+static LAST_MAX_SCROLL: AtomicUsize = AtomicUsize::new(0);
+
+/// Get the last known max scroll value (from the most recent render frame).
+/// Returns 0 if no frame has been rendered yet.
+pub fn last_max_scroll() -> usize {
+    LAST_MAX_SCROLL.load(Ordering::Relaxed)
+}
 
 // Minimal color palette
 const USER_COLOR: Color = Color::Rgb(138, 180, 248); // Soft blue (caret)
@@ -1061,27 +1072,41 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
 
     // Check diagram display mode and get active diagrams
     let diagrams = super::mermaid::get_active_diagrams();
+    let diagram_count = diagrams.len();
+    let selected_index = if diagram_count > 0 {
+        app.diagram_index().min(diagram_count - 1)
+    } else {
+        0
+    };
     let pinned_diagram = if diagram_mode == crate::config::DiagramDisplayMode::Pinned {
-        diagrams.first().cloned()
+        diagrams.get(selected_index).cloned()
     } else {
         None
     };
+    let diagram_focus = app.diagram_focus();
+    let (diagram_scroll_x, diagram_scroll_y) = app.diagram_scroll();
 
     let mut diagram_width = 0u16;
     let mut messages_width = area.width;
     let mut has_pinned_area = false;
     if pinned_diagram.is_some() {
-        // Calculate diagram width - aim for ~40% of screen, min 30 cols
-        diagram_width = (area.width * 2 / 5).max(30).min(area.width / 2);
-        messages_width = area.width.saturating_sub(diagram_width);
-        has_pinned_area = diagram_width > 0 && messages_width > 0;
-        if messages_width > 0 && messages_width != area.width {
-            if let Some(ref mut capture) = debug_capture {
-                capture
-                    .render_order
-                    .push("prepare_messages_rewrap".to_string());
+        const MIN_DIAGRAM_WIDTH: u16 = 30;
+        const MIN_MESSAGES_WIDTH: u16 = 20;
+        let max_diagram = area.width.saturating_sub(MIN_MESSAGES_WIDTH);
+        if max_diagram >= MIN_DIAGRAM_WIDTH {
+            let ratio = app.diagram_pane_ratio().clamp(25, 70) as u32;
+            diagram_width = ((area.width as u32 * ratio) / 100) as u16;
+            diagram_width = diagram_width.max(MIN_DIAGRAM_WIDTH).min(max_diagram);
+            messages_width = area.width.saturating_sub(diagram_width);
+            has_pinned_area = diagram_width > 0 && messages_width > 0;
+            if messages_width > 0 && messages_width != area.width {
+                if let Some(ref mut capture) = debug_capture {
+                    capture
+                        .render_order
+                        .push("prepare_messages_rewrap".to_string());
+                }
+                prepared = prepare_messages(app, messages_width);
             }
-            prepared = prepare_messages(app, messages_width);
         }
     }
     if let Some(ref mut capture) = debug_capture {
@@ -1148,6 +1173,12 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         capture.state.has_suggestions = !suggestions.is_empty();
         capture.state.status = format!("{:?}", app.status());
         capture.state.diagram_mode = Some(format!("{:?}", diagram_mode));
+        capture.state.diagram_focus = diagram_focus;
+        capture.state.diagram_index = selected_index;
+        capture.state.diagram_count = diagram_count;
+        capture.state.diagram_scroll_x = diagram_scroll_x;
+        capture.state.diagram_scroll_y = diagram_scroll_y;
+        capture.state.diagram_pane_ratio = app.diagram_pane_ratio();
 
         // Capture rendered content
         // Queued messages
@@ -1212,7 +1243,16 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         if let Some(ref mut capture) = debug_capture {
             capture.render_order.push("draw_pinned_diagram".to_string());
         }
-        draw_pinned_diagram(frame, diagram_info, area);
+        draw_pinned_diagram(
+            frame,
+            diagram_info,
+            area,
+            selected_index,
+            diagram_count,
+            diagram_focus,
+            diagram_scroll_x,
+            diagram_scroll_y,
+        );
     }
 
     let messages_draw = draw_start.elapsed();
@@ -2352,26 +2392,83 @@ fn color_to_rgb(color: Color) -> Option<[u8; 3]> {
 }
 
 /// Draw a pinned diagram in a dedicated pane
-fn draw_pinned_diagram(frame: &mut Frame, diagram: &info_widget::DiagramInfo, area: Rect) {
-    use ratatui::widgets::BorderType;
+fn draw_pinned_diagram(
+    frame: &mut Frame,
+    diagram: &info_widget::DiagramInfo,
+    area: Rect,
+    index: usize,
+    total: usize,
+    focused: bool,
+    scroll_x: i32,
+    scroll_y: i32,
+) {
+    use ratatui::widgets::{BorderType, Clear, Paragraph, Wrap};
 
     if area.width < 5 || area.height < 3 {
         return;
+    }
+
+    let border_color = if focused { ACCENT_COLOR } else { DIM_COLOR };
+    let mut title_parts = vec![Span::styled(" diagram ", Style::default().fg(TOOL_COLOR))];
+    if total > 0 {
+        title_parts.push(Span::styled(
+            format!("{}/{}", index + 1, total),
+            Style::default().fg(TOOL_COLOR),
+        ));
+    }
+    let mode_label = if focused { " pan " } else { " fit " };
+    title_parts.push(Span::styled(
+        mode_label,
+        Style::default().fg(if focused { ACCENT_COLOR } else { DIM_COLOR }),
+    ));
+    if total > 1 {
+        title_parts.push(Span::styled(
+            " Ctrl+Left/Right",
+            Style::default().fg(DIM_COLOR),
+        ));
     }
 
     // Draw border with title
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(DIM_COLOR))
-        .title(Span::styled(" diagram ", Style::default().fg(TOOL_COLOR)));
+        .border_style(Style::default().fg(border_color))
+        .title(Line::from(title_parts));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     // Render the diagram image inside the border
     if inner.width > 0 && inner.height > 0 {
-        super::mermaid::render_image_widget(diagram.hash, inner, frame.buffer_mut(), false, false);
+        let mut rendered = 0u16;
+        if super::mermaid::protocol_type().is_some() {
+            if focused {
+                rendered = super::mermaid::render_image_widget_viewport(
+                    diagram.hash,
+                    inner,
+                    frame.buffer_mut(),
+                    scroll_x,
+                    scroll_y,
+                    false,
+                );
+            } else {
+                rendered = super::mermaid::render_image_widget_fit(
+                    diagram.hash,
+                    inner,
+                    frame.buffer_mut(),
+                    false,
+                    false,
+                );
+            }
+        }
+
+        if rendered == 0 {
+            frame.render_widget(Clear, inner);
+            let placeholder =
+                super::mermaid::diagram_placeholder_lines(diagram.width, diagram.height);
+            let paragraph = Paragraph::new(placeholder).wrap(Wrap { trim: true });
+            frame.render_widget(paragraph, inner);
+        }
     }
 }
 
@@ -2388,6 +2485,10 @@ fn draw_messages(
     let total_lines = wrapped_lines.len();
     let visible_height = area.height as usize;
     let max_scroll = total_lines.saturating_sub(visible_height);
+
+    // Publish max_scroll so scroll handlers can clamp without overshoot
+    LAST_MAX_SCROLL.store(max_scroll, Ordering::Relaxed);
+
     let user_scroll = app.scroll_offset().min(max_scroll); // Cap to available content
 
     // scroll_offset = 0 means bottom (auto-scroll), higher = further up
