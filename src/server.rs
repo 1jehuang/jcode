@@ -1951,7 +1951,9 @@ async fn handle_client(
                 }
 
                 // Register MCP tools (management tool + server tool proxies)
-                registry.register_mcp_tools(Some(client_event_tx.clone())).await;
+                registry
+                    .register_mcp_tools(Some(client_event_tx.clone()))
+                    .await;
 
                 // Note: Don't send SessionId here - it's included in the History response
                 // from GetHistory. Sending it here causes race conditions when ResumeSession
@@ -1961,7 +1963,14 @@ async fn handle_client(
 
             Request::GetHistory { id } => {
                 let _ = provider.prefetch_models().await;
-                let (messages, is_canary, provider_name, provider_model, available_models, tool_names) = {
+                let (
+                    messages,
+                    is_canary,
+                    provider_name,
+                    provider_model,
+                    available_models,
+                    tool_names,
+                ) = {
                     let agent_guard = agent.lock().await;
                     (
                         agent_guard.get_history(),
@@ -1974,7 +1983,8 @@ async fn handle_client(
                 };
 
                 // Build MCP server list with tool counts from registered tool names
-                let mut mcp_map: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+                let mut mcp_map: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
                 for name in &tool_names {
                     if let Some(rest) = name.strip_prefix("mcp__") {
                         if let Some((server, _tool)) = rest.split_once("__") {
@@ -2082,7 +2092,9 @@ async fn handle_client(
 
                 // Register MCP tools for resumed sessions
                 if result.is_ok() {
-                    registry.register_mcp_tools(Some(client_event_tx.clone())).await;
+                    registry
+                        .register_mcp_tools(Some(client_event_tx.clone()))
+                        .await;
                 }
 
                 match result {
@@ -2139,7 +2151,14 @@ async fn handle_client(
 
                         // Send updated history to client
                         let _ = provider.prefetch_models().await;
-                        let (messages, is_canary, provider_name, provider_model, available_models, tool_names) = {
+                        let (
+                            messages,
+                            is_canary,
+                            provider_name,
+                            provider_model,
+                            available_models,
+                            tool_names,
+                        ) = {
                             let agent_guard = agent.lock().await;
                             (
                                 agent_guard.get_history(),
@@ -2152,7 +2171,8 @@ async fn handle_client(
                         };
 
                         // Build MCP server list with tool counts
-                        let mut mcp_map: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+                        let mut mcp_map: std::collections::BTreeMap<String, usize> =
+                            std::collections::BTreeMap::new();
                         for name in &tool_names {
                             if let Some(rest) = name.strip_prefix("mcp__") {
                                 if let Some((server, _tool)) = rest.split_once("__") {
@@ -6602,7 +6622,9 @@ CLIENT COMMANDS (client: prefix):
   client:set_input:<text>  - Set input buffer
   client:keys:<keyspec>    - Inject key events
   client:message:<text>    - Inject and submit message
+  client:inject:<role>:<t> - Inject display message (no send)
   client:scroll:<dir>      - Scroll (up/down/top/bottom)
+  client:scroll-test[:<j>] - Run offscreen scroll+diagram test
   client:wait              - Check if processing
   client:history           - Get display messages
   client:help              - Client command help
@@ -6612,7 +6634,9 @@ TESTER COMMANDS (tester: prefix):
   tester:list              - List active testers
   tester:<id>:frame        - Get frame from tester
   tester:<id>:message:<t>  - Send message to tester
+  tester:<id>:inject:<t>   - Inject display message (no send)
   tester:<id>:state        - Get tester state
+  tester:<id>:scroll-test  - Run offscreen scroll+diagram test
   tester:<id>:stop         - Stop tester
 
 Examples:
@@ -6868,9 +6892,14 @@ async fn execute_tester_subcommand(
         "wait" => "wait".to_string(),
         "input" => "input".to_string(),
         "message" => format!("message:{}", arg.unwrap_or("")),
+        "inject" => format!("inject:{}", arg.unwrap_or("")),
         "keys" => format!("keys:{}", arg.unwrap_or("")),
         "set_input" => format!("set_input:{}", arg.unwrap_or("")),
         "scroll" => format!("scroll:{}", arg.unwrap_or("down")),
+        "scroll-test" => match arg {
+            Some(raw) => format!("scroll-test:{}", raw),
+            None => "scroll-test".to_string(),
+        },
         "stop" => {
             // Kill the tester
             if let Some(pid) = tester.get("pid").and_then(|v| v.as_u64()) {

@@ -3,8 +3,8 @@
 use super::info_widget;
 use super::markdown;
 use super::visual_debug::{
-    self, FrameCaptureBuilder, InfoWidgetCapture, InfoWidgetSummary, MarginsCapture,
-    MessageCapture, RenderTimingCapture, WidgetPlacementCapture,
+    self, FrameCaptureBuilder, ImageRegionCapture, InfoWidgetCapture, InfoWidgetSummary,
+    MarginsCapture, MessageCapture, RenderTimingCapture, WidgetPlacementCapture,
 };
 use super::{DisplayMessage, ProcessingStatus, TuiState};
 use crate::message::ToolCall;
@@ -1055,6 +1055,17 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     }
     let prep_start = Instant::now();
     let prepared = prepare_messages(app, area.width);
+    if let Some(ref mut capture) = debug_capture {
+        capture.image_regions = prepared
+            .image_regions
+            .iter()
+            .map(|region| ImageRegionCapture {
+                hash: format!("{:016x}", region.hash),
+                abs_line_idx: region.abs_line_idx,
+                height: region.height,
+            })
+            .collect();
+    }
     let prep_elapsed = prep_start.elapsed();
     let content_height = prepared.wrapped_lines.len().max(1) as u16;
     let fixed_height = 1 + queued_height + input_height; // status + queued + input
