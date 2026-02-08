@@ -47,6 +47,8 @@ pub struct FrameCapture {
     pub anomalies: Vec<String>,
     /// The actual text content rendered to each area (stripped of ANSI)
     pub rendered_text: RenderedText,
+    /// Mermaid image regions detected in wrapped content
+    pub image_regions: Vec<ImageRegionCapture>,
     /// Render timing information (milliseconds)
     pub render_timing: Option<RenderTimingCapture>,
     /// Info widget placements and summary data
@@ -197,6 +199,14 @@ pub struct RenderedText {
     pub recent_messages: Vec<MessageCapture>,
     /// Streaming text (if currently streaming)
     pub streaming_text_preview: String,
+}
+
+/// Mermaid image region capture
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ImageRegionCapture {
+    pub hash: String,
+    pub abs_line_idx: usize,
+    pub height: u16,
 }
 
 /// Captured message for debugging
@@ -579,6 +589,16 @@ fn write_frame(file: &mut File, frame: &FrameCapture) -> std::io::Result<()> {
             frame.rendered_text.streaming_text_preview
         )?;
     }
+    if !frame.image_regions.is_empty() {
+        writeln!(file, "  image_regions:")?;
+        for region in &frame.image_regions {
+            writeln!(
+                file,
+                "    {} @{} (h={})",
+                region.hash, region.abs_line_idx, region.height
+            )?;
+        }
+    }
 
     // Render timing
     if let Some(timing) = &frame.render_timing {
@@ -646,6 +666,7 @@ pub struct FrameCaptureBuilder {
     pub layout: LayoutCapture,
     pub state: StateSnapshot,
     pub rendered_text: RenderedText,
+    pub image_regions: Vec<ImageRegionCapture>,
     pub anomalies: Vec<String>,
     pub render_timing: Option<RenderTimingCapture>,
     pub info_widgets: Option<InfoWidgetCapture>,
@@ -686,6 +707,7 @@ impl FrameCaptureBuilder {
             state: self.state,
             anomalies: self.anomalies,
             rendered_text: self.rendered_text,
+            image_regions: self.image_regions,
             render_timing: self.render_timing,
             info_widgets: self.info_widgets,
             render_order: self.render_order,
