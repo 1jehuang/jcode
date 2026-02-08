@@ -195,6 +195,13 @@ impl ScrollKeys {
         if self.page_down.matches(code, modifiers) {
             return Some(10); // Page down
         }
+        if modifiers.contains(KeyModifiers::CONTROL) {
+            match code {
+                KeyCode::Char('k') => return Some(-3),
+                KeyCode::Char('j') => return Some(3),
+                _ => {}
+            }
+        }
         None
     }
 }
@@ -276,4 +283,44 @@ fn format_binding(binding: &KeyBinding) -> String {
 
     parts.push(key);
     parts.join("+")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scroll_amount_ctrl_fallback() {
+        let keys = ScrollKeys {
+            up: KeyBinding {
+                code: KeyCode::Char('k'),
+                modifiers: KeyModifiers::ALT,
+            },
+            down: KeyBinding {
+                code: KeyCode::Char('j'),
+                modifiers: KeyModifiers::ALT,
+            },
+            page_up: KeyBinding {
+                code: KeyCode::Char('u'),
+                modifiers: KeyModifiers::ALT,
+            },
+            page_down: KeyBinding {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::ALT,
+            },
+            up_label: "Alt+K".to_string(),
+            down_label: "Alt+J".to_string(),
+            page_up_label: "Alt+U".to_string(),
+            page_down_label: "Alt+D".to_string(),
+        };
+
+        assert_eq!(
+            keys.scroll_amount(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            Some(-3)
+        );
+        assert_eq!(
+            keys.scroll_amount(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            Some(3)
+        );
+    }
 }
