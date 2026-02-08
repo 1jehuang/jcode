@@ -33,9 +33,9 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeybindingsConfig {
-    /// Scroll up key (default: "alt+k")
+    /// Scroll up key (default: "ctrl+k")
     pub scroll_up: String,
-    /// Scroll down key (default: "alt+j")
+    /// Scroll down key (default: "ctrl+j")
     pub scroll_down: String,
     /// Page up key (default: "alt+u")
     pub scroll_page_up: String,
@@ -50,8 +50,8 @@ pub struct KeybindingsConfig {
 impl Default for KeybindingsConfig {
     fn default() -> Self {
         Self {
-            scroll_up: "alt+k".to_string(),
-            scroll_down: "alt+j".to_string(),
+            scroll_up: "ctrl+k".to_string(),
+            scroll_down: "ctrl+j".to_string(),
             scroll_page_up: "alt+u".to_string(),
             scroll_page_down: "alt+d".to_string(),
             model_switch_next: "ctrl+tab".to_string(),
@@ -249,8 +249,8 @@ impl Config {
 # Scroll keys (vim-style by default)
 # Supports: ctrl, alt, shift modifiers + any key
 # Examples: "ctrl+k", "alt+j", "ctrl+shift+up", "pageup"
-scroll_up = "alt+k"
-scroll_down = "alt+j"
+scroll_up = "ctrl+k"
+scroll_down = "ctrl+j"
 scroll_page_up = "alt+u"
 scroll_page_down = "alt+d"
 
