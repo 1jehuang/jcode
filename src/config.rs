@@ -98,7 +98,7 @@ impl Default for DisplayConfig {
         Self {
             show_diffs: true,
             queue_mode: false,
-            mouse_capture: false,
+            mouse_capture: true,
             debug_socket: false,
             centered: true,
             show_thinking: false,
@@ -266,7 +266,7 @@ show_diffs = true
 queue_mode = false
 
 # Capture mouse events (enables scroll wheel; disables terminal text selection)
-mouse_capture = false
+mouse_capture = true
 
 # Enable debug socket for external control/testing (default: false)
 debug_socket = false
