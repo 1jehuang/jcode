@@ -124,6 +124,14 @@ pub trait TuiState {
     fn update_cost(&mut self);
     /// Diagram display mode (none/margin/pinned)
     fn diagram_mode(&self) -> crate::config::DiagramDisplayMode;
+    /// Whether the diagram pane is focused (pinned mode)
+    fn diagram_focus(&self) -> bool;
+    /// Selected diagram index (pinned mode, most-recent = 0)
+    fn diagram_index(&self) -> usize;
+    /// Diagram scroll offsets in cells (x, y) when focused
+    fn diagram_scroll(&self) -> (i32, i32);
+    /// Diagram pane width ratio percentage
+    fn diagram_pane_ratio(&self) -> u8;
 }
 
 pub(crate) fn subscribe_metadata() -> (Option<String>, Option<bool>) {
