@@ -279,6 +279,19 @@ struct DebugRunReport {
     assertions: Vec<DebugAssertResult>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct ScrollTestConfig {
+    width: Option<u16>,
+    height: Option<u16>,
+    step: Option<usize>,
+    max_steps: Option<usize>,
+    padding: Option<usize>,
+    diagrams: Option<usize>,
+    include_frames: Option<bool>,
+    include_paused: Option<bool>,
+    diagram: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct DebugEvent {
     at_ms: u64,
@@ -312,6 +325,24 @@ impl DebugTrace {
             detail,
         });
     }
+}
+
+#[derive(Clone)]
+struct ScrollTestState {
+    display_messages: Vec<DisplayMessage>,
+    display_messages_version: u64,
+    scroll_offset: usize,
+    auto_scroll_paused: bool,
+    is_processing: bool,
+    streaming_text: String,
+    queued_messages: Vec<String>,
+    interleave_message: Option<String>,
+    pending_soft_interrupt: Option<String>,
+    input: String,
+    cursor_pos: usize,
+    status: ProcessingStatus,
+    processing_started: Option<Instant>,
+    status_notice: Option<(String, Instant)>,
 }
 
 /// TUI Application state
@@ -467,6 +498,44 @@ pub struct App {
     debug_trace: DebugTrace,
     // Incremental markdown renderer for streaming text (uses RefCell for interior mutability)
     streaming_md_renderer: RefCell<IncrementalMarkdownRenderer>,
+}
+
+impl ScrollTestState {
+    fn capture(app: &App) -> Self {
+        Self {
+            display_messages: app.display_messages.clone(),
+            display_messages_version: app.display_messages_version,
+            scroll_offset: app.scroll_offset,
+            auto_scroll_paused: app.auto_scroll_paused,
+            is_processing: app.is_processing,
+            streaming_text: app.streaming_text.clone(),
+            queued_messages: app.queued_messages.clone(),
+            interleave_message: app.interleave_message.clone(),
+            pending_soft_interrupt: app.pending_soft_interrupt.clone(),
+            input: app.input.clone(),
+            cursor_pos: app.cursor_pos,
+            status: app.status.clone(),
+            processing_started: app.processing_started,
+            status_notice: app.status_notice.clone(),
+        }
+    }
+
+    fn restore(self, app: &mut App) {
+        app.display_messages = self.display_messages;
+        app.display_messages_version = self.display_messages_version;
+        app.scroll_offset = self.scroll_offset;
+        app.auto_scroll_paused = self.auto_scroll_paused;
+        app.is_processing = self.is_processing;
+        app.streaming_text = self.streaming_text;
+        app.queued_messages = self.queued_messages;
+        app.interleave_message = self.interleave_message;
+        app.pending_soft_interrupt = self.pending_soft_interrupt;
+        app.input = self.input;
+        app.cursor_pos = self.cursor_pos;
+        app.status = self.status;
+        app.processing_started = self.processing_started;
+        app.status_notice = self.status_notice;
+    }
 }
 
 /// A placeholder provider for remote mode (never actually called)
@@ -959,6 +1028,387 @@ impl App {
 
     /// Check for and process debug commands from file
     /// Commands: "message:<text>", "reload", "state", "quit"
+    fn scroll_max_estimate(&self) -> usize {
+        self.display_messages
+            .len()
+            .saturating_mul(100)
+            .saturating_add(self.streaming_text.len())
+    }
+
+    fn debug_scroll_up(&mut self, amount: usize) {
+        let max_estimate = self.scroll_max_estimate();
+        self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max_estimate);
+        if self.is_processing {
+            self.auto_scroll_paused = true;
+        }
+    }
+
+    fn debug_scroll_down(&mut self, amount: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+        if self.scroll_offset == 0 {
+            self.auto_scroll_paused = false;
+        }
+    }
+
+    fn debug_scroll_top(&mut self) {
+        let max_estimate = self.scroll_max_estimate();
+        self.scroll_offset = max_estimate;
+        if self.is_processing {
+            self.auto_scroll_paused = true;
+        }
+    }
+
+    fn debug_scroll_bottom(&mut self) {
+        self.scroll_offset = 0;
+        self.auto_scroll_paused = false;
+    }
+
+    fn build_scroll_test_content(
+        diagrams: usize,
+        padding: usize,
+        override_diagram: Option<&str>,
+    ) -> String {
+        let mut out = String::new();
+        let intro_lines = padding.max(4);
+        for i in 0..intro_lines {
+            out.push_str(&format!(
+                "Intro line {:02} - quick brown fox jumps over the lazy dog.\n",
+                i + 1
+            ));
+        }
+
+        let diagram_templates = [
+            r#"flowchart TD
+    A[Start] --> B{Decision}
+    B -->|Yes| C[Process 1]
+    B -->|No| D[Process 2]
+    C --> E[Merge]
+    D --> E
+    E --> F[End]"#,
+            r#"sequenceDiagram
+    participant U as User
+    participant A as App
+    participant S as Service
+    U->>A: Scroll request
+    A->>S: Render diagram
+    S-->>A: PNG
+    A-->>U: Draw frame"#,
+            r#"stateDiagram-v2
+    [*] --> Idle
+    Idle --> Scrolling: input
+    Scrolling --> Rendering: diagram
+    Rendering --> Idle: frame drawn"#,
+        ];
+
+        for idx in 0..diagrams {
+            let diagram =
+                override_diagram.unwrap_or(diagram_templates[idx % diagram_templates.len()]);
+            out.push_str("```mermaid\n");
+            out.push_str(diagram);
+            out.push_str("\n```\n");
+
+            for j in 0..padding {
+                out.push_str(&format!(
+                    "After diagram {} line {:02} - stretch content for scrolling.\n",
+                    idx + 1,
+                    j + 1
+                ));
+            }
+        }
+
+        out
+    }
+
+    fn capture_scroll_test_step(
+        &mut self,
+        terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+        label: &str,
+        mode: &str,
+        scroll_offset: usize,
+        max_scroll: usize,
+        include_frames: bool,
+    ) -> Result<serde_json::Value, String> {
+        self.scroll_offset = scroll_offset;
+        self.auto_scroll_paused = mode == "paused";
+        if let Err(e) = terminal.draw(|f| crate::tui::ui::draw(f, self)) {
+            return Err(format!("draw error ({}): {}", label, e));
+        }
+
+        let frame = super::visual_debug::latest_frame();
+        let (frame_id, anomalies, image_regions, normalized_frame) = match frame {
+            Some(ref frame) => {
+                let normalized = if include_frames {
+                    Some(super::visual_debug::normalize_frame(frame))
+                } else {
+                    None
+                };
+                (
+                    Some(frame.frame_id),
+                    frame.anomalies.clone(),
+                    frame.image_regions.clone(),
+                    normalized,
+                )
+            }
+            None => (None, Vec::new(), Vec::new(), None),
+        };
+
+        let user_scroll = scroll_offset.min(max_scroll);
+        let scroll_top = if self.auto_scroll_paused && user_scroll > 0 {
+            user_scroll
+        } else if user_scroll > 0 {
+            max_scroll.saturating_sub(user_scroll)
+        } else {
+            max_scroll
+        };
+
+        let mermaid_stats = crate::tui::mermaid::debug_stats_json();
+        let mermaid_state = serde_json::to_value(crate::tui::mermaid::debug_image_state()).ok();
+
+        Ok(serde_json::json!({
+            "label": label,
+            "mode": mode,
+            "scroll_offset": scroll_offset,
+            "scroll_top": scroll_top,
+            "max_scroll": max_scroll,
+            "frame_id": frame_id,
+            "anomalies": anomalies,
+            "image_regions": image_regions,
+            "mermaid_stats": mermaid_stats,
+            "mermaid_state": mermaid_state,
+            "frame": normalized_frame,
+        }))
+    }
+
+    fn run_scroll_test(&mut self, raw: Option<&str>) -> String {
+        let cfg: ScrollTestConfig = if let Some(raw) = raw {
+            if raw.trim().is_empty() {
+                ScrollTestConfig {
+                    width: None,
+                    height: None,
+                    step: None,
+                    max_steps: None,
+                    padding: None,
+                    diagrams: None,
+                    include_frames: None,
+                    include_paused: None,
+                    diagram: None,
+                }
+            } else {
+                match serde_json::from_str(raw) {
+                    Ok(cfg) => cfg,
+                    Err(e) => return format!("scroll-test parse error: {}", e),
+                }
+            }
+        } else {
+            ScrollTestConfig {
+                width: None,
+                height: None,
+                step: None,
+                max_steps: None,
+                padding: None,
+                diagrams: None,
+                include_frames: None,
+                include_paused: None,
+                diagram: None,
+            }
+        };
+
+        let width = cfg.width.unwrap_or(100).max(40);
+        let height = cfg.height.unwrap_or(40).max(20);
+        let step = cfg.step.unwrap_or(5).max(1);
+        let max_steps = cfg.max_steps.unwrap_or(16).max(4).min(100);
+        let padding = cfg.padding.unwrap_or(12).max(4);
+        let diagrams = cfg.diagrams.unwrap_or(2).clamp(1, 3);
+        let include_frames = cfg.include_frames.unwrap_or(true);
+        let include_paused = cfg.include_paused.unwrap_or(true);
+        let diagram_override = cfg.diagram.as_deref();
+
+        let saved_state = ScrollTestState::capture(self);
+        let was_visual_debug = super::visual_debug::is_enabled();
+        super::visual_debug::enable();
+
+        let test_content = Self::build_scroll_test_content(diagrams, padding, diagram_override);
+        self.display_messages = vec![
+            DisplayMessage {
+                role: "user".to_string(),
+                content: "Scroll test: render mermaid + text".to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            },
+            DisplayMessage {
+                role: "assistant".to_string(),
+                content: test_content,
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            },
+        ];
+        self.bump_display_messages_version();
+        self.scroll_offset = 0;
+        self.auto_scroll_paused = false;
+        self.is_processing = false;
+        self.streaming_text.clear();
+        self.queued_messages.clear();
+        self.interleave_message = None;
+        self.pending_soft_interrupt = None;
+        self.status = ProcessingStatus::Idle;
+        self.processing_started = None;
+        self.status_notice = None;
+
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut errors: Vec<String> = Vec::new();
+        let mut steps: Vec<serde_json::Value> = Vec::new();
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = match Terminal::new(backend) {
+            Ok(t) => t,
+            Err(e) => {
+                saved_state.restore(self);
+                if !was_visual_debug {
+                    super::visual_debug::disable();
+                }
+                return format!("scroll-test terminal error: {}", e);
+            }
+        };
+
+        // Baseline render (bottom) for metrics
+        self.scroll_offset = 0;
+        self.auto_scroll_paused = false;
+        if let Err(e) = terminal.draw(|f| crate::tui::ui::draw(f, self)) {
+            errors.push(format!("baseline draw error: {}", e));
+        }
+
+        // Derive scroll positions using the latest frame
+        let baseline_frame = super::visual_debug::latest_frame();
+        let (visible_height, total_lines, image_regions) = if let Some(frame) = baseline_frame {
+            let visible_height = frame
+                .layout
+                .messages_area
+                .map(|r| r.height as usize)
+                .unwrap_or(height as usize);
+            let total_lines = frame.layout.estimated_content_height.max(1);
+            (visible_height, total_lines, frame.image_regions)
+        } else {
+            (height as usize, 1usize, Vec::new())
+        };
+
+        let max_scroll = total_lines.saturating_sub(visible_height);
+
+        let mut positions: Vec<(String, usize)> = Vec::new();
+        positions.push(("bottom".to_string(), max_scroll));
+        positions.push(("middle".to_string(), max_scroll / 2));
+        positions.push(("top".to_string(), 0));
+
+        for (idx, region) in image_regions.iter().enumerate() {
+            let img_top = region.abs_line_idx;
+            let img_bottom = region.abs_line_idx + region.height as usize;
+            positions.push((format!("image{}_top", idx + 1), img_top));
+            positions.push((
+                format!("image{}_bottom", idx + 1),
+                img_bottom.saturating_sub(visible_height),
+            ));
+            positions.push((format!("image{}_off_top", idx + 1), img_bottom));
+            if img_top > 0 {
+                positions.push((format!("image{}_pre", idx + 1), img_top.saturating_sub(2)));
+            }
+        }
+
+        if max_scroll > 0 {
+            let mut cursor = 0usize;
+            while cursor <= max_scroll && positions.len() < max_steps {
+                positions.push((format!("step_{}", cursor), cursor));
+                cursor = cursor.saturating_add(step);
+                if cursor == 0 {
+                    break;
+                }
+            }
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let mut ordered: Vec<(String, usize)> = Vec::new();
+        for (label, scroll_top) in positions {
+            let clamped = scroll_top.min(max_scroll);
+            if seen.insert(clamped) {
+                ordered.push((label, clamped));
+            }
+        }
+
+        if ordered.len() > max_steps {
+            ordered.truncate(max_steps);
+        }
+
+        for (label, scroll_top) in &ordered {
+            let offset = max_scroll.saturating_sub(*scroll_top);
+            match self.capture_scroll_test_step(
+                &mut terminal,
+                label,
+                "normal",
+                offset,
+                max_scroll,
+                include_frames,
+            ) {
+                Ok(step) => steps.push(step),
+                Err(e) => errors.push(e),
+            }
+        }
+
+        if include_paused {
+            for (label, scroll_top) in &ordered {
+                let offset = (*scroll_top).min(max_scroll);
+                let paused_label = format!("{}_paused", label);
+                match self.capture_scroll_test_step(
+                    &mut terminal,
+                    &paused_label,
+                    "paused",
+                    offset,
+                    max_scroll,
+                    include_frames,
+                ) {
+                    Ok(step) => steps.push(step),
+                    Err(e) => errors.push(e),
+                }
+            }
+        }
+
+        let mermaid_scroll_sim =
+            serde_json::to_value(crate::tui::mermaid::debug_test_scroll(None)).ok();
+
+        let report = serde_json::json!({
+            "ok": errors.is_empty(),
+            "config": {
+                "width": width,
+                "height": height,
+                "step": step,
+                "max_steps": max_steps,
+                "padding": padding,
+                "diagrams": diagrams,
+                "include_frames": include_frames,
+                "include_paused": include_paused,
+                "diagram_override": diagram_override,
+            },
+            "layout": {
+                "total_lines": total_lines,
+                "visible_height": visible_height,
+                "max_scroll": max_scroll,
+            },
+            "steps": steps,
+            "mermaid_scroll_sim": mermaid_scroll_sim,
+            "errors": errors,
+        });
+
+        saved_state.restore(self);
+        if !was_visual_debug {
+            super::visual_debug::disable();
+        }
+
+        serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
+    }
+
     fn handle_debug_command(&mut self, cmd: &str) -> String {
         let cmd = cmd.trim();
         if cmd == "frame" {
@@ -1225,6 +1675,34 @@ impl App {
         } else if cmd.starts_with("run:") {
             let raw = cmd.strip_prefix("run:").unwrap_or("");
             self.handle_script_run(raw)
+        } else if cmd.starts_with("inject:") {
+            let raw = cmd.strip_prefix("inject:").unwrap_or("");
+            let (role, content) = if let Some((r, c)) = raw.split_once(':') {
+                let role = match r {
+                    "user" | "assistant" | "system" | "tool" | "error" | "meta" => r,
+                    _ => "assistant",
+                };
+                if role == "assistant" && r != "assistant" {
+                    ("assistant", raw)
+                } else {
+                    (role, c)
+                }
+            } else {
+                ("assistant", raw)
+            };
+
+            self.push_display_message(DisplayMessage {
+                role: role.to_string(),
+                content: content.to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            format!("OK: injected {} message ({} chars)", role, content.len())
+        } else if cmd == "scroll-test" || cmd.starts_with("scroll-test:") {
+            let raw = cmd.strip_prefix("scroll-test:");
+            self.run_scroll_test(raw)
         } else if cmd == "quit" {
             self.should_quit = true;
             "OK: quitting".to_string()
@@ -1243,21 +1721,19 @@ impl App {
             let dir = cmd.strip_prefix("scroll:").unwrap_or("");
             match dir {
                 "up" => {
-                    if self.scroll_offset > 0 {
-                        self.scroll_offset = self.scroll_offset.saturating_sub(5);
-                    }
+                    self.debug_scroll_up(5);
                     format!("scroll: up to {}", self.scroll_offset)
                 }
                 "down" => {
-                    self.scroll_offset += 5;
+                    self.debug_scroll_down(5);
                     format!("scroll: down to {}", self.scroll_offset)
                 }
                 "top" => {
-                    self.scroll_offset = 0;
+                    self.debug_scroll_top();
                     "scroll: top".to_string()
                 }
                 "bottom" => {
-                    self.scroll_offset = usize::MAX / 2;
+                    self.debug_scroll_bottom();
                     "scroll: bottom".to_string()
                 }
                 _ => format!("scroll error: unknown direction '{}'", dir),
@@ -1366,6 +1842,7 @@ impl App {
         } else if cmd == "help" {
             "Debug commands:\n\
                  - message:<text> - inject and submit a message\n\
+                 - inject:<role>:<text> - inject display message without sending\n\
                  - reload - trigger /reload\n\
                  - state - get basic state info\n\
                  - snapshot - get combined state + frame snapshot JSON\n\
@@ -1398,6 +1875,7 @@ impl App {
                  - wait - check if processing\n\
                  - wait:<ms> - block until idle or timeout\n\
                  - scroll:<up|down|top|bottom> - control scroll\n\
+                 - scroll-test[:<json>] - run offscreen scroll+diagram test\n\
                  - keys:<keyspec> - inject key events (e.g. keys:ctrl+r)\n\
                  - input - get current input buffer\n\
                  - set_input:<text> - set input buffer\n\
@@ -1871,10 +2349,10 @@ impl App {
                 }
                 TestStep::Scroll { direction } => {
                     match direction.as_str() {
-                        "up" => self.scroll_offset = self.scroll_offset.saturating_add(5),
-                        "down" => self.scroll_offset = self.scroll_offset.saturating_sub(5),
-                        "top" => self.scroll_offset = usize::MAX,
-                        "bottom" => self.scroll_offset = 0,
+                        "up" => self.debug_scroll_up(5),
+                        "down" => self.debug_scroll_down(5),
+                        "top" => self.debug_scroll_top(),
+                        "bottom" => self.debug_scroll_bottom(),
                         _ => {}
                     }
                     format!("scroll: {}", direction)
@@ -2012,21 +2490,19 @@ impl App {
             let dir = trimmed.strip_prefix("scroll:").unwrap_or("");
             return match dir {
                 "up" => {
-                    if self.scroll_offset > 0 {
-                        self.scroll_offset = self.scroll_offset.saturating_sub(5);
-                    }
+                    self.debug_scroll_up(5);
                     format!("scroll: up to {}", self.scroll_offset)
                 }
                 "down" => {
-                    self.scroll_offset += 5;
+                    self.debug_scroll_down(5);
                     format!("scroll: down to {}", self.scroll_offset)
                 }
                 "top" => {
-                    self.scroll_offset = 0;
+                    self.debug_scroll_top();
                     "scroll: top".to_string()
                 }
                 "bottom" => {
-                    self.scroll_offset = usize::MAX / 2;
+                    self.debug_scroll_bottom();
                     "scroll: bottom".to_string()
                 }
                 _ => format!("ERR: unknown scroll '{}'", dir),
