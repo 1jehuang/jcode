@@ -12,6 +12,7 @@
 //! - Skip redundant renders when nothing changed
 //! - Clear only on render failure, not before every render
 
+use image::DynamicImage;
 use mermaid_rs_renderer::{
     config::{LayoutConfig, RenderConfig},
     layout::compute_layout,
@@ -26,12 +27,12 @@ use ratatui_image::{
     CropOptions, Resize, StatefulImage,
 };
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::hash::{Hash as _, Hasher};
 use std::panic;
 use std::path::PathBuf;
-use std::sync::{LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Instant;
 
 /// Global picker for terminal capability detection
@@ -49,6 +50,10 @@ static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> =
 /// Key is (hash, target_width) to support multiple sizes of the same diagram
 static IMAGE_STATE: LazyLock<Mutex<HashMap<u64, ImageState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Cache decoded source images to avoid reloading from disk on every pan
+static SOURCE_CACHE: LazyLock<Mutex<SourceImageCache>> =
+    LazyLock::new(|| Mutex::new(SourceImageCache::new()));
 
 /// Last render state for skip-redundant-render optimization
 static LAST_RENDER: LazyLock<Mutex<HashMap<u64, LastRenderState>>> =
@@ -77,6 +82,16 @@ struct ImageState {
     resize_mode: ResizeMode,
     /// Whether the last render clipped from the top (to show bottom portion)
     last_crop_top: bool,
+    /// Last viewport parameters (for pan/scroll)
+    last_viewport: Option<ViewportState>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ViewportState {
+    scroll_x_px: u32,
+    scroll_y_px: u32,
+    view_w_px: u32,
+    view_h_px: u32,
 }
 
 /// Resize mode for images - locked at creation time
@@ -84,6 +99,51 @@ struct ImageState {
 enum ResizeMode {
     Fit,
     Crop,
+    Viewport,
+}
+
+/// Cache decoded source images for fast viewport cropping
+const SOURCE_CACHE_MAX: usize = 8;
+
+struct SourceImageCache {
+    order: VecDeque<u64>,
+    entries: HashMap<u64, Arc<DynamicImage>>,
+}
+
+impl SourceImageCache {
+    fn new() -> Self {
+        Self {
+            order: VecDeque::new(),
+            entries: HashMap::new(),
+        }
+    }
+
+    fn touch(&mut self, hash: u64) {
+        if let Some(pos) = self.order.iter().position(|h| *h == hash) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(hash);
+    }
+
+    fn get(&mut self, hash: u64) -> Option<Arc<DynamicImage>> {
+        let img = self.entries.get(&hash).cloned();
+        if img.is_some() {
+            self.touch(hash);
+        }
+        img
+    }
+
+    fn insert(&mut self, hash: u64, image: DynamicImage) -> Arc<DynamicImage> {
+        let arc = Arc::new(image);
+        self.entries.insert(hash, arc.clone());
+        self.touch(hash);
+        while self.order.len() > SOURCE_CACHE_MAX {
+            if let Some(old) = self.order.pop_front() {
+                self.entries.remove(&old);
+            }
+        }
+        arc
+    }
 }
 
 /// Track what was rendered last frame for skip-redundant optimization
@@ -260,6 +320,10 @@ pub fn clear_cache() -> Result<(), String> {
     if let Ok(mut state) = IMAGE_STATE.lock() {
         state.clear();
     }
+    if let Ok(mut source) = SOURCE_CACHE.lock() {
+        source.entries.clear();
+        source.order.clear();
+    }
     if let Ok(mut last) = LAST_RENDER.lock() {
         last.clear();
     }
@@ -281,6 +345,7 @@ pub struct ImageStateInfo {
     pub hash: String,
     pub resize_mode: String,
     pub last_area: Option<String>,
+    pub last_viewport: Option<String>,
 }
 
 /// Get detailed state info for all cached images
@@ -293,10 +358,17 @@ pub fn debug_image_state() -> Vec<ImageStateInfo> {
                 resize_mode: match img_state.resize_mode {
                     ResizeMode::Fit => "Fit".to_string(),
                     ResizeMode::Crop => "Crop".to_string(),
+                    ResizeMode::Viewport => "Viewport".to_string(),
                 },
                 last_area: img_state
                     .last_area
                     .map(|r| format!("{}x{}+{}+{}", r.width, r.height, r.x, r.y)),
+                last_viewport: img_state.last_viewport.map(|v| {
+                    format!(
+                        "scroll={}x{}, view={}x{}",
+                        v.scroll_x_px, v.scroll_y_px, v.view_w_px, v.view_h_px
+                    )
+                }),
             })
             .collect()
     } else {
@@ -350,6 +422,7 @@ pub fn debug_render(content: &str) -> TestRenderResult {
                 state.get(&hash).map(|s| match s.resize_mode {
                     ResizeMode::Fit => "Fit".to_string(),
                     ResizeMode::Crop => "Crop".to_string(),
+                    ResizeMode::Viewport => "Viewport".to_string(),
                 })
             } else {
                 None
@@ -420,6 +493,7 @@ pub fn debug_test_resize_stability(hash: u64) -> serde_json::Value {
             state.get(&hash).map(|s| match s.resize_mode {
                 ResizeMode::Fit => "Fit",
                 ResizeMode::Crop => "Crop",
+                ResizeMode::Viewport => "Viewport",
             })
         } else {
             None
@@ -568,6 +642,7 @@ pub fn debug_test_scroll(content: Option<&str>) -> ScrollTestResult {
                     let mode = match img_state.resize_mode {
                         ResizeMode::Fit => "Fit",
                         ResizeMode::Crop => "Crop",
+                        ResizeMode::Viewport => "Viewport",
                     };
                     frame_info.resize_mode = Some(mode.to_string());
                     modes_seen.push(mode.to_string());
@@ -978,6 +1053,7 @@ pub fn render_mermaid_sized(content: &str, terminal_width: Option<u16>) -> Rende
                     last_area: None,
                     resize_mode: ResizeMode::Crop,
                     last_crop_top: false,
+                    last_viewport: None,
                 },
             );
         }
@@ -1089,7 +1165,16 @@ pub fn render_image_widget(
     // Try to render from existing state - single lock for the whole operation
     {
         let mut state = IMAGE_STATE.lock().unwrap();
+        let needs_reset = state
+            .get(&hash)
+            .map(|s| s.resize_mode != ResizeMode::Crop)
+            .unwrap_or(false);
+        if needs_reset {
+            state.remove(&hash);
+        }
         if let Some(img_state) = state.get_mut(&hash) {
+            img_state.resize_mode = ResizeMode::Crop;
+            img_state.last_viewport = None;
             // Always use Crop mode - no rescaling during scroll
             let crop_opts = CropOptions {
                 clip_top: crop_top,
@@ -1132,6 +1217,7 @@ pub fn render_image_widget(
                         last_area: Some(render_area),
                         resize_mode: ResizeMode::Crop,
                         last_crop_top: false,
+                        last_viewport: None,
                     },
                 );
 
@@ -1154,6 +1240,284 @@ pub fn render_image_widget(
     let clear_area = area.intersection(buf_area);
     if clear_area.width > 0 && clear_area.height > 0 {
         Clear.render(clear_area, buf);
+    }
+
+    0
+}
+
+/// Render an image using Fit mode (scales to fit the available area).
+/// draw_border controls whether a left border is drawn like code blocks.
+pub fn render_image_widget_fit(
+    hash: u64,
+    area: Rect,
+    buf: &mut Buffer,
+    centered: bool,
+    draw_border: bool,
+) -> u16 {
+    let buf_area = *buf.area();
+    let area = area.intersection(buf_area);
+
+    if area.width == 0 || area.height == 0 {
+        return 0;
+    }
+
+    let border_width = if draw_border { BORDER_WIDTH } else { 0 };
+    if area.width <= border_width {
+        return 0;
+    }
+
+    if draw_border {
+        let border_style = Style::default().fg(Color::Rgb(100, 100, 100)); // DIM_COLOR
+        for row in area.y..area.y.saturating_add(area.height) {
+            if row < buf.area().height {
+                buf.get_mut(area.x, row)
+                    .set_char('│')
+                    .set_style(border_style);
+                if area.x + 1 < buf.area().width {
+                    buf.get_mut(area.x + 1, row).set_char(' ');
+                }
+            }
+        }
+    }
+
+    let image_area = Rect {
+        x: area.x + border_width,
+        y: area.y,
+        width: area.width - border_width,
+        height: area.height,
+    };
+
+    if image_area.width == 0 {
+        return area.height;
+    }
+
+    let (img_width, path) = {
+        let cache = RENDER_CACHE.lock().unwrap();
+        if let Some(cached) = cache.get(hash) {
+            (cached.width, Some(cached.path.clone()))
+        } else {
+            (0, None)
+        }
+    };
+
+    let render_area = if centered && img_width > 0 {
+        let rendered_width = if let Some(Some(picker)) = PICKER.get() {
+            let font_size = picker.font_size();
+            let img_width_cells = (img_width as f32 / font_size.0 as f32).ceil() as u16;
+            img_width_cells.min(image_area.width)
+        } else {
+            image_area.width
+        };
+        let x_offset = (image_area.width.saturating_sub(rendered_width)) / 2;
+        Rect {
+            x: image_area.x + x_offset,
+            y: image_area.y,
+            width: rendered_width,
+            height: image_area.height,
+        }
+    } else {
+        image_area
+    };
+
+    {
+        let mut state = IMAGE_STATE.lock().unwrap();
+        let needs_reset = state
+            .get(&hash)
+            .map(|s| s.resize_mode != ResizeMode::Fit)
+            .unwrap_or(false);
+        if needs_reset {
+            state.remove(&hash);
+        }
+        if let Some(img_state) = state.get_mut(&hash) {
+            img_state.resize_mode = ResizeMode::Fit;
+            img_state.last_viewport = None;
+            let widget = StatefulImage::default().resize(Resize::Fit(None));
+            widget.render(render_area, buf, &mut img_state.protocol);
+            img_state.last_area = Some(render_area);
+            return area.height;
+        }
+    }
+
+    if let Some(path) = path {
+        if let Some(Some(picker)) = PICKER.get() {
+            if let Ok(img) = image::open(&path) {
+                let protocol = picker.new_resize_protocol(img);
+
+                let mut state = IMAGE_STATE.lock().unwrap();
+                state.insert(
+                    hash,
+                    ImageState {
+                        protocol,
+                        last_area: Some(render_area),
+                        resize_mode: ResizeMode::Fit,
+                        last_crop_top: false,
+                        last_viewport: None,
+                    },
+                );
+
+                if let Some(img_state) = state.get_mut(&hash) {
+                    let widget = StatefulImage::default().resize(Resize::Fit(None));
+                    widget.render(render_area, buf, &mut img_state.protocol);
+                    return area.height;
+                }
+            }
+        }
+    }
+
+    use ratatui::widgets::Clear;
+    let clear_area = area.intersection(buf_area);
+    if clear_area.width > 0 && clear_area.height > 0 {
+        Clear.render(clear_area, buf);
+    }
+
+    0
+}
+
+fn load_source_image(hash: u64) -> Option<Arc<DynamicImage>> {
+    if let Ok(mut cache) = SOURCE_CACHE.lock() {
+        if let Some(img) = cache.get(hash) {
+            return Some(img);
+        }
+    }
+
+    let path = {
+        let cache = RENDER_CACHE.lock().ok()?;
+        cache.get(hash).map(|c| c.path.clone())
+    }?;
+
+    let img = image::open(&path).ok()?;
+    if let Ok(mut cache) = SOURCE_CACHE.lock() {
+        return Some(cache.insert(hash, img));
+    }
+    Some(Arc::new(img))
+}
+
+/// Render an image by cropping a viewport (for pan/scroll in pinned pane).
+pub fn render_image_widget_viewport(
+    hash: u64,
+    area: Rect,
+    buf: &mut Buffer,
+    scroll_x: i32,
+    scroll_y: i32,
+    draw_border: bool,
+) -> u16 {
+    let buf_area = *buf.area();
+    let area = area.intersection(buf_area);
+
+    if area.width == 0 || area.height == 0 {
+        return 0;
+    }
+
+    let border_width = if draw_border { BORDER_WIDTH } else { 0 };
+    if area.width <= border_width {
+        return 0;
+    }
+
+    if draw_border {
+        let border_style = Style::default().fg(Color::Rgb(100, 100, 100)); // DIM_COLOR
+        for row in area.y..area.y.saturating_add(area.height) {
+            if row < buf.area().height {
+                buf.get_mut(area.x, row)
+                    .set_char('│')
+                    .set_style(border_style);
+                if area.x + 1 < buf.area().width {
+                    buf.get_mut(area.x + 1, row).set_char(' ');
+                }
+            }
+        }
+    }
+
+    let image_area = Rect {
+        x: area.x + border_width,
+        y: area.y,
+        width: area.width - border_width,
+        height: area.height,
+    };
+
+    if image_area.width == 0 || image_area.height == 0 {
+        return 0;
+    }
+
+    let picker = match PICKER.get().and_then(|p| p.as_ref()) {
+        Some(picker) => picker,
+        None => return 0,
+    };
+
+    let source = match load_source_image(hash) {
+        Some(img) => img,
+        None => return 0,
+    };
+
+    let font_size = picker.font_size();
+    let view_w_px = image_area.width as u32 * font_size.0 as u32;
+    let view_h_px = image_area.height as u32 * font_size.1 as u32;
+    if view_w_px == 0 || view_h_px == 0 {
+        return 0;
+    }
+
+    let img_width = source.width();
+    let img_height = source.height();
+    let max_scroll_x = img_width.saturating_sub(view_w_px);
+    let max_scroll_y = img_height.saturating_sub(view_h_px);
+
+    let scroll_x_px = (scroll_x.max(0) as u32)
+        .saturating_mul(font_size.0 as u32)
+        .min(max_scroll_x);
+    let scroll_y_px = (scroll_y.max(0) as u32)
+        .saturating_mul(font_size.1 as u32)
+        .min(max_scroll_y);
+
+    let crop_w = view_w_px.min(img_width.saturating_sub(scroll_x_px));
+    let crop_h = view_h_px.min(img_height.saturating_sub(scroll_y_px));
+    if crop_w == 0 || crop_h == 0 {
+        return 0;
+    }
+
+    let viewport = ViewportState {
+        scroll_x_px,
+        scroll_y_px,
+        view_w_px,
+        view_h_px,
+    };
+
+    {
+        let mut state = IMAGE_STATE.lock().unwrap();
+        let needs_reset = state
+            .get(&hash)
+            .map(|s| s.resize_mode != ResizeMode::Viewport)
+            .unwrap_or(false);
+        if needs_reset {
+            state.remove(&hash);
+        }
+        if let Some(img_state) = state.get_mut(&hash) {
+            if img_state.last_viewport == Some(viewport) {
+                let widget = StatefulImage::default().resize(Resize::Fit(None));
+                widget.render(image_area, buf, &mut img_state.protocol);
+                img_state.last_area = Some(image_area);
+                return area.height;
+            }
+        }
+    }
+
+    let cropped = source.crop_imm(scroll_x_px, scroll_y_px, crop_w, crop_h);
+    let protocol = picker.new_resize_protocol(cropped);
+
+    let mut state = IMAGE_STATE.lock().unwrap();
+    state.insert(
+        hash,
+        ImageState {
+            protocol,
+            last_area: Some(image_area),
+            resize_mode: ResizeMode::Viewport,
+            last_crop_top: false,
+            last_viewport: Some(viewport),
+        },
+    );
+
+    if let Some(img_state) = state.get_mut(&hash) {
+        let widget = StatefulImage::default().resize(Resize::Fit(None));
+        widget.render(image_area, buf, &mut img_state.protocol);
+        return area.height;
     }
 
     0
@@ -1322,6 +1686,11 @@ fn image_placeholder_lines(width: u32, height: u32) -> Vec<Line<'static>> {
     ]
 }
 
+/// Public helper for pinned diagram pane placeholders
+pub fn diagram_placeholder_lines(width: u32, height: u32) -> Vec<Line<'static>> {
+    image_placeholder_lines(width, height)
+}
+
 /// Convert error to ratatui Lines
 pub fn error_to_lines(error: &str) -> Vec<Line<'static>> {
     let dim = Style::default().fg(Color::Rgb(100, 100, 100));
@@ -1456,6 +1825,10 @@ pub fn evict_old_cache() {
 pub fn clear_image_state() {
     if let Ok(mut state) = IMAGE_STATE.lock() {
         state.clear();
+    }
+    if let Ok(mut source) = SOURCE_CACHE.lock() {
+        source.entries.clear();
+        source.order.clear();
     }
     if let Ok(mut last) = LAST_RENDER.lock() {
         last.clear();

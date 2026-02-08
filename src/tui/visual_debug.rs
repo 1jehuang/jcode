@@ -185,6 +185,12 @@ pub struct StateSnapshot {
     pub has_suggestions: bool,
     pub status: String,
     pub diagram_mode: Option<String>,
+    pub diagram_focus: bool,
+    pub diagram_index: usize,
+    pub diagram_count: usize,
+    pub diagram_scroll_x: i32,
+    pub diagram_scroll_y: i32,
+    pub diagram_pane_ratio: u8,
 }
 
 /// Actual rendered text content
