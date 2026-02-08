@@ -1100,7 +1100,7 @@ impl App {
                         .unwrap_or_default();
 
                     format!(
-                        "[{} complete. Previous version: {}, New version: {}.{}\nSession restored with {} turns. Continue with your task.]",
+                        "[{} complete. Previous version: {}, New version: {}.{}\nSession restored with {} turns. Continue with your task. Do not wait for user input — pick up where you left off and keep going.]",
                         action,
                         ctx.version_before,
                         ctx.version_after,
@@ -1114,7 +1114,7 @@ impl App {
                         .unwrap_or_else(|_| "unknown".to_string());
 
                     format!(
-                        "[Reload complete. Build: {}, CWD: {}, Session: {} turns. Continue where you left off.]",
+                        "[Reload complete. Build: {}, CWD: {}, Session: {} turns. Continue where you left off. Do not wait for user input — keep going.]",
                         build_hash,
                         cwd,
                         total_turns
@@ -3665,7 +3665,7 @@ impl App {
                             .unwrap_or_default();
 
                         format!(
-                            "[{} complete. Previous version: {}, New version: {}.{}\nContinue with your task.]",
+                            "[{} complete. Previous version: {}, New version: {}.{}\nContinue with your task. Do not wait for user input — pick up where you left off and keep going.]",
                             action,
                             ctx.version_before,
                             ctx.version_after,
@@ -3678,7 +3678,7 @@ impl App {
                             .unwrap_or_else(|_| "unknown".to_string());
                         let reload_summary = self.reload_info.join(", ");
                         format!(
-                            "[Reload complete. {}. CWD: {}. Session restored - continue where you left off.]",
+                            "[Reload complete. {}. CWD: {}. Session restored — continue where you left off. Do not wait for user input — keep going.]",
                             reload_summary, cwd
                         )
                     };
