@@ -6625,6 +6625,7 @@ CLIENT COMMANDS (client: prefix):
   client:inject:<role>:<t> - Inject display message (no send)
   client:scroll:<dir>      - Scroll (up/down/top/bottom)
   client:scroll-test[:<j>] - Run offscreen scroll+diagram test
+  client:scroll-suite[:<j>] - Run scroll+diagram test suite
   client:wait              - Check if processing
   client:history           - Get display messages
   client:help              - Client command help
@@ -6637,6 +6638,7 @@ TESTER COMMANDS (tester: prefix):
   tester:<id>:inject:<t>   - Inject display message (no send)
   tester:<id>:state        - Get tester state
   tester:<id>:scroll-test  - Run offscreen scroll+diagram test
+  tester:<id>:scroll-suite - Run scroll+diagram test suite
   tester:<id>:stop         - Stop tester
 
 Examples:
@@ -6899,6 +6901,10 @@ async fn execute_tester_subcommand(
         "scroll-test" => match arg {
             Some(raw) => format!("scroll-test:{}", raw),
             None => "scroll-test".to_string(),
+        },
+        "scroll-suite" => match arg {
+            Some(raw) => format!("scroll-suite:{}", raw),
+            None => "scroll-suite".to_string(),
         },
         "stop" => {
             // Kill the tester
