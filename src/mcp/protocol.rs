@@ -260,9 +260,7 @@ impl McpConfig {
     }
 
     /// Parse MCP servers from Codex CLI's config.toml ([mcp_servers.*] sections)
-    fn load_from_codex_toml(
-        path: &std::path::Path,
-    ) -> anyhow::Result<Self> {
+    fn load_from_codex_toml(path: &std::path::Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let table: toml::Table = content.parse()?;
 
@@ -292,16 +290,13 @@ impl McpConfig {
                         .and_then(|v| v.as_table())
                         .map(|t| {
                             t.iter()
-                                .filter_map(|(k, v)| {
-                                    v.as_str().map(|s| (k.clone(), s.to_string()))
-                                })
+                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                                 .collect()
                         })
                         .unwrap_or_default();
-                    config.servers.insert(
-                        name.clone(),
-                        McpServerConfig { command, args, env },
-                    );
+                    config
+                        .servers
+                        .insert(name.clone(), McpServerConfig { command, args, env });
                 }
             }
         }

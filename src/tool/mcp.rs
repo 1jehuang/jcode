@@ -201,8 +201,7 @@ impl McpManagementTool {
 
                 // Register the new tools in the registry
                 if let Some(ref registry) = self.registry {
-                    let mcp_tools =
-                        crate::mcp::create_mcp_tools(Arc::clone(&self.manager)).await;
+                    let mcp_tools = crate::mcp::create_mcp_tools(Arc::clone(&self.manager)).await;
                     for (name, tool) in mcp_tools {
                         if name.starts_with(&format!("mcp__{}__", server_name)) {
                             registry.register(name, tool).await;

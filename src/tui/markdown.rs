@@ -571,8 +571,18 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
         } else {
             // Regular code block - render what we have
             let lang_str = code_block_lang.as_deref().unwrap_or("");
-            let header = format!("┌─ {} (streaming...)", if lang_str.is_empty() { "code" } else { lang_str });
-            lines.push(Line::from(Span::styled(header, Style::default().fg(DIM_COLOR))));
+            let header = format!(
+                "┌─ {} (streaming...)",
+                if lang_str.is_empty() {
+                    "code"
+                } else {
+                    lang_str
+                }
+            );
+            lines.push(Line::from(Span::styled(
+                header,
+                Style::default().fg(DIM_COLOR),
+            )));
 
             // Render code with syntax highlighting
             let highlighted = highlight_code(&code_block_content, code_block_lang.as_deref());
@@ -582,8 +592,14 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                 lines.push(Line::from(prefixed));
             }
             // Show cursor to indicate more content coming
-            lines.push(Line::from(Span::styled("│ ▌", Style::default().fg(DIM_COLOR))));
-            lines.push(Line::from(Span::styled("└─", Style::default().fg(DIM_COLOR))));
+            lines.push(Line::from(Span::styled(
+                "│ ▌",
+                Style::default().fg(DIM_COLOR),
+            )));
+            lines.push(Line::from(Span::styled(
+                "└─",
+                Style::default().fg(DIM_COLOR),
+            )));
         }
     }
 
