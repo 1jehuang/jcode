@@ -326,9 +326,9 @@ const MIN_WIDGET_WIDTH: u16 = 24;
 const MAX_WIDGET_WIDTH: u16 = 40;
 /// Minimum height needed to show the widget
 const MIN_WIDGET_HEIGHT: u16 = 5;
-/// Max rows a widget can drift per frame toward its ideal position.
-/// Lower = smoother movement, higher = snappier. 1 = very smooth drift.
-const MAX_DRIFT_ROWS: u16 = 2;
+/// How much width shrinkage to tolerate before forcing a widget to reposition.
+/// Higher values = stickier widgets during scroll (less jitter).
+const STICKY_WIDTH_TOLERANCE: u16 = 4;
 const PAGE_SWITCH_SECONDS: u64 = 30;
 
 /// Data to display in the info widget
@@ -565,13 +565,94 @@ pub fn calculate_placements(
         }
     }
 
-    // Compute ideal placements using greedy algorithm
+    // Phase 1: Sticky positioning — try to keep previous widgets in place.
+    // This prevents jittery repositioning during scroll when margins change slightly.
     let prev_placements = state.placements.clone();
     let mut placements: Vec<WidgetPlacement> = Vec::new();
+    let mut kept: std::collections::HashSet<WidgetKind> = std::collections::HashSet::new();
 
-    // Place widgets greedily by priority
-    // Rects are modified in-place: after placing a widget at top, we shrink the rect
+    for prev in &prev_placements {
+        if !available.contains(&prev.kind) {
+            continue;
+        }
+
+        // Convert widget rect to row-relative coordinates
+        let row_start = prev.rect.y.saturating_sub(messages_area.y) as usize;
+        let row_end = row_start + prev.rect.height as usize;
+
+        // Check if the old position still has enough margin space (with tolerance)
+        let widths = match prev.side {
+            Side::Right => &margins.right_widths,
+            Side::Left => &margins.left_widths,
+        };
+
+        // All rows must still exist and have enough width
+        let still_fits = row_end <= widths.len()
+            && (row_start..row_end)
+                .all(|row| widths[row] + STICKY_WIDTH_TOLERANCE >= prev.rect.width);
+
+        if still_fits {
+            // Keep the widget at the same viewport-relative position, but update x
+            // so it doesn't overlap text if margin narrowed slightly
+            let actual_min_width = widths[row_start..row_end]
+                .iter()
+                .copied()
+                .min()
+                .unwrap_or(0);
+            // Use the actual available width (clamped), keeping the widget honest
+            // about what space it actually has — but it stays in position.
+            let use_width = actual_min_width.min(MAX_WIDGET_WIDTH);
+
+            // Find the matching margin_space for x calculation
+            let x = if let Some(ms) = margin_spaces.iter().find(|m| m.side == prev.side) {
+                match prev.side {
+                    Side::Right => ms.x_offset.saturating_sub(actual_min_width),
+                    Side::Left => ms.x_offset,
+                }
+            } else {
+                prev.rect.x
+            };
+
+            placements.push(WidgetPlacement {
+                kind: prev.kind,
+                rect: Rect::new(x, prev.rect.y, use_width, prev.rect.height),
+                side: prev.side,
+            });
+            kept.insert(prev.kind);
+
+            // Remove the kept widget's rows from available rects so greedy placement
+            // doesn't overlap. Shrink or split any rect that overlaps these rows.
+            for rect in all_rects.iter_mut() {
+                if rect.2 == 0 || rect.0 != prev.side {
+                    continue;
+                }
+                let r_start = rect.1 as usize;
+                let r_end = r_start + rect.2 as usize;
+                // Check overlap
+                if row_start < r_end && row_end > r_start {
+                    if row_start <= r_start && row_end >= r_end {
+                        // Fully consumed
+                        rect.2 = 0;
+                    } else if row_start <= r_start {
+                        // Trim from top
+                        let trim = (row_end - r_start) as u16;
+                        rect.1 += trim;
+                        rect.2 = rect.2.saturating_sub(trim);
+                    } else {
+                        // Trim from bottom (keep top portion only)
+                        rect.2 = (row_start - r_start) as u16;
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase 2: Greedy placement for widgets that couldn't keep their position
     for kind in available {
+        if kept.contains(&kind) {
+            continue;
+        }
+
         let min_h = kind.min_height() + 2; // Add border
         let preferred = kind.preferred_side();
 
@@ -649,67 +730,6 @@ pub fn calculate_placements(
                 all_rects[idx].2 = 0;
             }
         }
-    }
-
-    // Dampen vertical movement: drift toward ideal position instead of jumping.
-    // Each frame a widget moves at most MAX_DRIFT_ROWS toward its ideal y.
-    // x and width always use the actual margin at the chosen row (no text overlap).
-    for placement in placements.iter_mut() {
-        let prev = match prev_placements.iter().find(|p| p.kind == placement.kind) {
-            Some(p) => p,
-            None => continue, // New widget — no damping needed
-        };
-
-        // Only dampen if the widget stayed on the same side
-        if prev.side != placement.side {
-            continue;
-        }
-
-        let prev_row = prev.rect.y;
-        let ideal_row = placement.rect.y;
-        if prev_row == ideal_row {
-            continue;
-        }
-
-        // Move at most MAX_DRIFT_ROWS toward the ideal position
-        let delta = ideal_row as i32 - prev_row as i32;
-        let clamped_delta = delta.clamp(-(MAX_DRIFT_ROWS as i32), MAX_DRIFT_ROWS as i32);
-        let dampened_y = (prev_row as i32 + clamped_delta).max(messages_area.y as i32) as u16;
-
-        // Validate the dampened position: check margin has enough width
-        let dampened_row_start = dampened_y.saturating_sub(messages_area.y) as usize;
-        let dampened_row_end = dampened_row_start + placement.rect.height as usize;
-
-        let widths = match placement.side {
-            Side::Right => &margins.right_widths,
-            Side::Left => &margins.left_widths,
-        };
-
-        let fits = dampened_row_end <= widths.len()
-            && (dampened_row_start..dampened_row_end).all(|row| widths[row] >= MIN_WIDGET_WIDTH);
-
-        if !fits {
-            continue; // Can't use dampened position — keep the ideal
-        }
-
-        // Recompute x and width for the dampened row range
-        let actual_min_width = widths[dampened_row_start..dampened_row_end]
-            .iter()
-            .copied()
-            .min()
-            .unwrap_or(0);
-        let use_width = actual_min_width.min(MAX_WIDGET_WIDTH);
-
-        let x = if let Some(ms) = margin_spaces.iter().find(|m| m.side == placement.side) {
-            match placement.side {
-                Side::Right => ms.x_offset.saturating_sub(actual_min_width),
-                Side::Left => ms.x_offset,
-            }
-        } else {
-            placement.rect.x
-        };
-
-        placement.rect = Rect::new(x, dampened_y, use_width, placement.rect.height);
     }
 
     state.placements = placements.clone();
