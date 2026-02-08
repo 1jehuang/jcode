@@ -319,6 +319,22 @@ impl TuiState for BenchState {
     fn diagram_mode(&self) -> jcode::config::DiagramDisplayMode {
         jcode::config::DiagramDisplayMode::Pinned
     }
+
+    fn diagram_focus(&self) -> bool {
+        false
+    }
+
+    fn diagram_index(&self) -> usize {
+        0
+    }
+
+    fn diagram_scroll(&self) -> (i32, i32) {
+        (0, 0)
+    }
+
+    fn diagram_pane_ratio(&self) -> u8 {
+        40
+    }
 }
 
 fn make_text(len: usize) -> String {
