@@ -1303,10 +1303,49 @@ impl TuiState for ClientApp {
             }
         });
 
+        // Gather memory info (read from local disk, same as server)
+        let memory_info = {
+            use crate::memory::MemoryManager;
+
+            let manager = MemoryManager::new();
+            let project_graph = manager.load_project_graph().ok();
+            let global_graph = manager.load_global_graph().ok();
+
+            let (project_count, global_count, by_category) = match (project_graph, global_graph) {
+                (Some(p), Some(g)) => {
+                    let project_count = p.memory_count();
+                    let global_count = g.memory_count();
+                    let mut by_category = std::collections::HashMap::new();
+                    for entry in p.memories.values().chain(g.memories.values()) {
+                        *by_category.entry(entry.category.to_string()).or_insert(0) += 1;
+                    }
+                    (project_count, global_count, by_category)
+                }
+                _ => (0, 0, std::collections::HashMap::new()),
+            };
+
+            let total_count = project_count + global_count;
+            let activity = crate::memory::get_activity();
+
+            if total_count > 0 || activity.is_some() {
+                Some(super::info_widget::MemoryInfo {
+                    total_count,
+                    project_count,
+                    global_count,
+                    by_category,
+                    sidecar_available: true,
+                    activity,
+                })
+            } else {
+                None
+            }
+        };
+
         super::info_widget::InfoWidgetData {
             usage_info,
             tokens_per_second,
             auth_method,
+            memory_info,
             upstream_provider: None, // Client mode doesn't have upstream provider info
             ..Default::default()
         }
