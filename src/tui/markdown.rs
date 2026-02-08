@@ -49,6 +49,28 @@ struct MarkdownDebugState {
 static MARKDOWN_DEBUG: LazyLock<Mutex<MarkdownDebugState>> =
     LazyLock::new(|| Mutex::new(MarkdownDebugState::default()));
 
+static DIAGRAM_MODE_OVERRIDE: LazyLock<Mutex<Option<DiagramDisplayMode>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+pub fn set_diagram_mode_override(mode: Option<DiagramDisplayMode>) {
+    if let Ok(mut override_mode) = DIAGRAM_MODE_OVERRIDE.lock() {
+        *override_mode = mode;
+    }
+}
+
+pub fn get_diagram_mode_override() -> Option<DiagramDisplayMode> {
+    DIAGRAM_MODE_OVERRIDE.lock().ok().and_then(|mode| *mode)
+}
+
+fn effective_diagram_mode() -> DiagramDisplayMode {
+    if let Ok(mode) = DIAGRAM_MODE_OVERRIDE.lock() {
+        if let Some(override_mode) = *mode {
+            return override_mode;
+        }
+    }
+    config().display.diagram_mode
+}
+
 struct HighlightCache {
     entries: HashMap<u64, Vec<Line<'static>>>,
 }
@@ -249,7 +271,7 @@ const HEADING_COLOR: Color = Color::Rgb(200, 155, 75); // Darker amber for #### 
 const DIM_COLOR: Color = Color::Rgb(100, 100, 100);
 
 fn diagram_side_only() -> bool {
-    matches!(config().display.diagram_mode, DiagramDisplayMode::Pinned)
+    matches!(effective_diagram_mode(), DiagramDisplayMode::Pinned)
 }
 
 fn mermaid_sidebar_placeholder(text: &str) -> Line<'static> {

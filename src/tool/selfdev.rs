@@ -437,6 +437,8 @@ Unnamespaced commands default to `server:`.
 | `client:enable` | Enable visual debug capture |
 | `client:disable` | Disable visual debug capture |
 | `client:status` | Client debug status |
+| `client:scroll-test[:<json>]` | Run offscreen scroll+diagram test |
+| `client:scroll-suite[:<json>]` | Run scroll+diagram test suite |
 
 ### Tester Commands (spawn test instances)
 | Command | Description |
@@ -447,6 +449,8 @@ Unnamespaced commands default to `server:`.
 | `tester:<id>:frame` | Get frame from tester |
 | `tester:<id>:state` | Get tester state |
 | `tester:<id>:message:<text>` | Send message to tester |
+| `tester:<id>:scroll-test[:<json>]` | Run offscreen scroll+diagram test |
+| `tester:<id>:scroll-suite[:<json>]` | Run scroll+diagram test suite |
 | `tester:<id>:stop` | Stop tester |
 
 Use the `debug_socket` tool to execute these commands directly."#
