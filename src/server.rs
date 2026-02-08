@@ -1006,6 +1006,9 @@ impl Server {
                                 }
                                 continue;
                             }
+                        } else {
+                            // No coordinator → sessions are independent, no cross-sync
+                            continue;
                         }
 
                         // Record the latest plan for this swarm
