@@ -8952,15 +8952,15 @@ impl super::TuiState for App {
             use crate::memory::MemoryManager;
 
             let manager = MemoryManager::new();
-            let project = manager.load_project().ok();
-            let global = manager.load_global().ok();
+            let project_graph = manager.load_project_graph().ok();
+            let global_graph = manager.load_global_graph().ok();
 
-            let (project_count, global_count, by_category) = match (project, global) {
+            let (project_count, global_count, by_category) = match (project_graph, global_graph) {
                 (Some(p), Some(g)) => {
-                    let project_count = p.entries.len();
-                    let global_count = g.entries.len();
+                    let project_count = p.memory_count();
+                    let global_count = g.memory_count();
                     let mut by_category = std::collections::HashMap::new();
-                    for entry in p.entries.iter().chain(g.entries.iter()) {
+                    for entry in p.memories.values().chain(g.memories.values()) {
                         *by_category.entry(entry.category.to_string()).or_insert(0) += 1;
                     }
                     (project_count, global_count, by_category)
