@@ -493,15 +493,16 @@ pub fn debug_test_scroll(content: Option<&str>) -> ScrollTestResult {
         let image_bottom = y_offset + image_height as i32;
 
         // Check if any part is visible
-        let visible_top = image_top.max(0) as u16;
-        let visible_bottom = (image_bottom.min(term_height as i32)) as u16;
+        let visible_top_i32 = image_top.max(0);
+        let visible_bottom_i32 = image_bottom.min(term_height as i32);
 
-        let visible = visible_top < visible_bottom && visible_bottom > 0;
+        let visible = visible_top_i32 < visible_bottom_i32;
         let visible_rows = if visible {
-            visible_bottom - visible_top
+            (visible_bottom_i32 - visible_top_i32) as u16
         } else {
             0
         };
+        let visible_top = visible_top_i32 as u16;
 
         let mut frame_info = ScrollFrameInfo {
             frame: frame_idx,
@@ -977,8 +978,15 @@ pub fn render_image_widget(
     centered: bool,
     crop_top: bool,
 ) -> u16 {
+    let buf_area = *buf.area();
+    let area = area.intersection(buf_area);
+
+    if area.width == 0 || area.height == 0 {
+        return 0;
+    }
+
     // Skip if area is too small (need room for border + image)
-    if area.width <= BORDER_WIDTH || area.height == 0 {
+    if area.width <= BORDER_WIDTH {
         return 0;
     }
 
@@ -1106,7 +1114,10 @@ pub fn render_image_widget(
 
     // Render failed - clear the area to avoid showing stale content
     use ratatui::widgets::Clear;
-    Clear.render(area, buf);
+    let clear_area = area.intersection(buf_area);
+    if clear_area.width > 0 && clear_area.height > 0 {
+        Clear.render(clear_area, buf);
+    }
 
     0
 }
@@ -1121,7 +1132,11 @@ pub fn clear_image_area(area: Rect, buf: &mut Buffer) {
 
     // Use ratatui's Clear widget
     use ratatui::widgets::Clear;
-    Clear.render(area, buf);
+    let clamped = area.intersection(*buf.area());
+    if clamped.width == 0 || clamped.height == 0 {
+        return;
+    }
+    Clear.render(clamped, buf);
 }
 
 /// Invalidate last render state for a hash (call when content changes)
