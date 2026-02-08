@@ -864,7 +864,23 @@ impl App {
                     // Check the target's mtime
                     if let Ok(metadata) = std::fs::metadata(&link_target) {
                         if let Ok(target_mtime) = metadata.modified() {
-                            return target_mtime > startup_mtime;
+                            if target_mtime > startup_mtime {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check canary binary - in self-dev mode, the server may have reloaded
+        // with a newer canary while this client is still running an older binary
+        if let Ok(canary) = crate::build::canary_binary_path() {
+            if canary.exists() {
+                if let Ok(metadata) = std::fs::metadata(&canary) {
+                    if let Ok(canary_mtime) = metadata.modified() {
+                        if canary_mtime > startup_mtime {
+                            return true;
                         }
                     }
                 }
