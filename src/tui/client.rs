@@ -1345,4 +1345,12 @@ impl TuiState for ClientApp {
     fn diagram_pane_ratio(&self) -> u8 {
         40
     }
+
+    fn diagram_pane_enabled(&self) -> bool {
+        true
+    }
+
+    fn diagram_zoom(&self) -> u8 {
+        100
+    }
 }

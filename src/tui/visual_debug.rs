@@ -191,6 +191,8 @@ pub struct StateSnapshot {
     pub diagram_scroll_x: i32,
     pub diagram_scroll_y: i32,
     pub diagram_pane_ratio: u8,
+    pub diagram_pane_enabled: bool,
+    pub diagram_zoom: u8,
 }
 
 /// Actual rendered text content
