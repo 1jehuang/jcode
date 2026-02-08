@@ -34,7 +34,10 @@ fn send_request(request: &Value) -> Result<Value> {
 
 fn check_error(response: &Value) -> Option<String> {
     if response.get("type").and_then(|t| t.as_str()) == Some("error") {
-        response.get("message").and_then(|m| m.as_str()).map(|s| s.to_string())
+        response
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(|s| s.to_string())
     } else {
         None
     }
