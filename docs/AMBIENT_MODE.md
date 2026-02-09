@@ -138,9 +138,265 @@ sequenceDiagram
     AMB->>CB: Execute proactive tasks
     AMB->>MEM: Store new memories from findings
 
-    AMB->>Q: schedule_ambient(next_wake, context)
-    AMB->>SYS: Done (report results for widget)
+    AMB->>AMB: end_ambient_cycle(summary, schedule)
+    AMB->>SYS: Done (summary → widget + email)
 ```
+
+---
+
+## Ambient Agent Tools
+
+The ambient agent has access to a subset of jcode tools plus ambient-specific tools.
+
+### `end_ambient_cycle` (required)
+
+Every ambient cycle **must** end with this tool call. The system uses the summary for the notification email and the info widget.
+
+```rust
+// Tool: end_ambient_cycle
+{
+    "summary": "Merged 3 duplicate memories, pruned 2 stale facts,
+                extracted memories from crashed session jcode-red-fox-1234",
+    "memories_modified": 8,
+    "compactions": 2,
+    "proactive_work": null,
+    "next_schedule": {
+        "wake_in_minutes": 25,
+        "context": "Verify 4 remaining stale facts"
+    }
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `summary` | yes | Human-readable summary of what was done (goes into email/widget) |
+| `memories_modified` | yes | Count of memories created/merged/pruned/updated |
+| `compactions` | yes | Number of context compactions during this cycle |
+| `proactive_work` | no | Description of proactive code changes, if any |
+| `next_schedule` | no | When to wake next + context (falls back to system default if omitted) |
+
+### `schedule_ambient`
+
+Can also be called mid-cycle to queue future work:
+
+```rust
+// Tool: schedule_ambient
+{
+    "wake_in_minutes": 15,
+    "context": "Check if CI passed for auth refactor PR",
+    "priority": "normal"
+}
+```
+
+### `todos`
+
+The agent should use a todos tool to plan its cycle. This provides:
+- Visibility into what the agent planned vs what it actually did
+- If the cycle is interrupted, we know what's left
+- Structure for the agent's reasoning
+
+### `request_permission`
+
+From the [Safety System](./SAFETY_SYSTEM.md). Used for any Tier 2 action.
+
+---
+
+## Handling Unexpected Stops
+
+The model may stop unexpectedly (output length limit, API error, random stop). The system handles this:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Running: Cycle started
+
+    Running --> Stopped: Model output ends
+
+    Stopped --> CheckTool{Called end_ambient_cycle?}
+
+    CheckTool --> Complete: Yes → normal completion
+    CheckTool --> Continuation: No → send continuation message
+
+    Continuation --> Running: Model continues work
+    Continuation --> Stopped: Model stops again
+
+    Stopped --> ForcedEnd: Second stop without end_ambient_cycle
+    ForcedEnd --> Incomplete: Generate partial transcript,\nschedule default wake
+
+    Complete --> [*]
+    Incomplete --> [*]
+```
+
+**Continuation message** (injected as user message):
+
+```
+You stopped unexpectedly without calling end_ambient_cycle.
+If you are done with your work, call end_ambient_cycle with a
+summary of what you accomplished and schedule your next wake.
+If you are not done, continue what you were doing.
+```
+
+**If no `end_ambient_cycle` is called after two attempts:**
+- System generates a partial transcript marked as `incomplete`
+- Compaction count is pulled from system metrics
+- Default wake interval is scheduled
+- Warning logged for debugging
+
+**If no `schedule_ambient` or `next_schedule` in `end_ambient_cycle`:**
+- System schedules a default wake at `max_interval_minutes` from config
+- Warning logged — the agent should always schedule its next wake
+
+---
+
+## System Prompt
+
+The ambient agent's system prompt is built dynamically each cycle with real data. The prompt gives the agent information to reason with, not rigid instructions for how to think.
+
+```
+You are the ambient agent for jcode. You operate autonomously without
+user prompting. Your job is to maintain and improve the user's
+development environment.
+
+## Current State
+- Last ambient cycle: {timestamp} ({time_ago})
+- Machine was off/idle since: {if applicable}
+- Active user sessions: {count, or "none"}
+- Cycle budget: ~{estimated_max_tokens} tokens
+
+## Scheduled Queue
+{queued items with context, or "empty — do general ambient work"}
+
+## Recent Sessions (since last cycle)
+{for each session:
+  - id, status (closed/crashed/active), duration, topic summary
+  - extraction status (extracted/missed/partial)
+}
+
+## Memory Graph Health
+- Total memories: {count} ({active} active, {inactive} inactive)
+- Memories with confidence < 0.1: {count}
+- Unresolved contradictions: {count}
+- Memories without embeddings: {count}
+- Duplicate candidates (similarity > 0.95): {count}
+- Last consolidation: {timestamp}
+
+## User Feedback History
+{recent memories about ambient approval/rejection patterns}
+
+## Resource Budget
+- Provider: {name}
+- Tokens remaining in window: {count}
+- Window resets: {timestamp}
+- User usage rate: {tokens/min average}
+- Budget for this cycle: stay under {limit} tokens
+
+## Instructions
+
+Start by using the todos tool to plan what you'll do this cycle.
+
+Priority order:
+1. Execute any scheduled queue items first.
+2. Garden the memory graph — consolidate duplicates, resolve
+   contradictions, prune dead memories, verify stale facts,
+   extract from missed sessions.
+3. Scout for proactive work (only if enabled and past cold start) —
+   look at recent sessions and git history to identify useful work
+   the user would appreciate.
+
+For gardening: focus on highest-value maintenance first. Duplicates
+and contradictions before pruning. Verify stale facts only if you
+have budget left.
+
+For proactive work: be conservative. A bad surprise is worse than
+no surprise. Check the user feedback memories — if they've rejected
+similar work before, don't do it. Code changes must go on a worktree
+branch with a PR via request_permission.
+
+When done, you MUST call end_ambient_cycle with a summary of
+everything you did, including compaction count. Always schedule
+your next wake time with context for what you plan to do next.
+```
+
+---
+
+## Usage Calculation
+
+### Tracking
+
+Every API call (user or ambient) is logged:
+
+```rust
+struct UsageRecord {
+    timestamp: DateTime<Utc>,
+    source: UsageSource,      // User | Ambient
+    tokens_input: u32,
+    tokens_output: u32,
+    provider: String,
+}
+```
+
+### Rate Limit Discovery
+
+Rate limits are learned from provider response headers:
+
+```
+x-ratelimit-limit-requests: 50
+x-ratelimit-remaining-requests: 42
+x-ratelimit-limit-tokens: 100000
+x-ratelimit-remaining-tokens: 85000
+x-ratelimit-reset-requests: 2026-02-08T15:00:00Z
+```
+
+When headers aren't available, fall back to conservative defaults and adjust based on whether rate limit errors occur.
+
+### Adaptive Interval Algorithm
+
+```
+# Known from headers or defaults
+window_remaining = reset_time - now
+tokens_remaining = ratelimit_remaining_tokens
+requests_remaining = ratelimit_remaining_requests
+
+# Estimate user consumption from rolling history
+user_rate = rolling_average(
+    usage_log.filter(source=User, last_hour),
+    per_minute
+)
+
+# Project user usage for rest of window
+user_projected = user_rate * window_remaining
+
+# Reserve 20% buffer so user never feels throttled
+ambient_budget = (tokens_remaining - user_projected) * 0.8
+
+# Estimate cost per ambient cycle from recent cycles
+tokens_per_cycle = rolling_average(
+    recent_ambient_cycles.last(5).tokens_used
+)
+
+# How many cycles fit in remaining budget?
+cycles_available = ambient_budget / tokens_per_cycle
+
+# Spread evenly across remaining window
+if cycles_available > 0:
+    interval = window_remaining / cycles_available
+else:
+    interval = window_remaining  # wait for reset
+
+# Clamp to configured bounds
+interval = clamp(interval, min_interval, max_interval)
+```
+
+### Behavioral Rules
+
+| Condition | Behavior |
+|-----------|----------|
+| User is active in a session | Pause ambient (or multiply interval by 3-5x) |
+| User has been idle for hours | Run cycles more frequently |
+| Hit a rate limit | Exponential backoff (double interval each time) |
+| No rate limit errors for N cycles | Gradually decrease interval |
+| No headers available | Start with 30min interval, adjust from errors |
+| Approaching end of window with budget left | Squeeze in extra cycles |
+| Over 80% of budget consumed | Fall back to max_interval |
 
 ---
 
