@@ -68,7 +68,8 @@ impl NotificationDispatcher {
             "Ambient cycle: {} memories, {} compactions",
             transcript.memories_modified, transcript.compactions
         );
-        let body = format_cycle_body(transcript);
+        let safe_body = format_cycle_body_safe(transcript);
+        let detailed_body = format_cycle_body_detailed(transcript);
 
         let priority = if transcript.pending_permissions > 0 {
             Priority::High
@@ -76,34 +77,39 @@ impl NotificationDispatcher {
             Priority::Default
         };
 
-        self.send_all(&title, &body, priority);
+        self.send_all(&title, &safe_body, &detailed_body, priority);
     }
 
     /// Send a permission request notification (high priority).
-    ///
-    /// Only sends the action type, not the description — descriptions may
-    /// contain sensitive file paths, code snippets, or secrets.
-    pub fn dispatch_permission_request(&self, action: &str, _description: &str, _request_id: &str) {
+    pub fn dispatch_permission_request(&self, action: &str, description: &str, request_id: &str) {
         let title = format!("jcode: permission needed ({})", action);
-        let body = "An ambient action needs your approval. Open jcode to review.".to_string();
+        let safe_body =
+            "An ambient action needs your approval. Open jcode to review.".to_string();
+        let detailed_body = format!(
+            "Action: {}\n{}\n\nRequest ID: {}\nReview in jcode to approve or deny.",
+            action, description, request_id
+        );
 
-        self.send_all(&title, &body, Priority::High);
+        self.send_all(&title, &safe_body, &detailed_body, Priority::High);
     }
 
     /// Send through all configured channels (fire-and-forget).
-    fn send_all(&self, title: &str, body: &str, priority: Priority) {
+    ///
+    /// `safe_body` is sanitized (no secrets) — used for ntfy (potentially public).
+    /// `detailed_body` includes full info — used for email and desktop (private channels).
+    fn send_all(&self, title: &str, safe_body: &str, detailed_body: &str, priority: Priority) {
         // Guard: only dispatch if inside a tokio runtime
         if tokio::runtime::Handle::try_current().is_err() {
             logging::info("Notification skipped: no tokio runtime");
             return;
         }
 
-        // ntfy.sh
+        // ntfy.sh — uses SAFE body (may be publicly readable)
         if let Some(ref topic) = self.config.ntfy_topic {
             let client = self.client.clone();
             let url = format!("{}/{}", self.config.ntfy_server, topic);
             let title = title.to_string();
-            let body = body.to_string();
+            let body = safe_body.to_string();
             let priority = priority;
             tokio::spawn(async move {
                 if let Err(e) = send_ntfy(&client, &url, &title, &body, priority).await {
@@ -112,10 +118,10 @@ impl NotificationDispatcher {
             });
         }
 
-        // Desktop notification (notify-send)
+        // Desktop notification — uses DETAILED body (local machine, private)
         if self.config.desktop_notifications {
             let title = title.to_string();
-            let body = body.to_string();
+            let body = detailed_body.to_string();
             let urgency = match priority {
                 Priority::Default => "normal",
                 Priority::High | Priority::Urgent => "critical",
@@ -125,7 +131,7 @@ impl NotificationDispatcher {
             });
         }
 
-        // Email
+        // Email — uses DETAILED body (sent to your own address, private)
         if self.config.email_enabled {
             if let (Some(ref to), Some(ref host), Some(ref from)) = (
                 &self.config.email_to,
@@ -138,7 +144,7 @@ impl NotificationDispatcher {
                 let port = self.config.email_smtp_port;
                 let password = self.config.email_password.clone();
                 let title = title.to_string();
-                let body = body.to_string();
+                let body = detailed_body.to_string();
                 tokio::spawn(async move {
                     if let Err(e) = send_email(&host, port, &from, &to, password.as_deref(), &title, &body).await {
                         logging::error(&format!("Email notification failed: {}", e));
@@ -254,11 +260,9 @@ async fn send_email(
 // Formatting helpers
 // ---------------------------------------------------------------------------
 
-fn format_cycle_body(transcript: &AmbientTranscript) -> String {
-    // NOTE: Do NOT include the model-generated summary here.
-    // Summaries may contain file contents, API keys, env vars, or other
-    // sensitive data from the codebase. Notifications go over the network
-    // (ntfy.sh, email) and may be readable by third parties.
+/// Sanitized body for potentially public channels (ntfy.sh).
+/// Only includes counts and status — no model-generated text.
+fn format_cycle_body_safe(transcript: &AmbientTranscript) -> String {
     let mut lines = Vec::new();
 
     lines.push(format!("Status: {:?}", transcript.status));
@@ -276,12 +280,41 @@ fn format_cycle_body(transcript: &AmbientTranscript) -> String {
     lines.join("\n")
 }
 
+/// Full detailed body for private channels (email, desktop).
+/// Includes the model-generated summary and provider info.
+fn format_cycle_body_detailed(transcript: &AmbientTranscript) -> String {
+    let mut lines = Vec::new();
+
+    if let Some(ref summary) = transcript.summary {
+        lines.push(summary.clone());
+        lines.push(String::new());
+    }
+
+    lines.push(format!("Status: {:?}", transcript.status));
+    lines.push(format!(
+        "Provider: {} ({})",
+        transcript.provider, transcript.model
+    ));
+    lines.push(format!("Memories modified: {}", transcript.memories_modified));
+    lines.push(format!("Compactions: {}", transcript.compactions));
+
+    if transcript.pending_permissions > 0 {
+        lines.push(String::new());
+        lines.push(format!(
+            "{} permission request(s) pending — review in jcode",
+            transcript.pending_permissions
+        ));
+    }
+
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_format_cycle_body() {
+    fn test_format_cycle_body_safe() {
         let transcript = AmbientTranscript {
             session_id: "test_001".to_string(),
             started_at: chrono::Utc::now(),
@@ -296,13 +329,36 @@ mod tests {
             memories_modified: 3,
         };
 
-        let body = format_cycle_body(&transcript);
+        let body = format_cycle_body_safe(&transcript);
         assert!(body.contains("Memories modified: 3"));
         assert!(body.contains("Compactions: 1"));
         assert!(body.contains("Check jcode for full details"));
-        // Summary should NOT be included (security: may contain secrets)
+        // Safe body must NOT include model-generated summary
         assert!(!body.contains("Cleaned up"));
         assert!(!body.contains("permission"));
+    }
+
+    #[test]
+    fn test_format_cycle_body_detailed() {
+        let transcript = AmbientTranscript {
+            session_id: "test_001".to_string(),
+            started_at: chrono::Utc::now(),
+            ended_at: Some(chrono::Utc::now()),
+            status: crate::safety::TranscriptStatus::Complete,
+            provider: "claude".to_string(),
+            model: "claude-sonnet-4".to_string(),
+            actions: Vec::new(),
+            pending_permissions: 0,
+            summary: Some("Cleaned up 3 stale memories.".to_string()),
+            compactions: 1,
+            memories_modified: 3,
+        };
+
+        let body = format_cycle_body_detailed(&transcript);
+        // Detailed body SHOULD include the summary
+        assert!(body.contains("Cleaned up 3 stale memories."));
+        assert!(body.contains("Memories modified: 3"));
+        assert!(body.contains("Provider: claude"));
     }
 
     #[test]
@@ -321,9 +377,12 @@ mod tests {
             memories_modified: 0,
         };
 
-        let body = format_cycle_body(&transcript);
-        assert!(body.contains("2 permission request(s) pending"));
-        assert!(body.contains("Check jcode for full details"));
+        let safe = format_cycle_body_safe(&transcript);
+        assert!(safe.contains("2 permission request(s) pending"));
+        assert!(safe.contains("Check jcode for full details"));
+
+        let detailed = format_cycle_body_detailed(&transcript);
+        assert!(detailed.contains("2 permission request(s) pending"));
     }
 
     #[test]
