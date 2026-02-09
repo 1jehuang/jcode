@@ -80,12 +80,12 @@ impl NotificationDispatcher {
     }
 
     /// Send a permission request notification (high priority).
-    pub fn dispatch_permission_request(&self, action: &str, description: &str, request_id: &str) {
-        let title = format!("Permission needed: {}", action);
-        let body = format!(
-            "{}\n\nRequest ID: {}\nReview pending permissions in jcode.",
-            description, request_id
-        );
+    ///
+    /// Only sends the action type, not the description — descriptions may
+    /// contain sensitive file paths, code snippets, or secrets.
+    pub fn dispatch_permission_request(&self, action: &str, _description: &str, _request_id: &str) {
+        let title = format!("jcode: permission needed ({})", action);
+        let body = "An ambient action needs your approval. Open jcode to review.".to_string();
 
         self.send_all(&title, &body, Priority::High);
     }
@@ -255,26 +255,24 @@ async fn send_email(
 // ---------------------------------------------------------------------------
 
 fn format_cycle_body(transcript: &AmbientTranscript) -> String {
+    // NOTE: Do NOT include the model-generated summary here.
+    // Summaries may contain file contents, API keys, env vars, or other
+    // sensitive data from the codebase. Notifications go over the network
+    // (ntfy.sh, email) and may be readable by third parties.
     let mut lines = Vec::new();
 
-    if let Some(ref summary) = transcript.summary {
-        lines.push(summary.clone());
-        lines.push(String::new());
-    }
-
     lines.push(format!("Status: {:?}", transcript.status));
-    lines.push(format!("Provider: {} ({})", transcript.provider, transcript.model));
     lines.push(format!("Memories modified: {}", transcript.memories_modified));
     lines.push(format!("Compactions: {}", transcript.compactions));
 
     if transcript.pending_permissions > 0 {
-        lines.push(String::new());
         lines.push(format!(
-            "⚠ {} permission request(s) pending — review in jcode",
+            "{} permission request(s) pending",
             transcript.pending_permissions
         ));
     }
 
+    lines.push("Check jcode for full details.".to_string());
     lines.join("\n")
 }
 
@@ -299,9 +297,11 @@ mod tests {
         };
 
         let body = format_cycle_body(&transcript);
-        assert!(body.contains("Cleaned up 3 stale memories."));
         assert!(body.contains("Memories modified: 3"));
         assert!(body.contains("Compactions: 1"));
+        assert!(body.contains("Check jcode for full details"));
+        // Summary should NOT be included (security: may contain secrets)
+        assert!(!body.contains("Cleaned up"));
         assert!(!body.contains("permission"));
     }
 
@@ -323,6 +323,7 @@ mod tests {
 
         let body = format_cycle_body(&transcript);
         assert!(body.contains("2 permission request(s) pending"));
+        assert!(body.contains("Check jcode for full details"));
     }
 
     #[test]
