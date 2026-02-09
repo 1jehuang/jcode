@@ -562,24 +562,118 @@ work_branch_prefix = "ambient/"
 
 ---
 
+## Context Window Management
+
+Ambient mode uses the same compaction strategy as interactive sessions: **compact at 80% context window usage.** No special handling needed — if an ambient cycle is analyzing a large memory graph or many sessions, it compacts and continues.
+
+---
+
+## User Feedback via Memory
+
+Ambient learns from the user's approval/rejection decisions through the memory system itself. No separate feedback mechanism is needed.
+
+- **User rejects a proactive change** → ambient stores a memory: *"User rejected ambient PR to refactor auth tests — prefers not to have tests auto-modified"*
+- **User approves** → memory: *"User approved ambient fixing typos in docs"*
+- **Pattern emerges** → these memories get reinforced over time, naturally influencing what ambient prioritizes
+
+This works because ambient already scouts memories before deciding what to do. Its own approval/rejection history becomes part of the context it reasons about, and these memories consolidate, decay, and reinforce like everything else in the graph.
+
+---
+
+## Crash Safety & Recovery
+
+Ambient must assume the process can die at any point (battery death, crash, OOM, etc.) and design so nothing is lost or corrupted.
+
+### Principles
+
+- **Atomic writes** — memory graph and state files are written to a temp file first, then atomically renamed. A crash mid-write doesn't corrupt existing data.
+- **Incremental checkpointing** — if ambient is halfway through gardening 50 memories and crashes, it shouldn't redo the ones already finished. A "last processed" marker tracks progress within a cycle.
+- **Persistent queue survives crashes** — scheduled queue and permission requests are on disk, not in memory. They survive restarts.
+- **Interrupted transcripts** — if a cycle doesn't complete, the transcript is marked as `interrupted` rather than `completed`, so the user knows it didn't finish.
+
+### Recovery on Restart
+
+When ambient starts after an unexpected shutdown:
+
+1. **Don't replay missed cycles** — don't try to run every cycle that was scheduled while the machine was off. Just run one cycle that examines current state.
+2. **Check time since last run** — if the gap is large (hours/days), there may be a backlog of crashed sessions to extract, stale memories to verify, etc. The agent handles this naturally since it always checks current state rather than diffing from last run.
+3. **Expired scheduled items** — still execute them. The context the agent stored is still valid, the work is just late.
+4. **Resume, don't restart** — if a cycle was interrupted mid-way, check the checkpoint and continue from where it left off rather than starting over.
+
+### State Diagram
+
+```mermaid
+stateDiagram-v2
+    [*] --> Starting: jcode starts
+    Starting --> CheckLastRun: ambient enabled?
+
+    CheckLastRun --> NormalCycle: last run recent
+    CheckLastRun --> CatchUpCycle: last run stale (hours/days)
+    CheckLastRun --> ResumeCycle: interrupted cycle found
+
+    NormalCycle --> Sleeping: cycle complete
+    CatchUpCycle --> Sleeping: cycle complete
+    ResumeCycle --> Sleeping: cycle complete
+
+    Sleeping --> NormalCycle: timer/event fires
+    Sleeping --> [*]: machine off / crash
+
+    note right of CatchUpCycle: Single cycle examining\ncurrent state, not\nreplaying missed cycles
+
+    note right of ResumeCycle: Continue from\ncheckpoint marker
+```
+
+---
+
+## Cold Start
+
+First time ambient runs, there's no usage history, no patterns, no feedback memories. Bootstrapping strategy:
+
+- **Start conservative** — garden-only (memory maintenance), no proactive work until ambient has enough context
+- **Build usage baseline** — first few cycles just observe and track usage patterns for the adaptive scheduler
+- **Proactive work unlocks gradually** — after N successful garden cycles with user-approved results, ambient can start scouting for proactive work
+- **Or user opts in immediately** — config option to skip the warm-up if the user trusts it
+
+---
+
+## Per-Project Configuration
+
+Some projects may need different ambient behavior (e.g. sensitive work projects, personal repos with different preferences):
+
+```toml
+# In project-level .jcode/config.toml
+[ambient]
+# Disable ambient entirely for this project
+enabled = false
+
+# Or restrict to garden-only (no proactive code changes)
+proactive_work = false
+```
+
+---
+
+## Multi-Machine (Deferred)
+
+When ambient runs on multiple machines (e.g. laptop + desktop), shared state could conflict: double-processing sessions, conflicting memory edits, overlapping proactive work.
+
+This is a distributed systems problem that will be addressed once ambient is stable on a single machine. Potential approaches:
+- Machine ID on memory writes for conflict resolution
+- Lock file or leader election for exclusive operations
+- Git worktrees are already isolated, so proactive work is naturally conflict-free
+
+---
+
 ## Implementation Phases
 
 ### Phase 1: Foundation
 - [ ] Ambient agent loop (spawn, run, sleep)
 - [ ] Single-instance guard
 - [ ] Basic scheduling (fixed interval with max ceiling)
-- [ ] Provider selection chain (OpenAI → OpenRouter → Anthropic → disabled)
+- [ ] Provider selection chain (OpenAI OAuth → Anthropic OAuth → pay-per-token opt-in → disabled)
 - [ ] Configuration (`[ambient]` section in config)
 - [ ] Storage layout
 
-### Phase 2: Memory Consolidation — Sidecar (Layer 1)
-- [ ] Duplicate detection in sidecar (on memories already retrieved)
-- [ ] Contradiction detection in sidecar
-- [ ] Reinforce instead of duplicate
-- [ ] Reinforcement provenance (session_id + message_index breadcrumbs)
-- [ ] Runs after returning results to main agent (zero latency impact)
-
-### Phase 3: Memory Consolidation — Garden (Layer 2)
+### Phase 2: Memory Consolidation — Garden
 - [ ] Full graph-wide dedup scan
 - [ ] Fact verification against codebase
 - [ ] Retroactive session extraction (crashed/missed sessions)
@@ -588,7 +682,7 @@ work_branch_prefix = "ambient/"
 - [ ] Embedding backfill
 - [ ] Contradiction resolution
 
-### Phase 4: Scheduling
+### Phase 3: Scheduling
 - [ ] `schedule_ambient` tool for agent self-scheduling
 - [ ] Scheduled queue (persistent, with context)
 - [ ] Adaptive resource calculator
@@ -597,14 +691,14 @@ work_branch_prefix = "ambient/"
 - [ ] Event triggers (session close, crash, git push)
 - [ ] Active session detection → pause/throttle
 
-### Phase 5: Proactive Work
+### Phase 4: Proactive Work
 - [ ] Scout: analyze recent sessions + git history
 - [ ] Infer user priorities from memories
 - [ ] Identify actionable work
 - [ ] Execute on separate branch
 - [ ] Report results
 
-### Phase 6: Info Widget
+### Phase 5: Info Widget
 - [ ] Ambient status display in TUI
 - [ ] Queue preview
 - [ ] Last cycle summary
