@@ -18,6 +18,7 @@ mod memory;
 mod memory_agent;
 mod memory_graph;
 mod message;
+mod notifications;
 mod prompt;
 mod protocol;
 mod provider;
