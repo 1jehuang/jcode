@@ -94,6 +94,29 @@ impl ClientApp {
         self.display_messages_version = self.display_messages_version.wrapping_add(1);
     }
 
+    fn scroll_up(&mut self, amount: usize) {
+        let max_scroll = super::ui::last_max_scroll();
+        if !self.auto_scroll_paused {
+            let current_abs = max_scroll.saturating_sub(self.scroll_offset);
+            self.scroll_offset = current_abs.saturating_sub(amount);
+        } else {
+            self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+        }
+        self.auto_scroll_paused = true;
+    }
+
+    fn scroll_down(&mut self, amount: usize) {
+        if !self.auto_scroll_paused {
+            return;
+        }
+        let max_scroll = super::ui::last_max_scroll();
+        self.scroll_offset = (self.scroll_offset + amount).min(max_scroll);
+        if self.scroll_offset >= max_scroll {
+            self.scroll_offset = 0;
+            self.auto_scroll_paused = false;
+        }
+    }
+
     fn push_display_message(&mut self, message: DisplayMessage) {
         self.display_messages.push(message);
         self.bump_display_messages_version();
@@ -519,19 +542,12 @@ impl ClientApp {
                             }
                             Some(Ok(Event::Mouse(mouse))) => {
                                 use crossterm::event::MouseEventKind;
-                                let max = super::ui::last_max_scroll();
                                 match mouse.kind {
                                     MouseEventKind::ScrollUp => {
-                                        self.scroll_offset = (self.scroll_offset + 3).min(max);
-                                        if self.is_processing {
-                                            self.auto_scroll_paused = true;
-                                        }
+                                        self.scroll_up(3);
                                     }
                                     MouseEventKind::ScrollDown => {
-                                        self.scroll_offset = self.scroll_offset.saturating_sub(3);
-                                        if self.scroll_offset == 0 {
-                                            self.auto_scroll_paused = false;
-                                        }
+                                        self.scroll_down(3);
                                     }
                                     _ => {}
                                 }
@@ -850,17 +866,10 @@ impl ClientApp {
     ) -> Result<()> {
         // Handle configurable scroll keys first (before character input)
         if let Some(amount) = self.scroll_keys.scroll_amount(code.clone(), modifiers) {
-            let max = super::ui::last_max_scroll();
             if amount < 0 {
-                self.scroll_offset = (self.scroll_offset + (-amount) as usize).min(max);
-                if self.is_processing {
-                    self.auto_scroll_paused = true;
-                }
+                self.scroll_up((-amount) as usize);
             } else {
-                self.scroll_offset = self.scroll_offset.saturating_sub(amount as usize);
-                if self.scroll_offset == 0 {
-                    self.auto_scroll_paused = false;
-                }
+                self.scroll_down(amount as usize);
             }
             return Ok(());
         }

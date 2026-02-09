@@ -1389,43 +1389,59 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::ScrollUp => {
-                let max = self.scroll_max_estimate();
-                self.scroll_offset = (self.scroll_offset + 3).min(max);
-                if self.is_processing {
-                    self.auto_scroll_paused = true;
-                }
+                self.scroll_up(3);
             }
             MouseEventKind::ScrollDown => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(3);
-                if self.scroll_offset == 0 {
-                    self.auto_scroll_paused = false;
-                }
+                self.scroll_down(3);
             }
             _ => {}
         }
     }
 
-    fn debug_scroll_up(&mut self, amount: usize) {
-        let max_estimate = self.scroll_max_estimate();
-        self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max_estimate);
-        if self.is_processing {
-            self.auto_scroll_paused = true;
+    fn scroll_up(&mut self, amount: usize) {
+        let max_scroll = super::ui::last_max_scroll();
+        let max = if max_scroll > 0 {
+            max_scroll
+        } else {
+            self.scroll_max_estimate()
+        };
+        if !self.auto_scroll_paused {
+            let current_abs = max.saturating_sub(self.scroll_offset);
+            self.scroll_offset = current_abs.saturating_sub(amount);
+        } else {
+            self.scroll_offset = self.scroll_offset.saturating_sub(amount);
         }
+        self.auto_scroll_paused = true;
     }
 
-    fn debug_scroll_down(&mut self, amount: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
-        if self.scroll_offset == 0 {
+    fn scroll_down(&mut self, amount: usize) {
+        if !self.auto_scroll_paused {
+            return;
+        }
+        let max_scroll = super::ui::last_max_scroll();
+        let max = if max_scroll > 0 {
+            max_scroll
+        } else {
+            self.scroll_max_estimate()
+        };
+        self.scroll_offset = (self.scroll_offset + amount).min(max);
+        if self.scroll_offset >= max {
+            self.scroll_offset = 0;
             self.auto_scroll_paused = false;
         }
     }
 
+    fn debug_scroll_up(&mut self, amount: usize) {
+        self.scroll_up(amount);
+    }
+
+    fn debug_scroll_down(&mut self, amount: usize) {
+        self.scroll_down(amount);
+    }
+
     fn debug_scroll_top(&mut self) {
-        let max_estimate = self.scroll_max_estimate();
-        self.scroll_offset = max_estimate;
-        if self.is_processing {
-            self.auto_scroll_paused = true;
-        }
+        self.scroll_offset = 0;
+        self.auto_scroll_paused = true;
     }
 
     fn debug_scroll_bottom(&mut self) {
@@ -1526,8 +1542,6 @@ impl App {
         let user_scroll = scroll_offset.min(max_scroll);
         let scroll_top = if self.auto_scroll_paused && user_scroll > 0 {
             user_scroll
-        } else if user_scroll > 0 {
-            max_scroll.saturating_sub(user_scroll)
         } else {
             max_scroll
         };
@@ -3576,14 +3590,10 @@ impl App {
                                         .scroll_keys
                                         .scroll_amount(key.code.clone(), key.modifiers)
                                     {
-                                        let max_estimate = self.scroll_max_estimate();
                                         if amount < 0 {
-                                            self.scroll_offset = (self.scroll_offset
-                                                + (-amount) as usize)
-                                                .min(max_estimate);
+                                            self.scroll_up((-amount) as usize);
                                         } else {
-                                            self.scroll_offset =
-                                                self.scroll_offset.saturating_sub(amount as usize);
+                                            self.scroll_down(amount as usize);
                                         }
                                         terminal
                                             .draw(|frame| crate::tui::ui::draw(frame, &self))?;
@@ -4290,13 +4300,10 @@ impl App {
 
         // Handle configurable scroll keys (default: Ctrl+K/J, Alt+U/D for page)
         if let Some(amount) = self.scroll_keys.scroll_amount(code.clone(), modifiers) {
-            let max_estimate = self.scroll_max_estimate();
             if amount < 0 {
-                // Scroll up (increase offset)
-                self.scroll_offset = (self.scroll_offset + (-amount) as usize).min(max_estimate);
+                self.scroll_up((-amount) as usize);
             } else {
-                // Scroll down (decrease offset)
-                self.scroll_offset = self.scroll_offset.saturating_sub(amount as usize);
+                self.scroll_down(amount as usize);
             }
             return Ok(());
         }
@@ -4663,23 +4670,12 @@ impl App {
                 }
             }
             KeyCode::Up | KeyCode::PageUp => {
-                // Scroll up (increase offset from bottom)
-                let max_estimate = self.scroll_max_estimate();
                 let inc = if code == KeyCode::PageUp { 10 } else { 1 };
-                self.scroll_offset = (self.scroll_offset + inc).min(max_estimate);
-                // Pause auto-scroll when user scrolls up during streaming
-                if self.is_processing {
-                    self.auto_scroll_paused = true;
-                }
+                self.scroll_up(inc);
             }
             KeyCode::Down | KeyCode::PageDown => {
-                // Scroll down (decrease offset, 0 = bottom)
                 let dec = if code == KeyCode::PageDown { 10 } else { 1 };
-                self.scroll_offset = self.scroll_offset.saturating_sub(dec);
-                // Resume auto-scroll if scrolled back to bottom
-                if self.scroll_offset == 0 {
-                    self.auto_scroll_paused = false;
-                }
+                self.scroll_down(dec);
             }
             KeyCode::Esc => {
                 if self.is_processing {
@@ -4824,13 +4820,10 @@ impl App {
 
         // Handle configurable scroll keys (default: Ctrl+K/J, Alt+U/D for page)
         if let Some(amount) = self.scroll_keys.scroll_amount(code.clone(), modifiers) {
-            let max_estimate = self.scroll_max_estimate();
             if amount < 0 {
-                // Scroll up (increase offset)
-                self.scroll_offset = (self.scroll_offset + (-amount) as usize).min(max_estimate);
+                self.scroll_up((-amount) as usize);
             } else {
-                // Scroll down (decrease offset)
-                self.scroll_offset = self.scroll_offset.saturating_sub(amount as usize);
+                self.scroll_down(amount as usize);
             }
             return Ok(());
         }
@@ -5018,23 +5011,12 @@ impl App {
                 self.autocomplete();
             }
             KeyCode::Up | KeyCode::PageUp => {
-                // Scroll up (increase offset from bottom)
-                let max_estimate = self.scroll_max_estimate();
                 let inc = if code == KeyCode::PageUp { 10 } else { 1 };
-                self.scroll_offset = (self.scroll_offset + inc).min(max_estimate);
-                // Pause auto-scroll when user scrolls up during streaming
-                if self.is_processing {
-                    self.auto_scroll_paused = true;
-                }
+                self.scroll_up(inc);
             }
             KeyCode::Down | KeyCode::PageDown => {
-                // Scroll down (decrease offset, 0 = bottom)
                 let dec = if code == KeyCode::PageDown { 10 } else { 1 };
-                self.scroll_offset = self.scroll_offset.saturating_sub(dec);
-                // Resume auto-scroll if scrolled back to bottom
-                if self.scroll_offset == 0 {
-                    self.auto_scroll_paused = false;
-                }
+                self.scroll_down(dec);
             }
             KeyCode::Esc => {
                 if self.is_processing {
@@ -10166,48 +10148,68 @@ mod tests {
 
     #[test]
     fn test_scroll_ctrl_k_j_offset() {
-        let (mut app, _terminal) = create_scroll_test_app(100, 30, 1, 20);
+        let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
 
         assert_eq!(app.scroll_offset, 0);
+        assert!(!app.auto_scroll_paused);
 
         let (up_code, up_mods) = scroll_up_key(&app);
         let (down_code, down_mods) = scroll_down_key(&app);
 
-        // Scroll up (increases offset by 3)
+        // Render first so LAST_MAX_SCROLL is populated
+        render_and_snap(&app, &mut terminal);
+
+        // Scroll up (switches to absolute-from-top mode)
         app.handle_key(up_code.clone(), up_mods).unwrap();
-        assert_eq!(app.scroll_offset, 3);
+        assert!(app.auto_scroll_paused);
+        let first_offset = app.scroll_offset;
 
         app.handle_key(up_code.clone(), up_mods).unwrap();
-        assert_eq!(app.scroll_offset, 6);
+        let second_offset = app.scroll_offset;
+        assert!(
+            second_offset < first_offset,
+            "scrolling up should decrease absolute offset (move toward top)"
+        );
 
-        // Scroll down (decreases offset by 3)
+        // Scroll down (increases absolute position = moves toward bottom)
         app.handle_key(down_code.clone(), down_mods).unwrap();
-        assert_eq!(app.scroll_offset, 3);
+        assert_eq!(
+            app.scroll_offset, first_offset,
+            "one scroll down should undo one scroll up"
+        );
 
-        // Back to 0
-        app.handle_key(down_code.clone(), down_mods).unwrap();
+        // Keep scrolling down until back at bottom
+        for _ in 0..10 {
+            app.handle_key(down_code.clone(), down_mods).unwrap();
+            if !app.auto_scroll_paused {
+                break;
+            }
+        }
         assert_eq!(app.scroll_offset, 0);
+        assert!(!app.auto_scroll_paused);
 
-        // Stays at 0 (clamped)
+        // Stays at 0 when already at bottom
         app.handle_key(down_code.clone(), down_mods).unwrap();
         assert_eq!(app.scroll_offset, 0);
     }
 
     #[test]
     fn test_scroll_offset_capped() {
-        let (mut app, _terminal) = create_scroll_test_app(100, 30, 1, 4);
+        let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 4);
 
         let (up_code, up_mods) = scroll_up_key(&app);
+
+        // Render first so LAST_MAX_SCROLL is populated
+        render_and_snap(&app, &mut terminal);
 
         // Spam scroll-up many times
         for _ in 0..500 {
             app.handle_key(up_code.clone(), up_mods).unwrap();
         }
 
-        // Should be capped at max estimate, not 1500
-        let max_estimate = app.display_messages.len() * 100 + app.streaming_text.len();
-        assert!(app.scroll_offset <= max_estimate);
-        assert!(app.scroll_offset > 0);
+        // Should be at 0 (absolute top) after scrolling up enough
+        assert_eq!(app.scroll_offset, 0);
+        assert!(app.auto_scroll_paused);
     }
 
     #[test]
@@ -10235,6 +10237,7 @@ mod tests {
     fn test_scroll_render_scrolled_up() {
         let (mut app, mut terminal) = create_scroll_test_app(80, 25, 1, 8);
         app.scroll_offset = 10;
+        app.auto_scroll_paused = true;
         let text = render_and_snap(&app, &mut terminal);
 
         // ↓ indicator should appear when user has scrolled up
@@ -10250,10 +10253,12 @@ mod tests {
 
         // Render at bottom
         app.scroll_offset = 0;
+        app.auto_scroll_paused = false;
         let text_bottom = render_and_snap(&app, &mut terminal);
 
-        // Render scrolled up
+        // Render scrolled up (absolute line 10 from top)
         app.scroll_offset = 10;
+        app.auto_scroll_paused = true;
         let text_scrolled = render_and_snap(&app, &mut terminal);
 
         assert_ne!(
@@ -10269,6 +10274,7 @@ mod tests {
         // Render at several positions without crashing
         for offset in [0, 5, 10, 20, 50] {
             app.scroll_offset = offset;
+            app.auto_scroll_paused = offset > 0;
             terminal
                 .draw(|f| crate::tui::ui::draw(f, &app))
                 .unwrap_or_else(|e| panic!("draw failed at scroll_offset={}: {}", offset, e));
@@ -10276,6 +10282,7 @@ mod tests {
 
         // Verify at bottom
         app.scroll_offset = 0;
+        app.auto_scroll_paused = false;
         let text_bottom = render_and_snap(&app, &mut terminal);
         assert!(
             text_bottom.contains("diagram"),
@@ -10284,6 +10291,7 @@ mod tests {
 
         // Verify scrolled past first diagram - content should differ
         app.scroll_offset = 20;
+        app.auto_scroll_paused = true;
         let text_scrolled = render_and_snap(&app, &mut terminal);
         assert_ne!(
             text_bottom, text_scrolled,
@@ -10308,6 +10316,7 @@ mod tests {
 
         // Render at scroll_offset=10, verify no panic
         app.scroll_offset = 10;
+        app.auto_scroll_paused = true;
         terminal
             .draw(|f| crate::tui::ui::draw(f, &app))
             .expect("draw at offset=10 failed");
@@ -10327,16 +10336,17 @@ mod tests {
     fn test_scroll_key_then_render() {
         let (mut app, mut terminal) = create_scroll_test_app(80, 25, 1, 15);
 
-        let (up_code, up_mods) = scroll_up_key(&app);
-
-        // Render at bottom
+        // Render at bottom first (populates LAST_MAX_SCROLL)
         let text_before = render_and_snap(&app, &mut terminal);
+
+        let (up_code, up_mods) = scroll_up_key(&app);
 
         // Scroll up three times (9 lines total)
         for _ in 0..3 {
             app.handle_key(up_code.clone(), up_mods).unwrap();
         }
-        assert_eq!(app.scroll_offset, 9);
+        assert!(app.auto_scroll_paused);
+        assert!(app.scroll_offset < crate::tui::ui::last_max_scroll());
 
         // Render again
         let text_after = render_and_snap(&app, &mut terminal);
@@ -10354,27 +10364,31 @@ mod tests {
         let (up_code, up_mods) = scroll_up_key(&app);
         let (down_code, down_mods) = scroll_down_key(&app);
 
-        // Render at bottom before scrolling
+        // Render at bottom before scrolling (populates LAST_MAX_SCROLL)
         let text_original = render_and_snap(&app, &mut terminal);
 
         // Scroll up 3x
         for _ in 0..3 {
             app.handle_key(up_code.clone(), up_mods).unwrap();
         }
-        assert_eq!(app.scroll_offset, 9);
+        assert!(app.auto_scroll_paused);
 
         // Verify content shifted
         let text_scrolled = render_and_snap(&app, &mut terminal);
         assert_ne!(text_original, text_scrolled, "scrolled view should differ");
 
-        // Scroll back down 3x
-        for _ in 0..3 {
+        // Scroll back down until at bottom
+        for _ in 0..20 {
             app.handle_key(down_code.clone(), down_mods).unwrap();
+            if !app.auto_scroll_paused {
+                break;
+            }
         }
         assert_eq!(
             app.scroll_offset, 0,
             "scroll_offset should return to 0 after round-trip"
         );
+        assert!(!app.auto_scroll_paused);
 
         // Verify we're back at the bottom (status bar / input prompt visible)
         let text_restored = render_and_snap(&app, &mut terminal);
