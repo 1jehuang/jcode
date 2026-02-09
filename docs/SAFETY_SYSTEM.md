@@ -3,18 +3,18 @@
 > **Status:** Design
 > **Updated:** 2026-02-08
 
-A human-in-the-loop safety layer for unmonitored agent operations. Currently used by ambient mode, but designed as an independent system that any jcode feature can integrate with.
+A human-in-the-loop safety layer for unmonitored agent operations. Designed as an independent subsystem that any jcode feature can integrate with. Currently the only consumer is ambient mode, but the system is intentionally decoupled so it can be reused for future features.
 
 ## Overview
 
-When an agent operates without direct user supervision, it needs a way to:
+When an agent operates without direct user supervision (e.g. ambient mode), it needs a way to:
 1. **Know what it's allowed to do** without asking
 2. **Request permission** for actions that require human approval
 3. **Notify the user** that a request is pending
 4. **Wait or move on** while the user reviews
 5. **Report what it did** after each session
 
-The safety system provides all of this as a standalone subsystem.
+The safety system provides all of this. There are only two tiers: auto-allowed and requires-permission. There is no "always denied" — if the user explicitly approves something, the agent can do it. The core principle is that **anything that communicates with another human or leaves a trace outside the local sandbox requires permission.**
 
 ---
 
@@ -27,7 +27,6 @@ graph TB
         AC{Action classification}
         AUTO[Auto-allowed<br/>execute immediately]
         PERM[Requires permission<br/>call request_permission tool]
-        DENY[Always denied<br/>skip and log]
     end
 
     subgraph "Safety System"
@@ -56,7 +55,6 @@ graph TB
     CL --> AC
     AC -->|safe| AUTO
     AC -->|needs review| PERM
-    AC -->|forbidden| DENY
 
     PERM --> RQ
     RQ --> NF
@@ -73,12 +71,10 @@ graph TB
 
     AUTO --> TL
     PERM --> TL
-    DENY --> TL
     TL --> SR
 
     style AUTO fill:#e8f5e9
     style PERM fill:#fff3e0
-    style DENY fill:#ffcdd2
     style RQ fill:#e3f2fd
 ```
 
@@ -86,7 +82,7 @@ graph TB
 
 ## Action Classification
 
-Every action an agent wants to take is classified into one of three tiers.
+Every action an agent wants to take is classified into one of two tiers. There is no "always denied" tier — if the user approves it, the agent can do it. The safety system's job is to make sure the user is asked, not to prevent actions entirely.
 
 ### Tier 1: Auto-Allowed (no permission needed)
 
@@ -105,15 +101,16 @@ Actions that are local, reversible, and don't affect anything outside the projec
 
 ### Tier 2: Requires Permission (ask user)
 
-Actions that leave a trace outside the local sandbox, affect shared state, or can't be easily undone.
+Actions that leave a trace outside the local sandbox, affect shared state, or can't be easily undone. **The general rule: anything that communicates directly with another human always requires permission — no exceptions.**
 
 | Action | Rationale |
 |--------|-----------|
-| **Communication with humans** | |
+| **Communication with humans (always Tier 2)** | |
 | Send emails | Irreversible, visible to others |
 | Submit assignments | Academic consequences |
 | Post to Slack / Discord / chat | Visible to others |
 | Create GitHub issues / PR comments | Publicly visible |
+| Any form of direct human communication | Cannot be unsent |
 | **Code modifications** | |
 | Modify code in a repo (must use worktree + PR) | Requires review before merge |
 | Push to remote | Visible to collaborators |
@@ -132,18 +129,6 @@ Actions that leave a trace outside the local sandbox, affect shared state, or ca
 | Purchases / billing changes | Financial consequences |
 | Change passwords / API keys / auth | Security consequences |
 | Revoke tokens / modify permissions | Access consequences |
-
-### Tier 3: Always Denied
-
-Actions that should never be taken by an unmonitored agent regardless of permissions.
-
-| Action | Rationale |
-|--------|-----------|
-| Force-push to main/master | Destructive, affects all collaborators |
-| Delete remote branches without explicit config | Shared resource |
-| Access credentials / secrets for non-configured services | Security boundary |
-| Modify other users' files / data | Ownership boundary |
-| Disable security features (firewalls, auth) | Security critical |
 
 ### Custom Rules
 
@@ -477,9 +462,6 @@ pub struct SafetySystem {
 impl SafetySystem {
     /// Check if an action is allowed without permission
     pub fn is_auto_allowed(&self, action: &Action) -> bool;
-
-    /// Check if an action is always denied
-    pub fn is_denied(&self, action: &Action) -> bool;
 
     /// Request permission for an action
     /// Returns immediately if wait=false, blocks until decision if wait=true
