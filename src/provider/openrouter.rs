@@ -32,8 +32,9 @@ const API_BASE: &str = "https://openrouter.ai/api/v1";
 
 /// Default model (Claude Sonnet via OpenRouter)
 const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
-/// Default provider for Kimi models (official Moonshot AI upstream)
-const DEFAULT_KIMI_PROVIDER: &str = "Moonshot AI";
+/// Default provider order for Kimi models when no local stats exist yet.
+/// Ordered for practical coding use: speed first, then cache quality, then cost.
+const KIMI_FALLBACK_PROVIDERS: &[&str] = &["Fireworks", "Moonshot AI", "Together", "DeepInfra"];
 /// Known provider names for autocomplete when OpenRouter doesn't supply a list.
 const KNOWN_PROVIDERS: &[&str] = &[
     "Moonshot AI",
@@ -69,6 +70,16 @@ const CACHE_PIN_TTL_SECS: u64 = 60 * 60;
 const THROUGHPUT_SIMILARITY_THRESHOLD: f64 = 0.10;
 /// EWMA alpha for provider stats
 const PROVIDER_STATS_EWMA_ALPHA: f64 = 0.2;
+/// Primary routing weights when throughput differences are meaningful.
+/// Priority order: speed > cache > cost.
+const WEIGHT_SPEED_PRIMARY: f64 = 0.55;
+const WEIGHT_CACHE_PRIMARY: f64 = 0.30;
+const WEIGHT_COST_PRIMARY: f64 = 0.15;
+/// Rebalanced weights when throughput is effectively similar.
+/// Still keeps speed as the top signal while giving cost more influence.
+const WEIGHT_SPEED_BALANCED: f64 = 0.45;
+const WEIGHT_CACHE_BALANCED: f64 = 0.35;
+const WEIGHT_COST_BALANCED: f64 = 0.20;
 
 /// Model info from OpenRouter API
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -581,23 +592,13 @@ impl OpenRouterProvider {
             .any(|(_, stat)| stat.cache_read_supported || stat.cache_write_supported);
 
         if cache_supported {
-            let cache_capable: Vec<(String, ProviderStats)> = entries
-                .iter()
-                .filter(|(_, stat)| stat.cache_read_supported || stat.cache_write_supported)
-                .cloned()
-                .collect();
-            if !cache_capable.is_empty() {
-                entries = cache_capable;
-            }
+            // If this model has cache-capable upstreams, ignore non-cache providers.
+            // This prevents selecting a fast-but-no-cache backend for long coding sessions.
+            entries.retain(|(_, stat)| stat.cache_read_supported || stat.cache_write_supported);
+        }
 
-            let cache_candidates: Vec<(String, ProviderStats)> = entries
-                .iter()
-                .filter(|(_, stat)| stat.avg_cache_hit.unwrap_or(0.0) > 0.0)
-                .cloned()
-                .collect();
-            if !cache_candidates.is_empty() {
-                entries = cache_candidates;
-            }
+        if entries.is_empty() {
+            return Vec::new();
         }
 
         let cache_vals: Vec<f64> = entries
@@ -623,27 +624,34 @@ impl OpenRouterProvider {
         };
 
         let (w_cache, w_tp, w_cost) = if throughput_range < THROUGHPUT_SIMILARITY_THRESHOLD {
-            (0.6, 0.25, 0.15)
+            (
+                WEIGHT_CACHE_BALANCED,
+                WEIGHT_SPEED_BALANCED,
+                WEIGHT_COST_BALANCED,
+            )
         } else {
-            (0.6, 0.3, 0.1)
+            (
+                WEIGHT_CACHE_PRIMARY,
+                WEIGHT_SPEED_PRIMARY,
+                WEIGHT_COST_PRIMARY,
+            )
         };
 
         let mut scored: Vec<(f64, String)> = entries
             .drain(..)
             .map(|(provider, stat)| {
+                let cache_impl_score = match (stat.cache_read_supported, stat.cache_write_supported)
+                {
+                    (true, true) => 1.0,
+                    (true, false) | (false, true) => 0.75,
+                    (false, false) => 0.0,
+                };
                 let cache_score = if cache_supported {
-                    if let Some(v) = stat.avg_cache_hit {
-                        let baseline = if stat.cache_read_supported || stat.cache_write_supported {
-                            0.2
-                        } else {
-                            0.0
-                        };
-                        normalize(v, min_cache, max_cache, baseline)
-                    } else if stat.cache_read_supported || stat.cache_write_supported {
-                        0.2
-                    } else {
-                        0.0
-                    }
+                    // Base cache score on implementation support, then refine with observed hit-rate.
+                    // Hit-rate can vary by prompt shape; support is the stronger base signal.
+                    stat.avg_cache_hit
+                        .map(|v| normalize(v, min_cache, max_cache, cache_impl_score * 0.6))
+                        .unwrap_or(cache_impl_score * 0.6)
                 } else {
                     0.0
                 };
@@ -655,7 +663,10 @@ impl OpenRouterProvider {
                     .avg_cost_per_mtok
                     .map(|v| normalize_inverse(v, min_cost, max_cost, 0.5))
                     .unwrap_or(0.5);
-                let score = w_cache * cache_score + w_tp * tp_score + w_cost * cost_score;
+                // Downweight noisy one-off samples, but keep all providers eligible.
+                let confidence = (stat.samples as f64 / 8.0).clamp(0.35, 1.0);
+                let raw_score = w_cache * cache_score + w_tp * tp_score + w_cost * cost_score;
+                let score = confidence * raw_score + (1.0 - confidence) * 0.5;
                 (score, provider)
             })
             .collect();
@@ -694,16 +705,21 @@ impl OpenRouterProvider {
             return base;
         }
 
-        if Self::is_kimi_model(model) {
-            let mut routing = base.clone();
-            routing.order = Some(vec![DEFAULT_KIMI_PROVIDER.to_string()]);
-            return routing;
-        }
-
         let ranked = self.rank_providers(model);
         if !ranked.is_empty() {
             let mut routing = base.clone();
             routing.order = Some(ranked);
+            return routing;
+        }
+
+        if Self::is_kimi_model(model) {
+            let mut routing = base.clone();
+            routing.order = Some(
+                KIMI_FALLBACK_PROVIDERS
+                    .iter()
+                    .map(|p| (*p).to_string())
+                    .collect(),
+            );
             return routing;
         }
 
@@ -2098,5 +2114,73 @@ mod tests {
 
         let ranked = provider.rank_providers("test/model");
         assert_eq!(ranked.first().map(|s| s.as_str()), Some("FastCache"));
+    }
+
+    #[test]
+    fn test_rank_providers_speed_priority_among_cache_capable() {
+        let now = now_epoch_secs();
+        let mut stats = ProviderStatsStore::default();
+        let mut model_stats = HashMap::new();
+        model_stats.insert(
+            "Fireworks".to_string(),
+            ProviderStats {
+                samples: 12,
+                avg_cache_hit: Some(0.30),
+                avg_throughput: Some(120.0),
+                avg_cost_per_mtok: Some(1.3),
+                last_seen: now,
+                cache_read_supported: true,
+                cache_write_supported: true,
+            },
+        );
+        model_stats.insert(
+            "Moonshot AI".to_string(),
+            ProviderStats {
+                samples: 12,
+                avg_cache_hit: Some(0.70),
+                avg_throughput: Some(80.0),
+                avg_cost_per_mtok: Some(1.0),
+                last_seen: now,
+                cache_read_supported: true,
+                cache_write_supported: true,
+            },
+        );
+        stats
+            .models
+            .insert("moonshotai/kimi-k2.5".to_string(), model_stats);
+
+        let provider = OpenRouterProvider {
+            client: Client::new(),
+            model: Arc::new(RwLock::new("moonshotai/kimi-k2.5".to_string())),
+            api_key: "test".to_string(),
+            models_cache: Arc::new(RwLock::new(ModelsCache::default())),
+            provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
+            provider_stats: Arc::new(Mutex::new(stats)),
+            provider_pin: Arc::new(Mutex::new(None)),
+        };
+
+        let ranked = provider.rank_providers("moonshotai/kimi-k2.5");
+        assert_eq!(ranked.first().map(|s| s.as_str()), Some("Fireworks"));
+    }
+
+    #[test]
+    fn test_kimi_fallback_prefers_fireworks_without_stats() {
+        let provider = OpenRouterProvider {
+            client: Client::new(),
+            model: Arc::new(RwLock::new("moonshotai/kimi-k2.5".to_string())),
+            api_key: "test".to_string(),
+            models_cache: Arc::new(RwLock::new(ModelsCache::default())),
+            provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
+            provider_stats: Arc::new(Mutex::new(ProviderStatsStore::default())),
+            provider_pin: Arc::new(Mutex::new(None)),
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let routing = rt.block_on(provider.effective_routing("moonshotai/kimi-k2.5"));
+        let order = routing.order.expect("provider order");
+        assert_eq!(order.first().map(|s| s.as_str()), Some("Fireworks"));
     }
 }
