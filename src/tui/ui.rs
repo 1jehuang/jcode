@@ -1645,13 +1645,25 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     };
 
     let model = app.provider_model();
+    let provider_name = app.provider_name();
     let upstream = app.upstream_provider();
+    let provider_label = {
+        let trimmed = provider_name.trim();
+        if trimmed.is_empty() {
+            "unknown".to_string()
+        } else {
+            trimmed.to_lowercase()
+        }
+    };
 
-    // Line: Full model ID (dimmed) + upstream provider if available + hint to switch
+    // Line: provider + model + upstream provider if available + hint to switch
     let model_info = if let Some(ref provider) = upstream {
-        format!("{} via {} · /model to switch", model, provider)
+        format!(
+            "{} · {} via {} · /model to switch",
+            provider_label, model, provider
+        )
     } else {
-        format!("{} · /model to switch", model)
+        format!("{} · {} · /model to switch", provider_label, model)
     };
     lines.push(
         Line::from(Span::styled(model_info, Style::default().fg(DIM_COLOR))).alignment(align),
@@ -3030,6 +3042,7 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
         }
     };
 
+    let line = append_provider_indicator(line, app);
     let aligned_line = if app.centered_mode() {
         line.alignment(ratatui::layout::Alignment::Center)
     } else {
@@ -3037,6 +3050,41 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
     };
     let paragraph = Paragraph::new(aligned_line);
     frame.render_widget(paragraph, area);
+}
+
+fn append_provider_indicator(mut line: Line<'static>, app: &dyn TuiState) -> Line<'static> {
+    let provider = app.provider_name();
+    let provider = provider.trim();
+    if provider.is_empty() {
+        return line;
+    }
+
+    let upstream = app
+        .upstream_provider()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    if !line.spans.is_empty() {
+        line.spans
+            .push(Span::styled(" · ", Style::default().fg(DIM_COLOR)));
+    }
+
+    line.spans
+        .push(Span::styled("llm ", Style::default().fg(DIM_COLOR)));
+    line.spans.push(Span::styled(
+        provider.to_lowercase(),
+        Style::default().fg(Color::Rgb(140, 180, 255)),
+    ));
+    if let Some(upstream) = upstream {
+        line.spans
+            .push(Span::styled(" -> ", Style::default().fg(DIM_COLOR)));
+        line.spans.push(Span::styled(
+            upstream,
+            Style::default().fg(Color::Rgb(220, 190, 120)),
+        ));
+    }
+
+    line
 }
 
 /// Build usage line for idle state (shows subscription limits or cost)

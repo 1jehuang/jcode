@@ -556,10 +556,7 @@ desktop_notifications = true
                 .as_deref()
                 .unwrap_or("(provider default)"),
             self.ambient.enabled,
-            self.ambient
-                .provider
-                .as_deref()
-                .unwrap_or("(auto)"),
+            self.ambient.provider.as_deref().unwrap_or("(auto)"),
             self.ambient
                 .model
                 .as_deref()

@@ -590,6 +590,8 @@ pub struct App {
     debug_trace: DebugTrace,
     // Incremental markdown renderer for streaming text (uses RefCell for interior mutability)
     streaming_md_renderer: RefCell<IncrementalMarkdownRenderer>,
+    /// Ambient mode system prompt override (when running as visible ambient cycle)
+    ambient_system_prompt: Option<String>,
 }
 
 impl ScrollTestState {
@@ -805,7 +807,15 @@ impl App {
             reload_info: Vec::new(),
             debug_trace: DebugTrace::new(),
             streaming_md_renderer: RefCell::new(IncrementalMarkdownRenderer::new(None)),
+            ambient_system_prompt: None,
         }
+    }
+
+    /// Configure ambient mode: override system prompt and queue an initial message.
+    pub fn set_ambient_mode(&mut self, system_prompt: String, initial_message: String) {
+        self.ambient_system_prompt = Some(system_prompt);
+        self.queued_messages.push(initial_message);
+        self.pending_turn = true;
     }
 
     /// Create an App instance for remote mode (connecting to server)
@@ -7630,6 +7640,14 @@ impl App {
         &mut self,
         memory_prompt: Option<&str>,
     ) -> crate::prompt::SplitSystemPrompt {
+        // Ambient mode: use the full override prompt directly
+        if let Some(ref prompt) = self.ambient_system_prompt {
+            return crate::prompt::SplitSystemPrompt {
+                static_part: prompt.clone(),
+                dynamic_part: String::new(),
+            };
+        }
+
         let skill_prompt = self
             .active_skill
             .as_ref()
@@ -8974,18 +8992,24 @@ impl super::TuiState for App {
 
             let (project_count, global_count, by_category) = {
                 let mut by_category = std::collections::HashMap::new();
-                let project_count = project_graph.as_ref().map(|p| {
-                    for entry in p.memories.values() {
-                        *by_category.entry(entry.category.to_string()).or_insert(0) += 1;
-                    }
-                    p.memory_count()
-                }).unwrap_or(0);
-                let global_count = global_graph.as_ref().map(|g| {
-                    for entry in g.memories.values() {
-                        *by_category.entry(entry.category.to_string()).or_insert(0) += 1;
-                    }
-                    g.memory_count()
-                }).unwrap_or(0);
+                let project_count = project_graph
+                    .as_ref()
+                    .map(|p| {
+                        for entry in p.memories.values() {
+                            *by_category.entry(entry.category.to_string()).or_insert(0) += 1;
+                        }
+                        p.memory_count()
+                    })
+                    .unwrap_or(0);
+                let global_count = global_graph
+                    .as_ref()
+                    .map(|g| {
+                        for entry in g.memories.values() {
+                            *by_category.entry(entry.category.to_string()).or_insert(0) += 1;
+                        }
+                        g.memory_count()
+                    })
+                    .unwrap_or(0);
                 (project_count, global_count, by_category)
             };
 

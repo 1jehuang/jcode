@@ -10,6 +10,37 @@ use crate::storage;
 // Types
 // ---------------------------------------------------------------------------
 
+/// Context passed from the ambient runner to a visible TUI cycle.
+/// Saved to `~/.jcode/ambient/visible_cycle.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VisibleCycleContext {
+    pub system_prompt: String,
+    pub initial_message: String,
+}
+
+impl VisibleCycleContext {
+    pub fn context_path() -> Result<PathBuf> {
+        Ok(storage::jcode_dir()?.join("ambient").join("visible_cycle.json"))
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let path = Self::context_path()?;
+        if let Some(parent) = path.parent() {
+            storage::ensure_dir(parent)?;
+        }
+        storage::write_json(&path, self)
+    }
+
+    pub fn load() -> Result<Self> {
+        let path = Self::context_path()?;
+        storage::read_json(&path)
+    }
+
+    pub fn result_path() -> Result<PathBuf> {
+        Ok(storage::jcode_dir()?.join("ambient").join("cycle_result.json"))
+    }
+}
+
 /// Ambient mode status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AmbientStatus {
@@ -67,6 +98,9 @@ pub struct AmbientCycleResult {
     pub started_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,
     pub status: CycleStatus,
+    /// Full conversation transcript (markdown) for email notifications
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,14 +243,10 @@ impl AmbientState {
         match result.status {
             CycleStatus::Complete => {
                 if let Some(ref req) = result.next_schedule {
-                    let next = req
-                        .wake_at
-                        .unwrap_or_else(|| {
-                            Utc::now()
-                                + chrono::Duration::minutes(
-                                    req.wake_in_minutes.unwrap_or(30) as i64,
-                                )
-                        });
+                    let next = req.wake_at.unwrap_or_else(|| {
+                        Utc::now()
+                            + chrono::Duration::minutes(req.wake_in_minutes.unwrap_or(30) as i64)
+                    });
                     self.status = AmbientStatus::Scheduled { next_wake: next };
                 } else {
                     self.status = AmbientStatus::Idle;
@@ -282,9 +312,7 @@ impl ScheduledQueue {
     }
 
     pub fn peek_next(&self) -> Option<&ScheduledItem> {
-        self.items
-            .iter()
-            .min_by_key(|i| i.scheduled_for)
+        self.items.iter().min_by_key(|i| i.scheduled_for)
     }
 
     pub fn len(&self) -> usize {
@@ -419,8 +447,7 @@ impl AmbientManager {
     pub fn schedule(&mut self, request: ScheduleRequest) -> Result<String> {
         let id = format!("sched_{:08x}", rand::random::<u32>());
         let scheduled_for = request.wake_at.unwrap_or_else(|| {
-            Utc::now()
-                + chrono::Duration::minutes(request.wake_in_minutes.unwrap_or(30) as i64)
+            Utc::now() + chrono::Duration::minutes(request.wake_in_minutes.unwrap_or(30) as i64)
         });
 
         let item = ScheduledItem {
@@ -575,10 +602,7 @@ pub fn gather_feedback_memories(memory_manager: &crate::memory::MemoryManager) -
                         serde_json::from_str::<crate::safety::AmbientTranscript>(&content)
                     {
                         let status = format!("{:?}", transcript.status);
-                        let summary = transcript
-                            .summary
-                            .as_deref()
-                            .unwrap_or("no summary");
+                        let summary = transcript.summary.as_deref().unwrap_or("no summary");
                         let age = format_duration_rough(Utc::now() - transcript.started_at);
                         feedback.push(format!(
                             "Past cycle ({} ago, {}): {} memories modified, {} compactions — {}",
@@ -606,10 +630,7 @@ pub fn gather_feedback_memories(memory_manager: &crate::memory::MemoryManager) -
             if !memory.active {
                 continue;
             }
-            let has_ambient_tag = memory
-                .tags
-                .iter()
-                .any(|t| t == "ambient" || t == "system");
+            let has_ambient_tag = memory.tags.iter().any(|t| t == "ambient" || t == "system");
             if has_ambient_tag {
                 feedback.push(format!("Memory [{}]: {}", memory.id, memory.content));
             }
@@ -646,8 +667,9 @@ pub fn gather_recent_sessions(since: Option<DateTime<Utc>>) -> Vec<RecentSession
                         if session.updated_at < cutoff {
                             continue;
                         }
-                        let duration =
-                            (session.updated_at - session.created_at).num_seconds().max(0);
+                        let duration = (session.updated_at - session.created_at)
+                            .num_seconds()
+                            .max(0);
                         let extraction = if session.messages.is_empty() {
                             "no messages"
                         } else {
@@ -720,7 +742,10 @@ pub fn build_ambient_system_prompt(
     } else {
         prompt.push_str("- Active user sessions: none\n");
     }
-    prompt.push_str(&format!("- Total cycles completed: {}\n", state.total_cycles));
+    prompt.push_str(&format!(
+        "- Total cycles completed: {}\n",
+        state.total_cycles
+    ));
     prompt.push('\n');
 
     // --- Scheduled Queue ---
@@ -1005,6 +1030,7 @@ mod tests {
             started_at: Utc::now() - Duration::seconds(30),
             ended_at: Utc::now(),
             status: CycleStatus::Complete,
+            conversation: None,
         };
 
         state.record_cycle(&result);
@@ -1033,6 +1059,7 @@ mod tests {
             started_at: Utc::now() - Duration::seconds(10),
             ended_at: Utc::now(),
             status: CycleStatus::Complete,
+            conversation: None,
         };
 
         state.record_cycle(&result);
@@ -1089,9 +1116,8 @@ mod tests {
             cycle_budget_desc: "stay under 50k tokens".into(),
         };
 
-        let prompt = build_ambient_system_prompt(
-            &state, &queue, &health, &sessions, &feedback, &budget, 0,
-        );
+        let prompt =
+            build_ambient_system_prompt(&state, &queue, &health, &sessions, &feedback, &budget, 0);
 
         assert!(prompt.contains("ambient agent for jcode"));
         assert!(prompt.contains("## Current State"));

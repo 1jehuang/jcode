@@ -98,6 +98,9 @@ pub struct AmbientTranscript {
     pub summary: Option<String>,
     pub compactions: u32,
     pub memories_modified: u32,
+    /// Full conversation transcript (markdown) for email notifications
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -207,10 +210,7 @@ impl SafetySystem {
 
     /// Return all pending permission requests.
     pub fn pending_requests(&self) -> Vec<PermissionRequest> {
-        self.queue
-            .lock()
-            .map(|q| q.clone())
-            .unwrap_or_default()
+        self.queue.lock().map(|q| q.clone()).unwrap_or_default()
     }
 
     /// Append an action to the in-memory log.
@@ -275,10 +275,7 @@ impl SafetySystem {
         let dir = storage::jcode_dir()?.join("ambient").join("transcripts");
         storage::ensure_dir(&dir)?;
 
-        let filename = transcript
-            .started_at
-            .format("%Y-%m-%d-%H%M%S")
-            .to_string();
+        let filename = transcript.started_at.format("%Y-%m-%d-%H%M%S").to_string();
         let path = dir.join(format!("{}.json", filename));
         storage::write_json(&path, transcript)
     }
@@ -351,10 +348,7 @@ mod tests {
         assert_eq!(sys.classify("communicate"), ActionTier::RequiresPermission);
         assert_eq!(sys.classify("webfetch"), ActionTier::RequiresPermission);
         assert_eq!(sys.classify("websearch"), ActionTier::RequiresPermission);
-        assert_eq!(
-            sys.classify("unknown_tool"),
-            ActionTier::RequiresPermission
-        );
+        assert_eq!(sys.classify("unknown_tool"), ActionTier::RequiresPermission);
     }
 
     #[test]
