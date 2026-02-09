@@ -4,6 +4,7 @@
 //! In centered mode, widgets can appear on both left and right margins.
 //! In left-aligned mode, widgets only appear on the right margin.
 
+use crate::ambient::AmbientStatus;
 use crate::prompt::ContextInfo;
 use crate::protocol::SwarmMemberStatus;
 use crate::provider::DEFAULT_CONTEXT_LIMIT;
@@ -143,6 +144,8 @@ pub enum WidgetKind {
     ModelInfo,
     /// Mermaid diagrams
     Diagrams,
+    /// Ambient mode status
+    AmbientMode,
 }
 
 impl WidgetKind {
@@ -155,8 +158,9 @@ impl WidgetKind {
             WidgetKind::MemoryActivity => 3,
             WidgetKind::SwarmStatus => 4,
             WidgetKind::BackgroundTasks => 5,
-            WidgetKind::UsageLimits => 6,
-            WidgetKind::ModelInfo => 7,
+            WidgetKind::AmbientMode => 6,
+            WidgetKind::UsageLimits => 7,
+            WidgetKind::ModelInfo => 8,
         }
     }
 
@@ -169,6 +173,7 @@ impl WidgetKind {
             WidgetKind::MemoryActivity => Side::Right,
             WidgetKind::SwarmStatus => Side::Left,
             WidgetKind::BackgroundTasks => Side::Left,
+            WidgetKind::AmbientMode => Side::Left,
             WidgetKind::UsageLimits => Side::Left,
             WidgetKind::ModelInfo => Side::Left,
         }
@@ -183,6 +188,7 @@ impl WidgetKind {
             WidgetKind::MemoryActivity => 3,
             WidgetKind::SwarmStatus => 3,
             WidgetKind::BackgroundTasks => 2,
+            WidgetKind::AmbientMode => 3,
             WidgetKind::UsageLimits => 3,
             WidgetKind::ModelInfo => 3, // Model + usage bars
         }
@@ -197,6 +203,7 @@ impl WidgetKind {
             WidgetKind::MemoryActivity,
             WidgetKind::SwarmStatus,
             WidgetKind::BackgroundTasks,
+            WidgetKind::AmbientMode,
             WidgetKind::UsageLimits,
             WidgetKind::ModelInfo,
         ]
@@ -210,6 +217,7 @@ impl WidgetKind {
             WidgetKind::MemoryActivity => "memory",
             WidgetKind::SwarmStatus => "swarm",
             WidgetKind::BackgroundTasks => "background",
+            WidgetKind::AmbientMode => "ambient",
             WidgetKind::UsageLimits => "usage",
             WidgetKind::ModelInfo => "model",
         }
@@ -441,6 +449,18 @@ pub struct DiagramInfo {
     pub label: Option<String>,
 }
 
+/// Ambient mode status data for the info widget
+#[derive(Debug, Clone)]
+pub struct AmbientWidgetData {
+    pub status: AmbientStatus,
+    pub queue_count: usize,
+    pub next_queue_preview: Option<String>,
+    pub last_run_ago: Option<String>,
+    pub last_summary: Option<String>,
+    pub next_wake: Option<String>,
+    pub budget_percent: Option<f32>,
+}
+
 /// Minimum width needed to show the widget
 const MIN_WIDGET_WIDTH: u16 = 24;
 /// Maximum width the widget can take
@@ -479,6 +499,8 @@ pub struct InfoWidgetData {
     pub upstream_provider: Option<String>,
     /// Mermaid diagrams to display
     pub diagrams: Vec<DiagramInfo>,
+    /// Ambient mode status
+    pub ambient_info: Option<AmbientWidgetData>,
 }
 
 impl InfoWidgetData {
@@ -523,6 +545,7 @@ impl InfoWidgetData {
                 .as_ref()
                 .map(|b| b.running_count > 0 || b.memory_agent_active)
                 .unwrap_or(false),
+            WidgetKind::AmbientMode => self.ambient_info.is_some(),
             WidgetKind::UsageLimits => false, // Combined into ModelInfo
             WidgetKind::ModelInfo => self.model.is_some(),
         }
@@ -902,6 +925,25 @@ fn calculate_widget_height(
             }
             1 // Single line
         }
+        WidgetKind::AmbientMode => {
+            let Some(info) = &data.ambient_info else {
+                return 0;
+            };
+            let mut h = 1u16; // Status line
+            if info.queue_count > 0 {
+                h += 1; // Queue line
+            }
+            if info.last_run_ago.is_some() {
+                h += 1; // Last run line
+            }
+            if info.next_wake.is_some() {
+                h += 1; // Next wake line
+            }
+            if info.budget_percent.is_some() {
+                h += 1; // Budget bar
+            }
+            h
+        }
         WidgetKind::UsageLimits => {
             if data
                 .usage_info
@@ -1111,6 +1153,7 @@ fn render_widget_content(
         WidgetKind::MemoryActivity => render_memory_widget(data, inner),
         WidgetKind::SwarmStatus => render_swarm_widget(data, inner),
         WidgetKind::BackgroundTasks => render_background_widget(data, inner),
+        WidgetKind::AmbientMode => render_ambient_widget(data, inner),
         WidgetKind::UsageLimits => render_usage_widget(data, inner),
         WidgetKind::ModelInfo => render_model_widget(data, inner),
     }
@@ -1752,6 +1795,130 @@ fn render_background_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'sta
     ));
 
     vec![Line::from(spans)]
+}
+
+/// Render ambient mode status widget
+fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    let Some(info) = &data.ambient_info else {
+        return Vec::new();
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Status line
+    let (icon, status_text, status_color) = match &info.status {
+        AmbientStatus::Idle => ("○", "Idle".to_string(), Color::Rgb(120, 120, 130)),
+        AmbientStatus::Running { detail } => (
+            "●",
+            format!("Running ({})", detail),
+            Color::Rgb(100, 200, 100),
+        ),
+        AmbientStatus::Scheduled { .. } => {
+            ("◐", "Scheduled".to_string(), Color::Rgb(140, 180, 255))
+        }
+        AmbientStatus::Paused { reason } => (
+            "⏸",
+            format!("Paused ({})", truncate_smart(reason, inner.width.saturating_sub(12) as usize)),
+            Color::Rgb(255, 200, 100),
+        ),
+        AmbientStatus::Disabled => ("■", "Disabled".to_string(), Color::Rgb(100, 100, 110)),
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{} ", icon),
+            Style::default().fg(status_color),
+        ),
+        Span::styled(
+            truncate_smart(&status_text, inner.width.saturating_sub(3) as usize),
+            Style::default().fg(Color::Rgb(180, 180, 190)),
+        ),
+    ]));
+
+    // Queue line
+    if info.queue_count > 0 {
+        let queue_text = if let Some(ref preview) = info.next_queue_preview {
+            format!(
+                "Queue: {} (next: {})",
+                info.queue_count,
+                truncate_smart(preview, inner.width.saturating_sub(16) as usize)
+            )
+        } else {
+            format!("Queue: {} items", info.queue_count)
+        };
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                truncate_smart(&queue_text, inner.width.saturating_sub(2) as usize),
+                Style::default().fg(Color::Rgb(140, 140, 150)),
+            ),
+        ]));
+    }
+
+    // Last run line
+    if let Some(ref ago) = info.last_run_ago {
+        let last_text = if let Some(ref summary) = info.last_summary {
+            format!(
+                "Last: {} — {}",
+                ago,
+                truncate_smart(summary, inner.width.saturating_sub(10 + ago.len() as u16) as usize)
+            )
+        } else {
+            format!("Last: {}", ago)
+        };
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                truncate_smart(&last_text, inner.width.saturating_sub(2) as usize),
+                Style::default().fg(Color::Rgb(140, 140, 150)),
+            ),
+        ]));
+    }
+
+    // Next wake line
+    if let Some(ref next) = info.next_wake {
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                format!("Next: ~{} (adaptive)", next),
+                Style::default().fg(Color::Rgb(140, 140, 150)),
+            ),
+        ]));
+    }
+
+    // Budget bar
+    if let Some(budget) = info.budget_percent {
+        let pct = (budget * 100.0).round().clamp(0.0, 100.0) as u8;
+        let bar_width = inner.width.saturating_sub(12).min(10).max(4) as usize;
+        let filled = ((budget * bar_width as f32).round() as usize).min(bar_width);
+        let empty = bar_width.saturating_sub(filled);
+
+        let bar_color = if pct < 20 {
+            Color::Rgb(255, 100, 100)
+        } else if pct <= 50 {
+            Color::Rgb(255, 200, 100)
+        } else {
+            Color::Rgb(100, 200, 100)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                "█".repeat(filled),
+                Style::default().fg(bar_color),
+            ),
+            Span::styled(
+                "░".repeat(empty),
+                Style::default().fg(Color::Rgb(50, 50, 60)),
+            ),
+            Span::styled(
+                format!(" {}%", pct),
+                Style::default().fg(bar_color),
+            ),
+        ]));
+    }
+
+    lines
 }
 
 /// Render usage limits widget
