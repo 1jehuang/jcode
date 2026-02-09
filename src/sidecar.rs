@@ -149,6 +149,25 @@ Be conservative - only say "yes" if the memory would actually be useful for the 
         Ok((is_relevant, reason))
     }
 
+    /// Check if new information contradicts existing information
+    /// Returns true if the two statements are contradictory
+    pub async fn check_contradiction(
+        &self,
+        new_content: &str,
+        existing_content: &str,
+    ) -> Result<bool> {
+        let system = "You are a contradiction detector. Given two statements, determine if the new information directly contradicts the existing information. Reply with exactly YES or NO.";
+
+        let prompt = format!(
+            "## Existing Information\n{}\n\n## New Information\n{}\n\nDoes the new information contradict the existing information?",
+            existing_content, new_content
+        );
+
+        let response = self.complete(system, &prompt).await?;
+        let trimmed = response.trim().to_uppercase();
+        Ok(trimmed.starts_with("YES"))
+    }
+
     /// Extract memories from a session transcript
     pub async fn extract_memories(&self, transcript: &str) -> Result<Vec<ExtractedMemory>> {
         let system = r#"You are a memory extraction assistant. Extract important learnings from the conversation that should be remembered for future sessions.
