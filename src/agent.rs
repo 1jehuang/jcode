@@ -588,6 +588,63 @@ impl Agent {
         self.session.working_dir.as_deref()
     }
 
+    /// Get the stored messages (for transcript export)
+    pub fn messages(&self) -> &[StoredMessage] {
+        &self.session.messages
+    }
+
+    /// Export the full conversation as a markdown transcript.
+    pub fn export_conversation_markdown(&self) -> String {
+        let mut md = String::new();
+        for msg in &self.session.messages {
+            let role_label = match msg.role {
+                Role::User => "User",
+                Role::Assistant => "Assistant",
+            };
+            md.push_str(&format!("### {}\n\n", role_label));
+            for block in &msg.content {
+                match block {
+                    ContentBlock::Text { text, .. } => {
+                        md.push_str(text);
+                        md.push_str("\n\n");
+                    }
+                    ContentBlock::Reasoning { text } => {
+                        md.push_str(&format!("*Thinking:* {}\n\n", text));
+                    }
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        let input_str = serde_json::to_string_pretty(input)
+                            .unwrap_or_else(|_| input.to_string());
+                        md.push_str(&format!(
+                            "**Tool: `{}`**\n```json\n{}\n```\n\n",
+                            name, input_str
+                        ));
+                    }
+                    ContentBlock::ToolResult {
+                        content, is_error, ..
+                    } => {
+                        let label = if is_error == &Some(true) {
+                            "Error"
+                        } else {
+                            "Result"
+                        };
+                        // Truncate very long results
+                        let display = if content.len() > 2000 {
+                            format!(
+                                "{}... (truncated, {} chars total)",
+                                &content[..2000],
+                                content.len()
+                            )
+                        } else {
+                            content.clone()
+                        };
+                        md.push_str(&format!("**{}:**\n```\n{}\n```\n\n", label, display));
+                    }
+                }
+            }
+        }
+        md
+    }
+
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
         self.add_message(

@@ -6432,7 +6432,8 @@ async fn handle_debug_client(
                                     "enabled": false,
                                     "status": "disabled",
                                     "message": "Ambient mode is not enabled in config"
-                                }).to_string())
+                                })
+                                .to_string())
                             }
                         } else if cmd == "ambient:queue" {
                             if let Some(ref runner) = ambient_runner {
@@ -6466,7 +6467,8 @@ async fn handle_debug_client(
   ambient:queue    - Scheduled queue contents
   ambient:trigger  - Manually trigger an ambient cycle
   ambient:log      - Recent transcript summaries
-  ambient:stop     - Stop ambient mode"#.to_string())
+  ambient:stop     - Stop ambient mode"#
+                                .to_string())
                         } else if cmd == "events:recent" || cmd.starts_with("events:recent:") {
                             // Get recent events (default 50, or specify count)
                             let count: usize = cmd

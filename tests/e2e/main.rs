@@ -790,22 +790,13 @@ fn test_safety_classification() {
     assert!(safety.classify("todowrite") == jcode::safety::ActionTier::AutoAllowed);
 
     // Tier 2: requires permission
+    assert!(safety.classify("bash") == jcode::safety::ActionTier::RequiresPermission);
+    assert!(safety.classify("edit") == jcode::safety::ActionTier::RequiresPermission);
+    assert!(safety.classify("write") == jcode::safety::ActionTier::RequiresPermission);
     assert!(
-        safety.classify("bash") == jcode::safety::ActionTier::RequiresPermission
+        safety.classify("create_pull_request") == jcode::safety::ActionTier::RequiresPermission
     );
-    assert!(
-        safety.classify("edit") == jcode::safety::ActionTier::RequiresPermission
-    );
-    assert!(
-        safety.classify("write") == jcode::safety::ActionTier::RequiresPermission
-    );
-    assert!(
-        safety.classify("create_pull_request")
-            == jcode::safety::ActionTier::RequiresPermission
-    );
-    assert!(
-        safety.classify("send_email") == jcode::safety::ActionTier::RequiresPermission
-    );
+    assert!(safety.classify("send_email") == jcode::safety::ActionTier::RequiresPermission);
 
     // Case insensitive
     assert!(safety.classify("READ") == jcode::safety::ActionTier::AutoAllowed);
@@ -840,10 +831,17 @@ fn test_safety_permission_flow() {
     // Verify our request was added
     let pending = safety.pending_requests();
     assert_eq!(pending.len(), baseline + 1);
-    assert!(pending.iter().any(|p| p.action == "create_pull_request" && p.id == "test_perm_flow_001"));
+    assert!(pending
+        .iter()
+        .any(|p| p.action == "create_pull_request" && p.id == "test_perm_flow_001"));
 
     // Record an approval decision
-    let _ = safety.record_decision("test_perm_flow_001", true, "test", Some("looks good".to_string()));
+    let _ = safety.record_decision(
+        "test_perm_flow_001",
+        true,
+        "test",
+        Some("looks good".to_string()),
+    );
 
     // Verify our request was removed
     assert_eq!(safety.pending_requests().len(), baseline);
@@ -868,6 +866,7 @@ fn test_safety_transcript() {
         summary: Some("Test cycle completed".to_string()),
         compactions: 0,
         memories_modified: 3,
+        conversation: None,
     };
 
     // Should not panic
@@ -924,6 +923,7 @@ fn test_ambient_state_lifecycle() {
         started_at: chrono::Utc::now(),
         ended_at: chrono::Utc::now(),
         status: CycleStatus::Complete,
+        conversation: None,
     };
 
     state.record_cycle(&result);
@@ -1093,16 +1093,17 @@ async fn test_ambient_end_cycle_tool() -> Result<()> {
 
     let mut agent = Agent::new(provider, registry);
 
-    let response = agent
-        .run_once_capture("Begin ambient cycle")
-        .await?;
+    let response = agent.run_once_capture("Begin ambient cycle").await?;
     assert_eq!(response, "Cycle complete.");
 
     // The tool should have stored a cycle result
     let result = jcode::tool::ambient::take_cycle_result();
     assert!(result.is_some());
     let result = result.unwrap();
-    assert_eq!(result.summary, "Merged 2 duplicate memories, pruned 1 stale memory");
+    assert_eq!(
+        result.summary,
+        "Merged 2 duplicate memories, pruned 1 stale memory"
+    );
     assert_eq!(result.memories_modified, 3);
     assert_eq!(result.compactions, 0);
 
@@ -1241,11 +1242,26 @@ fn test_ambient_system_prompt_builder() {
     );
 
     // Verify key sections exist
-    assert!(prompt.contains("ambient agent"), "Prompt missing 'ambient agent'");
-    assert!(prompt.contains("Memory Graph Health"), "Prompt missing 'Memory Graph Health'");
-    assert!(prompt.contains("Total memories: 42"), "Prompt missing memory count");
-    assert!(prompt.contains("Resource Budget"), "Prompt missing 'Resource Budget'");
-    assert!(prompt.contains("end_ambient_cycle"), "Prompt missing end_ambient_cycle instruction");
+    assert!(
+        prompt.contains("ambient agent"),
+        "Prompt missing 'ambient agent'"
+    );
+    assert!(
+        prompt.contains("Memory Graph Health"),
+        "Prompt missing 'Memory Graph Health'"
+    );
+    assert!(
+        prompt.contains("Total memories: 42"),
+        "Prompt missing memory count"
+    );
+    assert!(
+        prompt.contains("Resource Budget"),
+        "Prompt missing 'Resource Budget'"
+    );
+    assert!(
+        prompt.contains("end_ambient_cycle"),
+        "Prompt missing end_ambient_cycle instruction"
+    );
 }
 
 /// Test ambient runner handle: status_json
@@ -1262,12 +1278,30 @@ async fn test_ambient_runner_status() {
 
     // Verify expected fields exist and have correct types
     assert!(status.get("status").is_some(), "Missing 'status' field");
-    assert!(status.get("total_cycles").is_some(), "Missing 'total_cycles' field");
-    assert!(status.get("loop_running").is_some(), "Missing 'loop_running' field");
-    assert_eq!(status["loop_running"], false, "Runner loop should not be running");
-    assert!(status["total_cycles"].is_number(), "total_cycles should be a number");
-    assert!(status.get("queue_count").is_some(), "Missing 'queue_count' field");
-    assert!(status.get("active_user_sessions").is_some(), "Missing 'active_user_sessions' field");
+    assert!(
+        status.get("total_cycles").is_some(),
+        "Missing 'total_cycles' field"
+    );
+    assert!(
+        status.get("loop_running").is_some(),
+        "Missing 'loop_running' field"
+    );
+    assert_eq!(
+        status["loop_running"], false,
+        "Runner loop should not be running"
+    );
+    assert!(
+        status["total_cycles"].is_number(),
+        "total_cycles should be a number"
+    );
+    assert!(
+        status.get("queue_count").is_some(),
+        "Missing 'queue_count' field"
+    );
+    assert!(
+        status.get("active_user_sessions").is_some(),
+        "Missing 'active_user_sessions' field"
+    );
 }
 
 /// Test ambient runner handle: trigger and stop
@@ -1438,9 +1472,7 @@ async fn test_full_ambient_cycle_simulation() -> Result<()> {
     let mut agent = Agent::new(provider.clone(), registry);
     agent.set_system_prompt("You are the jcode ambient maintenance agent.");
 
-    let response = agent
-        .run_once_capture("Begin your ambient cycle.")
-        .await?;
+    let response = agent.run_once_capture("Begin your ambient cycle.").await?;
 
     assert!(response.contains("Ambient cycle completed"));
 

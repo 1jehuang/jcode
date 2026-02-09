@@ -31,7 +31,10 @@ pub fn store_cycle_result(result: AmbientCycleResult) {
 
 /// Take the stored cycle result (returns None if not set or already taken).
 pub fn take_cycle_result() -> Option<AmbientCycleResult> {
-    cycle_result_slot().lock().ok().and_then(|mut slot| slot.take())
+    cycle_result_slot()
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
 }
 
 /// Global SafetySystem instance shared with ambient tools.
@@ -157,6 +160,7 @@ impl Tool for EndAmbientCycleTool {
             started_at: now, // approximate; the runner will override if it tracks start time
             ended_at: now,
             status: CycleStatus::Complete,
+            conversation: None, // populated by the runner after cycle completes
         };
 
         // Store for the ambient runner to pick up
@@ -449,6 +453,7 @@ mod tests {
             started_at: Utc::now(),
             ended_at: Utc::now(),
             status: CycleStatus::Complete,
+            conversation: None,
         };
 
         store_cycle_result(result);
@@ -478,7 +483,10 @@ mod tests {
         assert_eq!(parsed.summary, "Merged 3 duplicates");
         assert_eq!(parsed.memories_modified, 5);
         assert_eq!(parsed.compactions, 1);
-        assert_eq!(parsed.proactive_work.as_deref(), Some("Fixed typo in README"));
+        assert_eq!(
+            parsed.proactive_work.as_deref(),
+            Some("Fixed typo in README")
+        );
         let ns = parsed.next_schedule.unwrap();
         assert_eq!(ns.wake_in_minutes, Some(20));
         assert_eq!(ns.context.as_deref(), Some("Verify stale facts"));

@@ -469,8 +469,7 @@ impl MemoryAgent {
                                 if let Ok(mut graph) = memory_manager.load_project_graph() {
                                     if graph.get_memory(&existing_id).is_some() {
                                         let strength = {
-                                            let entry =
-                                                graph.get_memory_mut(&existing_id).unwrap();
+                                            let entry = graph.get_memory_mut(&existing_id).unwrap();
                                             entry.reinforce("incremental", 0);
                                             entry.strength
                                         };

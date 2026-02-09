@@ -1,7 +1,7 @@
+mod agent;
 mod ambient;
 mod ambient_runner;
 mod ambient_scheduler;
-mod agent;
 mod auth;
 mod auto_debug;
 mod background;
@@ -251,6 +251,9 @@ enum AmbientCommand {
     Trigger,
     /// Stop ambient mode
     Stop,
+    /// Run an ambient cycle in a visible TUI (internal, spawned by the ambient runner)
+    #[command(hide = true)]
+    RunVisible,
 }
 
 #[derive(Subcommand, Debug)]
@@ -972,15 +975,86 @@ async fn run_debug_command(
 
 /// Run ambient mode CLI commands via the debug socket
 async fn run_ambient_command(cmd: AmbientCommand) -> Result<()> {
+    match cmd {
+        AmbientCommand::RunVisible => {
+            return run_ambient_visible().await;
+        }
+        _ => {}
+    }
+
     let debug_cmd = match cmd {
         AmbientCommand::Status => "ambient:status",
         AmbientCommand::Log => "ambient:log",
         AmbientCommand::Trigger => "ambient:trigger",
         AmbientCommand::Stop => "ambient:stop",
+        AmbientCommand::RunVisible => unreachable!(),
     };
 
     // Send command via debug socket
     run_debug_command(debug_cmd, "", None, None, false).await
+}
+
+/// Run a visible ambient cycle in a standalone TUI.
+/// Reads context from `~/.jcode/ambient/visible_cycle.json`, starts a TUI with
+/// ambient system prompt and tools, and auto-sends the initial message.
+async fn run_ambient_visible() -> Result<()> {
+    use crate::ambient::VisibleCycleContext;
+
+    // Load the cycle context saved by the ambient runner
+    let context = VisibleCycleContext::load()
+        .map_err(|e| anyhow::anyhow!("Failed to load visible cycle context: {}\nIs the ambient runner running?", e))?;
+
+    // Initialize provider (uses same auth as normal jcode)
+    let (provider, registry) = init_provider_and_registry(&ProviderChoice::Auto, None).await?;
+
+    // Register ambient tools (in addition to the normal tools)
+    registry.register_ambient_tools().await;
+
+    // Initialize safety system for ambient tools
+    let safety = std::sync::Arc::new(crate::safety::SafetySystem::new());
+    crate::tool::ambient::init_safety_system(safety);
+
+    // Start TUI with ambient mode
+    let terminal = ratatui::init();
+    crate::tui::mermaid::init_picker();
+    let mouse_capture = crate::config::config().display.mouse_capture;
+    let keyboard_enhanced = tui::enable_keyboard_enhancement();
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
+    if mouse_capture {
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+    }
+
+    let mut app = tui::App::new(provider, registry);
+    app.set_ambient_mode(context.system_prompt, context.initial_message);
+
+    // Set terminal title
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::terminal::SetTitle("🤖 jcode ambient cycle")
+    );
+
+    let result = app.run(terminal).await;
+
+    // Cleanup terminal
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
+    if mouse_capture {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    }
+    if keyboard_enhanced {
+        tui::disable_keyboard_enhancement();
+    }
+    ratatui::restore();
+    crate::tui::mermaid::clear_image_state();
+
+    // Save cycle result to file if end_ambient_cycle was called
+    if let Some(cycle_result) = crate::tool::ambient::take_cycle_result() {
+        let result_path = VisibleCycleContext::result_path()?;
+        crate::storage::write_json(&result_path, &cycle_result)?;
+        eprintln!("Ambient cycle result saved.");
+    }
+
+    result?;
+    Ok(())
 }
 
 /// Run memory management commands

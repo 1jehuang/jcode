@@ -349,12 +349,9 @@ mod tests {
             unsaved_count: 0,
         };
 
-        log.records
-            .push(make_record(UsageSource::User, 500, 10));
-        log.records
-            .push(make_record(UsageSource::Ambient, 300, 5));
-        log.records
-            .push(make_record(UsageSource::User, 200, 2));
+        log.records.push(make_record(UsageSource::User, 500, 10));
+        log.records.push(make_record(UsageSource::Ambient, 300, 5));
+        log.records.push(make_record(UsageSource::User, 200, 2));
 
         let user_total = log.total_tokens_in_window(&UsageSource::User, Duration::from_secs(3600));
         assert_eq!(user_total, 700);
@@ -519,8 +516,7 @@ mod tests {
         });
 
         // Recent record (should survive).
-        log.records
-            .push(make_record(UsageSource::User, 200, 5));
+        log.records.push(make_record(UsageSource::User, 200, 5));
 
         log.prune();
         assert_eq!(log.records.len(), 1);
