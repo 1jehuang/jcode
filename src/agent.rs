@@ -710,6 +710,14 @@ impl Agent {
         }
     }
 
+    /// Unlock tools if a tool execution may have changed the registry
+    /// (e.g., mcp connect/disconnect/reload)
+    fn unlock_tools_if_needed(&mut self, tool_name: &str) {
+        if tool_name == "mcp" {
+            self.unlock_tools();
+        }
+    }
+
     /// Build the system prompt, including skill, memory, self-dev context, and CLAUDE.md files
     fn build_system_prompt(&self, memory_prompt: Option<&str>) -> String {
         let split = self.build_system_prompt_split(memory_prompt);
@@ -1594,6 +1602,7 @@ impl Agent {
                 }));
 
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
+                self.unlock_tools_if_needed(&tc.name);
                 let tool_elapsed = tool_start.elapsed();
                 logging::info(&format!(
                     "Tool finished: {} in {:.2}s",
@@ -2075,6 +2084,7 @@ impl Agent {
                 }
 
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
+                self.unlock_tools_if_needed(&tc.name);
 
                 match result {
                     Ok(output) => {
@@ -2529,6 +2539,7 @@ impl Agent {
                 }
 
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
+                self.unlock_tools_if_needed(&tc.name);
 
                 match result {
                     Ok(output) => {
