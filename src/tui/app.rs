@@ -3381,7 +3381,7 @@ impl App {
     /// Returns Some(session_id) if hot-reload was requested
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<RunResult> {
         let mut event_stream = EventStream::new();
-        let mut redraw_interval = interval(Duration::from_millis(50));
+        let mut redraw_interval = interval(Duration::from_millis(16));
         // Subscribe to bus for background task completion notifications
         let mut bus_receiver = Bus::global().subscribe();
 
@@ -3515,7 +3515,7 @@ impl App {
         use super::backend::RemoteConnection;
 
         let mut event_stream = EventStream::new();
-        let mut redraw_interval = interval(Duration::from_millis(50));
+        let mut redraw_interval = interval(Duration::from_millis(16));
         let mut reconnect_attempts = 0u32;
         const MAX_RECONNECT_ATTEMPTS: u32 = 30;
 
@@ -6853,7 +6853,7 @@ impl App {
         terminal: &mut DefaultTerminal,
         event_stream: &mut EventStream,
     ) -> Result<()> {
-        let mut redraw_interval = interval(Duration::from_millis(50));
+        let mut redraw_interval = interval(Duration::from_millis(16));
 
         loop {
             let repaired = self.repair_missing_tool_outputs();
