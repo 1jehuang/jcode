@@ -27,11 +27,16 @@ pub fn build_graph_topology(
     let mut id_to_idx: HashMap<String, usize> = HashMap::new();
 
     // Collect all memory nodes from both graphs
+    // Sort keys for deterministic iteration order (HashMap order is random,
+    // which causes the graph layout to jitter on every frame redraw)
     let graphs: Vec<&crate::memory_graph::MemoryGraph> =
         [project, global].into_iter().flatten().collect();
 
     for graph in &graphs {
-        for (id, entry) in &graph.memories {
+        let mut memory_ids: Vec<&String> = graph.memories.keys().collect();
+        memory_ids.sort();
+        for id in memory_ids {
+            let entry = &graph.memories[id];
             if !id_to_idx.contains_key(id) {
                 let idx = nodes.len();
                 id_to_idx.insert(id.clone(), idx);
@@ -42,8 +47,9 @@ pub fn build_graph_topology(
             }
         }
 
-        // Add tag nodes
-        for (id, _tag) in &graph.tags {
+        let mut tag_ids: Vec<&String> = graph.tags.keys().collect();
+        tag_ids.sort();
+        for id in tag_ids {
             if !id_to_idx.contains_key(id) {
                 let idx = nodes.len();
                 id_to_idx.insert(id.clone(), idx);
@@ -55,9 +61,12 @@ pub fn build_graph_topology(
         }
     }
 
-    // Collect edges
+    // Collect edges (sort for deterministic order)
     for graph in &graphs {
-        for (src_id, edge_list) in &graph.edges {
+        let mut edge_src_ids: Vec<&String> = graph.edges.keys().collect();
+        edge_src_ids.sort();
+        for src_id in edge_src_ids {
+            let edge_list = &graph.edges[src_id];
             let Some(&src_idx) = id_to_idx.get(src_id) else {
                 continue;
             };
@@ -937,7 +946,7 @@ fn calculate_widget_height(
     };
 
     let total = content_height + border_height;
-    total.min(max_height).max(kind.min_height() + border_height)
+    total.min(max_height)
 }
 
 /// Legacy API for backwards compatibility - will be removed
