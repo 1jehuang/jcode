@@ -493,6 +493,8 @@ pub struct InfoWidgetData {
     pub usage_info: Option<UsageInfo>,
     /// Streaming output tokens per second (approximate)
     pub tokens_per_second: Option<f32>,
+    /// Active provider name (openrouter/openai/anthropic/...)
+    pub provider_name: Option<String>,
     /// Authentication method used to access the model
     pub auth_method: AuthMethod,
     /// Upstream provider (e.g., which OpenRouter provider served the request: fireworks, etc.)
@@ -1212,8 +1214,15 @@ fn render_memory_mermaid_graph(frame: &mut Frame, graph_rect: Rect, info: &Memor
 
     match super::mermaid::render_mermaid_untracked(&diagram, Some(graph_rect.width)) {
         super::mermaid::RenderResult::Image { hash, .. } => {
-            super::mermaid::render_image_widget(hash, graph_rect, frame.buffer_mut(), false, false)
-                > 0
+            // Scale to fit the tiny widget so we show the full graph shape
+            // instead of a clipped top slice.
+            super::mermaid::render_image_widget_fit(
+                hash,
+                graph_rect,
+                frame.buffer_mut(),
+                false,
+                false,
+            ) > 0
         }
         super::mermaid::RenderResult::Error(_) => false,
     }
@@ -2254,6 +2263,34 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
     }
 
     lines.push(Line::from(spans));
+
+    if let Some(provider) = data
+        .provider_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let mut provider_spans = vec![
+            Span::styled("☁ ", Style::default().fg(Color::Rgb(140, 180, 255))),
+            Span::styled(
+                provider.to_lowercase(),
+                Style::default().fg(Color::Rgb(140, 180, 255)),
+            ),
+        ];
+        if let Some(upstream) = data.upstream_provider.as_deref().map(str::trim) {
+            if !upstream.is_empty() {
+                provider_spans.push(Span::styled(
+                    " -> ",
+                    Style::default().fg(Color::Rgb(100, 100, 110)),
+                ));
+                provider_spans.push(Span::styled(
+                    upstream.to_string(),
+                    Style::default().fg(Color::Rgb(220, 190, 120)),
+                ));
+            }
+        }
+        lines.push(Line::from(provider_spans));
+    }
 
     // Auth method line (with upstream provider if available)
     if data.auth_method != AuthMethod::Unknown {
