@@ -447,7 +447,7 @@ impl ClientApp {
             let (reader, writer) = stream.into_split();
             let mut reader = BufReader::new(reader);
             let writer = std::sync::Arc::new(tokio::sync::Mutex::new(writer));
-            let mut redraw_interval = interval(Duration::from_millis(50));
+            let mut redraw_interval = interval(Duration::from_millis(16));
             let mut server_line = String::new();
 
             // Subscribe to server events and get history
