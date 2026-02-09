@@ -18,7 +18,7 @@ These aren't separate phases. The agent does all three in a single pass — whil
 1. **Single agent at a time** — only one ambient instance ever runs, no parallelism
 2. **Subscription-first** — defaults to OAuth (OpenAI/Anthropic), never uses API keys unless explicitly configured
 3. **User priority** — interactive sessions always take precedence over ambient work
-4. **Strong models** — uses capable models (o5.2-codex-xhigh) so the agent can reason well about what's actually useful
+4. **Strong models** — uses the strongest available model from the selected provider so the agent can reason well about what's actually useful
 5. **Self-scheduling** — the agent decides when to wake next, constrained by adaptive resource limits
 
 ---
@@ -379,17 +379,14 @@ pub enum Priority {
 ```mermaid
 graph TD
     START[Ambient Mode Start] --> CHECK1{OpenAI OAuth<br/>available?}
-    CHECK1 -->|yes| OAI[Use OpenAI<br/>o5.2-codex-xhigh]
-    CHECK1 -->|no| CHECK2{OpenRouter<br/>available?}
-    CHECK2 -->|yes| OR[Use OpenRouter<br/>strongest available]
-    CHECK2 -->|no| CHECK3{Anthropic OAuth<br/>available?}
-    CHECK3 -->|yes| ANT[Use Anthropic<br/>claude-opus-4-6]
-    CHECK3 -->|no| CHECK4{API key +<br/>config opt-in?}
-    CHECK4 -->|yes| API[Use API key<br/>with budget cap]
-    CHECK4 -->|no| DISABLED[Ambient mode disabled<br/>no provider available]
+    CHECK1 -->|yes| OAI[Use OpenAI<br/>strongest available]
+    CHECK1 -->|no| CHECK2{Anthropic OAuth<br/>available?}
+    CHECK2 -->|yes| ANT[Use Anthropic<br/>strongest available]
+    CHECK2 -->|no| CHECK3{API key or OpenRouter +<br/>config opt-in?}
+    CHECK3 -->|yes| API[Use API/OpenRouter<br/>with budget cap]
+    CHECK3 -->|no| DISABLED[Ambient mode disabled<br/>no provider available]
 
     style OAI fill:#e8f5e9
-    style OR fill:#e3f2fd
     style ANT fill:#fff3e0
     style API fill:#ffcdd2
     style DISABLED fill:#f5f5f5
@@ -397,22 +394,23 @@ graph TD
 
 **Rationale:**
 - **OpenAI first** — separate rate limit pool from Anthropic, so ambient doesn't compete with interactive sessions
+- **Anthropic second** — also subscription-based (OAuth), no per-token cost
+- **OpenRouter/API keys last** — these are pay-per-token; opt-in only via config to avoid silently burning credits
 - **Strong models** — ambient needs good judgment about what work is valuable. A weak model would do the wrong proactive work and annoy the user.
-- **API keys off by default** — ambient silently burning through API credits is unacceptable. Opt-in only via config.
 
 ### Model Selection
 
 | Provider | Default Model | Rationale |
 |----------|--------------|-----------|
-| OpenAI OAuth | `o5.2-codex-xhigh` (→ `o5.3-codex-xhigh` when available) | Strongest reasoning for judgment calls |
-| OpenRouter | Strongest available reasoning model | Flexible, user can override |
-| Anthropic OAuth | `claude-opus-4-6` | Best available on Anthropic |
+| OpenAI OAuth | Strongest available (e.g. `5.2-codex-xhigh`) | Best reasoning for judgment calls |
+| Anthropic OAuth | Strongest available (e.g. `claude-opus-4-6`) | Best available on Anthropic |
+| OpenRouter (opt-in) | Strongest available | Pay-per-token, requires config opt-in |
 | API key (opt-in) | Configurable | User chooses cost/capability tradeoff |
 
 ### Resource Rules
 
-1. **Subscription (OAuth):** Ambient is allowed, subject to adaptive rate limiting
-2. **API keys:** Off by default. Enable in config with optional daily budget cap
+1. **Subscription (OAuth — OpenAI/Anthropic):** Ambient is allowed, subject to adaptive rate limiting
+2. **Pay-per-token (API keys, OpenRouter):** Off by default. Enable in config with optional daily budget cap
 3. **User active:** Ambient pauses or throttles to minimum when user has an active session
 4. **Rate limited:** If ambient hits a rate limit, back off aggressively (exponential backoff)
 5. **Separate pools:** Prefer OpenAI for ambient when Anthropic is used interactively (and vice versa)
@@ -461,12 +459,16 @@ graph LR
 
 ### Safety
 
-Ambient mode should be conservative with proactive work:
+Ambient mode operates under the [Safety System](./SAFETY_SYSTEM.md) — a human-in-the-loop layer that classifies actions, requests permission for anything risky, and notifies the user via email/SMS/desktop.
+
+Key constraints for ambient:
+- **All actions classified** — auto-allowed (read, local branches, memory ops), requires permission (PRs, pushes, communication), or always denied (force-push, delete remote branches)
 - **Commits to a separate branch** — never pushes to main/master directly
+- **Code changes require worktree + PR** — modifications always go through review
 - **Small, focused changes** — no large refactors without user request
-- **Reports what it did** — visible in the info widget and session history
+- **Session transcript** — full log of every action, sent as summary after each cycle
 - **Respects .gitignore and sensitive files** — same security rules as interactive mode
-- **Can be reviewed** — user sees ambient work in the TUI and can accept/reject
+- **Can be reviewed** — user sees ambient work in the TUI and pending permission requests
 
 ---
 
@@ -521,7 +523,7 @@ enabled = false
 # provider = "openai"
 
 # Model override (default: provider's strongest)
-# model = "o5.2-codex-xhigh"
+# model = "5.2-codex-xhigh"
 
 # Allow API key usage (default: false, only OAuth)
 allow_api_keys = false
