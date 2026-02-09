@@ -799,6 +799,86 @@ pub fn reset() {
     }
 }
 
+/// Trigger a final memory extraction when a session ends.
+///
+/// This is fire-and-forget: spawns a tokio task that runs extraction
+/// with a 5-second timeout, then logs the result. Does not block the caller.
+pub fn trigger_final_extraction(transcript: String, session_id: String) {
+    if transcript.len() < 200 {
+        return;
+    }
+
+    tokio::spawn(async move {
+        crate::logging::info(&format!(
+            "Final extraction starting for session {} ({} chars)",
+            session_id,
+            transcript.len()
+        ));
+
+        let sidecar = crate::sidecar::HaikuSidecar::new();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            sidecar.extract_memories(&transcript),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(extracted)) if !extracted.is_empty() => {
+                let manager = crate::memory::MemoryManager::new();
+                let mut stored_count = 0;
+
+                for mem in &extracted {
+                    let category = match mem.category.as_str() {
+                        "fact" => crate::memory::MemoryCategory::Fact,
+                        "preference" => crate::memory::MemoryCategory::Preference,
+                        "correction" => crate::memory::MemoryCategory::Correction,
+                        _ => crate::memory::MemoryCategory::Fact,
+                    };
+
+                    let trust = match mem.trust.as_str() {
+                        "high" => crate::memory::TrustLevel::High,
+                        "low" => crate::memory::TrustLevel::Low,
+                        _ => crate::memory::TrustLevel::Medium,
+                    };
+
+                    let entry = crate::memory::MemoryEntry::new(category, &mem.content)
+                        .with_source(&session_id)
+                        .with_trust(trust);
+
+                    if manager.remember_project(entry).is_ok() {
+                        stored_count += 1;
+                    }
+                }
+
+                if stored_count > 0 {
+                    crate::logging::info(&format!(
+                        "Final extraction for session {}: stored {} memories",
+                        session_id, stored_count
+                    ));
+                }
+            }
+            Ok(Ok(_)) => {
+                crate::logging::info(&format!(
+                    "Final extraction for session {}: no memories extracted",
+                    session_id
+                ));
+            }
+            Ok(Err(e)) => {
+                crate::logging::info(&format!(
+                    "Final extraction for session {} failed: {}",
+                    session_id, e
+                ));
+            }
+            Err(_) => {
+                crate::logging::info(&format!(
+                    "Final extraction for session {} timed out (5s)",
+                    session_id
+                ));
+            }
+        }
+    });
+}
+
 /// Check if the memory agent is currently processing (has been initialized)
 pub fn is_active() -> bool {
     get().is_some()

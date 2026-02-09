@@ -30,6 +30,9 @@ pub struct Config {
 
     /// Ambient mode configuration
     pub ambient: AmbientConfig,
+
+    /// Safety / notification configuration
+    pub safety: SafetyConfig,
 }
 
 /// Keybinding configuration
@@ -172,6 +175,46 @@ impl Default for AmbientConfig {
     }
 }
 
+/// Safety system & notification configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SafetyConfig {
+    /// ntfy.sh topic name (required for push notifications)
+    pub ntfy_topic: Option<String>,
+    /// ntfy.sh server URL (default: https://ntfy.sh)
+    pub ntfy_server: String,
+    /// Enable desktop notifications via notify-send (default: true)
+    pub desktop_notifications: bool,
+    /// Enable email notifications (default: false)
+    pub email_enabled: bool,
+    /// Email recipient
+    pub email_to: Option<String>,
+    /// SMTP host (e.g. smtp.gmail.com)
+    pub email_smtp_host: Option<String>,
+    /// SMTP port (default: 587)
+    pub email_smtp_port: u16,
+    /// Email sender address
+    pub email_from: Option<String>,
+    /// SMTP password (prefer JCODE_SMTP_PASSWORD env var)
+    pub email_password: Option<String>,
+}
+
+impl Default for SafetyConfig {
+    fn default() -> Self {
+        Self {
+            ntfy_topic: None,
+            ntfy_server: "https://ntfy.sh".to_string(),
+            desktop_notifications: true,
+            email_enabled: false,
+            email_to: None,
+            email_smtp_host: None,
+            email_smtp_port: 587,
+            email_from: None,
+            email_password: None,
+        }
+    }
+}
+
 impl Config {
     /// Get the config file path
     pub fn path() -> Option<PathBuf> {
@@ -279,6 +322,21 @@ impl Config {
             }
         }
 
+        // Safety / notifications
+        if let Ok(v) = std::env::var("JCODE_NTFY_TOPIC") {
+            self.safety.ntfy_topic = Some(v);
+        }
+        if let Ok(v) = std::env::var("JCODE_NTFY_SERVER") {
+            self.safety.ntfy_server = v;
+        }
+        if let Ok(v) = std::env::var("JCODE_SMTP_PASSWORD") {
+            self.safety.email_password = Some(v);
+        }
+        if let Ok(v) = std::env::var("JCODE_EMAIL_TO") {
+            self.safety.email_to = Some(v);
+            self.safety.email_enabled = true;
+        }
+
         // Provider
         if let Ok(v) = std::env::var("JCODE_MODEL") {
             self.provider.default_model = Some(v);
@@ -376,6 +434,25 @@ pause_on_active_session = true
 proactive_work = true
 # Branch prefix for proactive work
 work_branch_prefix = "ambient/"
+
+[safety]
+# Notification settings for ambient mode events
+
+# ntfy.sh push notifications (free, phone app: https://ntfy.sh)
+# ntfy_topic = "jcode-ambient-your-secret-topic"
+# ntfy_server = "https://ntfy.sh"
+
+# Desktop notifications via notify-send (default: true)
+desktop_notifications = true
+
+# Email notifications via SMTP
+# email_enabled = false
+# email_to = "you@example.com"
+# email_from = "jcode@example.com"
+# email_smtp_host = "smtp.gmail.com"
+# email_smtp_port = 587
+# Password via env: JCODE_SMTP_PASSWORD (preferred) or config below
+# email_password = ""
 "#;
 
         std::fs::write(&path, default_content)?;
@@ -418,6 +495,11 @@ work_branch_prefix = "ambient/"
 - Proactive work: {}
 - Work branch prefix: `{}`
 
+**Notifications:**
+- ntfy.sh: {}
+- Desktop: {}
+- Email: {}
+
 *Edit the config file or set environment variables to customize.*
 *Environment variables (e.g., `JCODE_SCROLL_UP_KEY`) override file settings.*"#,
             path,
@@ -453,6 +535,24 @@ work_branch_prefix = "ambient/"
             self.ambient.pause_on_active_session,
             self.ambient.proactive_work,
             self.ambient.work_branch_prefix,
+            self.safety
+                .ntfy_topic
+                .as_deref()
+                .map(|t| format!("enabled (topic: {})", t))
+                .unwrap_or_else(|| "disabled".to_string()),
+            if self.safety.desktop_notifications {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            if self.safety.email_enabled {
+                self.safety
+                    .email_to
+                    .as_deref()
+                    .unwrap_or("enabled (no recipient)")
+            } else {
+                "disabled"
+            },
         )
     }
 }

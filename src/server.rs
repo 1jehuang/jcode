@@ -1184,6 +1184,11 @@ impl Server {
 
         // Note: No default session created here - each client creates its own session
 
+        // Initialize the memory agent early so it's ready for all sessions
+        tokio::spawn(async {
+            let _ = crate::memory_agent::init().await;
+        });
+
         // Spawn ambient mode background loop if enabled
         if let Some(ref runner) = self.ambient_runner {
             let ambient_handle = runner.clone();
@@ -3119,10 +3124,18 @@ async fn handle_client(
                     continue;
                 }
 
-                // Remove session
+                // Remove session and trigger final memory extraction
                 let mut sessions_guard = sessions.write().await;
-                if sessions_guard.remove(&target_session).is_some() {
-                    drop(sessions_guard);
+                let removed_agent = sessions_guard.remove(&target_session);
+                drop(sessions_guard);
+                if let Some(agent_arc) = removed_agent {
+                    {
+                        let agent = agent_arc.lock().await;
+                        let transcript = agent.build_transcript_for_extraction();
+                        let sid = target_session.clone();
+                        drop(agent);
+                        crate::memory_agent::trigger_final_extraction(transcript, sid);
+                    }
                     // Clean up swarm membership
                     let removed_swarm_id = {
                         let mut members = swarm_members.write().await;
@@ -3163,7 +3176,6 @@ async fn handle_client(
                     }
                     let _ = client_event_tx.send(ServerEvent::Done { id });
                 } else {
-                    drop(sessions_guard);
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: format!("Unknown session '{}'", target_session),
@@ -3533,9 +3545,17 @@ async fn handle_client(
     }
 
     // Clean up: remove this client's session from the map
+    // Extract transcript for final memory extraction before dropping the agent
     {
         let mut sessions_guard = sessions.write().await;
-        sessions_guard.remove(&client_session_id);
+        if let Some(agent_arc) = sessions_guard.remove(&client_session_id) {
+            drop(sessions_guard);
+            let agent = agent_arc.lock().await;
+            let transcript = agent.build_transcript_for_extraction();
+            let sid = client_session_id.clone();
+            drop(agent);
+            crate::memory_agent::trigger_final_extraction(transcript, sid);
+        }
     }
 
     // Clean up: remove from swarm tracking
@@ -5246,11 +5266,19 @@ async fn handle_debug_client(
                             if target_id.is_empty() {
                                 Err(anyhow::anyhow!("destroy_session: requires a session_id"))
                             } else {
-                                // Remove session first, drop write guard immediately
-                                let removed = {
+                                // Remove session first, extract transcript for final memory extraction
+                                let removed_agent = {
                                     let mut sessions_guard = sessions.write().await;
-                                    sessions_guard.remove(target_id).is_some()
+                                    sessions_guard.remove(target_id)
                                 };
+                                if let Some(ref agent_arc) = removed_agent {
+                                    let agent = agent_arc.lock().await;
+                                    let transcript = agent.build_transcript_for_extraction();
+                                    let sid = target_id.to_string();
+                                    drop(agent);
+                                    crate::memory_agent::trigger_final_extraction(transcript, sid);
+                                }
+                                let removed = removed_agent.is_some();
                                 if removed {
                                     // Clean up swarm membership
                                     let swarm_id = {

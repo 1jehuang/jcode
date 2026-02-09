@@ -82,6 +82,9 @@ syntect = { version = "5", default-features = false, features = ["default-fancy"
 pulldown-cmark = "0.12"
 unicode-width = "0.2"   # Unicode character display width
 
+# Email (SMTP)
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+
 # PDF parsing
 pdf-extract = "0.8"
 

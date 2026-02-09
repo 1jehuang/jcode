@@ -476,6 +476,80 @@ pub fn gather_memory_graph_health(
     health
 }
 
+/// Gather feedback memories relevant to ambient mode.
+///
+/// Pulls from two sources:
+/// 1. Recent ambient transcripts (summaries of past cycles)
+/// 2. Memory graph entries tagged "ambient" or "system"
+///
+/// Returns formatted strings for inclusion in the ambient system prompt.
+pub fn gather_feedback_memories(memory_manager: &crate::memory::MemoryManager) -> Vec<String> {
+    let mut feedback = Vec::new();
+
+    // --- Source 1: Recent ambient transcripts ---
+    let transcripts_dir = match crate::storage::jcode_dir() {
+        Ok(d) => d.join("ambient").join("transcripts"),
+        Err(_) => return feedback,
+    };
+
+    if transcripts_dir.exists() {
+        if let Ok(dir) = std::fs::read_dir(&transcripts_dir) {
+            let mut files: Vec<_> = dir.flatten().collect();
+            // Sort by filename descending (most recent first)
+            files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+            // Only look at the last 5 transcripts
+            files.truncate(5);
+
+            for entry in files {
+                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                    if let Ok(transcript) =
+                        serde_json::from_str::<crate::safety::AmbientTranscript>(&content)
+                    {
+                        let status = format!("{:?}", transcript.status);
+                        let summary = transcript
+                            .summary
+                            .as_deref()
+                            .unwrap_or("no summary");
+                        let age = format_duration_rough(Utc::now() - transcript.started_at);
+                        feedback.push(format!(
+                            "Past cycle ({} ago, {}): {} memories modified, {} compactions — {}",
+                            age,
+                            status.to_lowercase(),
+                            transcript.memories_modified,
+                            transcript.compactions,
+                            summary,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Source 2: Memory graph entries tagged "ambient" or "system" ---
+    for graph in [
+        memory_manager.load_project_graph(),
+        memory_manager.load_global_graph(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for memory in graph.memories.values() {
+            if !memory.active {
+                continue;
+            }
+            let has_ambient_tag = memory
+                .tags
+                .iter()
+                .any(|t| t == "ambient" || t == "system");
+            if has_ambient_tag {
+                feedback.push(format!("Memory [{}]: {}", memory.id, memory.content));
+            }
+        }
+    }
+
+    feedback
+}
+
 /// Gather recent sessions since a given timestamp.
 pub fn gather_recent_sessions(since: Option<DateTime<Utc>>) -> Vec<RecentSessionInfo> {
     let sessions_dir = match crate::storage::jcode_dir() {
