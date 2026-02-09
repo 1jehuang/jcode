@@ -431,11 +431,16 @@ impl MemoryAgent {
         let memory_manager = self.memory_manager.clone();
         let context_owned = context.to_string();
 
+        // Similarity threshold for duplicate detection
+        const DUPLICATE_THRESHOLD: f32 = 0.90;
+
         // Run extraction in background - don't block the main flow
         tokio::spawn(async move {
             match sidecar.extract_memories(&context_owned).await {
                 Ok(extracted) if !extracted.is_empty() => {
                     let mut stored_count = 0;
+                    let mut reinforced_count = 0;
+                    let mut superseded_count = 0;
 
                     for mem in extracted {
                         let category = match mem.category.as_str() {
@@ -451,23 +456,125 @@ impl MemoryAgent {
                             _ => memory::TrustLevel::Medium,
                         };
 
+                        // Check for duplicate: find semantically similar existing memories
+                        let similar =
+                            memory_manager.find_similar(&mem.content, DUPLICATE_THRESHOLD, 1);
+
+                        if let Ok(matches) = similar {
+                            if let Some((existing, _sim)) = matches.first() {
+                                // Duplicate found - reinforce existing memory instead
+                                let existing_id = existing.id.clone();
+                                let mut did_reinforce = false;
+
+                                if let Ok(mut graph) = memory_manager.load_project_graph() {
+                                    if graph.get_memory(&existing_id).is_some() {
+                                        let strength = {
+                                            let entry =
+                                                graph.get_memory_mut(&existing_id).unwrap();
+                                            entry.reinforce("incremental", 0);
+                                            entry.strength
+                                        };
+                                        if memory_manager.save_project_graph(&graph).is_ok() {
+                                            did_reinforce = true;
+                                            crate::logging::info(&format!(
+                                                "Reinforced existing memory {} (strength={})",
+                                                existing_id, strength
+                                            ));
+                                        }
+                                    }
+                                }
+
+                                if !did_reinforce {
+                                    if let Ok(mut graph) = memory_manager.load_global_graph() {
+                                        if graph.get_memory(&existing_id).is_some() {
+                                            graph
+                                                .get_memory_mut(&existing_id)
+                                                .unwrap()
+                                                .reinforce("incremental", 0);
+                                            let _ = memory_manager.save_global_graph(&graph);
+                                            did_reinforce = true;
+                                        }
+                                    }
+                                }
+
+                                if did_reinforce {
+                                    reinforced_count += 1;
+                                }
+                                continue;
+                            }
+                        }
+
+                        // No duplicate - check for contradiction in same category
+                        let contradiction_found =
+                            match memory_manager.find_similar(&mem.content, 0.5, 5) {
+                                Ok(candidates) => {
+                                    let mut found = None;
+                                    for (candidate, _) in &candidates {
+                                        if candidate.category == category {
+                                            match sidecar
+                                                .check_contradiction(
+                                                    &mem.content,
+                                                    &candidate.content,
+                                                )
+                                                .await
+                                            {
+                                                Ok(true) => {
+                                                    found = Some(candidate.id.clone());
+                                                    break;
+                                                }
+                                                Ok(false) => {}
+                                                Err(e) => {
+                                                    crate::logging::info(&format!(
+                                                        "Contradiction check failed: {}",
+                                                        e
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    found
+                                }
+                                Err(_) => None,
+                            };
+
+                        // Create the new memory
                         let entry = memory::MemoryEntry::new(category, &mem.content)
                             .with_source("incremental")
                             .with_trust(trust);
 
-                        if memory_manager.remember_project(entry).is_ok() {
-                            stored_count += 1;
+                        match memory_manager.remember_project(entry) {
+                            Ok(new_id) => {
+                                stored_count += 1;
+
+                                // If contradiction found, supersede the old memory
+                                if let Some(old_id) = contradiction_found {
+                                    if let Ok(mut graph) = memory_manager.load_project_graph() {
+                                        if let Some(old_entry) = graph.get_memory_mut(&old_id) {
+                                            old_entry.supersede(&new_id);
+                                            if memory_manager.save_project_graph(&graph).is_ok() {
+                                                superseded_count += 1;
+                                                crate::logging::info(&format!(
+                                                    "Superseded memory {} with {}",
+                                                    old_id, new_id
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                crate::logging::info(&format!("Failed to store memory: {}", e));
+                            }
                         }
                     }
 
-                    if stored_count > 0 {
+                    let total = stored_count + reinforced_count;
+                    if total > 0 {
                         crate::logging::info(&format!(
-                            "Incremental extraction: stored {} memories on topic change",
-                            stored_count
+                            "Incremental extraction: {} stored, {} reinforced, {} superseded",
+                            stored_count, reinforced_count, superseded_count
                         ));
-                        memory::add_event(MemoryEventKind::ExtractionComplete {
-                            count: stored_count,
-                        });
+                        memory::add_event(MemoryEventKind::ExtractionComplete { count: total });
                     }
                     memory::set_state(MemoryState::Idle);
                 }
