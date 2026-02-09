@@ -1310,11 +1310,7 @@ impl Server {
                             .await;
 
                             // Decrement client count when done
-                            let new_count = {
-                                let mut c = client_count.write().await;
-                                *c -= 1;
-                                *c
-                            };
+                            *client_count.write().await -= 1;
 
                             // Nudge ambient runner on session close
                             if let Some(ref runner) = ambient_runner {
