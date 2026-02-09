@@ -151,6 +151,14 @@ impl Default for TrustLevel {
     }
 }
 
+/// A reinforcement breadcrumb tracking when/where a memory was reinforced
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Reinforcement {
+    pub session_id: String,
+    pub message_index: usize,
+    pub timestamp: DateTime<Utc>,
+}
+
 /// A single memory entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEntry {
@@ -174,6 +182,9 @@ pub struct MemoryEntry {
     /// ID of memory that superseded this one
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
+    /// Reinforcement provenance (breadcrumbs of when/where this was reinforced)
+    #[serde(default)]
+    pub reinforcements: Vec<Reinforcement>,
     /// Embedding vector for similarity search (384 dimensions for MiniLM)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding: Option<Vec<f32>>,
@@ -206,6 +217,7 @@ impl MemoryEntry {
             strength: 1,
             active: true,
             superseded_by: None,
+            reinforcements: Vec::new(),
             embedding: None,
             confidence: 1.0,
         }
@@ -268,9 +280,14 @@ impl MemoryEntry {
     }
 
     /// Reinforce this memory (called when same info is encountered again)
-    pub fn reinforce(&mut self) {
+    pub fn reinforce(&mut self, session_id: &str, message_index: usize) {
         self.strength += 1;
         self.updated_at = Utc::now();
+        self.reinforcements.push(Reinforcement {
+            session_id: session_id.to_string(),
+            message_index,
+            timestamp: Utc::now(),
+        });
     }
 
     /// Mark this memory as superseded by another
