@@ -824,6 +824,66 @@ fn binary_age() -> Option<String> {
     Some(build_age)
 }
 
+/// Get changelog entries the user hasn't seen yet.
+/// Reads the last-seen commit hash from ~/.jcode/last_seen_changelog,
+/// filters the embedded changelog to only new entries, then saves the latest hash.
+/// Returns just the commit subjects (not the hashes).
+fn get_unseen_changelog_entries() -> &'static Vec<String> {
+    static ENTRIES: OnceLock<Vec<String>> = OnceLock::new();
+    ENTRIES.get_or_init(|| {
+        let changelog = env!("JCODE_CHANGELOG");
+        if changelog.is_empty() {
+            return Vec::new();
+        }
+
+        // Parse "hash:subject" lines
+        let all_entries: Vec<(&str, &str)> = changelog
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .collect();
+
+        if all_entries.is_empty() {
+            return Vec::new();
+        }
+
+        // Read last-seen hash
+        let state_file = dirs::home_dir()
+            .map(|h| h.join(".jcode").join("last_seen_changelog"))
+            .unwrap_or_else(|| std::path::PathBuf::from(".jcode/last_seen_changelog"));
+
+        let last_seen_hash = std::fs::read_to_string(&state_file)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+
+        // Filter: take entries until we hit the last-seen hash
+        let new_entries: Vec<String> = if last_seen_hash.is_empty() {
+            // First time ever — show last 5 as a welcome
+            all_entries
+                .iter()
+                .take(5)
+                .map(|(_, subject)| subject.to_string())
+                .collect()
+        } else {
+            all_entries
+                .iter()
+                .take_while(|(hash, _)| *hash != last_seen_hash)
+                .map(|(_, subject)| subject.to_string())
+                .collect()
+        };
+
+        // Save the latest hash so next session only shows new stuff
+        if let Some((latest_hash, _)) = all_entries.first() {
+            if let Some(parent) = state_file.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&state_file, latest_hash);
+        }
+
+        new_entries
+    })
+}
+
 /// Shorten model name for display (e.g., "claude-opus-4-5-20251101" -> "claude4.5opus")
 fn shorten_model_name(model: &str) -> String {
     // Handle OpenRouter models (format: provider/model-name)
@@ -1605,45 +1665,43 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     }
 
     // Line 3+: Recent changes in a box (from git log, embedded at build time)
-    let changelog = env!("JCODE_CHANGELOG");
+    // Each line is "hash:subject". We filter to only show commits since the user last saw updates.
+    let new_entries = get_unseen_changelog_entries();
     let term_width = width as usize;
-    if !changelog.is_empty() && term_width > 20 {
-        let changelog_lines: Vec<&str> = changelog.lines().collect();
-        if !changelog_lines.is_empty() {
-            const MAX_LINES: usize = 5;
-            let available_width = term_width.saturating_sub(2); // Leave margin
-            let display_lines = changelog_lines.len().min(MAX_LINES);
-            let has_more = changelog_lines.len() > MAX_LINES;
+    if !new_entries.is_empty() && term_width > 20 {
+        const MAX_LINES: usize = 8;
+        let available_width = term_width.saturating_sub(2);
+        let display_count = new_entries.len().min(MAX_LINES);
+        let has_more = new_entries.len() > MAX_LINES;
 
-            let mut content: Vec<Line> = Vec::new();
-            for line in changelog_lines.iter().take(display_lines) {
-                content.push(
-                    Line::from(Span::styled(
-                        line.to_string(),
-                        Style::default().fg(DIM_COLOR),
-                    ))
-                    .alignment(align),
-                );
-            }
-            if has_more {
-                content.push(
-                    Line::from(Span::styled(
-                        format!("…{} more", changelog_lines.len() - MAX_LINES),
-                        Style::default().fg(DIM_COLOR),
-                    ))
-                    .alignment(align),
-                );
-            }
-
-            let boxed = render_rounded_box(
-                "Updates",
-                content,
-                available_width,
-                Style::default().fg(DIM_COLOR),
+        let mut content: Vec<Line> = Vec::new();
+        for entry in new_entries.iter().take(display_count) {
+            content.push(
+                Line::from(Span::styled(
+                    format!("• {}", entry),
+                    Style::default().fg(DIM_COLOR),
+                ))
+                .alignment(align),
             );
-            for line in boxed {
-                lines.push(line.alignment(align));
-            }
+        }
+        if has_more {
+            content.push(
+                Line::from(Span::styled(
+                    format!("  …{} more", new_entries.len() - MAX_LINES),
+                    Style::default().fg(DIM_COLOR),
+                ))
+                .alignment(align),
+            );
+        }
+
+        let boxed = render_rounded_box(
+            "Updates",
+            content,
+            available_width,
+            Style::default().fg(DIM_COLOR),
+        );
+        for line in boxed {
+            lines.push(line.alignment(align));
         }
     }
 
