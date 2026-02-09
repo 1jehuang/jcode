@@ -90,6 +90,7 @@ mermaid-rs-renderer = { path = "../mermaid-rs-renderer" }
 
 [dev-dependencies]
 async-stream = "0.3"
+tempfile = "3"
 
 [build-dependencies]
 dirs = "5"
