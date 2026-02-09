@@ -742,17 +742,33 @@ memory { action: "tag", id: "...", tags: ["new", "tags"] }
 
 ### Phase 7: Full Integration ✅
 - [x] End-of-session extraction
-- [ ] Consolidation on write
+- [ ] Sidecar consolidation on write (see below)
 - [x] User control CLI (`jcode memory` commands)
 - [x] Memory export/import
 
-### Phase 8: Memory Consolidation (Sleep-Like Processing) 📋
-- [ ] Background consolidation daemon
-- [ ] Similarity-based memory merging
-- [ ] Redundancy detection and deduplication
-- [ ] Contradiction resolution
+### Phase 7.5: Sidecar Consolidation (Inline, Per-Turn) 📋
+
+Lightweight consolidation that runs in the memory sidecar after returning results to the main agent. Only operates on memories already retrieved — no extra lookups, zero added latency.
+
+Currently `extract_from_context()` blindly creates new memories without checking for duplicates or contradictions. These tasks fix that:
+
+- [ ] **Duplicate detection on write** — before storing an extracted memory, check if a semantically similar one already exists in the retrieved set. If so, reinforce the existing memory instead of creating a duplicate.
+- [ ] **Contradiction detection on write** — if a new memory contradicts an existing one in the retrieved set, supersede the old one rather than storing both.
+- [ ] **Reinforcement provenance** — add `Vec<Reinforcement>` to `MemoryEntry` where each reinforcement records `session_id`, `message_index`, and `timestamp`. The system automatically attaches this breadcrumb when `reinforce()` is called, so consolidation agents can later trace back why a memory has its current strength.
+
+### Phase 8: Deep Memory Consolidation (Ambient Garden) 📋
+
+Full graph-wide consolidation that runs during ambient mode background cycles. See [AMBIENT_MODE.md](./AMBIENT_MODE.md) for the ambient mode design.
+
+- [ ] Graph-wide similarity-based memory merging
+- [ ] Redundancy detection and deduplication (beyond sidecar's local scope)
+- [ ] Contradiction resolution (across full graph, not just retrieved set)
+- [ ] Fact verification against codebase (check if factual memories are still true)
+- [ ] Retroactive session extraction (crashed/missed sessions)
 - [ ] Cluster reorganization
-- [ ] Weak memory pruning
+- [ ] Weak memory pruning (confidence < 0.05 AND strength <= 1)
+- [ ] Relationship discovery across sessions
+- [ ] Embedding backfill for memories missing embeddings
 - [ ] Knowledge graph optimization
 
 ---
