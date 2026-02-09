@@ -4627,6 +4627,7 @@ impl App {
                             ));
                             return Ok(());
                         }
+                        self.upstream_provider = None;
                         remote.set_model(model_name).await?;
                         return Ok(());
                     }
@@ -5806,6 +5807,7 @@ impl App {
                 Ok(()) => {
                     self.provider_session_id = None;
                     self.session.provider_session_id = None;
+                    self.upstream_provider = None;
                     let active_model = self.provider.model();
                     self.update_context_limit_for_model(&active_model);
                     self.session.model = Some(active_model.clone());
@@ -6140,6 +6142,7 @@ impl App {
             Ok(()) => {
                 self.provider_session_id = None;
                 self.session.provider_session_id = None;
+                self.upstream_provider = None;
                 self.update_context_limit_for_model(next_model);
                 self.session.model = Some(self.provider.model());
                 let _ = self.session.save();
@@ -9267,6 +9270,13 @@ impl super::TuiState for App {
             background_info,
             usage_info,
             tokens_per_second,
+            provider_name: if self.is_remote {
+                self.remote_provider_name
+                    .clone()
+                    .or_else(|| Some(self.provider.name().to_string()))
+            } else {
+                Some(self.provider.name().to_string())
+            },
             auth_method,
             upstream_provider: self.upstream_provider.clone(),
             diagrams,

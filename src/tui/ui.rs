@@ -3052,7 +3052,7 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
     frame.render_widget(paragraph, area);
 }
 
-fn append_provider_indicator(mut line: Line<'static>, app: &dyn TuiState) -> Line<'static> {
+fn append_provider_indicator(line: Line<'static>, app: &dyn TuiState) -> Line<'static> {
     let provider = app.provider_name();
     let provider = provider.trim();
     if provider.is_empty() {
@@ -3064,27 +3064,25 @@ fn append_provider_indicator(mut line: Line<'static>, app: &dyn TuiState) -> Lin
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    if !line.spans.is_empty() {
-        line.spans
-            .push(Span::styled(" · ", Style::default().fg(DIM_COLOR)));
-    }
-
-    line.spans
-        .push(Span::styled("llm ", Style::default().fg(DIM_COLOR)));
-    line.spans.push(Span::styled(
+    let mut indicator = Vec::new();
+    indicator.push(Span::styled("llm ", Style::default().fg(DIM_COLOR)));
+    indicator.push(Span::styled(
         provider.to_lowercase(),
         Style::default().fg(Color::Rgb(140, 180, 255)),
     ));
     if let Some(upstream) = upstream {
-        line.spans
-            .push(Span::styled(" -> ", Style::default().fg(DIM_COLOR)));
-        line.spans.push(Span::styled(
+        indicator.push(Span::styled(" -> ", Style::default().fg(DIM_COLOR)));
+        indicator.push(Span::styled(
             upstream,
             Style::default().fg(Color::Rgb(220, 190, 120)),
         ));
     }
 
-    line
+    if !line.spans.is_empty() {
+        indicator.push(Span::styled(" · ", Style::default().fg(DIM_COLOR)));
+    }
+    indicator.extend(line.spans.into_iter());
+    Line::from(indicator)
 }
 
 /// Build usage line for idle state (shows subscription limits or cost)
