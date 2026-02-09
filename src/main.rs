@@ -1,3 +1,5 @@
+mod ambient;
+mod ambient_scheduler;
 mod agent;
 mod auth;
 mod auto_debug;
@@ -19,6 +21,7 @@ mod prompt;
 mod protocol;
 mod provider;
 mod registry;
+mod safety;
 mod server;
 mod session;
 mod sidecar;
