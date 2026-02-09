@@ -221,6 +221,19 @@ impl AmbientRunnerHandle {
         }
         logging::info("Ambient runner: starting background loop");
 
+        // Spawn IMAP reply poller if email replies are enabled
+        let safety_config = config().safety.clone();
+        if safety_config.email_reply_enabled
+            && safety_config.email_imap_host.is_some()
+            && safety_config.email_enabled
+        {
+            let imap_config = safety_config.clone();
+            tokio::spawn(async move {
+                crate::notifications::imap_reply_loop(imap_config).await;
+            });
+            logging::info("Ambient runner: IMAP reply poller spawned");
+        }
+
         let amb_config = &config().ambient;
         let scheduler_config = AmbientSchedulerConfig {
             min_interval_minutes: amb_config.min_interval_minutes,
@@ -282,7 +295,8 @@ impl AmbientRunnerHandle {
                         let mut qp = self.inner.next_queue_preview.write().await;
                         *qp = mgr.queue().peek_next().map(|i| i.context.clone());
                     }
-                    mgr.should_run()
+                    // Also run if there are pending email reply directives
+                    mgr.should_run() || ambient::has_pending_directives()
                 }
                 Err(e) => {
                     logging::error(&format!("Ambient runner: failed to load manager: {}", e));
@@ -451,6 +465,19 @@ impl AmbientRunnerHandle {
     async fn run_cycle(&self, provider: &Arc<dyn Provider>) -> anyhow::Result<AmbientCycleResult> {
         let started_at = Utc::now();
 
+        // Visible mode: set up live transcript writer + kitty window
+        let visible = config().ambient.visible;
+        let mut transcript_writer = LiveTranscriptWriter::new(visible);
+        let kitty_child = if visible {
+            transcript_writer.write_line(&format!(
+                "# Ambient Cycle — {}\n",
+                started_at.format("%Y-%m-%d %H:%M:%S UTC")
+            ));
+            spawn_transcript_viewer()
+        } else {
+            None
+        };
+
         // Fork provider for this cycle
         let cycle_provider = provider.fork();
 
@@ -497,9 +524,11 @@ impl AmbientRunnerHandle {
 
         // Set system prompt on agent
         agent.set_system_prompt(&system_prompt);
+        transcript_writer.write_section("System Prompt", &system_prompt);
 
         // Run the agent with the initial message
         let initial_message = "Begin your ambient cycle. Check the scheduled queue, assess memory graph health, and plan your work using the todos tool.";
+        transcript_writer.write_section("Initial Message", initial_message);
 
         // Clear any previous cycle result
         ambient_tools::take_cycle_result();
@@ -507,8 +536,14 @@ impl AmbientRunnerHandle {
         // Run agent turn
         let run_result = agent.run_once_capture(initial_message).await;
 
+        if let Ok(ref response) = run_result {
+            transcript_writer.write_section("Agent Response", response);
+        }
+
         // Check if end_ambient_cycle was called
         if let Some(result) = ambient_tools::take_cycle_result() {
+            transcript_writer.write_line("\n---\n**Cycle complete.**");
+            cleanup_kitty(kitty_child).await;
             // Agent called end_ambient_cycle properly
             return Ok(AmbientCycleResult {
                 started_at,
@@ -529,10 +564,15 @@ impl AmbientRunnerHandle {
             what you accomplished and schedule your next wake. \
             If you are not done, continue what you were doing.";
 
-        let _ = agent.run_once_capture(continuation).await;
+        let continuation_result = agent.run_once_capture(continuation).await;
+        if let Ok(ref response) = continuation_result {
+            transcript_writer.write_section("Continuation Response", response);
+        }
 
         // Check again
         if let Some(result) = ambient_tools::take_cycle_result() {
+            transcript_writer.write_line("\n---\n**Cycle complete (after continuation).**");
+            cleanup_kitty(kitty_child).await;
             return Ok(AmbientCycleResult {
                 started_at,
                 ended_at: Utc::now(),
@@ -542,6 +582,8 @@ impl AmbientRunnerHandle {
 
         // Still no end_ambient_cycle after two attempts - generate partial result
         logging::warn("Ambient cycle: forced end after 2 attempts without end_ambient_cycle");
+        transcript_writer.write_line("\n---\n**Cycle forced end (no end_ambient_cycle called).**");
+        cleanup_kitty(kitty_child).await;
         Ok(AmbientCycleResult {
             summary: "Cycle ended without calling end_ambient_cycle (forced end after 2 attempts)"
                 .to_string(),
@@ -553,5 +595,85 @@ impl AmbientRunnerHandle {
             ended_at: Utc::now(),
             status: CycleStatus::Incomplete,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Live transcript writer (for visible ambient mode)
+// ---------------------------------------------------------------------------
+
+struct LiveTranscriptWriter {
+    file: Option<std::fs::File>,
+}
+
+impl LiveTranscriptWriter {
+    fn new(enabled: bool) -> Self {
+        if !enabled {
+            return Self { file: None };
+        }
+        let path = crate::storage::jcode_dir()
+            .ok()
+            .map(|d| d.join("ambient").join("live_transcript.md"));
+        let file = path.and_then(|p| {
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::File::create(&p).ok()
+        });
+        Self { file }
+    }
+
+    fn write_section(&mut self, heading: &str, content: &str) {
+        if let Some(ref mut f) = self.file {
+            use std::io::Write;
+            let _ = writeln!(f, "\n## {}\n", heading);
+            let _ = writeln!(f, "{}\n", content);
+            let _ = f.flush();
+        }
+    }
+
+    fn write_line(&mut self, line: &str) {
+        if let Some(ref mut f) = self.file {
+            use std::io::Write;
+            let _ = writeln!(f, "{}", line);
+            let _ = f.flush();
+        }
+    }
+}
+
+/// Spawn a kitty terminal window that tails the live transcript.
+fn spawn_transcript_viewer() -> Option<std::process::Child> {
+    let transcript_path = crate::storage::jcode_dir()
+        .ok()
+        .map(|d| d.join("ambient").join("live_transcript.md"))?;
+
+    let child = std::process::Command::new("kitty")
+        .args([
+            "--title",
+            "jcode ambient cycle",
+            "-e",
+            "tail",
+            "-f",
+            &transcript_path.to_string_lossy(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok();
+
+    if child.is_none() {
+        logging::warn("Ambient visible: failed to spawn kitty window (falling back to headless)");
+    }
+
+    child
+}
+
+/// Clean up the kitty viewer window after cycle ends.
+async fn cleanup_kitty(child: Option<std::process::Child>) {
+    if let Some(mut child) = child {
+        // Give user a few seconds to read the final output
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        let _ = child.kill();
     }
 }
