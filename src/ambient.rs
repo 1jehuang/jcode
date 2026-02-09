@@ -862,6 +862,11 @@ pub fn build_ambient_system_prompt(
          no surprise. Check the user feedback memories -- if they've rejected \
          similar work before, don't do it. Code changes must go on a worktree \
          branch with a PR via request_permission.\n\n\
+         Good sources for scouting proactive work:\n\
+         - Todoist (via MCP) — check for relevant tasks and deadlines\n\
+         - Canvas (via MCP) — check for upcoming assignments or deadlines\n\
+         - Git history — recent commits, open branches, stale PRs\n\
+         - Session history — patterns in what the user works on\n\n\
          When done, you MUST call end_ambient_cycle with a summary of \
          everything you did, including compaction count. Always schedule \
          your next wake time with context for what you plan to do next.\n",
