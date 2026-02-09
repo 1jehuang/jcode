@@ -156,6 +156,8 @@ pub struct AmbientConfig {
     pub proactive_work: bool,
     /// Proactive work branch prefix (default: "ambient/")
     pub work_branch_prefix: String,
+    /// Show ambient cycle in a terminal window (default: false)
+    pub visible: bool,
 }
 
 impl Default for AmbientConfig {
@@ -171,6 +173,7 @@ impl Default for AmbientConfig {
             pause_on_active_session: true,
             proactive_work: true,
             work_branch_prefix: "ambient/".to_string(),
+            visible: false,
         }
     }
 }
@@ -197,6 +200,12 @@ pub struct SafetyConfig {
     pub email_from: Option<String>,
     /// SMTP password (prefer JCODE_SMTP_PASSWORD env var)
     pub email_password: Option<String>,
+    /// IMAP host for receiving email replies (e.g. imap.gmail.com)
+    pub email_imap_host: Option<String>,
+    /// IMAP port (default: 993)
+    pub email_imap_port: u16,
+    /// Enable email reply → agent directive feature (default: false)
+    pub email_reply_enabled: bool,
 }
 
 impl Default for SafetyConfig {
@@ -211,6 +220,9 @@ impl Default for SafetyConfig {
             email_smtp_port: 587,
             email_from: None,
             email_password: None,
+            email_imap_host: None,
+            email_imap_port: 993,
+            email_reply_enabled: false,
         }
     }
 }
@@ -336,6 +348,19 @@ impl Config {
             self.safety.email_to = Some(v);
             self.safety.email_enabled = true;
         }
+        if let Ok(v) = std::env::var("JCODE_IMAP_HOST") {
+            self.safety.email_imap_host = Some(v);
+        }
+        if let Ok(v) = std::env::var("JCODE_EMAIL_REPLY_ENABLED") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.safety.email_reply_enabled = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_AMBIENT_VISIBLE") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.ambient.visible = parsed;
+            }
+        }
 
         // Provider
         if let Ok(v) = std::env::var("JCODE_MODEL") {
@@ -434,6 +459,8 @@ pause_on_active_session = true
 proactive_work = true
 # Branch prefix for proactive work
 work_branch_prefix = "ambient/"
+# Show ambient cycle in a terminal window (default: false)
+# visible = false
 
 [safety]
 # Notification settings for ambient mode events
@@ -453,6 +480,11 @@ desktop_notifications = true
 # email_smtp_port = 587
 # Password via env: JCODE_SMTP_PASSWORD (preferred) or config below
 # email_password = ""
+
+# IMAP for email replies (reply to ambient emails to send directives)
+# email_reply_enabled = false
+# email_imap_host = "imap.gmail.com"
+# email_imap_port = 993
 "#;
 
         std::fs::write(&path, default_content)?;
@@ -494,11 +526,13 @@ desktop_notifications = true
 - Pause on active session: {}
 - Proactive work: {}
 - Work branch prefix: `{}`
+- Visible mode: {}
 
 **Notifications:**
 - ntfy.sh: {}
 - Desktop: {}
 - Email: {}
+- Email replies: {}
 
 *Edit the config file or set environment variables to customize.*
 *Environment variables (e.g., `JCODE_SCROLL_UP_KEY`) override file settings.*"#,
@@ -535,6 +569,7 @@ desktop_notifications = true
             self.ambient.pause_on_active_session,
             self.ambient.proactive_work,
             self.ambient.work_branch_prefix,
+            self.ambient.visible,
             self.safety
                 .ntfy_topic
                 .as_deref()
@@ -550,6 +585,14 @@ desktop_notifications = true
                     .email_to
                     .as_deref()
                     .unwrap_or("enabled (no recipient)")
+            } else {
+                "disabled"
+            },
+            if self.safety.email_reply_enabled {
+                self.safety
+                    .email_imap_host
+                    .as_deref()
+                    .unwrap_or("enabled (no IMAP host)")
             } else {
                 "disabled"
             },
