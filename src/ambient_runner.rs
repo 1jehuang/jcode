@@ -13,6 +13,7 @@ use crate::ambient_scheduler::{AdaptiveScheduler, AmbientSchedulerConfig};
 use crate::config::config;
 use crate::logging;
 use crate::memory::MemoryManager;
+use crate::notifications::NotificationDispatcher;
 use crate::provider::Provider;
 use crate::safety::SafetySystem;
 use crate::tool;
@@ -40,6 +41,8 @@ struct AmbientRunnerInner {
     running: RwLock<bool>,
     /// Safety system shared with ambient tools
     safety: Arc<SafetySystem>,
+    /// Notification dispatcher for push/email/desktop alerts
+    notifier: NotificationDispatcher,
     /// Number of active user sessions (for pause logic)
     active_user_sessions: RwLock<usize>,
 }
@@ -55,6 +58,7 @@ impl AmbientRunnerHandle {
                 wake_notify: Notify::new(),
                 running: RwLock::new(false),
                 safety,
+                notifier: NotificationDispatcher::new(),
                 active_user_sessions: RwLock::new(0),
             }),
         }
@@ -369,6 +373,30 @@ impl AmbientRunnerHandle {
                         memories_modified: result.memories_modified,
                     };
                     let _ = self.inner.safety.save_transcript(&transcript);
+
+                    // Send notifications (fire-and-forget)
+                    self.inner.notifier.dispatch_cycle_summary(&transcript);
+
+                    // Post-cycle memory consolidation (fire-and-forget)
+                    tokio::spawn(async move {
+                        let manager = MemoryManager::new();
+                        match manager.backfill_embeddings() {
+                            Ok((backfilled, _failed)) => {
+                                if backfilled > 0 {
+                                    logging::info(&format!(
+                                        "Ambient: backfilled {} embeddings",
+                                        backfilled
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                logging::error(&format!(
+                                    "Ambient: embedding backfill failed: {}",
+                                    e
+                                ));
+                            }
+                        }
+                    });
                 }
                 Err(e) => {
                     logging::error(&format!("Ambient cycle failed: {}", e));
@@ -445,8 +473,7 @@ impl AmbientRunnerHandle {
 
         let recent_sessions = ambient::gather_recent_sessions(state.last_run);
 
-        // TODO: gather actual feedback memories from memory graph
-        let feedback_memories: Vec<String> = Vec::new();
+        let feedback_memories = ambient::gather_feedback_memories(&memory_manager);
 
         let budget = ResourceBudget {
             provider: cycle_provider.name().to_string(),
