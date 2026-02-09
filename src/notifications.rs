@@ -231,12 +231,14 @@ async fn send_email(
     use lettre::transport::smtp::authentication::Credentials;
     use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
+    let html_body = markdown_to_html_email(body);
+
     let email = Message::builder()
         .from(from.parse()?)
         .to(to.parse()?)
         .subject(subject)
-        .header(ContentType::TEXT_PLAIN)
-        .body(body.to_string())?;
+        .header(ContentType::TEXT_HTML)
+        .body(html_body)?;
 
     let mut transport_builder =
         AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(smtp_host)?
@@ -254,6 +256,104 @@ async fn send_email(
 
     logging::info(&format!("Email notification sent to {}: {}", to, subject));
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Markdown → HTML email
+// ---------------------------------------------------------------------------
+
+/// Convert markdown text to a styled HTML email body.
+fn markdown_to_html_email(markdown: &str) -> String {
+    use pulldown_cmark::{html, Options, Parser};
+
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
+
+    let parser = Parser::new_ext(markdown, options);
+    let mut html_content = String::new();
+    html::push_html(&mut html_content, parser);
+
+    format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    color: #1a1a1a;
+    line-height: 1.6;
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 20px;
+    background: #f5f5f5;
+  }}
+  .container {{
+    background: #ffffff;
+    border-radius: 8px;
+    padding: 24px 28px;
+    border: 1px solid #e0e0e0;
+  }}
+  h1, h2, h3 {{
+    color: #2d2d2d;
+    margin-top: 1.2em;
+    margin-bottom: 0.4em;
+  }}
+  h1 {{ font-size: 1.3em; border-bottom: 2px solid #6366f1; padding-bottom: 6px; }}
+  h2 {{ font-size: 1.1em; }}
+  strong {{ color: #111; }}
+  ul, ol {{ padding-left: 1.4em; }}
+  li {{ margin-bottom: 4px; }}
+  code {{
+    background: #f0f0f0;
+    padding: 2px 5px;
+    border-radius: 3px;
+    font-size: 0.9em;
+  }}
+  pre {{
+    background: #1e1e2e;
+    color: #cdd6f4;
+    padding: 12px 16px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 0.85em;
+  }}
+  pre code {{
+    background: none;
+    padding: 0;
+    color: inherit;
+  }}
+  table {{
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1em 0;
+  }}
+  th, td {{
+    border: 1px solid #ddd;
+    padding: 6px 10px;
+    text-align: left;
+  }}
+  th {{ background: #f8f8f8; font-weight: 600; }}
+  .footer {{
+    margin-top: 20px;
+    padding-top: 12px;
+    border-top: 1px solid #e0e0e0;
+    font-size: 0.8em;
+    color: #888;
+  }}
+</style>
+</head>
+<body>
+<div class="container">
+{html_content}
+</div>
+<div class="footer">
+  Sent by jcode ambient mode
+</div>
+</body>
+</html>"#
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +382,7 @@ fn format_cycle_body_safe(transcript: &AmbientTranscript) -> String {
 
 /// Full detailed body for private channels (email, desktop).
 /// Includes the model-generated summary and provider info.
+/// Output is markdown — rendered to HTML for email, plain text for desktop.
 fn format_cycle_body_detailed(transcript: &AmbientTranscript) -> String {
     let mut lines = Vec::new();
 
@@ -290,18 +391,21 @@ fn format_cycle_body_detailed(transcript: &AmbientTranscript) -> String {
         lines.push(String::new());
     }
 
-    lines.push(format!("Status: {:?}", transcript.status));
+    lines.push("---".to_string());
+    lines.push(String::new());
     lines.push(format!(
-        "Provider: {} ({})",
-        transcript.provider, transcript.model
+        "**Status:** {:?} · **Provider:** {} ({}) · **Memories:** {} · **Compactions:** {}",
+        transcript.status,
+        transcript.provider,
+        transcript.model,
+        transcript.memories_modified,
+        transcript.compactions,
     ));
-    lines.push(format!("Memories modified: {}", transcript.memories_modified));
-    lines.push(format!("Compactions: {}", transcript.compactions));
 
     if transcript.pending_permissions > 0 {
         lines.push(String::new());
         lines.push(format!(
-            "{} permission request(s) pending — review in jcode",
+            "**⚠ {} permission request(s) pending** — review in jcode",
             transcript.pending_permissions
         ));
     }
@@ -357,8 +461,8 @@ mod tests {
         let body = format_cycle_body_detailed(&transcript);
         // Detailed body SHOULD include the summary
         assert!(body.contains("Cleaned up 3 stale memories."));
-        assert!(body.contains("Memories modified: 3"));
-        assert!(body.contains("Provider: claude"));
+        assert!(body.contains("**Memories:** 3"));
+        assert!(body.contains("claude"));
     }
 
     #[test]
@@ -383,6 +487,15 @@ mod tests {
 
         let detailed = format_cycle_body_detailed(&transcript);
         assert!(detailed.contains("2 permission request(s) pending"));
+    }
+
+    #[test]
+    fn test_markdown_to_html_email() {
+        let md = "**Ambient Cycle Summary:**\n\n- Cleaned 3 memories\n- Status: Complete\n";
+        let html = markdown_to_html_email(md);
+        assert!(html.contains("<strong>Ambient Cycle Summary:</strong>"));
+        assert!(html.contains("<li>"));
+        assert!(html.contains("jcode ambient mode"));
     }
 
     #[test]
