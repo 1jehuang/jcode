@@ -926,6 +926,9 @@ impl Server {
                             coordinators.get(&swarm_id).cloned()
                         };
 
+                        // Only sync todos across sessions when there's an active coordinator
+                        // (i.e., a real coordinated swarm). Without a coordinator, sessions
+                        // in the same repo are independent and keep their own private todos.
                         if let Some(ref coordinator_id) = coordinator {
                             if coordinator_id != &todo_event.session_id {
                                 let proposal_key =
