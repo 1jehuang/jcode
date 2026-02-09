@@ -89,8 +89,7 @@ impl NotificationDispatcher {
     /// Send a permission request notification (high priority).
     pub fn dispatch_permission_request(&self, action: &str, description: &str, request_id: &str) {
         let title = format!("jcode: permission needed ({})", action);
-        let safe_body =
-            "An ambient action needs your approval. Open jcode to review.".to_string();
+        let safe_body = "An ambient action needs your approval. Open jcode to review.".to_string();
         let detailed_body = format!(
             "Action: {}\n{}\n\nRequest ID: {}\nReview in jcode to approve or deny.",
             action, description, request_id
@@ -275,14 +274,11 @@ async fn send_email(
     let email = builder.body(html_body)?;
 
     let mut transport_builder =
-        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(smtp_host)?
-            .port(smtp_port);
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(smtp_host)?.port(smtp_port);
 
     if let Some(pw) = password {
-        transport_builder = transport_builder.credentials(Credentials::new(
-            from.to_string(),
-            pw.to_string(),
-        ));
+        transport_builder =
+            transport_builder.credentials(Credentials::new(from.to_string(), pw.to_string()));
     }
 
     let transport = transport_builder.build();
@@ -482,11 +478,7 @@ fn poll_imap_once(host: &str, port: u16, user: &str, pass: &str) -> anyhow::Resu
         if let Some(body) = message.body() {
             if let Some(parsed) = mail_parser::MessageParser::default().parse(body) {
                 // Extract the cycle ID from In-Reply-To header
-                let in_reply_to = parsed
-                    .in_reply_to()
-                    .as_text()
-                    .unwrap_or("")
-                    .to_string();
+                let in_reply_to = parsed.in_reply_to().as_text().unwrap_or("").to_string();
 
                 // Parse cycle_id from "<ambient-{id}@jcode>"
                 let cycle_id = in_reply_to
@@ -546,7 +538,10 @@ fn format_cycle_body_safe(transcript: &AmbientTranscript) -> String {
     let mut lines = Vec::new();
 
     lines.push(format!("Status: {:?}", transcript.status));
-    lines.push(format!("Memories modified: {}", transcript.memories_modified));
+    lines.push(format!(
+        "Memories modified: {}",
+        transcript.memories_modified
+    ));
     lines.push(format!("Compactions: {}", transcript.compactions));
 
     if transcript.pending_permissions > 0 {
@@ -567,6 +562,8 @@ fn format_cycle_body_detailed(transcript: &AmbientTranscript) -> String {
     let mut lines = Vec::new();
 
     if let Some(ref summary) = transcript.summary {
+        lines.push("# Summary".to_string());
+        lines.push(String::new());
         lines.push(summary.clone());
         lines.push(String::new());
     }
@@ -590,6 +587,16 @@ fn format_cycle_body_detailed(transcript: &AmbientTranscript) -> String {
         ));
     }
 
+    // Include full conversation transcript if available
+    if let Some(ref conversation) = transcript.conversation {
+        lines.push(String::new());
+        lines.push("---".to_string());
+        lines.push(String::new());
+        lines.push("# Full Transcript".to_string());
+        lines.push(String::new());
+        lines.push(conversation.clone());
+    }
+
     lines.join("\n")
 }
 
@@ -611,6 +618,7 @@ mod tests {
             summary: Some("Cleaned up 3 stale memories.".to_string()),
             compactions: 1,
             memories_modified: 3,
+            conversation: None,
         };
 
         let body = format_cycle_body_safe(&transcript);
@@ -636,6 +644,7 @@ mod tests {
             summary: Some("Cleaned up 3 stale memories.".to_string()),
             compactions: 1,
             memories_modified: 3,
+            conversation: Some("### User\n\nBegin cycle.\n\n### Assistant\n\nDone.\n".to_string()),
         };
 
         let body = format_cycle_body_detailed(&transcript);
@@ -643,6 +652,10 @@ mod tests {
         assert!(body.contains("Cleaned up 3 stale memories."));
         assert!(body.contains("**Memories:** 3"));
         assert!(body.contains("claude"));
+        // Should include conversation transcript
+        assert!(body.contains("# Full Transcript"));
+        assert!(body.contains("### User"));
+        assert!(body.contains("Begin cycle."));
     }
 
     #[test]
@@ -659,6 +672,7 @@ mod tests {
             summary: None,
             compactions: 0,
             memories_modified: 0,
+            conversation: None,
         };
 
         let safe = format_cycle_body_safe(&transcript);
