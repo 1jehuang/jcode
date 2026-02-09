@@ -72,6 +72,8 @@ pub struct Agent {
     /// to avoid cache invalidation when MCP tools arrive asynchronously.
     /// Cleared on compaction/reset.
     locked_tools: Option<Vec<ToolDefinition>>,
+    /// Override system prompt (used by ambient mode to inject a custom prompt)
+    system_prompt_override: Option<String>,
 }
 
 impl Agent {
@@ -91,6 +93,7 @@ impl Agent {
             cache_tracker: CacheTracker::new(),
             last_usage: TokenUsage::default(),
             locked_tools: None,
+            system_prompt_override: None,
         };
         agent.session.model = Some(agent.provider.model());
         agent.seed_compaction_from_session();
@@ -119,6 +122,7 @@ impl Agent {
             cache_tracker: CacheTracker::new(),
             last_usage: TokenUsage::default(),
             locked_tools: None,
+            system_prompt_override: None,
         };
         if let Some(model) = agent.session.model.clone() {
             if let Err(e) = agent.provider.set_model(&model) {
@@ -736,6 +740,14 @@ impl Agent {
         &self,
         memory_prompt: Option<&str>,
     ) -> crate::prompt::SplitSystemPrompt {
+        // If there's a system prompt override (e.g., ambient mode), use it directly
+        if let Some(ref override_prompt) = self.system_prompt_override {
+            return crate::prompt::SplitSystemPrompt {
+                static_part: override_prompt.clone(),
+                dynamic_part: String::new(),
+            };
+        }
+
         // Get skill prompt if active
         let skill_prompt = self
             .active_skill
@@ -810,6 +822,12 @@ impl Agent {
     }
 
     /// Mark this session as a debug/test session
+    /// Set a custom system prompt override (used by ambient mode).
+    /// When set, this replaces the normal system prompt entirely.
+    pub fn set_system_prompt(&mut self, prompt: &str) {
+        self.system_prompt_override = Some(prompt.to_string());
+    }
+
     pub fn set_debug(&mut self, is_debug: bool) {
         self.session.set_debug(is_debug);
         if let Err(err) = self.session.save() {
