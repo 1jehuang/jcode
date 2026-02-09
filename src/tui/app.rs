@@ -9246,7 +9246,38 @@ impl super::TuiState for App {
             auth_method,
             upstream_provider: self.upstream_provider.clone(),
             diagrams,
-            ambient_info: None,
+            ambient_info: if crate::config::config().ambient.enabled {
+                let state = crate::ambient::AmbientState::load().unwrap_or_default();
+                let last_run_ago = state.last_run.map(|t| {
+                    let ago = chrono::Utc::now() - t;
+                    if ago.num_hours() > 0 {
+                        format!("{}h ago", ago.num_hours())
+                    } else {
+                        format!("{}m ago", ago.num_minutes().max(0))
+                    }
+                });
+                let next_wake = match &state.status {
+                    crate::ambient::AmbientStatus::Scheduled { next_wake } => {
+                        let until = *next_wake - chrono::Utc::now();
+                        let mins = until.num_minutes().max(0);
+                        Some(format!("in {}m", mins))
+                    }
+                    _ => None,
+                };
+                Some(super::info_widget::AmbientWidgetData {
+                    status: state.status,
+                    queue_count: crate::ambient::AmbientManager::new()
+                        .map(|m| m.queue().len())
+                        .unwrap_or(0),
+                    next_queue_preview: None,
+                    last_run_ago,
+                    last_summary: state.last_summary,
+                    next_wake,
+                    budget_percent: None,
+                })
+            } else {
+                None
+            },
         }
     }
 

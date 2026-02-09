@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::agent::Agent;
+use crate::ambient_runner::AmbientRunnerHandle;
 use crate::build;
 use crate::bus::{Bus, BusEvent, FileOp};
 use crate::id;
@@ -596,12 +597,23 @@ pub struct Server {
     event_history: Arc<RwLock<Vec<SwarmEvent>>>,
     /// Counter for event IDs
     event_counter: Arc<std::sync::atomic::AtomicU64>,
+    /// Ambient mode runner handle (None if ambient is disabled)
+    ambient_runner: Option<AmbientRunnerHandle>,
 }
 
 impl Server {
     pub fn new(provider: Arc<dyn Provider>) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
         let (client_debug_response_tx, _) = broadcast::channel(64);
+
+        // Initialize ambient runner if enabled
+        let ambient_runner = if crate::config::config().ambient.enabled {
+            let safety = Arc::new(crate::safety::SafetySystem::new());
+            Some(AmbientRunnerHandle::new(safety))
+        } else {
+            None
+        };
+
         Self {
             provider,
             socket_path: socket_path(),
@@ -625,6 +637,7 @@ impl Server {
             channel_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             event_history: Arc::new(RwLock::new(Vec::new())),
             event_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            ambient_runner,
         }
     }
 
@@ -650,6 +663,13 @@ impl Server {
         let (event_tx, _) = broadcast::channel(1024);
         let (client_debug_response_tx, _) = broadcast::channel(64);
 
+        let ambient_runner = if crate::config::config().ambient.enabled {
+            let safety = Arc::new(crate::safety::SafetySystem::new());
+            Some(AmbientRunnerHandle::new(safety))
+        } else {
+            None
+        };
+
         Self {
             provider,
             socket_path: socket,
@@ -673,6 +693,7 @@ impl Server {
             channel_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             event_history: Arc::new(RwLock::new(Vec::new())),
             event_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            ambient_runner,
         }
     }
 
@@ -1160,6 +1181,16 @@ impl Server {
 
         // Note: No default session created here - each client creates its own session
 
+        // Spawn ambient mode background loop if enabled
+        if let Some(ref runner) = self.ambient_runner {
+            let ambient_handle = runner.clone();
+            let ambient_provider = Arc::clone(&self.provider);
+            crate::logging::info("Ambient mode enabled - starting background loop");
+            tokio::spawn(async move {
+                ambient_handle.run_loop(ambient_provider).await;
+            });
+        }
+
         if debug_control_allowed() {
             crate::logging::info("Debug control enabled; idle timeout monitor disabled.");
         } else {
@@ -1225,6 +1256,7 @@ impl Server {
         let main_client_debug_response_tx = self.client_debug_response_tx.clone();
         let main_server_name = self.identity.name.clone();
         let main_server_icon = self.identity.icon.clone();
+        let main_ambient_runner = self.ambient_runner.clone();
 
         let main_handle = tokio::spawn(async move {
             loop {
@@ -1248,6 +1280,7 @@ impl Server {
                         let client_debug_response_tx = main_client_debug_response_tx.clone();
                         let server_name = main_server_name.clone();
                         let server_icon = main_server_icon.clone();
+                        let ambient_runner = main_ambient_runner.clone();
 
                         // Increment client count
                         *client_count.write().await += 1;
@@ -1277,7 +1310,16 @@ impl Server {
                             .await;
 
                             // Decrement client count when done
-                            *client_count.write().await -= 1;
+                            let new_count = {
+                                let mut c = client_count.write().await;
+                                *c -= 1;
+                                *c
+                            };
+
+                            // Nudge ambient runner on session close
+                            if let Some(ref runner) = ambient_runner {
+                                runner.nudge();
+                            }
 
                             if let Err(e) = result {
                                 crate::logging::error(&format!("Client error: {}", e));
@@ -1310,6 +1352,7 @@ impl Server {
         let debug_event_history = Arc::clone(&self.event_history);
         let debug_server_identity = self.identity.clone();
         let debug_start_time = std::time::Instant::now();
+        let debug_ambient_runner = self.ambient_runner.clone();
 
         let debug_handle = tokio::spawn(async move {
             loop {
@@ -1333,6 +1376,7 @@ impl Server {
                         let event_history = Arc::clone(&debug_event_history);
                         let server_identity = debug_server_identity.clone();
                         let server_start_time = debug_start_time;
+                        let ambient_runner = debug_ambient_runner.clone();
 
                         tokio::spawn(async move {
                             if let Err(e) = handle_debug_client(
@@ -1355,6 +1399,7 @@ impl Server {
                                 event_history,
                                 server_identity,
                                 server_start_time,
+                                ambient_runner,
                             )
                             .await
                             {
@@ -4953,6 +4998,7 @@ async fn handle_debug_client(
     event_history: Arc<RwLock<Vec<SwarmEvent>>>,
     server_identity: ServerIdentity,
     server_start_time: std::time::Instant,
+    ambient_runner: Option<AmbientRunnerHandle>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -6350,6 +6396,50 @@ async fn handle_debug_client(
                             // Placeholder (duplicates removed — swarm:roles, swarm:channels,
                             // swarm:plan_version are handled earlier in the chain)
                             Ok("unreachable".to_string())
+                        } else if cmd == "ambient:status" {
+                            // Get ambient mode status
+                            if let Some(ref runner) = ambient_runner {
+                                Ok(runner.status_json().await)
+                            } else {
+                                Ok(serde_json::json!({
+                                    "enabled": false,
+                                    "status": "disabled",
+                                    "message": "Ambient mode is not enabled in config"
+                                }).to_string())
+                            }
+                        } else if cmd == "ambient:queue" {
+                            if let Some(ref runner) = ambient_runner {
+                                Ok(runner.queue_json().await)
+                            } else {
+                                Ok("[]".to_string())
+                            }
+                        } else if cmd == "ambient:trigger" {
+                            if let Some(ref runner) = ambient_runner {
+                                runner.trigger().await;
+                                Ok("Ambient cycle triggered".to_string())
+                            } else {
+                                Err(anyhow::anyhow!("Ambient mode is not enabled"))
+                            }
+                        } else if cmd == "ambient:log" {
+                            if let Some(ref runner) = ambient_runner {
+                                Ok(runner.log_json().await)
+                            } else {
+                                Ok("[]".to_string())
+                            }
+                        } else if cmd == "ambient:stop" {
+                            if let Some(ref runner) = ambient_runner {
+                                runner.stop().await;
+                                Ok("Ambient mode stopped".to_string())
+                            } else {
+                                Err(anyhow::anyhow!("Ambient mode is not enabled"))
+                            }
+                        } else if cmd == "ambient:help" {
+                            Ok(r#"Ambient mode debug commands (ambient: prefix):
+  ambient:status   - Current ambient state, cycle count, last run
+  ambient:queue    - Scheduled queue contents
+  ambient:trigger  - Manually trigger an ambient cycle
+  ambient:log      - Recent transcript summaries
+  ambient:stop     - Stop ambient mode"#.to_string())
                         } else if cmd == "events:recent" || cmd.starts_with("events:recent:") {
                             // Get recent events (default 50, or specify count)
                             let count: usize = cmd
@@ -6594,6 +6684,14 @@ SWARM COMMANDS (swarm: prefix):
   swarm:broadcast:<msg>    - Broadcast to swarm members
   swarm:notify:<sid> <msg> - Send DM to specific session
   swarm:help               - Full swarm command reference
+
+AMBIENT COMMANDS (ambient: prefix):
+  ambient:status           - Current ambient state, cycle count, last run
+  ambient:queue            - Scheduled queue contents
+  ambient:trigger          - Manually trigger an ambient cycle
+  ambient:log              - Recent transcript summaries
+  ambient:stop             - Stop ambient mode
+  ambient:help             - Ambient command reference
 
 EVENTS COMMANDS (events: prefix):
   events:recent            - Get recent events (default 50)

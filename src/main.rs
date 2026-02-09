@@ -1,4 +1,5 @@
 mod ambient;
+mod ambient_runner;
 mod ambient_scheduler;
 mod agent;
 mod auth;
@@ -233,6 +234,22 @@ enum Command {
     /// Memory management commands
     #[command(subcommand)]
     Memory(MemoryCommand),
+
+    /// Ambient mode management
+    #[command(subcommand)]
+    Ambient(AmbientCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum AmbientCommand {
+    /// Show ambient mode status
+    Status,
+    /// Show recent ambient activity log
+    Log,
+    /// Manually trigger an ambient cycle
+    Trigger,
+    /// Stop ambient mode
+    Stop,
 }
 
 #[derive(Subcommand, Debug)]
@@ -442,6 +459,9 @@ async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::Memory(subcmd)) => {
             run_memory_command(subcmd)?;
+        }
+        Some(Command::Ambient(subcmd)) => {
+            run_ambient_command(subcmd).await?;
         }
         None => {
             // Auto-detect jcode repo and enable self-dev mode
@@ -947,6 +967,19 @@ async fn run_debug_command(
     }
 
     Ok(())
+}
+
+/// Run ambient mode CLI commands via the debug socket
+async fn run_ambient_command(cmd: AmbientCommand) -> Result<()> {
+    let debug_cmd = match cmd {
+        AmbientCommand::Status => "ambient:status",
+        AmbientCommand::Log => "ambient:log",
+        AmbientCommand::Trigger => "ambient:trigger",
+        AmbientCommand::Stop => "ambient:stop",
+    };
+
+    // Send command via debug socket
+    run_debug_command(debug_cmd, "", None, None, false).await
 }
 
 /// Run memory management commands
