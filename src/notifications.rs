@@ -77,7 +77,13 @@ impl NotificationDispatcher {
             Priority::Default
         };
 
-        self.send_all(&title, &safe_body, &detailed_body, priority);
+        self.send_all(
+            &title,
+            &safe_body,
+            &detailed_body,
+            priority,
+            Some(&transcript.session_id),
+        );
     }
 
     /// Send a permission request notification (high priority).
@@ -90,14 +96,22 @@ impl NotificationDispatcher {
             action, description, request_id
         );
 
-        self.send_all(&title, &safe_body, &detailed_body, Priority::High);
+        self.send_all(&title, &safe_body, &detailed_body, Priority::High, None);
     }
 
     /// Send through all configured channels (fire-and-forget).
     ///
     /// `safe_body` is sanitized (no secrets) — used for ntfy (potentially public).
     /// `detailed_body` includes full info — used for email and desktop (private channels).
-    fn send_all(&self, title: &str, safe_body: &str, detailed_body: &str, priority: Priority) {
+    /// `cycle_id` is embedded as Message-ID in emails for reply tracking.
+    fn send_all(
+        &self,
+        title: &str,
+        safe_body: &str,
+        detailed_body: &str,
+        priority: Priority,
+        cycle_id: Option<&str>,
+    ) {
         // Guard: only dispatch if inside a tokio runtime
         if tokio::runtime::Handle::try_current().is_err() {
             logging::info("Notification skipped: no tokio runtime");
@@ -145,8 +159,20 @@ impl NotificationDispatcher {
                 let password = self.config.email_password.clone();
                 let title = title.to_string();
                 let body = detailed_body.to_string();
+                let cycle_id = cycle_id.map(|s| s.to_string());
                 tokio::spawn(async move {
-                    if let Err(e) = send_email(&host, port, &from, &to, password.as_deref(), &title, &body).await {
+                    if let Err(e) = send_email(
+                        &host,
+                        port,
+                        &from,
+                        &to,
+                        password.as_deref(),
+                        &title,
+                        &body,
+                        cycle_id.as_deref(),
+                    )
+                    .await
+                    {
                         logging::error(&format!("Email notification failed: {}", e));
                     }
                 });
@@ -226,6 +252,7 @@ async fn send_email(
     password: Option<&str>,
     subject: &str,
     body: &str,
+    cycle_id: Option<&str>,
 ) -> anyhow::Result<()> {
     use lettre::message::header::ContentType;
     use lettre::transport::smtp::authentication::Credentials;
@@ -233,12 +260,19 @@ async fn send_email(
 
     let html_body = markdown_to_html_email(body);
 
-    let email = Message::builder()
+    let mut builder = Message::builder()
         .from(from.parse()?)
         .to(to.parse()?)
         .subject(subject)
-        .header(ContentType::TEXT_HTML)
-        .body(html_body)?;
+        .header(ContentType::TEXT_HTML);
+
+    // Add Message-ID for reply tracking (format: <ambient-{id}@jcode>)
+    if let Some(cid) = cycle_id {
+        let msg_id = format!("<ambient-{}@jcode>", cid);
+        builder = builder.message_id(Some(msg_id));
+    }
+
+    let email = builder.body(html_body)?;
 
     let mut transport_builder =
         AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(smtp_host)?
@@ -354,6 +388,152 @@ fn markdown_to_html_email(markdown: &str) -> String {
 </body>
 </html>"#
     )
+}
+
+// ---------------------------------------------------------------------------
+// IMAP reply polling
+// ---------------------------------------------------------------------------
+
+/// Run an IMAP polling loop checking for replies to ambient emails.
+/// Should be spawned as a tokio task alongside the ambient runner.
+pub async fn imap_reply_loop(config: SafetyConfig) {
+    let host = match config.email_imap_host.as_ref() {
+        Some(h) => h.clone(),
+        None => {
+            logging::error("IMAP reply loop: no imap_host configured");
+            return;
+        }
+    };
+    let port = config.email_imap_port;
+    let user = match config.email_from.as_ref() {
+        Some(u) => u.clone(),
+        None => {
+            logging::error("IMAP reply loop: no email_from configured");
+            return;
+        }
+    };
+    let pass = match config.email_password.as_ref() {
+        Some(p) => p.clone(),
+        None => {
+            logging::error("IMAP reply loop: no email password configured");
+            return;
+        }
+    };
+
+    logging::info(&format!(
+        "IMAP reply loop: starting ({}:{}, user: {})",
+        host, port, user
+    ));
+
+    loop {
+        // Run synchronous IMAP in a blocking task
+        let h = host.clone();
+        let u = user.clone();
+        let p = pass.clone();
+        let pt = port;
+        let result = tokio::task::spawn_blocking(move || poll_imap_once(&h, pt, &u, &p)).await;
+
+        match result {
+            Ok(Ok(count)) => {
+                if count > 0 {
+                    logging::info(&format!("IMAP: processed {} email replies", count));
+                }
+            }
+            Ok(Err(e)) => {
+                logging::error(&format!("IMAP poll error: {}", e));
+            }
+            Err(e) => {
+                logging::error(&format!("IMAP poll task panicked: {}", e));
+            }
+        }
+
+        // Poll every 60 seconds
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    }
+}
+
+fn poll_imap_once(host: &str, port: u16, user: &str, pass: &str) -> anyhow::Result<usize> {
+    let tls = native_tls::TlsConnector::builder().build()?;
+    let client = imap::connect((host, port), host, &tls)?;
+    let mut session = client
+        .login(user, pass)
+        .map_err(|(e, _)| anyhow::anyhow!("IMAP login failed: {}", e))?;
+
+    session.select("INBOX")?;
+
+    // Search for unseen replies to our ambient emails
+    let search = session.search("UNSEEN HEADER In-Reply-To \"@jcode>\"")?;
+
+    let mut processed = 0;
+    if search.is_empty() {
+        session.logout()?;
+        return Ok(0);
+    }
+
+    // Build sequence set from search results
+    let seq_set: String = search
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let messages = session.fetch(&seq_set, "RFC822")?;
+    for message in messages.iter() {
+        if let Some(body) = message.body() {
+            if let Some(parsed) = mail_parser::MessageParser::default().parse(body) {
+                // Extract the cycle ID from In-Reply-To header
+                let in_reply_to = parsed
+                    .in_reply_to()
+                    .as_text()
+                    .unwrap_or("")
+                    .to_string();
+
+                // Parse cycle_id from "<ambient-{id}@jcode>"
+                let cycle_id = in_reply_to
+                    .trim_start_matches("<ambient-")
+                    .trim_end_matches("@jcode>")
+                    .to_string();
+
+                // Get reply body text (strip quoted content)
+                let body_text = parsed
+                    .body_text(0)
+                    .map(|s| strip_quoted_reply(&s))
+                    .unwrap_or_default();
+
+                if !body_text.trim().is_empty() {
+                    if let Err(e) =
+                        crate::ambient::add_directive(body_text.trim().to_string(), cycle_id)
+                    {
+                        logging::error(&format!("Failed to save directive: {}", e));
+                    }
+                    processed += 1;
+                }
+            }
+        }
+    }
+
+    // Mark all processed as seen
+    if let Err(e) = session.store(&seq_set, "+FLAGS (\\Seen)") {
+        logging::warn(&format!("IMAP: failed to mark messages as seen: {}", e));
+    }
+
+    session.logout()?;
+    Ok(processed)
+}
+
+/// Strip quoted reply lines (lines starting with ">") and email signatures.
+fn strip_quoted_reply(text: &str) -> String {
+    text.lines()
+        .take_while(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with('>')
+                && trimmed != "--"
+                && trimmed != "-- "
+                && !trimmed.starts_with("On ") // "On Mon, Jan 1, 2025 ... wrote:"
+                    || trimmed.is_empty()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -496,6 +676,22 @@ mod tests {
         assert!(html.contains("<strong>Ambient Cycle Summary:</strong>"));
         assert!(html.contains("<li>"));
         assert!(html.contains("jcode ambient mode"));
+    }
+
+    #[test]
+    fn test_strip_quoted_reply() {
+        let email = "Thanks, please clean up the test data.\n\n> On Mon, Feb 9, 2026 jcode wrote:\n> Ambient cycle complete.\n";
+        let stripped = strip_quoted_reply(email);
+        assert!(stripped.contains("clean up the test data"));
+        assert!(!stripped.contains("Ambient cycle complete"));
+    }
+
+    #[test]
+    fn test_strip_quoted_reply_signature() {
+        let email = "Focus on memory gardening.\n--\nJeremy\n";
+        let stripped = strip_quoted_reply(email);
+        assert!(stripped.contains("Focus on memory gardening"));
+        assert!(!stripped.contains("Jeremy"));
     }
 
     #[test]
