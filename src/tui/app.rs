@@ -7769,6 +7769,7 @@ impl App {
                         superseded_by: None,
                         strength: 1,
                         source: Some(self.session.id.clone()),
+                        reinforcements: Vec::new(),
                         embedding: None, // Will be generated when stored
                         confidence: 1.0,
                     };
@@ -8971,17 +8972,21 @@ impl super::TuiState for App {
             let project_graph = manager.load_project_graph().ok();
             let global_graph = manager.load_global_graph().ok();
 
-            let (project_count, global_count, by_category) = match (&project_graph, &global_graph) {
-                (Some(p), Some(g)) => {
-                    let project_count = p.memory_count();
-                    let global_count = g.memory_count();
-                    let mut by_category = std::collections::HashMap::new();
-                    for entry in p.memories.values().chain(g.memories.values()) {
+            let (project_count, global_count, by_category) = {
+                let mut by_category = std::collections::HashMap::new();
+                let project_count = project_graph.as_ref().map(|p| {
+                    for entry in p.memories.values() {
                         *by_category.entry(entry.category.to_string()).or_insert(0) += 1;
                     }
-                    (project_count, global_count, by_category)
-                }
-                _ => (0, 0, std::collections::HashMap::new()),
+                    p.memory_count()
+                }).unwrap_or(0);
+                let global_count = global_graph.as_ref().map(|g| {
+                    for entry in g.memories.values() {
+                        *by_category.entry(entry.category.to_string()).or_insert(0) += 1;
+                    }
+                    g.memory_count()
+                }).unwrap_or(0);
+                (project_count, global_count, by_category)
             };
 
             let total_count = project_count + global_count;
