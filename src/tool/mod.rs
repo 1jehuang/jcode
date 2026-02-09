@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(dead_code)]
 
+pub mod ambient;
 mod apply_patch;
 mod bash;
 mod batch;
@@ -458,6 +459,27 @@ impl Registry {
         self.register(
             "debug_socket".to_string(),
             Arc::new(debug_socket_tool) as Arc<dyn Tool>,
+        )
+        .await;
+    }
+
+    /// Register ambient-mode tools (only for ambient sessions)
+    pub async fn register_ambient_tools(&self) {
+        self.register(
+            "end_ambient_cycle".to_string(),
+            Arc::new(ambient::EndAmbientCycleTool::new()) as Arc<dyn Tool>,
+        )
+        .await;
+
+        self.register(
+            "schedule_ambient".to_string(),
+            Arc::new(ambient::ScheduleAmbientTool::new()) as Arc<dyn Tool>,
+        )
+        .await;
+
+        self.register(
+            "request_permission".to_string(),
+            Arc::new(ambient::RequestPermissionTool::new()) as Arc<dyn Tool>,
         )
         .await;
     }
