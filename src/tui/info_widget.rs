@@ -13,7 +13,8 @@ use ratatui::{
     prelude::*,
     widgets::{Block, BorderType, Borders, Paragraph},
 };
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -96,8 +97,7 @@ pub fn build_graph_topology(
         indices.sort_by(|&a, &b| nodes[b].degree.cmp(&nodes[a].degree));
 
         // Take top connected nodes
-        let keep: std::collections::HashSet<usize> =
-            indices.into_iter().take(max_nodes).collect();
+        let keep: std::collections::HashSet<usize> = indices.into_iter().take(max_nodes).collect();
 
         // Rebuild with only kept nodes
         let mut new_nodes = Vec::new();
@@ -837,8 +837,8 @@ pub fn calculate_placements(
                         .unwrap_or(0);
                     // Widget width is clamped to MAX_WIDGET_WIDTH
                     let new_min_width = actual_min_width.min(MAX_WIDGET_WIDTH);
-                    all_rects[idx].3 = new_min_width; // new widget width (clamped)
-                    // Anchor flush against the edge
+                    all_rects[idx].3 = new_min_width;
+                    // Anchor flush against the edge.
                     all_rects[idx].4 = match side {
                         Side::Right => margin.x_offset.saturating_sub(new_min_width),
                         Side::Left => margin.x_offset,
@@ -896,7 +896,7 @@ fn calculate_widget_height(
             };
             let mut h = 1u16; // Title
             if !info.graph_nodes.is_empty() {
-                h += 4.min(max_height.saturating_sub(border_height + 2)); // Graph rows
+                h += 6.min(max_height.saturating_sub(border_height + 2)); // Graph rows
             }
             if info.activity.is_some() {
                 h += 1; // State line
@@ -1120,6 +1120,10 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
         render_diagrams_widget(frame, inner, data);
         return;
     }
+    if placement.kind == WidgetKind::MemoryActivity {
+        render_memory_widget_with_mermaid(frame, inner, data);
+        return;
+    }
 
     let lines = render_widget_content(placement.kind, data, inner);
     let para = Paragraph::new(lines);
@@ -1138,6 +1142,147 @@ fn render_diagrams_widget(frame: &mut Frame, inner: Rect, data: &InfoWidgetData)
 
     // Render the image using mermaid module
     super::mermaid::render_image_widget(diagram.hash, inner, frame.buffer_mut(), false, false);
+}
+
+const MEMORY_MERMAID_MAX_NODES: usize = 16;
+
+fn render_memory_widget_with_mermaid(frame: &mut Frame, inner: Rect, data: &InfoWidgetData) {
+    let Some(info) = &data.memory_info else {
+        return;
+    };
+    if info.total_count == 0 && info.activity.is_none() {
+        return;
+    }
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let mut lines = render_memory_widget(data, inner);
+    if lines.is_empty() {
+        return;
+    }
+
+    let title_line = lines.remove(0);
+    let activity_lines = lines;
+
+    // Title row.
+    let title_rect = Rect::new(inner.x, inner.y, inner.width, 1);
+    frame.render_widget(Paragraph::new(vec![title_line]), title_rect);
+
+    let activity_height = (activity_lines.len() as u16).min(inner.height.saturating_sub(1));
+    let graph_height = inner.height.saturating_sub(1 + activity_height);
+
+    if graph_height > 0 && !info.graph_nodes.is_empty() {
+        let graph_rect = Rect::new(inner.x, inner.y + 1, inner.width, graph_height);
+        let rendered_image = render_memory_mermaid_graph(frame, graph_rect, info);
+        if !rendered_image {
+            // Fallback for terminals without image protocol support.
+            let fallback = render_mini_graph(info, graph_rect.width, graph_rect.height.min(6));
+            if !fallback.is_empty() {
+                frame.render_widget(Paragraph::new(fallback), graph_rect);
+            }
+        }
+    }
+
+    if activity_height > 0 {
+        let start = activity_lines
+            .len()
+            .saturating_sub(activity_height as usize);
+        let activity_rect = Rect::new(
+            inner.x,
+            inner.y + inner.height.saturating_sub(activity_height),
+            inner.width,
+            activity_height,
+        );
+        frame.render_widget(
+            Paragraph::new(activity_lines[start..].to_vec()),
+            activity_rect,
+        );
+    }
+}
+
+fn render_memory_mermaid_graph(frame: &mut Frame, graph_rect: Rect, info: &MemoryInfo) -> bool {
+    if graph_rect.width < 6 || graph_rect.height < 3 || info.graph_nodes.is_empty() {
+        return false;
+    }
+
+    let Some(diagram) = build_memory_graph_mermaid(info, MEMORY_MERMAID_MAX_NODES) else {
+        return false;
+    };
+
+    match super::mermaid::render_mermaid_untracked(&diagram, Some(graph_rect.width)) {
+        super::mermaid::RenderResult::Image { hash, .. } => {
+            super::mermaid::render_image_widget(hash, graph_rect, frame.buffer_mut(), false, false)
+                > 0
+        }
+        super::mermaid::RenderResult::Error(_) => false,
+    }
+}
+
+fn build_memory_graph_mermaid(info: &MemoryInfo, max_nodes: usize) -> Option<String> {
+    if info.graph_nodes.is_empty() || max_nodes == 0 {
+        return None;
+    }
+
+    let mut selected: Vec<usize> = (0..info.graph_nodes.len()).collect();
+    if selected.len() > max_nodes {
+        selected.sort_by_key(|&idx| (Reverse(info.graph_nodes[idx].degree), idx));
+        selected.truncate(max_nodes);
+        selected.sort_unstable();
+    }
+
+    let mut old_to_new: HashMap<usize, usize> = HashMap::new();
+    for (new_idx, old_idx) in selected.iter().copied().enumerate() {
+        old_to_new.insert(old_idx, new_idx);
+    }
+
+    let mut kind_counts: HashMap<String, usize> = HashMap::new();
+    let mut lines = Vec::with_capacity(selected.len() + info.graph_edges.len() + 1);
+    lines.push("flowchart TD".to_string());
+
+    for (new_idx, old_idx) in selected.iter().copied().enumerate() {
+        let node = &info.graph_nodes[old_idx];
+        let counter = kind_counts.entry(node.kind.clone()).or_insert(0);
+        *counter += 1;
+        let token = memory_kind_token(&node.kind, *counter);
+        let id = format!("n{}", new_idx);
+        let def = match node.kind.as_str() {
+            "preference" => format!("    {}({})", id, token),
+            "correction" => format!("    {}{{{{{}}}}}", id, token),
+            "tag" => format!("    {}(({}))", id, token),
+            _ => format!("    {}[{}]", id, token),
+        };
+        lines.push(def);
+    }
+
+    let mut edge_set: HashSet<(usize, usize)> = HashSet::new();
+    for &(src, dst) in &info.graph_edges {
+        let Some(&a) = old_to_new.get(&src) else {
+            continue;
+        };
+        let Some(&b) = old_to_new.get(&dst) else {
+            continue;
+        };
+        if a != b {
+            edge_set.insert((a, b));
+        }
+    }
+    let mut edges: Vec<(usize, usize)> = edge_set.into_iter().collect();
+    edges.sort_unstable();
+    for (a, b) in edges {
+        lines.push(format!("    n{} --> n{}", a, b));
+    }
+
+    Some(lines.join("\n"))
+}
+
+fn memory_kind_token(kind: &str, index: usize) -> String {
+    match kind {
+        "preference" => format!("P{}", index),
+        "correction" => format!("C{}", index),
+        "tag" => format!("T{}", index),
+        _ => format!("F{}", index),
+    }
 }
 
 /// Render content for a specific widget type
@@ -1326,13 +1471,6 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
         ),
     ]));
 
-    // Mini graph visualization (if we have graph data and enough space)
-    let graph_height = inner.height.saturating_sub(2); // leave room for title + activity
-    if !info.graph_nodes.is_empty() && graph_height >= 2 {
-        let graph_lines = render_mini_graph(info, inner.width, graph_height.min(6));
-        lines.extend(graph_lines);
-    }
-
     // Activity state if active
     if let Some(activity) = &info.activity {
         let state_line = match &activity.state {
@@ -1433,13 +1571,13 @@ fn format_memory_event(event: &MemoryEvent, max_width: usize) -> (&'static str, 
     }
 }
 
-/// Render a tiny ASCII graph visualization of memory nodes and edges.
-/// Each node is a single character, edges are drawn as connecting chars.
+/// Render a tiny graph visualization of memory nodes and edges.
+/// Uses a 2x4 sub-cell braille raster so edges stay legible in tight widgets.
 /// Returns lines of styled spans representing the graph.
 fn render_mini_graph(info: &MemoryInfo, width: u16, height: u16) -> Vec<Line<'static>> {
     let w = width as usize;
     let h = height as usize;
-    if w < 4 || h < 2 || info.graph_nodes.is_empty() {
+    if w < 6 || h < 2 || info.graph_nodes.is_empty() {
         return Vec::new();
     }
 
@@ -1447,20 +1585,37 @@ fn render_mini_graph(info: &MemoryInfo, width: u16, height: u16) -> Vec<Line<'st
     let edges = &info.graph_edges;
 
     // Assign positions using a deterministic layout
-    // Use a simple grid-based approach with some jitter based on node index
-    let positions = layout_nodes(nodes.len(), edges, w, h);
+    let positions = spread_overlapping_positions(layout_nodes(nodes.len(), edges, w, h), w, h);
 
-    // Build a character grid
-    let mut grid: Vec<Vec<(char, Color)>> = vec![vec![(' ', Color::Reset); w]; h];
+    // Braille subpixel canvas (2x width, 4x height)
+    let px_w = w.saturating_mul(2);
+    let px_h = h.saturating_mul(4);
+    let mut edge_pixels = vec![false; px_w.saturating_mul(px_h)];
+    let edge_color = Color::Rgb(72, 72, 84);
 
-    // Draw edges first (behind nodes)
+    // Draw edges first on the subpixel canvas (behind nodes)
     for &(src, tgt) in edges {
         if src >= positions.len() || tgt >= positions.len() {
             continue;
         }
         let (sx, sy) = positions[src];
         let (tx, ty) = positions[tgt];
-        draw_edge(&mut grid, sx, sy, tx, ty, Color::Rgb(60, 60, 70));
+        draw_edge_pixels(&mut edge_pixels, px_w, px_h, sx, sy, tx, ty);
+    }
+
+    // Build a character grid
+    let mut grid: Vec<Vec<(char, Color)>> = vec![vec![(' ', Color::Reset); w]; h];
+
+    // Convert subpixel edge raster into braille glyphs
+    for y in 0..h {
+        for x in 0..w {
+            let mask = braille_mask_for_cell(&edge_pixels, px_w, px_h, x, y);
+            if mask != 0 {
+                if let Some(ch) = char::from_u32(0x2800 + mask as u32) {
+                    grid[y][x] = (ch, edge_color);
+                }
+            }
+        }
     }
 
     // Draw nodes on top
@@ -1493,6 +1648,140 @@ fn render_mini_graph(info: &MemoryInfo, width: u16, height: u16) -> Vec<Line<'st
         .collect()
 }
 
+/// Draw an edge in braille-subpixel space between two cell coordinates.
+fn draw_edge_pixels(
+    pixels: &mut [bool],
+    px_w: usize,
+    px_h: usize,
+    x0_cell: usize,
+    y0_cell: usize,
+    x1_cell: usize,
+    y1_cell: usize,
+) {
+    if px_w == 0 || px_h == 0 {
+        return;
+    }
+
+    // Route through cell centers for stable visual alignment.
+    let mut x0 = x0_cell.saturating_mul(2).saturating_add(1) as i32;
+    let mut y0 = y0_cell.saturating_mul(4).saturating_add(2) as i32;
+    let x1 = x1_cell.saturating_mul(2).saturating_add(1) as i32;
+    let y1 = y1_cell.saturating_mul(4).saturating_add(2) as i32;
+
+    let dx = (x1 - x0).abs();
+    let dy = (y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx - dy;
+
+    loop {
+        if x0 >= 0 && y0 >= 0 && (x0 as usize) < px_w && (y0 as usize) < px_h {
+            pixels[y0 as usize * px_w + x0 as usize] = true;
+        }
+
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+
+        let e2 = err * 2;
+        if e2 > -dy {
+            err -= dy;
+            x0 += sx;
+        }
+        if e2 < dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+/// Map a 2x4 subpixel block to a unicode braille bitmask.
+fn braille_mask_for_cell(
+    edge_pixels: &[bool],
+    px_w: usize,
+    px_h: usize,
+    cell_x: usize,
+    cell_y: usize,
+) -> u8 {
+    let base_x = cell_x.saturating_mul(2);
+    let base_y = cell_y.saturating_mul(4);
+    let mut mask = 0u8;
+    let dots = [
+        (0usize, 0usize, 0x01u8), // dot 1
+        (0, 1, 0x02),             // dot 2
+        (0, 2, 0x04),             // dot 3
+        (1, 0, 0x08),             // dot 4
+        (1, 1, 0x10),             // dot 5
+        (1, 2, 0x20),             // dot 6
+        (0, 3, 0x40),             // dot 7
+        (1, 3, 0x80),             // dot 8
+    ];
+
+    for (dx, dy, bit) in dots {
+        let x = base_x + dx;
+        let y = base_y + dy;
+        if x < px_w && y < px_h && edge_pixels[y * px_w + x] {
+            mask |= bit;
+        }
+    }
+
+    mask
+}
+
+/// Spread overlapping node coordinates to nearby free cells.
+fn spread_overlapping_positions(
+    mut positions: Vec<(usize, usize)>,
+    w: usize,
+    h: usize,
+) -> Vec<(usize, usize)> {
+    let mut occupied: HashSet<(usize, usize)> = HashSet::new();
+    for pos in &mut positions {
+        if occupied.insert(*pos) {
+            continue;
+        }
+        if let Some(free) = nearest_free_position(*pos, &occupied, w, h) {
+            *pos = free;
+            occupied.insert(free);
+        }
+    }
+    positions
+}
+
+fn nearest_free_position(
+    origin: (usize, usize),
+    occupied: &HashSet<(usize, usize)>,
+    w: usize,
+    h: usize,
+) -> Option<(usize, usize)> {
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let ox = origin.0 as i32;
+    let oy = origin.1 as i32;
+    let max_radius = w.max(h) as i32;
+
+    for r in 1..=max_radius {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx.abs() != r && dy.abs() != r {
+                    continue;
+                }
+                let x = ox + dx;
+                let y = oy + dy;
+                if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
+                    continue;
+                }
+                let candidate = (x as usize, y as usize);
+                if !occupied.contains(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Pick character and color for a graph node
 fn node_char(node: &GraphNode) -> (char, Color) {
     match node.kind.as_str() {
@@ -1505,12 +1794,7 @@ fn node_char(node: &GraphNode) -> (char, Color) {
 
 /// Simple deterministic layout: place nodes in a spiral/circle pattern
 /// with connected nodes pulled closer together
-fn layout_nodes(
-    count: usize,
-    edges: &[(usize, usize)],
-    w: usize,
-    h: usize,
-) -> Vec<(usize, usize)> {
+fn layout_nodes(count: usize, edges: &[(usize, usize)], w: usize, h: usize) -> Vec<(usize, usize)> {
     if count == 0 {
         return Vec::new();
     }
@@ -1588,57 +1872,6 @@ fn layout_nodes(
             )
         })
         .collect()
-}
-
-/// Draw a line between two points on the character grid using Bresenham's
-fn draw_edge(
-    grid: &mut [Vec<(char, Color)>],
-    x0: usize,
-    y0: usize,
-    x1: usize,
-    y1: usize,
-    color: Color,
-) {
-    let dx = (x1 as i32 - x0 as i32).abs();
-    let dy = (y1 as i32 - y0 as i32).abs();
-    let sx: i32 = if x0 < x1 { 1 } else { -1 };
-    let sy: i32 = if y0 < y1 { 1 } else { -1 };
-    let mut err = dx - dy;
-    let mut x = x0 as i32;
-    let mut y = y0 as i32;
-    let h = grid.len() as i32;
-    let w = if h > 0 { grid[0].len() as i32 } else { 0 };
-
-    loop {
-        if x >= 0 && x < w && y >= 0 && y < h {
-            let gy = y as usize;
-            let gx = x as usize;
-            // Don't overwrite nodes
-            if grid[gy][gx].0 == ' ' {
-                // Pick edge character based on direction
-                let ch = if dx == 0 {
-                    '│'
-                } else if dy == 0 {
-                    '─'
-                } else {
-                    '·'
-                };
-                grid[gy][gx] = (ch, color);
-            }
-        }
-        if x == x1 as i32 && y == y1 as i32 {
-            break;
-        }
-        let e2 = 2 * err;
-        if e2 > -dy {
-            err -= dy;
-            x += sx;
-        }
-        if e2 < dx {
-            err += dx;
-            y += sy;
-        }
-    }
 }
 
 fn swarm_member_label(member: &SwarmMemberStatus) -> String {
@@ -1818,17 +2051,17 @@ fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
         }
         AmbientStatus::Paused { reason } => (
             "⏸",
-            format!("Paused ({})", truncate_smart(reason, inner.width.saturating_sub(12) as usize)),
+            format!(
+                "Paused ({})",
+                truncate_smart(reason, inner.width.saturating_sub(12) as usize)
+            ),
             Color::Rgb(255, 200, 100),
         ),
         AmbientStatus::Disabled => ("■", "Disabled".to_string(), Color::Rgb(100, 100, 110)),
     };
 
     lines.push(Line::from(vec![
-        Span::styled(
-            format!("{} ", icon),
-            Style::default().fg(status_color),
-        ),
+        Span::styled(format!("{} ", icon), Style::default().fg(status_color)),
         Span::styled(
             truncate_smart(&status_text, inner.width.saturating_sub(3) as usize),
             Style::default().fg(Color::Rgb(180, 180, 190)),
@@ -1861,7 +2094,10 @@ fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
             format!(
                 "Last: {} — {}",
                 ago,
-                truncate_smart(summary, inner.width.saturating_sub(10 + ago.len() as u16) as usize)
+                truncate_smart(
+                    summary,
+                    inner.width.saturating_sub(10 + ago.len() as u16) as usize
+                )
             )
         } else {
             format!("Last: {}", ago)
@@ -1903,18 +2139,12 @@ fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
 
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled(
-                "█".repeat(filled),
-                Style::default().fg(bar_color),
-            ),
+            Span::styled("█".repeat(filled), Style::default().fg(bar_color)),
             Span::styled(
                 "░".repeat(empty),
                 Style::default().fg(Color::Rgb(50, 50, 60)),
             ),
-            Span::styled(
-                format!(" {}%", pct),
-                Style::default().fg(bar_color),
-            ),
+            Span::styled(format!(" {}%", pct), Style::default().fg(bar_color)),
         ]));
     }
 
@@ -2760,13 +2990,138 @@ fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_smart;
+    use super::{
+        build_memory_graph_mermaid, render_memory_widget, render_mini_graph, truncate_smart,
+        GraphNode, InfoWidgetData, MemoryInfo,
+    };
+    use ratatui::layout::Rect;
+    use ratatui::text::Line;
+    use std::collections::HashSet;
 
     #[test]
     fn truncate_smart_handles_unicode() {
         let s = "eagle running — keep going";
         let out = truncate_smart(s, 15);
         assert_eq!(out, "eagle runnin...");
+    }
+
+    #[test]
+    fn mini_graph_renders_braille_edges_and_nodes() {
+        let info = MemoryInfo {
+            total_count: 4,
+            graph_nodes: vec![
+                GraphNode {
+                    kind: "fact".to_string(),
+                    degree: 2,
+                },
+                GraphNode {
+                    kind: "preference".to_string(),
+                    degree: 2,
+                },
+                GraphNode {
+                    kind: "correction".to_string(),
+                    degree: 1,
+                },
+                GraphNode {
+                    kind: "tag".to_string(),
+                    degree: 1,
+                },
+            ],
+            graph_edges: vec![(0, 1), (1, 2), (1, 3)],
+            ..Default::default()
+        };
+        let lines = render_mini_graph(&info, 24, 4);
+        assert_eq!(lines.len(), 4);
+
+        let text = flatten_lines(&lines);
+        let has_node = text.chars().any(|ch| ch == '●' || ch == '◆');
+        let has_braille_edge = text
+            .chars()
+            .any(|ch| ('\u{2801}'..='\u{28FF}').contains(&ch));
+
+        assert!(has_node, "expected node glyphs in mini graph");
+        assert!(
+            has_braille_edge,
+            "expected braille edge glyphs in mini graph"
+        );
+    }
+
+    #[test]
+    fn overlapping_positions_are_spread_for_node_visibility() {
+        let positions = vec![(1, 1), (1, 1), (1, 1), (2, 1)];
+        let spread = super::spread_overlapping_positions(positions, 6, 4);
+        let unique: HashSet<(usize, usize)> = spread.iter().copied().collect();
+        assert_eq!(spread.len(), 4);
+        assert_eq!(unique.len(), 4);
+    }
+
+    #[test]
+    fn memory_widget_uses_full_graph_height_when_idle() {
+        let info = MemoryInfo {
+            total_count: 3,
+            graph_nodes: vec![
+                GraphNode {
+                    kind: "fact".to_string(),
+                    degree: 1,
+                },
+                GraphNode {
+                    kind: "preference".to_string(),
+                    degree: 2,
+                },
+                GraphNode {
+                    kind: "tag".to_string(),
+                    degree: 1,
+                },
+            ],
+            graph_edges: vec![(0, 1), (1, 2)],
+            ..Default::default()
+        };
+        let data = InfoWidgetData {
+            memory_info: Some(info),
+            ..Default::default()
+        };
+
+        // Mermaid graph is rendered separately by render_memory_widget_with_mermaid.
+        // The line renderer should only include title/activity text.
+        let lines = render_memory_widget(&data, Rect::new(0, 0, 24, 5));
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn memory_graph_mermaid_contains_nodes_and_edges() {
+        let info = MemoryInfo {
+            total_count: 4,
+            graph_nodes: vec![
+                GraphNode {
+                    kind: "fact".to_string(),
+                    degree: 1,
+                },
+                GraphNode {
+                    kind: "preference".to_string(),
+                    degree: 2,
+                },
+                GraphNode {
+                    kind: "tag".to_string(),
+                    degree: 1,
+                },
+            ],
+            graph_edges: vec![(0, 1), (1, 2)],
+            ..Default::default()
+        };
+
+        let mermaid = build_memory_graph_mermaid(&info, 16).expect("expected mermaid content");
+        assert!(mermaid.contains("flowchart TD"));
+        assert!(mermaid.contains("n0"));
+        assert!(mermaid.contains("-->"));
+    }
+
+    fn flatten_lines(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("")
     }
 }
 

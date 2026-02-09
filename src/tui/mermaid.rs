@@ -859,6 +859,21 @@ pub fn render_mermaid(content: &str) -> RenderResult {
 
 /// Render with explicit terminal width for adaptive sizing
 pub fn render_mermaid_sized(content: &str, terminal_width: Option<u16>) -> RenderResult {
+    render_mermaid_sized_internal(content, terminal_width, true)
+}
+
+/// Render without registering the diagram in ACTIVE_DIAGRAMS.
+/// Useful for internal widget visuals that should not appear in the
+/// user-visible diagram pane.
+pub fn render_mermaid_untracked(content: &str, terminal_width: Option<u16>) -> RenderResult {
+    render_mermaid_sized_internal(content, terminal_width, false)
+}
+
+fn render_mermaid_sized_internal(
+    content: &str,
+    terminal_width: Option<u16>,
+    register_active: bool,
+) -> RenderResult {
     if let Ok(mut state) = MERMAID_DEBUG.lock() {
         state.stats.total_requests += 1;
         state.stats.last_content_len = Some(content.len());
@@ -904,8 +919,10 @@ pub fn render_mermaid_sized(content: &str, terminal_width: Option<u16>) -> Rende
                     state.stats.cache_hits += 1;
                     state.stats.last_hash = Some(format!("{:016x}", hash));
                 }
-                // Register as active diagram (for pinned widget display)
-                register_active_diagram(hash, cached.width, cached.height, None);
+                if register_active {
+                    // Register as active diagram (for pinned widget display)
+                    register_active_diagram(hash, cached.width, cached.height, None);
+                }
                 return RenderResult::Image {
                     hash,
                     path: cached.path.clone(),
@@ -1059,8 +1076,10 @@ pub fn render_mermaid_sized(content: &str, terminal_width: Option<u16>) -> Rende
         }
     }
 
-    // Register this diagram as active for info widget display
-    register_active_diagram(hash, width, height, None);
+    if register_active {
+        // Register this diagram as active for info widget display
+        register_active_diagram(hash, width, height, None);
+    }
 
     RenderResult::Image {
         hash,
