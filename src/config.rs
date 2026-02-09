@@ -27,6 +27,9 @@ pub struct Config {
 
     /// Provider configuration
     pub provider: ProviderConfig,
+
+    /// Ambient mode configuration
+    pub ambient: AmbientConfig,
 }
 
 /// Keybinding configuration
@@ -126,6 +129,49 @@ impl Default for ProviderConfig {
     }
 }
 
+/// Ambient mode configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AmbientConfig {
+    /// Enable ambient mode (default: false)
+    pub enabled: bool,
+    /// Provider override (default: auto-select)
+    pub provider: Option<String>,
+    /// Model override (default: provider's strongest)
+    pub model: Option<String>,
+    /// Allow API key usage (default: false, only OAuth)
+    pub allow_api_keys: bool,
+    /// Daily token budget when using API keys
+    pub api_daily_budget: Option<u64>,
+    /// Minimum interval between cycles in minutes (default: 5)
+    pub min_interval_minutes: u32,
+    /// Maximum interval between cycles in minutes (default: 120)
+    pub max_interval_minutes: u32,
+    /// Pause ambient when user has active session (default: true)
+    pub pause_on_active_session: bool,
+    /// Enable proactive work vs garden-only (default: true)
+    pub proactive_work: bool,
+    /// Proactive work branch prefix (default: "ambient/")
+    pub work_branch_prefix: String,
+}
+
+impl Default for AmbientConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: None,
+            model: None,
+            allow_api_keys: false,
+            api_daily_budget: None,
+            min_interval_minutes: 5,
+            max_interval_minutes: 120,
+            pause_on_active_session: true,
+            proactive_work: true,
+            work_branch_prefix: "ambient/".to_string(),
+        }
+    }
+}
+
 impl Config {
     /// Get the config file path
     pub fn path() -> Option<PathBuf> {
@@ -205,6 +251,34 @@ impl Config {
             }
         }
 
+        // Ambient
+        if let Ok(v) = std::env::var("JCODE_AMBIENT_ENABLED") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.ambient.enabled = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_AMBIENT_PROVIDER") {
+            self.ambient.provider = Some(v);
+        }
+        if let Ok(v) = std::env::var("JCODE_AMBIENT_MODEL") {
+            self.ambient.model = Some(v);
+        }
+        if let Ok(v) = std::env::var("JCODE_AMBIENT_MIN_INTERVAL") {
+            if let Ok(parsed) = v.trim().parse::<u32>() {
+                self.ambient.min_interval_minutes = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_AMBIENT_MAX_INTERVAL") {
+            if let Ok(parsed) = v.trim().parse::<u32>() {
+                self.ambient.max_interval_minutes = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_AMBIENT_PROACTIVE") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.ambient.proactive_work = parsed;
+            }
+        }
+
         // Provider
         if let Ok(v) = std::env::var("JCODE_MODEL") {
             self.provider.default_model = Some(v);
@@ -279,6 +353,29 @@ show_thinking = false
 # default_model = "claude-sonnet-4-20250514"
 # OpenAI reasoning effort (none|low|medium|high|xhigh)
 openai_reasoning_effort = "xhigh"
+
+[ambient]
+# Ambient mode: background agent that maintains your codebase
+# Enable ambient mode (default: false)
+enabled = false
+# Provider override (default: auto-select based on available credentials)
+# provider = "claude"
+# Model override (default: provider's strongest)
+# model = "claude-sonnet-4-20250514"
+# Allow API key usage (default: false, only OAuth to avoid surprise costs)
+allow_api_keys = false
+# Daily token budget when using API keys (optional)
+# api_daily_budget = 100000
+# Minimum interval between cycles in minutes
+min_interval_minutes = 5
+# Maximum interval between cycles in minutes
+max_interval_minutes = 120
+# Pause ambient when user has active session
+pause_on_active_session = true
+# Enable proactive work (new features, refactoring) vs garden-only (lint, format, deps)
+proactive_work = true
+# Branch prefix for proactive work
+work_branch_prefix = "ambient/"
 "#;
 
         std::fs::write(&path, default_content)?;
@@ -312,6 +409,15 @@ openai_reasoning_effort = "xhigh"
 - Default model: {}
 - OpenAI reasoning effort: {}
 
+**Ambient:**
+- Enabled: {}
+- Provider: {}
+- Model: {}
+- Interval: {}-{} minutes
+- Pause on active session: {}
+- Proactive work: {}
+- Work branch prefix: `{}`
+
 *Edit the config file or set environment variables to customize.*
 *Environment variables (e.g., `JCODE_SCROLL_UP_KEY`) override file settings.*"#,
             path,
@@ -333,6 +439,20 @@ openai_reasoning_effort = "xhigh"
                 .openai_reasoning_effort
                 .as_deref()
                 .unwrap_or("(provider default)"),
+            self.ambient.enabled,
+            self.ambient
+                .provider
+                .as_deref()
+                .unwrap_or("(auto)"),
+            self.ambient
+                .model
+                .as_deref()
+                .unwrap_or("(provider default)"),
+            self.ambient.min_interval_minutes,
+            self.ambient.max_interval_minutes,
+            self.ambient.pause_on_active_session,
+            self.ambient.proactive_work,
+            self.ambient.work_branch_prefix,
         )
     }
 }
