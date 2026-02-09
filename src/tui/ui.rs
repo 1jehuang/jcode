@@ -2552,23 +2552,14 @@ fn draw_messages(
     // Publish max_scroll so scroll handlers can clamp without overshoot
     LAST_MAX_SCROLL.store(max_scroll, Ordering::Relaxed);
 
-    let user_scroll = app.scroll_offset().min(max_scroll); // Cap to available content
+    let user_scroll = app.scroll_offset().min(max_scroll);
 
-    // scroll_offset = 0 means bottom (auto-scroll), higher = further up
-    // ratatui scroll = lines from top to hide
-    //
-    // When auto_scroll_paused is true during streaming, we interpret scroll_offset
-    // as an absolute position from top (not distance from bottom), which keeps the
-    // user viewing the same lines even as new content is added at the bottom.
+    // scroll_offset semantics:
+    // - When auto_scroll_paused: scroll_offset is absolute line from top
+    // - When !auto_scroll_paused: scroll_offset should be 0 (at bottom)
     let scroll = if app.auto_scroll_paused() && user_scroll > 0 {
-        // Paused: treat scroll_offset as absolute position from top
-        // This keeps the view stable as content grows
         user_scroll.min(max_scroll)
-    } else if user_scroll > 0 {
-        // Not paused but scrolled: distance from bottom
-        max_scroll.saturating_sub(user_scroll)
     } else {
-        // At bottom: show newest content
         max_scroll
     };
 
