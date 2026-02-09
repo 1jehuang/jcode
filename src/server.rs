@@ -4458,8 +4458,10 @@ async fn execute_debug_command(
     // mcp:reload - reload MCP config and reconnect
     if trimmed == "mcp:reload" {
         let input = serde_json::json!({"action": "reload"});
-        let agent = agent.lock().await;
+        let mut agent = agent.lock().await;
         let result = agent.execute_tool("mcp", input).await?;
+        // Unlock tool list so next request picks up new MCP tools
+        agent.unlock_tools();
         return Ok(result.output);
     }
 

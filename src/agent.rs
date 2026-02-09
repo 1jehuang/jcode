@@ -68,6 +68,10 @@ pub struct Agent {
     cache_tracker: CacheTracker,
     /// Last token usage from API request (for debug socket queries)
     last_usage: TokenUsage,
+    /// Locked tool list: once the first API request is sent, freeze the tool list
+    /// to avoid cache invalidation when MCP tools arrive asynchronously.
+    /// Cleared on compaction/reset.
+    locked_tools: Option<Vec<ToolDefinition>>,
 }
 
 impl Agent {
@@ -86,6 +90,7 @@ impl Agent {
             soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             cache_tracker: CacheTracker::new(),
             last_usage: TokenUsage::default(),
+            locked_tools: None,
         };
         agent.session.model = Some(agent.provider.model());
         agent.seed_compaction_from_session();
@@ -113,6 +118,7 @@ impl Agent {
             soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             cache_tracker: CacheTracker::new(),
             last_usage: TokenUsage::default(),
+            locked_tools: None,
         };
         if let Some(model) = agent.session.model.clone() {
             if let Err(e) = agent.provider.set_model(&model) {
@@ -245,6 +251,7 @@ impl Agent {
             let _ = self.session.save();
             self.seed_compaction_from_session();
             self.cache_tracker.reset();
+            self.locked_tools = None;
         }
 
         repaired
@@ -693,6 +700,16 @@ impl Agent {
         let _ = self.session.save();
     }
 
+    /// Unlock the tool list so the next API request picks up any new tools.
+    /// Called after MCP reload or when the user explicitly wants new tools.
+    pub fn unlock_tools(&mut self) {
+        if self.locked_tools.is_some() {
+            logging::info("Tool list unlocked — next request will pick up current tools");
+            self.locked_tools = None;
+            self.cache_tracker.reset();
+        }
+    }
+
     /// Build the system prompt, including skill, memory, self-dev context, and CLAUDE.md files
     fn build_system_prompt(&self, memory_prompt: Option<&str>) -> String {
         let split = self.build_system_prompt_split(memory_prompt);
@@ -792,7 +809,38 @@ impl Agent {
         }
     }
 
-    async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+    async fn tool_definitions(&mut self) -> Vec<ToolDefinition> {
+        if self.session.is_canary {
+            self.registry.register_selfdev_tools().await;
+        }
+
+        // Return locked tools if available (prevents cache invalidation from
+        // MCP tools arriving asynchronously after the first API request)
+        if let Some(ref locked) = self.locked_tools {
+            return locked.clone();
+        }
+
+        let mut tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
+        if !self.session.is_canary {
+            tools.retain(|tool| tool.name != "selfdev");
+        }
+
+        // Lock the tool list on first call to prevent cache invalidation
+        // when MCP tools arrive asynchronously mid-session
+        logging::info(&format!(
+            "Locking tool list at {} tools for cache stability",
+            tools.len()
+        ));
+        self.locked_tools = Some(tools.clone());
+        tools
+    }
+
+    pub async fn tool_names(&self) -> Vec<String> {
+        self.registry.tool_names().await
+    }
+
+    /// Get full tool definitions for debug introspection (bypasses lock)
+    pub async fn tool_definitions_for_debug(&self) -> Vec<crate::message::ToolDefinition> {
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
         }
@@ -801,15 +849,6 @@ impl Agent {
             tools.retain(|tool| tool.name != "selfdev");
         }
         tools
-    }
-
-    pub async fn tool_names(&self) -> Vec<String> {
-        self.registry.tool_names().await
-    }
-
-    /// Get full tool definitions for debug introspection
-    pub async fn tool_definitions_for_debug(&self) -> Vec<crate::message::ToolDefinition> {
-        self.tool_definitions().await
     }
 
     pub async fn execute_tool(
@@ -1075,8 +1114,9 @@ impl Agent {
             }
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
-                // Reset cache tracker on compaction since the message history changes
+                // Reset cache tracker and tool lock on compaction since the message history changes
                 self.cache_tracker.reset();
+                self.locked_tools = None;
                 if print_output {
                     let tokens_str = event
                         .pre_tokens
@@ -1653,8 +1693,9 @@ impl Agent {
             }
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
-                // Reset cache tracker on compaction since the message history changes
+                // Reset cache tracker and tool lock on compaction since the message history changes
                 self.cache_tracker.reset();
+                self.locked_tools = None;
                 logging::info(&format!(
                     "Context compacted ({}{})",
                     event.trigger,
@@ -2113,8 +2154,9 @@ impl Agent {
             }
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
-                // Reset cache tracker on compaction since the message history changes
+                // Reset cache tracker and tool lock on compaction since the message history changes
                 self.cache_tracker.reset();
+                self.locked_tools = None;
                 logging::info(&format!(
                     "Context compacted ({}{})",
                     event.trigger,
