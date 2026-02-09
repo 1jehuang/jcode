@@ -88,8 +88,8 @@ lettre = { version = "0.11", default-features = false, features = ["tokio1-rustl
 # PDF parsing
 pdf-extract = "0.8"
 
-# Mermaid diagram rendering (use stable commit, not local WIP)
-mermaid-rs-renderer = { path = "../mermaid-rs-renderer" }
+# Mermaid diagram rendering (stable v0.2.0 tag)
+mermaid-rs-renderer = { git = "ssh://git@github.com/1jehuang/mermaid-rs-renderer.git", tag = "v0.2.0" }
 
 [dev-dependencies]
 async-stream = "0.3"
