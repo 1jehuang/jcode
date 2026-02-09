@@ -9246,6 +9246,7 @@ impl super::TuiState for App {
             auth_method,
             upstream_provider: self.upstream_provider.clone(),
             diagrams,
+            ambient_info: None,
         }
     }
 
