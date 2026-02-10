@@ -720,6 +720,7 @@ impl OpenRouterProvider {
                     .map(|p| (*p).to_string())
                     .collect(),
             );
+            routing.allow_fallbacks = false;
             return routing;
         }
 
@@ -2182,5 +2183,6 @@ mod tests {
         let routing = rt.block_on(provider.effective_routing("moonshotai/kimi-k2.5"));
         let order = routing.order.expect("provider order");
         assert_eq!(order.first().map(|s| s.as_str()), Some("Fireworks"));
+        assert!(!routing.allow_fallbacks, "Kimi should disable fallbacks to force provider");
     }
 }
