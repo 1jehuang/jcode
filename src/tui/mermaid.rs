@@ -46,10 +46,17 @@ static CACHE_EVICTED: OnceLock<()> = OnceLock::new();
 static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> =
     LazyLock::new(|| Mutex::new(MermaidCache::new()));
 
+/// Maximum number of StatefulProtocol entries to keep in IMAGE_STATE.
+/// Each entry holds the full decoded+encoded image data and can consume
+/// several MB of RAM (e.g. a 1440×1080 RGBA image ≈ 6 MB, plus protocol
+/// encoding overhead).  Keeping this bounded prevents unbounded memory
+/// growth over long sessions with many diagrams.
+const IMAGE_STATE_MAX: usize = 12;
+
 /// Image state cache - holds StatefulProtocol for each rendered image
 /// Key is (hash, target_width) to support multiple sizes of the same diagram
-static IMAGE_STATE: LazyLock<Mutex<HashMap<u64, ImageState>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static IMAGE_STATE: LazyLock<Mutex<ImageStateCache>> =
+    LazyLock::new(|| Mutex::new(ImageStateCache::new()));
 
 /// Cache decoded source images to avoid reloading from disk on every pan
 static SOURCE_CACHE: LazyLock<Mutex<SourceImageCache>> =
@@ -84,6 +91,76 @@ struct ImageState {
     last_crop_top: bool,
     /// Last viewport parameters (for pan/scroll)
     last_viewport: Option<ViewportState>,
+}
+
+/// LRU-bounded cache for ImageState entries.
+struct ImageStateCache {
+    entries: HashMap<u64, ImageState>,
+    order: VecDeque<u64>,
+}
+
+impl ImageStateCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn touch(&mut self, hash: u64) {
+        if let Some(pos) = self.order.iter().position(|h| *h == hash) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(hash);
+    }
+
+    fn get_mut(&mut self, hash: u64) -> Option<&mut ImageState> {
+        if self.entries.contains_key(&hash) {
+            self.touch(hash);
+            self.entries.get_mut(&hash)
+        } else {
+            None
+        }
+    }
+
+    fn get(&self, hash: &u64) -> Option<&ImageState> {
+        self.entries.get(hash)
+    }
+
+    fn contains_key(&self, hash: &u64) -> bool {
+        self.entries.contains_key(hash)
+    }
+
+    fn insert(&mut self, hash: u64, state: ImageState) {
+        if self.entries.contains_key(&hash) {
+            self.entries.insert(hash, state);
+            self.touch(hash);
+        } else {
+            self.entries.insert(hash, state);
+            self.order.push_back(hash);
+            while self.order.len() > IMAGE_STATE_MAX {
+                if let Some(old) = self.order.pop_front() {
+                    self.entries.remove(&old);
+                }
+            }
+        }
+    }
+
+    fn remove(&mut self, hash: &u64) {
+        self.entries.remove(hash);
+        if let Some(pos) = self.order.iter().position(|h| h == hash) {
+            self.order.remove(pos);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&u64, &ImageState)> {
+        self.entries.iter()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -316,6 +393,7 @@ pub fn clear_cache() -> Result<(), String> {
     // Clear in-memory caches
     if let Ok(mut cache) = RENDER_CACHE.lock() {
         cache.entries.clear();
+        cache.order.clear();
     }
     if let Ok(mut state) = IMAGE_STATE.lock() {
         state.clear();
@@ -714,10 +792,15 @@ pub fn get_font_size() -> Option<(u16, u16)> {
     PICKER.get().and_then(|p| p.map(|p| p.font_size()))
 }
 
+/// Maximum in-memory RENDER_CACHE entries (metadata only, not images).
+const RENDER_CACHE_MAX: usize = 64;
+
 /// Mermaid rendering cache
 struct MermaidCache {
     /// Map from content hash to rendered PNG info
     entries: HashMap<u64, CachedDiagram>,
+    /// Insertion order for LRU eviction
+    order: VecDeque<u64>,
     /// Cache directory
     cache_dir: PathBuf,
 }
@@ -737,11 +820,11 @@ impl MermaidCache {
             .join("jcode")
             .join("mermaid");
 
-        // Create cache dir if needed
         let _ = fs::create_dir_all(&cache_dir);
 
         Self {
             entries: HashMap::new(),
+            order: VecDeque::new(),
             cache_dir,
         }
     }
@@ -751,7 +834,21 @@ impl MermaidCache {
     }
 
     fn insert(&mut self, hash: u64, diagram: CachedDiagram) {
-        self.entries.insert(hash, diagram);
+        if self.entries.contains_key(&hash) {
+            self.entries.insert(hash, diagram);
+            if let Some(pos) = self.order.iter().position(|h| *h == hash) {
+                self.order.remove(pos);
+            }
+            self.order.push_back(hash);
+        } else {
+            self.entries.insert(hash, diagram);
+            self.order.push_back(hash);
+            while self.order.len() > RENDER_CACHE_MAX {
+                if let Some(old) = self.order.pop_front() {
+                    self.entries.remove(&old);
+                }
+            }
+        }
     }
 
     fn cache_path(&self, hash: u64, target_width: u32) -> PathBuf {
@@ -823,30 +920,24 @@ fn calculate_render_size(
     edge_count: usize,
     terminal_width: Option<u16>,
 ) -> (f64, f64) {
-    // Base size on terminal width if available
     let base_width = if let Some(term_width) = terminal_width {
-        // Get font size to calculate pixel width
         let font_width = get_font_size().map(|(w, _)| w).unwrap_or(8) as f64;
         let pixel_width = term_width as f64 * font_width;
-        // Cap at reasonable bounds
-        pixel_width.clamp(400.0, 2400.0)
+        pixel_width.clamp(400.0, 1600.0)
     } else {
-        1200.0 // Default fallback
+        1200.0
     };
 
-    // Scale based on complexity
     let complexity = node_count + edge_count;
     let complexity_factor = match complexity {
-        0..=5 => 0.6,   // Simple: smaller image
-        6..=15 => 0.8,  // Medium: moderate size
-        16..=30 => 1.0, // Standard: full size
-        31..=60 => 1.2, // Complex: larger
-        _ => 1.4,       // Very complex: even larger
+        0..=5 => 0.6,
+        6..=15 => 0.8,
+        16..=30 => 1.0,
+        _ => 1.1,
     };
 
-    let width = (base_width * complexity_factor).clamp(400.0, 2400.0);
-    // Maintain reasonable aspect ratio
-    let height = (width * 0.75).clamp(300.0, 1800.0);
+    let width = (base_width * complexity_factor).clamp(400.0, 1600.0);
+    let height = (width * 0.75).clamp(300.0, 1200.0);
 
     (width, height)
 }
@@ -1056,26 +1147,6 @@ fn render_mermaid_sized_internal(
         );
     }
 
-    // Pre-create the StatefulProtocol for this image
-    // Always use Crop mode to prevent rescaling during scroll
-    if let Some(Some(picker)) = PICKER.get() {
-        if let Ok(img) = image::open(&png_path) {
-            let protocol = picker.new_resize_protocol(img);
-
-            let mut state = IMAGE_STATE.lock().unwrap();
-            state.insert(
-                hash,
-                ImageState {
-                    protocol,
-                    last_area: None,
-                    resize_mode: ResizeMode::Crop,
-                    last_crop_top: false,
-                    last_viewport: None,
-                },
-            );
-        }
-    }
-
     if register_active {
         // Register this diagram as active for info widget display
         register_active_diagram(hash, width, height, None);
@@ -1191,7 +1262,7 @@ pub fn render_image_widget(
         if needs_reset {
             state.remove(&hash);
         }
-        if let Some(img_state) = state.get_mut(&hash) {
+        if let Some(img_state) = state.get_mut(hash) {
             img_state.resize_mode = ResizeMode::Crop;
             img_state.last_viewport = None;
             // Always use Crop mode - no rescaling during scroll
@@ -1240,7 +1311,7 @@ pub fn render_image_widget(
                     },
                 );
 
-                if let Some(img_state) = state.get_mut(&hash) {
+                if let Some(img_state) = state.get_mut(hash) {
                     let crop_opts = CropOptions {
                         clip_top: crop_top,
                         clip_left: false,
@@ -1347,7 +1418,7 @@ pub fn render_image_widget_fit(
         if needs_reset {
             state.remove(&hash);
         }
-        if let Some(img_state) = state.get_mut(&hash) {
+        if let Some(img_state) = state.get_mut(hash) {
             img_state.resize_mode = ResizeMode::Fit;
             img_state.last_viewport = None;
             let widget = StatefulImage::default().resize(Resize::Fit(None));
@@ -1374,7 +1445,7 @@ pub fn render_image_widget_fit(
                     },
                 );
 
-                if let Some(img_state) = state.get_mut(&hash) {
+                if let Some(img_state) = state.get_mut(hash) {
                     let widget = StatefulImage::default().resize(Resize::Fit(None));
                     widget.render(render_area, buf, &mut img_state.protocol);
                     return area.height;
@@ -1518,7 +1589,7 @@ pub fn render_image_widget_viewport(
         if needs_reset {
             state.remove(&hash);
         }
-        if let Some(img_state) = state.get_mut(&hash) {
+        if let Some(img_state) = state.get_mut(hash) {
             if img_state.last_viewport == Some(viewport) {
                 let widget = StatefulImage::default().resize(Resize::Fit(None));
                 widget.render(image_area, buf, &mut img_state.protocol);
@@ -1543,7 +1614,7 @@ pub fn render_image_widget_viewport(
         },
     );
 
-    if let Some(img_state) = state.get_mut(&hash) {
+    if let Some(img_state) = state.get_mut(hash) {
         let widget = StatefulImage::default().resize(Resize::Fit(None));
         widget.render(image_area, buf, &mut img_state.protocol);
         return area.height;
@@ -1799,11 +1870,11 @@ fn get_png_dimensions(path: &PathBuf) -> Option<(u32, u32)> {
     None
 }
 
-/// Maximum age for cached files (7 days)
-const CACHE_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+/// Maximum age for cached files (3 days)
+const CACHE_MAX_AGE_SECS: u64 = 3 * 24 * 60 * 60;
 
-/// Maximum total cache size (100 MB)
-const CACHE_MAX_SIZE_BYTES: u64 = 100 * 1024 * 1024;
+/// Maximum total cache size (50 MB)
+const CACHE_MAX_SIZE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Evict old cache files on startup.
 pub fn evict_old_cache() {

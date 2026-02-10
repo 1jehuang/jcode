@@ -1247,7 +1247,7 @@ fn build_memory_graph_mermaid(info: &MemoryInfo, max_nodes: usize) -> Option<Str
 
     let mut kind_counts: HashMap<String, usize> = HashMap::new();
     let mut lines = Vec::with_capacity(selected.len() + info.graph_edges.len() + 1);
-    lines.push("flowchart TD".to_string());
+    lines.push("graph TD".to_string());
 
     for (new_idx, old_idx) in selected.iter().copied().enumerate() {
         let node = &info.graph_nodes[old_idx];
@@ -3147,7 +3147,7 @@ mod tests {
         };
 
         let mermaid = build_memory_graph_mermaid(&info, 16).expect("expected mermaid content");
-        assert!(mermaid.contains("flowchart TD"));
+        assert!(mermaid.contains("graph TD"));
         assert!(mermaid.contains("n0"));
         assert!(mermaid.contains("-->"));
     }
