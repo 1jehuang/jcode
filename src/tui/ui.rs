@@ -1141,7 +1141,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     } else {
         0
     };
-    let picker_height: u16 = if app.picker_state().is_some() { 1 } else { 0 };
+    let picker_height: u16 = if app.picker_state().is_some() { 8 } else { 0 };
     let input_height = base_input_height + hint_line_height;
 
     // Count user messages to show next prompt number
@@ -2802,111 +2802,219 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         None => return,
     };
 
+    let height = area.height as usize;
     let width = area.width as usize;
-    let mut spans: Vec<Span> = Vec::new();
+    if height == 0 {
+        return;
+    }
 
-    // Mode prefix
-    let prefix_text = match &picker.mode {
-        super::PickerMode::Model => " model: ".to_string(),
-        super::PickerMode::Provider { ref model } => {
-            let short = if model.len() > 20 {
-                format!("{}…", &model[..19])
-            } else {
-                model.clone()
-            };
-            format!(" {} via: ", short)
-        }
-    };
-    let prefix_width = prefix_text.len();
-    spans.push(Span::styled(prefix_text, Style::default().fg(DIM_COLOR)));
-
-    // Build display labels for all items
-    let labels: Vec<String> = picker
-        .items
-        .iter()
-        .map(|item| {
-            if item.detail.is_empty() {
-                item.label.clone()
-            } else {
-                format!("{} ({})", item.label, item.detail)
-            }
-        })
-        .collect();
-
-    // Calculate how many items fit, ensuring selected is always visible
-    let available = width.saturating_sub(prefix_width + 4); // reserve for arrows/padding
     let selected = picker.selected;
+    let total = picker.models.len();
+    let filtered_count = picker.filtered.len();
+    let col = picker.column;
 
-    // Start from the selected item and expand outward
-    let selected_w = labels[selected].len() + 4;
-    let mut total_width = selected_w;
-    let mut start = selected;
-    let mut end = selected + 1;
+    // Column labels
+    let col_names = ["MODEL", "PROVIDER", "VIA"];
+    let col_focus_style = Style::default().fg(Color::White).bold().underlined();
+    let col_dim_style = Style::default().fg(DIM_COLOR);
 
-    // Alternate expanding right then left to center the selection
-    loop {
-        let can_right = end < labels.len();
-        let can_left = start > 0;
-        if !can_right && !can_left {
-            break;
-        }
-        let mut expanded = false;
-        // Try right
-        if can_right {
-            let w = labels[end].len() + 4;
-            if total_width + w <= available {
-                total_width += w;
-                end += 1;
-                expanded = true;
-            }
-        }
-        // Try left
-        if can_left {
-            let w = labels[start - 1].len() + 4;
-            if total_width + w <= available {
-                total_width += w;
-                start -= 1;
-                expanded = true;
-            }
-        }
-        if !expanded {
-            break;
-        }
+    // Header line: column headers + filter + count
+    let mut header_spans: Vec<Span> = Vec::new();
+    header_spans.push(Span::styled(" ", Style::default()));
+
+    // Filter display
+    if picker.filter.is_empty() {
+        header_spans.push(Span::styled(
+            "filter: ",
+            Style::default().fg(Color::Rgb(80, 80, 100)),
+        ));
+    } else {
+        header_spans.push(Span::styled("filter: ", Style::default().fg(DIM_COLOR)));
+        header_spans.push(Span::styled(
+            picker.filter.clone(),
+            Style::default().fg(Color::White).bold(),
+        ));
+        header_spans.push(Span::styled(" ", Style::default()));
     }
 
-    // Show left arrow if scrolled
-    if start > 0 {
-        spans.push(Span::styled("◂ ", Style::default().fg(DIM_COLOR)));
+    // Count
+    let count_str = if filtered_count == total {
+        format!("({})", total)
+    } else {
+        format!("({}/{})", filtered_count, total)
+    };
+    header_spans.push(Span::styled(
+        format!("{}  ", count_str),
+        Style::default().fg(DIM_COLOR),
+    ));
+
+    // Column headers with focus indicator
+    for (i, name) in col_names.iter().enumerate() {
+        if i > 0 {
+            header_spans.push(Span::styled("  ", Style::default()));
+        }
+        header_spans.push(Span::styled(
+            name.to_string(),
+            if i == col { col_focus_style } else { col_dim_style },
+        ));
     }
 
-    // Render visible items
-    for i in start..end {
-        let is_selected = i == selected;
-        let prefix = if is_selected { "▸ " } else { "  " };
-        let label_text = format!("{}{}", prefix, labels[i]);
+    if picker.preview {
+        header_spans.push(Span::styled(
+            "  press Enter to open",
+            Style::default().fg(Color::Rgb(60, 60, 80)).italic(),
+        ));
+    } else {
+        header_spans.push(Span::styled(
+            "  ↑↓ ←→ Enter Esc",
+            Style::default().fg(Color::Rgb(60, 60, 80)),
+        ));
+    }
 
-        let style = if is_selected {
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(header_spans));
+
+    // Handle empty results
+    if picker.filtered.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "   no matches",
+            Style::default().fg(DIM_COLOR).italic(),
+        )));
+        let paragraph = Paragraph::new(lines);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    // Calculate column widths based on content
+    // Model column: flexible, Provider: ~20, Via: ~12
+    let via_width = 12usize;
+    let provider_width = 20usize;
+    let model_width = width.saturating_sub(3 + provider_width + via_width + 4); // 3 for marker, 4 for gaps
+
+    // Vertical list
+    let list_height = height.saturating_sub(1);
+    if list_height == 0 {
+        let paragraph = Paragraph::new(lines);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    // Scroll window
+    let half = list_height / 2;
+    let start = if selected <= half {
+        0
+    } else if selected + list_height - half > filtered_count {
+        filtered_count.saturating_sub(list_height)
+    } else {
+        selected - half
+    };
+    let end = (start + list_height).min(filtered_count);
+
+    for vi in start..end {
+        let model_idx = picker.filtered[vi];
+        let entry = &picker.models[model_idx];
+        let is_row_selected = vi == selected;
+        let route = entry.routes.get(entry.selected_route);
+
+        let marker = if is_row_selected { "▸" } else { " " };
+
+        let mut spans: Vec<Span> = Vec::new();
+        spans.push(Span::styled(
+            format!(" {} ", marker),
+            if is_row_selected {
+                Style::default().fg(Color::White).bold()
+            } else {
+                Style::default().fg(DIM_COLOR)
+            },
+        ));
+
+        let unavailable = route.map(|r| !r.available).unwrap_or(true);
+
+        // Model column
+        let model_text = if entry.name.len() > model_width {
+            format!("{:<w$}", &entry.name[..model_width], w = model_width)
+        } else {
+            format!("{:<w$}", entry.name, w = model_width)
+        };
+        let model_style = if unavailable {
+            Style::default().fg(Color::Rgb(80, 80, 80))
+        } else if is_row_selected && col == 0 {
             Style::default()
                 .fg(Color::White)
                 .bg(Color::Rgb(60, 60, 80))
                 .bold()
-        } else if picker.items[i].is_current {
+        } else if entry.is_current {
             Style::default().fg(ACCENT_COLOR)
         } else {
-            Style::default().fg(DIM_COLOR)
+            Style::default().fg(Color::Rgb(200, 200, 220))
         };
+        spans.push(Span::styled(model_text, model_style));
 
-        spans.push(Span::styled(label_text, style));
-        spans.push(Span::styled(" ", Style::default()));
+        // Provider column
+        let route_count = entry.routes.len();
+        let provider_text = route
+            .map(|r| r.provider.as_str())
+            .unwrap_or("—");
+        // When on model column, show route count hint instead of full provider
+        let provider_display = if col == 0 && route_count > 1 {
+            let label = format!("{} ({})", provider_text, route_count);
+            if label.len() > provider_width {
+                format!(" {:<w$}", &label[..provider_width], w = provider_width)
+            } else {
+                format!(" {:<w$}", label, w = provider_width)
+            }
+        } else if provider_text.len() > provider_width {
+            format!(" {:<w$}", &provider_text[..provider_width], w = provider_width)
+        } else {
+            format!(" {:<w$}", provider_text, w = provider_width)
+        };
+        let provider_style = if unavailable {
+            Style::default().fg(Color::Rgb(80, 80, 80))
+        } else if is_row_selected && col == 1 {
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Rgb(60, 60, 80))
+                .bold()
+        } else {
+            Style::default().fg(Color::Rgb(140, 180, 255))
+        };
+        spans.push(Span::styled(provider_display, provider_style));
+
+        // Via/API column
+        let via_text = route
+            .map(|r| r.api_method.as_str())
+            .unwrap_or("—");
+        let via_display = format!(" {:<w$}", via_text, w = via_width);
+        let via_style = if unavailable {
+            Style::default().fg(Color::Rgb(80, 80, 80))
+        } else if is_row_selected && col == 2 {
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Rgb(60, 60, 80))
+                .bold()
+        } else {
+            Style::default().fg(Color::Rgb(220, 190, 120))
+        };
+        spans.push(Span::styled(via_display, via_style));
+
+        // Detail (pricing etc) after columns
+        if let Some(route) = route {
+            if !route.detail.is_empty() {
+                spans.push(Span::styled(
+                    format!("  {}", route.detail),
+                    if unavailable {
+                        Style::default().fg(Color::Rgb(80, 80, 80))
+                    } else {
+                        Style::default().fg(DIM_COLOR)
+                    },
+                ));
+            }
+        }
+
+        lines.push(Line::from(spans));
     }
 
-    // Show right arrow if more items
-    if end < labels.len() {
-        spans.push(Span::styled(" ▸", Style::default().fg(DIM_COLOR)));
-    }
-
-    let line = Line::from(spans);
-    let paragraph = Paragraph::new(line);
+    let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, area);
 }
 
@@ -3166,7 +3274,6 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
         }
     };
 
-    let line = append_provider_indicator(line, app);
     let aligned_line = if app.centered_mode() {
         line.alignment(ratatui::layout::Alignment::Center)
     } else {
@@ -3174,39 +3281,6 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
     };
     let paragraph = Paragraph::new(aligned_line);
     frame.render_widget(paragraph, area);
-}
-
-fn append_provider_indicator(line: Line<'static>, app: &dyn TuiState) -> Line<'static> {
-    let provider = app.provider_name();
-    let provider = provider.trim();
-    if provider.is_empty() {
-        return line;
-    }
-
-    let upstream = app
-        .upstream_provider()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    let mut indicator = Vec::new();
-    indicator.push(Span::styled("llm ", Style::default().fg(DIM_COLOR)));
-    indicator.push(Span::styled(
-        provider.to_lowercase(),
-        Style::default().fg(Color::Rgb(140, 180, 255)),
-    ));
-    if let Some(upstream) = upstream {
-        indicator.push(Span::styled(" -> ", Style::default().fg(DIM_COLOR)));
-        indicator.push(Span::styled(
-            upstream,
-            Style::default().fg(Color::Rgb(220, 190, 120)),
-        ));
-    }
-
-    if !line.spans.is_empty() {
-        indicator.push(Span::styled(" · ", Style::default().fg(DIM_COLOR)));
-    }
-    indicator.extend(line.spans.into_iter());
-    Line::from(indicator)
 }
 
 /// Build usage line for idle state (shows subscription limits or cost)

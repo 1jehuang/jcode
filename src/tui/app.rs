@@ -4282,9 +4282,11 @@ impl App {
         modifiers: KeyModifiers,
         remote: &mut super::backend::RemoteConnection,
     ) -> Result<()> {
-        // If picker is active, handle picker keys first
-        if self.picker_state.is_some() {
-            return self.handle_picker_key(code, modifiers);
+        // If picker is active and not in preview mode, handle picker keys first
+        if let Some(ref picker) = self.picker_state {
+            if !picker.preview {
+                return self.handle_picker_key(code, modifiers);
+            }
         }
 
         if let Some(direction) = self
@@ -4480,12 +4482,44 @@ impl App {
                 self.cursor_pos += 1;
                 self.scroll_offset = 0;
                 self.reset_tab_completion();
+                // Preemptively show model picker preview when user types /model
+                if self.picker_state.is_none() {
+                    let trimmed = self.input.trim();
+                    if trimmed == "/model" || trimmed == "/models" {
+                        let saved_input = self.input.clone();
+                        let saved_cursor = self.cursor_pos;
+                        self.open_model_picker();
+                        if let Some(ref mut picker) = self.picker_state {
+                            picker.preview = true;
+                        }
+                        // Restore input — preview doesn't steal it
+                        self.input = saved_input;
+                        self.cursor_pos = saved_cursor;
+                    }
+                } else if let Some(ref picker) = self.picker_state {
+                    // Close preview if user keeps typing past /model
+                    if picker.preview {
+                        let trimmed = self.input.trim();
+                        if trimmed != "/model" && trimmed != "/models" {
+                            self.picker_state = None;
+                        }
+                    }
+                }
             }
             KeyCode::Backspace => {
                 if self.cursor_pos > 0 {
                     self.cursor_pos -= 1;
                     self.input.remove(self.cursor_pos);
                     self.reset_tab_completion();
+                    // Close preview picker if input no longer matches /model
+                    if let Some(ref picker) = self.picker_state {
+                        if picker.preview {
+                            let trimmed = self.input.trim();
+                            if trimmed != "/model" && trimmed != "/models" {
+                                self.picker_state = None;
+                            }
+                        }
+                    }
                 }
             }
             KeyCode::Delete => {
@@ -4761,9 +4795,11 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
-        // If picker is active, handle picker keys first
-        if self.picker_state.is_some() {
-            return self.handle_picker_key(code, modifiers);
+        // If picker is active and not in preview mode, handle picker keys first
+        if let Some(ref picker) = self.picker_state {
+            if !picker.preview {
+                return self.handle_picker_key(code, modifiers);
+            }
         }
 
         if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('m')) {
@@ -6148,202 +6184,281 @@ impl App {
 
     /// Open the model picker with available models
     fn open_model_picker(&mut self) {
-        let (models, current) = if self.is_remote {
-            let models = self.remote_available_models.clone();
-            let current = self
-                .remote_provider_model
+        use std::collections::BTreeMap;
+
+        let current_model = if self.is_remote {
+            self.remote_provider_model
                 .clone()
-                .unwrap_or_else(|| "unknown".to_string());
-            (models, current)
+                .unwrap_or_else(|| "unknown".to_string())
         } else {
-            let models: Vec<String> = self
-                .provider
-                .available_models_display()
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect();
-            let current = self.provider.model().to_string();
-            (models, current)
+            self.provider.model().to_string()
         };
 
-        if models.is_empty() {
-            self.set_status_notice("No models available to switch");
-            return;
-        }
-
-        let items: Vec<super::PickerItem> = models
-            .iter()
-            .map(|m| {
-                let is_current = *m == current;
-                super::PickerItem {
-                    label: m.clone(),
-                    value: m.clone(),
-                    detail: if is_current {
-                        "current".to_string()
-                    } else {
-                        String::new()
-                    },
-                    is_current,
+        // Gather routes from provider (local) or build from available info (remote)
+        let routes: Vec<crate::provider::ModelRoute> = if self.is_remote {
+            // Remote mode: build routes from available models + auth status
+            let auth = crate::auth::AuthStatus::check();
+            let mut routes = Vec::new();
+            for model in &self.remote_available_models {
+                if model.contains('/') {
+                    // OpenRouter model
+                    let cached = crate::provider::openrouter::load_endpoints_disk_cache_public(model);
+                    let auto_detail = cached.as_ref().and_then(|(eps, _)| {
+                        eps.first().map(|ep| format!("→ {}", ep.provider_name))
+                    }).unwrap_or_default();
+                    routes.push(crate::provider::ModelRoute {
+                        model: model.clone(),
+                        provider: "auto".to_string(),
+                        api_method: "openrouter".to_string(),
+                        available: auth.openrouter != crate::auth::AuthState::NotConfigured,
+                        detail: auto_detail,
+                    });
+                    if let Some((endpoints, age)) = cached {
+                        let age_str = if age < 3600 {
+                            format!("{}m ago", age / 60)
+                        } else if age < 86400 {
+                            format!("{}h ago", age / 3600)
+                        } else {
+                            format!("{}d ago", age / 86400)
+                        };
+                        for ep in &endpoints {
+                            routes.push(crate::provider::ModelRoute {
+                                model: model.clone(),
+                                provider: ep.provider_name.clone(),
+                                api_method: "openrouter".to_string(),
+                                available: auth.openrouter != crate::auth::AuthState::NotConfigured,
+                                detail: format!("{} ({})", ep.detail_string(), age_str),
+                            });
+                        }
+                    }
+                } else if crate::provider::ALL_CLAUDE_MODELS.contains(&model.as_str()) {
+                    if auth.anthropic.has_oauth {
+                        routes.push(crate::provider::ModelRoute {
+                            model: model.clone(),
+                            provider: "Anthropic".to_string(),
+                            api_method: "oauth".to_string(),
+                            available: true,
+                            detail: String::new(),
+                        });
+                    }
+                } else if crate::provider::ALL_OPENAI_MODELS.contains(&model.as_str()) {
+                    routes.push(crate::provider::ModelRoute {
+                        model: model.clone(),
+                        provider: "OpenAI".to_string(),
+                        api_method: "api-key".to_string(),
+                        available: auth.openai != crate::auth::AuthState::NotConfigured,
+                        detail: String::new(),
+                    });
                 }
-            })
-            .collect();
-
-        let selected = items
-            .iter()
-            .position(|i| i.is_current)
-            .unwrap_or(0);
-
-        self.picker_state = Some(super::PickerState {
-            mode: super::PickerMode::Model,
-            items,
-            selected,
-            filter: String::new(),
-        });
-        self.input.clear();
-        self.cursor_pos = 0;
-    }
-
-    /// Open provider picker for a specific model
-    fn open_provider_picker(&mut self, model: String) {
-        // Provider selection is available for OpenRouter-format models (contain '/')
-        if !model.contains('/') {
-            self.set_status_notice("Provider selection is only available for OpenRouter models");
-            return;
-        }
-
-        // Get provider details (with pricing/uptime from cached endpoints)
-        let details: std::collections::HashMap<String, String> = if self.is_remote {
-            // Remote mode: use disk cache directly
-            crate::provider::openrouter::load_endpoints_disk_cache_public(&model)
-                .unwrap_or_default()
-                .iter()
-                .map(|e| (e.provider_name.clone(), e.detail_string()))
-                .collect()
-        } else {
-            self.provider
-                .provider_details_for_model(&model)
-                .into_iter()
-                .collect()
-        };
-
-        // Get provider names list
-        let providers: Vec<String> = if self.is_remote {
-            if details.is_empty() {
-                crate::provider::openrouter::known_providers()
-            } else {
-                details.keys().cloned().collect()
             }
+            routes
         } else {
-            self.provider.available_providers_for_model(&model)
+            self.provider.model_routes()
         };
 
-        if providers.is_empty() {
-            self.set_status_notice("No providers available");
+        if routes.is_empty() {
+            self.set_status_notice("No models available");
             return;
         }
 
-        let mut items: Vec<super::PickerItem> = Vec::new();
-        // Add "auto" option first
-        items.push(super::PickerItem {
-            label: "auto".to_string(),
-            value: "auto".to_string(),
-            detail: "automatic routing".to_string(),
-            is_current: false,
-        });
-        for p in &providers {
-            let detail = details
-                .get(p)
-                .cloned()
-                .unwrap_or_default();
-            items.push(super::PickerItem {
-                label: p.clone(),
-                value: p.clone(),
-                detail,
-                is_current: false,
+        // Group routes by model, preserving order of first appearance
+        let mut model_order: Vec<String> = Vec::new();
+        let mut model_routes: BTreeMap<String, Vec<super::RouteOption>> = BTreeMap::new();
+        for r in &routes {
+            if !model_routes.contains_key(&r.model) {
+                model_order.push(r.model.clone());
+            }
+            model_routes.entry(r.model.clone()).or_default().push(
+                super::RouteOption {
+                    provider: r.provider.clone(),
+                    api_method: r.api_method.clone(),
+                    available: r.available,
+                    detail: r.detail.clone(),
+                },
+            );
+        }
+
+        // Sort routes within each model: available first, then oauth > api-key > openrouter
+        fn route_sort_key(r: &super::RouteOption) -> (u8, u8, String) {
+            let avail = if r.available { 0 } else { 1 };
+            let method = match r.api_method.as_str() {
+                "oauth" => 0,
+                "api-key" => 1,
+                "openrouter" => 2,
+                _ => 3,
+            };
+            (avail, method, r.provider.clone())
+        }
+
+        let mut models: Vec<super::ModelEntry> = Vec::new();
+        for name in &model_order {
+            let mut entry_routes = model_routes.remove(name).unwrap_or_default();
+            entry_routes.sort_by_key(|r| route_sort_key(r));
+            models.push(super::ModelEntry {
+                name: name.clone(),
+                routes: entry_routes,
+                selected_route: 0,
+                is_current: *name == current_model,
             });
         }
 
-        self.picker_state = Some(super::PickerState {
-            mode: super::PickerMode::Provider {
-                model: model.clone(),
-            },
-            items,
-            selected: 0,
-            filter: String::new(),
+        // Sort models: current first, then available, then alphabetical
+        models.sort_by(|a, b| {
+            let a_current = if a.is_current { 0u8 } else { 1 };
+            let b_current = if b.is_current { 0u8 } else { 1 };
+            let a_avail = if a.routes.first().map(|r| r.available).unwrap_or(false) { 0u8 } else { 1 };
+            let b_avail = if b.routes.first().map(|r| r.available).unwrap_or(false) { 0u8 } else { 1 };
+            a_current
+                .cmp(&b_current)
+                .then(a_avail.cmp(&b_avail))
+                .then(a.name.cmp(&b.name))
         });
+
+        let filtered: Vec<usize> = (0..models.len()).collect();
+        let selected = 0; // Current model is sorted first
+
+        self.picker_state = Some(super::PickerState {
+            models,
+            filtered,
+            selected,
+            column: 0,
+            filter: String::new(),
+            preview: false,
+        });
+        self.input.clear();
+        self.cursor_pos = 0;
     }
 
     /// Handle keyboard input when picker is active
     fn handle_picker_key(&mut self, code: KeyCode, _modifiers: KeyModifiers) -> Result<()> {
         match code {
             KeyCode::Esc => {
+                if let Some(ref picker) = self.picker_state {
+                    if !picker.filter.is_empty() {
+                        // First Esc clears filter
+                        let picker = self.picker_state.as_mut().unwrap();
+                        picker.filter.clear();
+                        Self::apply_picker_filter(picker);
+                        return Ok(());
+                    }
+                }
                 self.picker_state = None;
             }
-            KeyCode::Left => {
+            KeyCode::Up => {
                 if let Some(ref mut picker) = self.picker_state {
-                    picker.selected = picker.selected.saturating_sub(1);
+                    if picker.column == 0 {
+                        picker.selected = picker.selected.saturating_sub(1);
+                    } else {
+                        // Cycle routes for current model
+                        if let Some(&idx) = picker.filtered.get(picker.selected) {
+                            let entry = &mut picker.models[idx];
+                            entry.selected_route = entry.selected_route.saturating_sub(1);
+                        }
+                    }
+                }
+            }
+            KeyCode::Down => {
+                if let Some(ref mut picker) = self.picker_state {
+                    if picker.column == 0 {
+                        let max = picker.filtered.len().saturating_sub(1);
+                        picker.selected = (picker.selected + 1).min(max);
+                    } else {
+                        if let Some(&idx) = picker.filtered.get(picker.selected) {
+                            let entry = &mut picker.models[idx];
+                            let max = entry.routes.len().saturating_sub(1);
+                            entry.selected_route = (entry.selected_route + 1).min(max);
+                        }
+                    }
                 }
             }
             KeyCode::Right => {
                 if let Some(ref mut picker) = self.picker_state {
-                    let max = picker.items.len().saturating_sub(1);
-                    picker.selected = (picker.selected + 1).min(max);
+                    if picker.column < 2 {
+                        // Only allow moving to provider/via columns if model has multiple routes
+                        if let Some(&idx) = picker.filtered.get(picker.selected) {
+                            if picker.models[idx].routes.len() > 1 || picker.column > 0 {
+                                picker.column += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            KeyCode::Left | KeyCode::BackTab => {
+                if let Some(ref mut picker) = self.picker_state {
+                    if picker.column > 0 {
+                        picker.column -= 1;
+                    }
                 }
             }
             KeyCode::Tab => {
-                // In model mode, switch to provider selection for the selected model
-                let transition = if let Some(ref picker) = self.picker_state {
-                    if let super::PickerMode::Model = &picker.mode {
-                        let model = picker.items[picker.selected].value.clone();
-                        Some(model)
-                    } else {
-                        None
+                if let Some(ref mut picker) = self.picker_state {
+                    if picker.column == 0 && !picker.filter.is_empty() {
+                        // Tab-complete: fill to longest common prefix of matches
+                        Self::tab_complete_filter(picker);
+                    } else if picker.column < 2 {
+                        // Move to next column if model has routes
+                        if let Some(&idx) = picker.filtered.get(picker.selected) {
+                            if picker.models[idx].routes.len() > 1 || picker.column > 0 {
+                                picker.column += 1;
+                            }
+                        }
                     }
-                } else {
-                    None
-                };
-                if let Some(model) = transition {
-                    self.open_provider_picker(model);
-                }
-            }
-            KeyCode::BackTab => {
-                // In provider mode, go back to model selection
-                let go_back = self
-                    .picker_state
-                    .as_ref()
-                    .map(|p| matches!(p.mode, super::PickerMode::Provider { .. }))
-                    .unwrap_or(false);
-                if go_back {
-                    self.open_model_picker();
                 }
             }
             KeyCode::Enter => {
-                if let Some(picker) = self.picker_state.take() {
-                    let selected = &picker.items[picker.selected];
-                    let (spec, notice) = match &picker.mode {
-                        super::PickerMode::Model => {
-                            let model = selected.value.clone();
-                            (model.clone(), format!("Model → {}", model))
+                if let Some(ref mut picker) = self.picker_state {
+                    if picker.filtered.is_empty() {
+                        return Ok(());
+                    }
+                    let idx = picker.filtered[picker.selected];
+                    let entry = &picker.models[idx];
+
+                    if picker.column == 0 && entry.routes.len() > 1 {
+                        // Advance to provider column (don't confirm yet)
+                        picker.column = 1;
+                        return Ok(());
+                    }
+                    if picker.column == 1 {
+                        // Advance to via column
+                        picker.column = 2;
+                        return Ok(());
+                    }
+
+                    // Column 2 or single-route model: confirm selection
+                    let route = &entry.routes[entry.selected_route];
+
+                    if !route.available {
+                        let name = entry.name.clone();
+                        let provider = route.provider.clone();
+                        let api = route.api_method.clone();
+                        self.picker_state = None;
+                        self.set_status_notice(format!(
+                            "{} via {} ({}) — not available",
+                            name, provider, api
+                        ));
+                        return Ok(());
+                    }
+
+                    let spec = if route.api_method == "openrouter" && route.provider != "auto" {
+                        if entry.name.contains('/') {
+                            format!("{}@{}", entry.name, route.provider)
+                        } else {
+                            format!("anthropic/{}@{}", entry.name, route.provider)
                         }
-                        super::PickerMode::Provider { model } => {
-                            let provider = &selected.value;
-                            if provider == "auto" {
-                                (
-                                    format!("{}@auto", model),
-                                    format!("Model → {} (auto routing)", model),
-                                )
-                            } else {
-                                (
-                                    format!("{}@{}", model, provider),
-                                    format!("Model → {} via {}", model, provider),
-                                )
-                            }
-                        }
+                    } else if route.api_method == "openrouter" {
+                        entry.name.clone()
+                    } else {
+                        entry.name.clone()
                     };
 
+                    let notice = format!(
+                        "Model → {} via {} ({})",
+                        entry.name, route.provider, route.api_method
+                    );
+
+                    self.picker_state = None;
                     self.upstream_provider = None;
                     if self.is_remote {
-                        // Queue for async processing in remote loop
                         self.pending_model_switch = Some(spec);
                     } else {
                         let _ = self.provider.set_model(&spec);
@@ -6351,12 +6466,137 @@ impl App {
                     self.set_status_notice(notice);
                 }
             }
-            _ => {
-                // Any other key dismisses the picker
-                self.picker_state = None;
+            KeyCode::Backspace => {
+                if let Some(ref mut picker) = self.picker_state {
+                    if picker.filter.pop().is_some() {
+                        Self::apply_picker_filter(picker);
+                    }
+                }
             }
+            KeyCode::Char(c) => {
+                if let Some(ref mut picker) = self.picker_state {
+                    picker.filter.push(c);
+                    Self::apply_picker_filter(picker);
+                }
+            }
+            _ => {}
         }
         Ok(())
+    }
+
+    /// Fuzzy match score for picker: returns Some(score) if pattern is a subsequence of text.
+    /// Higher score = better match. Bonuses for consecutive chars, word boundaries.
+    fn picker_fuzzy_score(pattern: &str, text: &str) -> Option<i32> {
+        let pat: Vec<char> = pattern.to_lowercase().chars().collect();
+        let txt: Vec<char> = text.to_lowercase().chars().collect();
+        if pat.is_empty() {
+            return Some(0);
+        }
+
+        let mut pi = 0;
+        let mut score = 0i32;
+        let mut last_match: Option<usize> = None;
+
+        for (ti, &tc) in txt.iter().enumerate() {
+            if pi < pat.len() && tc == pat[pi] {
+                score += 1;
+                // Consecutive match bonus
+                if last_match == Some(ti - 1) {
+                    score += 3;
+                }
+                // Word boundary bonus (start, after / - _ space)
+                if ti == 0
+                    || matches!(
+                        txt.get(ti.wrapping_sub(1)),
+                        Some('/' | '-' | '_' | ' ' | '.')
+                    )
+                {
+                    score += 5;
+                }
+                // Exact prefix bonus
+                if pi == 0 && ti == 0 {
+                    score += 10;
+                }
+                last_match = Some(ti);
+                pi += 1;
+            }
+        }
+
+        if pi == pat.len() {
+            // Penalize long strings (prefer shorter, tighter matches)
+            score -= (txt.len() as i32) / 10;
+            Some(score)
+        } else {
+            None
+        }
+    }
+
+    /// Re-filter picker models using fuzzy matching, sorted by score
+    fn apply_picker_filter(picker: &mut super::PickerState) {
+        if picker.filter.is_empty() {
+            picker.filtered = (0..picker.models.len()).collect();
+        } else {
+            let mut scored: Vec<(usize, i32)> = picker
+                .models
+                .iter()
+                .enumerate()
+                .filter_map(|(i, m)| {
+                    Self::picker_fuzzy_score(&picker.filter, &m.name).map(|s| (i, s))
+                })
+                .collect();
+            // Sort by score descending (best matches first)
+            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            picker.filtered = scored.into_iter().map(|(i, _)| i).collect();
+        }
+        // Clamp selection
+        if picker.filtered.is_empty() {
+            picker.selected = 0;
+        } else {
+            picker.selected = picker.selected.min(picker.filtered.len() - 1);
+        }
+    }
+
+    /// Tab-complete: fill filter to longest common prefix of matched model names
+    fn tab_complete_filter(picker: &mut super::PickerState) {
+        if picker.filtered.is_empty() {
+            return;
+        }
+        // If only one match, fill the whole name
+        if picker.filtered.len() == 1 {
+            let name = picker.models[picker.filtered[0]].name.clone();
+            picker.filter = name;
+            Self::apply_picker_filter(picker);
+            return;
+        }
+        // Find longest common prefix (case-insensitive) of all matches
+        let names: Vec<&str> = picker
+            .filtered
+            .iter()
+            .map(|&i| picker.models[i].name.as_str())
+            .collect();
+        let first = names[0].to_lowercase();
+        let first_chars: Vec<char> = first.chars().collect();
+        let mut prefix_len = first_chars.len();
+        for name in &names[1..] {
+            let lower = name.to_lowercase();
+            let chars: Vec<char> = lower.chars().collect();
+            let mut common = 0;
+            for (a, b) in first_chars.iter().zip(chars.iter()) {
+                if a == b {
+                    common += 1;
+                } else {
+                    break;
+                }
+            }
+            prefix_len = prefix_len.min(common);
+        }
+        // Only extend the filter (don't shorten it)
+        if prefix_len > picker.filter.len() {
+            // Use the casing from the first match
+            let first_original = &picker.models[picker.filtered[0]].name;
+            picker.filter = first_original[..prefix_len].to_string();
+            Self::apply_picker_filter(picker);
+        }
     }
 
     fn extract_thought_line(text: &str) -> Option<String> {
@@ -8106,66 +8346,6 @@ impl App {
             .collect()
     }
 
-    fn rank_model_suggestions(
-        &self,
-        model_prefix: &str,
-        models: Vec<String>,
-    ) -> Vec<(String, &'static str)> {
-        let needle = model_prefix.to_lowercase();
-        let mut scored: Vec<(bool, usize, String)> = Vec::new();
-        for model in models {
-            let lower = model.to_lowercase();
-            if needle.is_empty() || lower.starts_with(&needle) {
-                scored.push((true, 0, model));
-            } else if let Some(score) = Self::fuzzy_score(&needle, &lower) {
-                scored.push((false, score, model));
-            }
-        }
-        scored.sort_by(|a, b| {
-            b.0.cmp(&a.0)
-                .then_with(|| a.1.cmp(&b.1))
-                .then_with(|| a.2.len().cmp(&b.2.len()))
-                .then_with(|| a.2.cmp(&b.2))
-        });
-        scored
-            .into_iter()
-            .map(|(_, _, model)| (format!("/model {}", model), "Switch to this model"))
-            .collect()
-    }
-
-    fn rank_provider_suggestions(
-        &self,
-        model: &str,
-        provider_prefix: &str,
-        providers: Vec<String>,
-    ) -> Vec<(String, &'static str)> {
-        let needle = provider_prefix.to_lowercase();
-        let mut scored: Vec<(bool, usize, String)> = Vec::new();
-        for provider in providers {
-            let lower = provider.to_lowercase();
-            if needle.is_empty() || lower.starts_with(&needle) {
-                scored.push((true, 0, provider));
-            } else if let Some(score) = Self::fuzzy_score(&needle, &lower) {
-                scored.push((false, score, provider));
-            }
-        }
-        scored.sort_by(|a, b| {
-            b.0.cmp(&a.0)
-                .then_with(|| a.1.cmp(&b.1))
-                .then_with(|| a.2.len().cmp(&b.2.len()))
-                .then_with(|| a.2.cmp(&b.2))
-        });
-        scored
-            .into_iter()
-            .map(|(_, _, provider)| {
-                (
-                    format!("/model {}@{}", model, provider),
-                    "Pin OpenRouter provider",
-                )
-            })
-            .collect()
-    }
-
     /// Get command suggestions based on current input (or base input for cycling)
     fn get_suggestions_for(&self, input: &str) -> Vec<(String, &'static str)> {
         let input = input.trim();
@@ -8177,47 +8357,9 @@ impl App {
 
         let prefix = input.to_lowercase();
 
-        // Get available models
-        let models: Vec<String> = if self.is_remote {
-            self.remote_available_models.clone()
-        } else {
-            self.provider.available_models_display()
-        };
-
-        // If input is exactly "/model", show all model options for cycling
-        if prefix == "/model" {
-            return self.rank_model_suggestions("", models);
-        }
-
-        // Check if this is a "/model " command with a partial model name
-        if let Some(model_prefix_raw) = input.strip_prefix("/model ") {
-            let model_prefix_lower = model_prefix_raw.to_lowercase();
-            if let Some((model_raw, provider_raw)) = model_prefix_raw.split_once('@') {
-                let model = model_raw.trim();
-                if model.is_empty() {
-                    return self.rank_model_suggestions("", models);
-                }
-                let mut providers: Vec<String> = if self.is_remote {
-                    let is_openrouter = self
-                        .remote_provider_name
-                        .as_deref()
-                        .map(|p| p.eq_ignore_ascii_case("openrouter"))
-                        .unwrap_or(false);
-                    if is_openrouter {
-                        crate::provider::openrouter::known_providers()
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    self.provider.available_providers_for_model(model)
-                };
-                if providers.is_empty() {
-                    return self.rank_model_suggestions(&model_prefix_lower, models);
-                }
-                providers.insert(0, "auto".to_string());
-                return self.rank_provider_suggestions(model, provider_raw.trim(), providers);
-            }
-            return self.rank_model_suggestions(&model_prefix_lower, models);
+        // /model opens the interactive picker — don't list individual models in autocomplete
+        if prefix == "/model" || prefix.starts_with("/model ") || prefix.starts_with("/models") {
+            return vec![("/model".into(), "Open model picker")];
         }
 
         // Built-in commands

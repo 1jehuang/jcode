@@ -477,9 +477,21 @@ fn endpoints_cache_path(model: &str) -> PathBuf {
         .join(format!("openrouter_endpoints_{}.json", safe_name))
 }
 
-/// Public access to endpoints disk cache for remote-mode picker
-pub fn load_endpoints_disk_cache_public(model: &str) -> Option<Vec<EndpointInfo>> {
-    load_endpoints_disk_cache(model)
+/// Public access to endpoints disk cache for picker (ignores TTL — stale data is fine for display).
+/// Returns (endpoints, age_secs) so caller can show staleness.
+pub fn load_endpoints_disk_cache_public(model: &str) -> Option<(Vec<EndpointInfo>, u64)> {
+    let path = endpoints_cache_path(model);
+    let content = std::fs::read_to_string(&path).ok()?;
+    let cache: EndpointsDiskCache = serde_json::from_str(&content).ok()?;
+    if cache.endpoints.is_empty() {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let age = now.saturating_sub(cache.cached_at);
+    Some((cache.endpoints, age))
 }
 
 fn load_endpoints_disk_cache(model: &str) -> Option<Vec<EndpointInfo>> {
