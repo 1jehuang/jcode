@@ -17,6 +17,16 @@ pub use claude::{NativeToolResult, NativeToolResultSender};
 /// Stream of events from a provider
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 
+/// A single route to access a model: model + provider + API method
+#[derive(Debug, Clone)]
+pub struct ModelRoute {
+    pub model: String,
+    pub provider: String,
+    pub api_method: String,
+    pub available: bool,
+    pub detail: String,
+}
+
 /// Provider trait for LLM backends
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -90,6 +100,12 @@ pub trait Provider: Send + Sync {
     /// Provider details for model picker: Vec<(provider_name, detail_string)>.
     /// Uses cached endpoint data when available (sync, no network).
     fn provider_details_for_model(&self, _model: &str) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// Get all model routes for the unified picker.
+    /// Returns every (model, provider, api_method, available, detail) combination.
+    fn model_routes(&self) -> Vec<ModelRoute> {
         Vec::new()
     }
 
@@ -658,6 +674,145 @@ impl Provider for MultiProvider {
             }
         }
         Vec::new()
+    }
+
+    fn model_routes(&self) -> Vec<ModelRoute> {
+        let mut routes = Vec::new();
+        let has_oauth = self.has_claude_creds && !self.use_claude_cli;
+        let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
+
+        // Anthropic models (oauth and/or api-key)
+        for model in ALL_CLAUDE_MODELS {
+            if has_oauth {
+                routes.push(ModelRoute {
+                    model: model.to_string(),
+                    provider: "Anthropic".to_string(),
+                    api_method: "oauth".to_string(),
+                    available: true,
+                    detail: String::new(),
+                });
+            }
+            if has_api_key {
+                routes.push(ModelRoute {
+                    model: model.to_string(),
+                    provider: "Anthropic".to_string(),
+                    api_method: "api-key".to_string(),
+                    available: true,
+                    detail: String::new(),
+                });
+            }
+            if !has_oauth && !has_api_key {
+                // Show as unavailable
+                routes.push(ModelRoute {
+                    model: model.to_string(),
+                    provider: "Anthropic".to_string(),
+                    api_method: "oauth".to_string(),
+                    available: false,
+                    detail: "no credentials".to_string(),
+                });
+            }
+        }
+
+        // OpenAI models
+        for model in ALL_OPENAI_MODELS {
+            routes.push(ModelRoute {
+                model: model.to_string(),
+                provider: "OpenAI".to_string(),
+                api_method: "api-key".to_string(),
+                available: self.has_openai_creds,
+                detail: if self.has_openai_creds {
+                    String::new()
+                } else {
+                    "no credentials".to_string()
+                },
+            });
+        }
+
+        // OpenRouter models (with per-provider endpoints)
+        if let Some(ref openrouter) = self.openrouter {
+            for model in openrouter.available_models_display() {
+                let cached = openrouter::load_endpoints_disk_cache_public(&model);
+                let age_str = cached.as_ref().map(|(_, age)| {
+                    if *age < 3600 {
+                        format!("{}m ago", age / 60)
+                    } else if *age < 86400 {
+                        format!("{}h ago", age / 3600)
+                    } else {
+                        format!("{}d ago", age / 86400)
+                    }
+                });
+                // Auto route: hint which provider it would likely pick
+                let auto_detail = cached
+                    .as_ref()
+                    .and_then(|(eps, _)| eps.first().map(|ep| format!("→ {}", ep.provider_name)))
+                    .unwrap_or_default();
+                routes.push(ModelRoute {
+                    model: model.clone(),
+                    provider: "auto".to_string(),
+                    api_method: "openrouter".to_string(),
+                    available: self.has_openrouter_creds,
+                    detail: auto_detail,
+                });
+                // Add per-provider routes from endpoints cache
+                if let Some((ref endpoints, _)) = cached {
+                    let stale_suffix = age_str.as_deref().unwrap_or("");
+                    for ep in endpoints {
+                        let mut detail = ep.detail_string();
+                        if !stale_suffix.is_empty() && !detail.is_empty() {
+                            detail = format!("{}, {}", detail, stale_suffix);
+                        } else if !stale_suffix.is_empty() {
+                            detail = stale_suffix.to_string();
+                        }
+                        routes.push(ModelRoute {
+                            model: model.clone(),
+                            provider: ep.provider_name.clone(),
+                            api_method: "openrouter".to_string(),
+                            available: self.has_openrouter_creds,
+                            detail,
+                        });
+                    }
+                }
+            }
+        } else {
+            // OpenRouter not configured - show a few popular models as unavailable
+            routes.push(ModelRoute {
+                model: "openrouter models".to_string(),
+                provider: "—".to_string(),
+                api_method: "openrouter".to_string(),
+                available: false,
+                detail: "OPENROUTER_API_KEY not set".to_string(),
+            });
+        }
+
+        // Also add Claude/OpenAI models via openrouter as alternative routes
+        if self.has_openrouter_creds {
+            for model in ALL_CLAUDE_MODELS {
+                let or_model = format!("anthropic/{}", model);
+                if let Some((endpoints, _)) =
+                    openrouter::load_endpoints_disk_cache_public(&or_model)
+                {
+                    for ep in &endpoints {
+                        routes.push(ModelRoute {
+                            model: model.to_string(),
+                            provider: ep.provider_name.clone(),
+                            api_method: "openrouter".to_string(),
+                            available: true,
+                            detail: ep.detail_string(),
+                        });
+                    }
+                } else {
+                    routes.push(ModelRoute {
+                        model: model.to_string(),
+                        provider: "Anthropic".to_string(),
+                        api_method: "openrouter".to_string(),
+                        available: true,
+                        detail: String::new(),
+                    });
+                }
+            }
+        }
+
+        routes
     }
 
     async fn prefetch_models(&self) -> Result<()> {

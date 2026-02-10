@@ -140,27 +140,39 @@ pub trait TuiState {
     fn picker_state(&self) -> Option<&PickerState>;
 }
 
-/// Interactive picker for model/provider selection
+/// Unified model/provider picker with three columns
 #[derive(Debug, Clone)]
 pub struct PickerState {
-    pub mode: PickerMode,
-    pub items: Vec<PickerItem>,
+    /// All unique model entries with their routes
+    pub models: Vec<ModelEntry>,
+    /// Filtered indices into `models` (by model filter)
+    pub filtered: Vec<usize>,
+    /// Selected row in filtered list
     pub selected: usize,
+    /// Active column: 0=model, 1=provider, 2=via
+    pub column: usize,
+    /// Filter text (applies to model column)
     pub filter: String,
+    /// Preview mode: picker is visible but input stays in main text box
+    pub preview: bool,
 }
 
+/// A unique model with its available routes
 #[derive(Debug, Clone)]
-pub enum PickerMode {
-    Model,
-    Provider { model: String },
-}
-
-#[derive(Debug, Clone)]
-pub struct PickerItem {
-    pub label: String,
-    pub value: String,
-    pub detail: String,
+pub struct ModelEntry {
+    pub name: String,
+    pub routes: Vec<RouteOption>,
+    pub selected_route: usize,
     pub is_current: bool,
+}
+
+/// A single route to reach a model
+#[derive(Debug, Clone)]
+pub struct RouteOption {
+    pub provider: String,
+    pub api_method: String,
+    pub available: bool,
+    pub detail: String,
 }
 
 pub(crate) fn subscribe_metadata() -> (Option<String>, Option<bool>) {
