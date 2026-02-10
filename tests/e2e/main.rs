@@ -192,7 +192,7 @@ async fn test_socket_model_cycle_supported_models() -> Result<()> {
         let event = tokio::time::timeout(Duration::from_secs(1), client.read_event()).await??;
         match event {
             ServerEvent::Ack { .. } => continue,
-            ServerEvent::ModelChanged { id, model, error } if id == request_id => {
+            ServerEvent::ModelChanged { id, model, error, .. } if id == request_id => {
                 assert!(error.is_none(), "Expected successful model change");
                 assert_eq!(model, "claude-opus-4-5-20251101");
                 saw_model_changed = true;
