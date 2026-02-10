@@ -2292,6 +2292,7 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::ModelChanged {
                         id,
                         model,
+                        provider_name: None,
                         error: Some(
                             "Model switching is not available for this provider.".to_string(),
                         ),
@@ -2318,14 +2319,15 @@ async fn handle_client(
                     if result.is_ok() {
                         agent_guard.reset_provider_session();
                     }
-                    result.map(|_| agent_guard.provider_model())
+                    result.map(|_| (agent_guard.provider_model(), agent_guard.provider_name()))
                 };
 
                 match result {
-                    Ok(updated) => {
+                    Ok((updated, pname)) => {
                         let _ = client_event_tx.send(ServerEvent::ModelChanged {
                             id,
                             model: updated,
+                            provider_name: Some(pname),
                             error: None,
                         });
                     }
@@ -2333,6 +2335,7 @@ async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::ModelChanged {
                             id,
                             model: current,
+                            provider_name: None,
                             error: Some(e.to_string()),
                         });
                     }
@@ -2352,6 +2355,7 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::ModelChanged {
                         id,
                         model: current,
+                        provider_name: None,
                         error: Some(
                             "Model switching is not available for this provider.".to_string(),
                         ),
@@ -2369,13 +2373,14 @@ async fn handle_client(
                     if result.is_ok() {
                         agent_guard.reset_provider_session();
                     }
-                    result.map(|_| agent_guard.provider_model())
+                    result.map(|_| (agent_guard.provider_model(), agent_guard.provider_name()))
                 };
                 match result {
-                    Ok(updated) => {
+                    Ok((updated, pname)) => {
                         let _ = client_event_tx.send(ServerEvent::ModelChanged {
                             id,
                             model: updated,
+                            provider_name: Some(pname),
                             error: None,
                         });
                     }
@@ -2383,6 +2388,7 @@ async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::ModelChanged {
                             id,
                             model: current,
+                            provider_name: None,
                             error: Some(e.to_string()),
                         });
                     }
