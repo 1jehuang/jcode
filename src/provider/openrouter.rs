@@ -81,6 +81,9 @@ const WEIGHT_SPEED_BALANCED: f64 = 0.45;
 const WEIGHT_CACHE_BALANCED: f64 = 0.35;
 const WEIGHT_COST_BALANCED: f64 = 0.20;
 
+/// Endpoints cache TTL (1 hour) - per-model provider endpoint data
+const ENDPOINTS_CACHE_TTL_SECS: u64 = 60 * 60;
+
 /// Model info from OpenRouter API
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -99,6 +102,66 @@ pub struct ModelPricing {
     pub input_cache_read: Option<String>,
     #[serde(default, rename = "input_cache_write")]
     pub input_cache_write: Option<String>,
+}
+
+/// Per-provider endpoint info from OpenRouter /endpoints API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointInfo {
+    pub provider_name: String,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub pricing: ModelPricing,
+    #[serde(default)]
+    pub context_length: Option<u64>,
+    #[serde(default)]
+    pub max_completion_tokens: Option<u64>,
+    #[serde(default)]
+    pub quantization: Option<String>,
+    #[serde(default)]
+    pub uptime_last_30m: Option<f64>,
+    #[serde(default)]
+    pub latency_last_30m: Option<f64>,
+    #[serde(default)]
+    pub throughput_last_30m: Option<f64>,
+    #[serde(default)]
+    pub supports_implicit_caching: Option<bool>,
+    #[serde(default)]
+    pub status: Option<i32>,
+}
+
+impl EndpointInfo {
+    /// Format a short detail string for picker display: "$0.45/M, 99% up"
+    pub fn detail_string(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(ref prompt) = self.pricing.prompt {
+            if let Ok(p) = prompt.parse::<f64>() {
+                parts.push(format!("${:.2}/M", p * 1e6));
+            }
+        }
+        if let Some(uptime) = self.uptime_last_30m {
+            parts.push(format!("{:.0}% up", uptime));
+        }
+        if let Some(ref cache_read) = self.pricing.input_cache_read {
+            if let Ok(cr) = cache_read.parse::<f64>() {
+                if cr > 0.0 {
+                    parts.push("cache".to_string());
+                }
+            }
+        }
+        if let Some(ref q) = self.quantization {
+            if q != "unknown" {
+                parts.push(q.clone());
+            }
+        }
+        parts.join(", ")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EndpointsDiskCache {
+    cached_at: u64,
+    endpoints: Vec<EndpointInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -386,6 +449,49 @@ fn save_disk_cache(models: &[ModelInfo]) {
     }
 }
 
+fn endpoints_cache_path(model: &str) -> PathBuf {
+    // Use a safe filename from the model ID
+    let safe_name = model.replace('/', "__");
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".jcode")
+        .join("cache")
+        .join(format!("openrouter_endpoints_{}.json", safe_name))
+}
+
+fn load_endpoints_disk_cache(model: &str) -> Option<Vec<EndpointInfo>> {
+    let path = endpoints_cache_path(model);
+    let content = std::fs::read_to_string(&path).ok()?;
+    let cache: EndpointsDiskCache = serde_json::from_str(&content).ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    if now - cache.cached_at < ENDPOINTS_CACHE_TTL_SECS {
+        Some(cache.endpoints)
+    } else {
+        None
+    }
+}
+
+fn save_endpoints_disk_cache(model: &str, endpoints: &[EndpointInfo]) {
+    let path = endpoints_cache_path(model);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let cache = EndpointsDiskCache {
+        cached_at: now,
+        endpoints: endpoints.to_vec(),
+    };
+    if let Ok(content) = serde_json::to_string(&cache) {
+        let _ = std::fs::write(&path, content);
+    }
+}
+
 fn load_provider_stats() -> ProviderStatsStore {
     let path = provider_stats_path();
     let content = match std::fs::read_to_string(&path) {
@@ -463,6 +569,8 @@ pub struct OpenRouterProvider {
     provider_stats: Arc<Mutex<ProviderStatsStore>>,
     /// Pinned provider for this session (cache-aware)
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
+    /// In-memory cache of per-model endpoint data
+    endpoints_cache: Arc<RwLock<HashMap<String, (u64, Vec<EndpointInfo>)>>>,
 }
 
 impl OpenRouterProvider {
@@ -512,6 +620,7 @@ impl OpenRouterProvider {
             provider_routing: Arc::new(RwLock::new(provider_routing)),
             provider_stats: Arc::new(Mutex::new(load_provider_stats())),
             provider_pin: Arc::new(Mutex::new(None)),
+            endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -859,6 +968,76 @@ impl OpenRouterProvider {
 
         // Fetch fresh
         self.fetch_models().await
+    }
+
+    /// Fetch per-provider endpoint data for a model from OpenRouter API.
+    /// Returns cached data if available and fresh (1-hour TTL).
+    pub async fn fetch_endpoints(&self, model: &str) -> Result<Vec<EndpointInfo>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        // Check in-memory cache
+        {
+            let cache = self.endpoints_cache.read().await;
+            if let Some((cached_at, endpoints)) = cache.get(model) {
+                if now - cached_at < ENDPOINTS_CACHE_TTL_SECS {
+                    return Ok(endpoints.clone());
+                }
+            }
+        }
+
+        // Check disk cache
+        if let Some(endpoints) = load_endpoints_disk_cache(model) {
+            let mut cache = self.endpoints_cache.write().await;
+            cache.insert(model.to_string(), (now, endpoints.clone()));
+            return Ok(endpoints);
+        }
+
+        // Fetch from API
+        let url = format!("{}/models/{}/endpoints", API_BASE, model);
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .send()
+            .await
+            .context("Failed to fetch endpoints from OpenRouter")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("OpenRouter endpoints API error ({}): {}", status, body);
+        }
+
+        #[derive(Deserialize)]
+        struct EndpointsWrapper {
+            endpoints: Vec<EndpointInfo>,
+        }
+
+        #[derive(Deserialize)]
+        struct EndpointsResponse {
+            data: EndpointsWrapper,
+        }
+
+        let resp: EndpointsResponse = response
+            .json()
+            .await
+            .context("Failed to parse endpoints response")?;
+
+        let endpoints = resp.data.endpoints;
+
+        // Save to disk cache
+        save_endpoints_disk_cache(model, &endpoints);
+
+        // Update in-memory cache
+        {
+            let mut cache = self.endpoints_cache.write().await;
+            cache.insert(model.to_string(), (now, endpoints.clone()));
+        }
+
+        Ok(endpoints)
     }
 
     /// Get context length for a model
@@ -1594,6 +1773,7 @@ impl Provider for OpenRouterProvider {
             )),
             provider_stats: Arc::clone(&self.provider_stats),
             provider_pin: Arc::new(Mutex::new(None)),
+            endpoints_cache: Arc::clone(&self.endpoints_cache),
         })
     }
 }
@@ -2111,6 +2291,7 @@ mod tests {
             provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
             provider_stats: Arc::new(Mutex::new(stats)),
             provider_pin: Arc::new(Mutex::new(None)),
+            endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
         };
 
         let ranked = provider.rank_providers("test/model");
@@ -2158,6 +2339,7 @@ mod tests {
             provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
             provider_stats: Arc::new(Mutex::new(stats)),
             provider_pin: Arc::new(Mutex::new(None)),
+            endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
         };
 
         let ranked = provider.rank_providers("moonshotai/kimi-k2.5");
@@ -2174,6 +2356,7 @@ mod tests {
             provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
             provider_stats: Arc::new(Mutex::new(ProviderStatsStore::default())),
             provider_pin: Arc::new(Mutex::new(None)),
+            endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
         };
 
         let rt = tokio::runtime::Builder::new_current_thread()
