@@ -6205,23 +6205,34 @@ impl App {
 
     /// Open provider picker for a specific model
     fn open_provider_picker(&mut self, model: String) {
-        let is_openrouter = if self.is_remote {
-            self.remote_provider_name
-                .as_deref()
-                .map(|p| p.eq_ignore_ascii_case("openrouter"))
-                .unwrap_or(false)
-        } else {
-            self.provider.name().eq_ignore_ascii_case("openrouter")
-        };
-
-        if !is_openrouter {
-            // Non-OpenRouter providers don't have provider selection
-            self.set_status_notice("Provider selection is only available for OpenRouter");
+        // Provider selection is available for OpenRouter-format models (contain '/')
+        if !model.contains('/') {
+            self.set_status_notice("Provider selection is only available for OpenRouter models");
             return;
         }
 
+        // Get provider details (with pricing/uptime from cached endpoints)
+        let details: std::collections::HashMap<String, String> = if self.is_remote {
+            // Remote mode: use disk cache directly
+            crate::provider::openrouter::load_endpoints_disk_cache_public(&model)
+                .unwrap_or_default()
+                .iter()
+                .map(|e| (e.provider_name.clone(), e.detail_string()))
+                .collect()
+        } else {
+            self.provider
+                .provider_details_for_model(&model)
+                .into_iter()
+                .collect()
+        };
+
+        // Get provider names list
         let providers: Vec<String> = if self.is_remote {
-            crate::provider::openrouter::known_providers()
+            if details.is_empty() {
+                crate::provider::openrouter::known_providers()
+            } else {
+                details.keys().cloned().collect()
+            }
         } else {
             self.provider.available_providers_for_model(&model)
         };
@@ -6240,10 +6251,14 @@ impl App {
             is_current: false,
         });
         for p in &providers {
+            let detail = details
+                .get(p)
+                .cloned()
+                .unwrap_or_default();
             items.push(super::PickerItem {
                 label: p.clone(),
                 value: p.clone(),
-                detail: String::new(),
+                detail,
                 is_current: false,
             });
         }

@@ -121,9 +121,9 @@ pub struct EndpointInfo {
     #[serde(default)]
     pub uptime_last_30m: Option<f64>,
     #[serde(default)]
-    pub latency_last_30m: Option<f64>,
+    pub latency_last_30m: Option<serde_json::Value>,
     #[serde(default)]
-    pub throughput_last_30m: Option<f64>,
+    pub throughput_last_30m: Option<serde_json::Value>,
     #[serde(default)]
     pub supports_implicit_caching: Option<bool>,
     #[serde(default)]
@@ -131,7 +131,18 @@ pub struct EndpointInfo {
 }
 
 impl EndpointInfo {
-    /// Format a short detail string for picker display: "$0.45/M, 99% up"
+    /// Extract p50 value from a percentile object or plain number
+    fn extract_p50(value: &serde_json::Value) -> Option<f64> {
+        match value {
+            serde_json::Value::Number(n) => n.as_f64(),
+            serde_json::Value::Object(map) => {
+                map.get("p50").and_then(|v| v.as_f64())
+            }
+            _ => None,
+        }
+    }
+
+    /// Format a short detail string for picker display: "$0.45/M, 99% up, 14 tps"
     pub fn detail_string(&self) -> String {
         let mut parts = Vec::new();
         if let Some(ref prompt) = self.pricing.prompt {
@@ -140,7 +151,14 @@ impl EndpointInfo {
             }
         }
         if let Some(uptime) = self.uptime_last_30m {
-            parts.push(format!("{:.0}% up", uptime));
+            parts.push(format!("{:.0}%", uptime));
+        }
+        if let Some(ref tps) = self.throughput_last_30m {
+            if let Some(t) = Self::extract_p50(tps) {
+                if t > 0.0 {
+                    parts.push(format!("{:.0}tps", t));
+                }
+            }
         }
         if let Some(ref cache_read) = self.pricing.input_cache_read {
             if let Ok(cr) = cache_read.parse::<f64>() {
@@ -457,6 +475,11 @@ fn endpoints_cache_path(model: &str) -> PathBuf {
         .join(".jcode")
         .join("cache")
         .join(format!("openrouter_endpoints_{}.json", safe_name))
+}
+
+/// Public access to endpoints disk cache for remote-mode picker
+pub fn load_endpoints_disk_cache_public(model: &str) -> Option<Vec<EndpointInfo>> {
+    load_endpoints_disk_cache(model)
 }
 
 fn load_endpoints_disk_cache(model: &str) -> Option<Vec<EndpointInfo>> {
@@ -867,6 +890,43 @@ impl OpenRouterProvider {
         providers.sort();
         providers.dedup();
         providers
+    }
+
+    /// Return provider details from cached endpoints data (sync, no network).
+    /// Falls back to local stats if no endpoints cache available.
+    pub fn provider_details_for_model(&self, model: &str) -> Vec<(String, String)> {
+        // Try endpoints disk cache first (has pricing, uptime, cache info)
+        if let Some(endpoints) = load_endpoints_disk_cache(model) {
+            return endpoints
+                .iter()
+                .map(|e| (e.provider_name.clone(), e.detail_string()))
+                .collect();
+        }
+
+        // Fall back to local observed stats
+        if let Ok(stats) = self.provider_stats.lock() {
+            if let Some(model_stats) = stats.models.get(model) {
+                let mut details: Vec<(String, String)> = model_stats
+                    .iter()
+                    .map(|(name, s)| {
+                        let mut parts = Vec::new();
+                        if let Some(tps) = s.avg_throughput {
+                            parts.push(format!("{:.0} tps", tps));
+                        }
+                        if let Some(cache) = s.avg_cache_hit {
+                            if cache > 0.0 {
+                                parts.push(format!("{:.0}% cache", cache * 100.0));
+                            }
+                        }
+                        (name.clone(), parts.join(", "))
+                    })
+                    .collect();
+                details.sort_by(|a, b| a.0.cmp(&b.0));
+                return details;
+            }
+        }
+
+        Vec::new()
     }
 
     /// Check if OPENROUTER_API_KEY is available (env var or config file)
@@ -2367,5 +2427,33 @@ mod tests {
         let order = routing.order.expect("provider order");
         assert_eq!(order.first().map(|s| s.as_str()), Some("Fireworks"));
         assert!(!routing.allow_fallbacks, "Kimi should disable fallbacks to force provider");
+    }
+
+    #[test]
+    fn test_endpoint_detail_string() {
+        let ep = EndpointInfo {
+            provider_name: "TestProvider".to_string(),
+            tag: None,
+            pricing: ModelPricing {
+                prompt: Some("0.00000045".to_string()),
+                completion: Some("0.00000225".to_string()),
+                input_cache_read: Some("0.00000007".to_string()),
+                input_cache_write: None,
+            },
+            context_length: Some(131072),
+            max_completion_tokens: Some(8192),
+            quantization: Some("fp8".to_string()),
+            uptime_last_30m: Some(99.5),
+            latency_last_30m: Some(serde_json::json!({"p50": 500, "p75": 800})),
+            throughput_last_30m: Some(serde_json::json!({"p50": 42, "p75": 55})),
+            supports_implicit_caching: Some(true),
+            status: Some(0),
+        };
+        let detail = ep.detail_string();
+        assert!(detail.contains("$0.45/M"), "should contain price: {}", detail);
+        assert!(detail.contains("100%"), "should contain uptime: {}", detail);
+        assert!(detail.contains("42tps"), "should contain throughput: {}", detail);
+        assert!(detail.contains("cache"), "should contain cache: {}", detail);
+        assert!(detail.contains("fp8"), "should contain quantization: {}", detail);
     }
 }
