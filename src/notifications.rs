@@ -95,7 +95,7 @@ impl NotificationDispatcher {
             action, description, request_id
         );
 
-        self.send_all(&title, &safe_body, &detailed_body, Priority::High, None);
+        self.send_all(&title, &safe_body, &detailed_body, Priority::High, Some(request_id));
     }
 
     /// Send through all configured channels (fire-and-forget).
@@ -493,10 +493,34 @@ fn poll_imap_once(host: &str, port: u16, user: &str, pass: &str) -> anyhow::Resu
                     .unwrap_or_default();
 
                 if !body_text.trim().is_empty() {
-                    if let Err(e) =
-                        crate::ambient::add_directive(body_text.trim().to_string(), cycle_id)
-                    {
-                        logging::error(&format!("Failed to save directive: {}", e));
+                    if cycle_id.starts_with("req_") {
+                        // Reply to a permission request — parse approve/deny
+                        let (approved, message) = parse_permission_reply(body_text.trim());
+                        if let Err(e) = crate::safety::record_permission_via_file(
+                            &cycle_id,
+                            approved,
+                            "email_reply",
+                            message,
+                        ) {
+                            logging::error(&format!(
+                                "Failed to record permission decision for {}: {}",
+                                cycle_id, e
+                            ));
+                        } else {
+                            logging::info(&format!(
+                                "Permission {} via email: {}",
+                                if approved { "approved" } else { "denied" },
+                                cycle_id
+                            ));
+                        }
+                    } else {
+                        // Normal directive reply to a cycle notification
+                        if let Err(e) = crate::ambient::add_directive(
+                            body_text.trim().to_string(),
+                            cycle_id,
+                        ) {
+                            logging::error(&format!("Failed to save directive: {}", e));
+                        }
                     }
                     processed += 1;
                 }
@@ -526,6 +550,33 @@ fn strip_quoted_reply(text: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Parse an email reply body for permission approve/deny intent.
+/// Returns `(approved, optional_message)`.
+///
+/// Checks the first line for approve keywords vs deny keywords.
+/// Defaults to deny if ambiguous (fail-safe).
+fn parse_permission_reply(text: &str) -> (bool, Option<String>) {
+    let lower = text.to_lowercase();
+    let first_line = lower.lines().next().unwrap_or("").trim();
+
+    let approve_words = ["approve", "approved", "yes", "lgtm", "go ahead", "ok", "sure"];
+    let deny_words = ["deny", "denied", "no", "reject", "rejected", "stop", "nope"];
+
+    let has_approve = approve_words.iter().any(|w| first_line.contains(w));
+    let has_deny = deny_words.iter().any(|w| first_line.contains(w));
+
+    // If both or neither match, default to deny (fail-safe)
+    let approved = has_approve && !has_deny;
+
+    let message = if text.trim().len() > 20 {
+        Some(text.trim().to_string())
+    } else {
+        None
+    };
+
+    (approved, message)
 }
 
 // ---------------------------------------------------------------------------
@@ -720,5 +771,61 @@ mod tests {
         // Just verify it doesn't panic
         let cfg = SafetyConfig::default();
         let _dispatcher = NotificationDispatcher::from_config(cfg);
+    }
+
+    #[test]
+    fn test_parse_permission_reply_approve() {
+        let (approved, _) = parse_permission_reply("Yes, go ahead");
+        assert!(approved);
+
+        let (approved, _) = parse_permission_reply("Approved");
+        assert!(approved);
+
+        let (approved, _) = parse_permission_reply("LGTM");
+        assert!(approved);
+
+        let (approved, _) = parse_permission_reply("sure thing");
+        assert!(approved);
+
+        let (approved, _) = parse_permission_reply("ok");
+        assert!(approved);
+    }
+
+    #[test]
+    fn test_parse_permission_reply_deny() {
+        let (approved, _) = parse_permission_reply("No, too risky");
+        assert!(!approved);
+
+        let (approved, _) = parse_permission_reply("Denied");
+        assert!(!approved);
+
+        let (approved, _) = parse_permission_reply("reject this");
+        assert!(!approved);
+
+        let (approved, _) = parse_permission_reply("nope");
+        assert!(!approved);
+
+        let (approved, _) = parse_permission_reply("Stop, don't do that");
+        assert!(!approved);
+    }
+
+    #[test]
+    fn test_parse_permission_reply_ambiguous_defaults_deny() {
+        let (approved, _) = parse_permission_reply("hmm let me think about it");
+        assert!(!approved);
+
+        let (approved, _) = parse_permission_reply("");
+        assert!(!approved);
+    }
+
+    #[test]
+    fn test_parse_permission_reply_message() {
+        // Short replies: no message
+        let (_, message) = parse_permission_reply("yes");
+        assert!(message.is_none());
+
+        // Longer replies: message included
+        let (_, message) = parse_permission_reply("Approved, but please use a feature branch for this");
+        assert!(message.is_some());
     }
 }
