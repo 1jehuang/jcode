@@ -304,6 +304,51 @@ fn persist_history(history: &[Decision]) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// File-based permission decision (for IMAP poller / external callers)
+// ---------------------------------------------------------------------------
+
+/// Record a permission decision by directly manipulating the queue/history JSON files.
+/// Used by the IMAP reply poller which doesn't have access to the live SafetySystem instance.
+pub fn record_permission_via_file(
+    request_id: &str,
+    approved: bool,
+    via: &str,
+    message: Option<String>,
+) -> Result<()> {
+    let qp = queue_path()?;
+    if let Some(parent) = qp.parent() {
+        storage::ensure_dir(parent)?;
+    }
+    let mut queue: Vec<PermissionRequest> = if qp.exists() {
+        storage::read_json(&qp).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    queue.retain(|r| r.id != request_id);
+    persist_queue(&queue)?;
+
+    let hp = history_path()?;
+    if let Some(parent) = hp.parent() {
+        storage::ensure_dir(parent)?;
+    }
+    let mut history: Vec<Decision> = if hp.exists() {
+        storage::read_json(&hp).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    history.push(Decision {
+        request_id: request_id.to_string(),
+        approved,
+        decided_at: Utc::now(),
+        decided_via: via.to_string(),
+        message,
+    });
+    persist_history(&history)?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // ID generation helper
 // ---------------------------------------------------------------------------
 
@@ -449,5 +494,36 @@ mod tests {
     fn test_new_request_id_format() {
         let id = new_request_id();
         assert!(id.starts_with("req_"));
+    }
+
+    #[test]
+    fn test_record_permission_via_file() {
+        // Seed a request into the queue via SafetySystem
+        let sys = SafetySystem::new();
+        let baseline = sys.pending_requests().len();
+        let req = PermissionRequest {
+            id: "req_file_test".to_string(),
+            action: "push".to_string(),
+            description: "Push to origin".to_string(),
+            rationale: "Ready for review".to_string(),
+            urgency: Urgency::Low,
+            wait: false,
+            created_at: Utc::now(),
+            context: None,
+        };
+        sys.request_permission(req);
+        assert_eq!(sys.pending_requests().len(), baseline + 1);
+
+        // Use the file-based function to approve it
+        record_permission_via_file("req_file_test", true, "email_reply", None).unwrap();
+
+        // Reload from disk — the in-memory SafetySystem won't see the change,
+        // but a fresh load should
+        let sys2 = SafetySystem::new();
+        let still_pending = sys2
+            .pending_requests()
+            .iter()
+            .any(|r| r.id == "req_file_test");
+        assert!(!still_pending, "request should have been removed from queue");
     }
 }
