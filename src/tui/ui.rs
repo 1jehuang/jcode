@@ -2805,78 +2805,104 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let width = area.width as usize;
     let mut spans: Vec<Span> = Vec::new();
 
-    // Mode label
-    let mode_label = match &picker.mode {
-        super::PickerMode::Model => " model: ",
-        super::PickerMode::Provider { model } => {
-            // We need to build a dynamic string, handled below
-            let _ = model;
-            ""
+    // Mode prefix
+    let prefix_text = match &picker.mode {
+        super::PickerMode::Model => " model: ".to_string(),
+        super::PickerMode::Provider { ref model } => {
+            let short = if model.len() > 20 {
+                format!("{}…", &model[..19])
+            } else {
+                model.clone()
+            };
+            format!(" {} via: ", short)
         }
     };
+    let prefix_width = prefix_text.len();
+    spans.push(Span::styled(prefix_text, Style::default().fg(DIM_COLOR)));
 
-    if let super::PickerMode::Provider { ref model } = picker.mode {
-        // Truncate model name to fit
-        let short = if model.len() > 20 {
-            format!("{}…", &model[..19])
-        } else {
-            model.clone()
-        };
-        spans.push(Span::styled(
-            format!(" {} via: ", short),
-            Style::default().fg(DIM_COLOR),
-        ));
-    } else {
-        spans.push(Span::styled(mode_label, Style::default().fg(DIM_COLOR)));
-    }
+    // Build display labels for all items
+    let labels: Vec<String> = picker
+        .items
+        .iter()
+        .map(|item| {
+            if item.detail.is_empty() {
+                item.label.clone()
+            } else {
+                format!("{} ({})", item.label, item.detail)
+            }
+        })
+        .collect();
 
-    // Render items horizontally with selected highlighted
-    let mut used_width = spans.iter().map(|s| s.width()).sum::<usize>();
+    // Calculate how many items fit, ensuring selected is always visible
+    let available = width.saturating_sub(prefix_width + 4); // reserve for arrows/padding
+    let selected = picker.selected;
 
-    for (i, item) in picker.items.iter().enumerate() {
-        let is_selected = i == picker.selected;
-        let prefix = if is_selected { "▸ " } else { "  " };
+    // Start from the selected item and expand outward
+    let selected_w = labels[selected].len() + 4;
+    let mut total_width = selected_w;
+    let mut start = selected;
+    let mut end = selected + 1;
 
-        let label_text = if item.detail.is_empty() {
-            format!("{}{}", prefix, item.label)
-        } else {
-            format!("{}{} ({})", prefix, item.label, item.detail)
-        };
-
-        let entry_width = label_text.len() + 1; // +1 for spacing
-        if used_width + entry_width > width {
-            spans.push(Span::styled(" …", Style::default().fg(DIM_COLOR)));
+    // Alternate expanding right then left to center the selection
+    loop {
+        let can_right = end < labels.len();
+        let can_left = start > 0;
+        if !can_right && !can_left {
             break;
         }
+        let mut expanded = false;
+        // Try right
+        if can_right {
+            let w = labels[end].len() + 4;
+            if total_width + w <= available {
+                total_width += w;
+                end += 1;
+                expanded = true;
+            }
+        }
+        // Try left
+        if can_left {
+            let w = labels[start - 1].len() + 4;
+            if total_width + w <= available {
+                total_width += w;
+                start -= 1;
+                expanded = true;
+            }
+        }
+        if !expanded {
+            break;
+        }
+    }
+
+    // Show left arrow if scrolled
+    if start > 0 {
+        spans.push(Span::styled("◂ ", Style::default().fg(DIM_COLOR)));
+    }
+
+    // Render visible items
+    for i in start..end {
+        let is_selected = i == selected;
+        let prefix = if is_selected { "▸ " } else { "  " };
+        let label_text = format!("{}{}", prefix, labels[i]);
 
         let style = if is_selected {
             Style::default()
                 .fg(Color::White)
                 .bg(Color::Rgb(60, 60, 80))
                 .bold()
-        } else if item.is_current {
+        } else if picker.items[i].is_current {
             Style::default().fg(ACCENT_COLOR)
         } else {
             Style::default().fg(DIM_COLOR)
         };
 
         spans.push(Span::styled(label_text, style));
-        used_width += entry_width;
+        spans.push(Span::styled(" ", Style::default()));
     }
 
-    // Hint at the end
-    let hint = match &picker.mode {
-        super::PickerMode::Model => " ← →  Tab:providers  Enter:select  Esc:cancel",
-        super::PickerMode::Provider { .. } => {
-            " ← →  Shift+Tab:back  Enter:select  Esc:cancel"
-        }
-    };
-    let hint_width = hint.len();
-    if used_width + hint_width <= width {
-        spans.push(Span::styled(
-            hint.to_string(),
-            Style::default().fg(Color::Rgb(80, 80, 100)),
-        ));
+    // Show right arrow if more items
+    if end < labels.len() {
+        spans.push(Span::styled(" ▸", Style::default().fg(DIM_COLOR)));
     }
 
     let line = Line::from(spans);
