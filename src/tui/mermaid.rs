@@ -27,7 +27,7 @@ use ratatui_image::{
     CropOptions, Resize, StatefulImage,
 };
 use serde::Serialize;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::hash::{Hash as _, Hasher};
 use std::panic;
@@ -301,6 +301,60 @@ pub struct MermaidCacheEntry {
     pub height: u32,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MermaidMemoryProfile {
+    /// Resident set size for the current process (if available from OS).
+    pub process_rss_bytes: Option<u64>,
+    /// Peak resident set size for the current process (if available from OS).
+    pub process_peak_rss_bytes: Option<u64>,
+    /// Virtual memory size for the current process (if available from OS).
+    pub process_virtual_bytes: Option<u64>,
+    /// Number of render-cache entries currently resident in memory.
+    pub render_cache_entries: usize,
+    pub render_cache_limit: usize,
+    /// Rough in-memory size of render-cache metadata (paths + structs), not image bytes.
+    pub render_cache_metadata_estimate_bytes: u64,
+    /// Number of image protocol states currently cached.
+    pub image_state_entries: usize,
+    pub image_state_limit: usize,
+    /// Lower-bound estimate for image protocol buffers (derived from source PNG dimensions).
+    pub image_state_protocol_min_estimate_bytes: u64,
+    /// Number of decoded source images cached for viewport panning.
+    pub source_cache_entries: usize,
+    pub source_cache_limit: usize,
+    /// Estimated decoded source image bytes (RGBA estimate).
+    pub source_cache_decoded_estimate_bytes: u64,
+    /// Number of active diagrams in the pinned-diagram list.
+    pub active_diagrams: usize,
+    pub active_diagrams_limit: usize,
+    /// On-disk cache size under the mermaid cache directory.
+    pub cache_disk_png_files: usize,
+    pub cache_disk_png_bytes: u64,
+    pub cache_disk_limit_bytes: u64,
+    pub cache_disk_max_age_secs: u64,
+    /// Mermaid-specific working set estimate (cache metadata + protocol floor + decoded source).
+    pub mermaid_working_set_estimate_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MermaidMemoryBenchmark {
+    pub iterations: usize,
+    pub errors: usize,
+    pub before: MermaidMemoryProfile,
+    pub after: MermaidMemoryProfile,
+    pub rss_delta_bytes: Option<i64>,
+    pub working_set_delta_bytes: i64,
+    pub peak_rss_bytes: Option<u64>,
+    pub peak_working_set_estimate_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProcessMemorySnapshot {
+    rss_bytes: Option<u64>,
+    peak_rss_bytes: Option<u64>,
+    virtual_bytes: Option<u64>,
+}
+
 pub fn debug_stats() -> MermaidDebugStats {
     let mut out = if let Ok(state) = MERMAID_DEBUG.lock() {
         state.stats.clone()
@@ -335,6 +389,202 @@ pub fn debug_cache() -> Vec<MermaidCacheEntry> {
             .collect();
     }
     Vec::new()
+}
+
+pub fn debug_memory_profile() -> MermaidMemoryProfile {
+    let process_mem = process_memory_snapshot();
+    let mut out = MermaidMemoryProfile {
+        process_rss_bytes: process_mem.rss_bytes,
+        process_peak_rss_bytes: process_mem.peak_rss_bytes,
+        process_virtual_bytes: process_mem.virtual_bytes,
+        render_cache_limit: RENDER_CACHE_MAX,
+        image_state_limit: IMAGE_STATE_MAX,
+        source_cache_limit: SOURCE_CACHE_MAX,
+        active_diagrams_limit: ACTIVE_DIAGRAMS_MAX,
+        cache_disk_limit_bytes: CACHE_MAX_SIZE_BYTES,
+        cache_disk_max_age_secs: CACHE_MAX_AGE_SECS,
+        ..MermaidMemoryProfile::default()
+    };
+
+    let mut cache_dir: Option<PathBuf> = None;
+    if let Ok(cache) = RENDER_CACHE.lock() {
+        out.render_cache_entries = cache.entries.len();
+        out.render_cache_metadata_estimate_bytes = cache
+            .entries
+            .values()
+            .map(|diagram| {
+                (std::mem::size_of::<CachedDiagram>() as u64)
+                    .saturating_add(diagram.path.to_string_lossy().len() as u64)
+                    .saturating_add(24)
+            })
+            .sum();
+        cache_dir = Some(cache.cache_dir.clone());
+    }
+
+    if let Some(dir) = cache_dir.as_deref() {
+        let (count, bytes) = scan_cache_dir_png_usage(dir);
+        out.cache_disk_png_files = count;
+        out.cache_disk_png_bytes = bytes;
+    }
+
+    if let Ok(state) = IMAGE_STATE.lock() {
+        out.image_state_entries = state.entries.len();
+        let mut seen_paths: HashSet<PathBuf> = HashSet::new();
+        for (_, image_state) in state.iter() {
+            if seen_paths.insert(image_state.source_path.clone()) {
+                if let Some((w, h)) = get_png_dimensions(&image_state.source_path) {
+                    out.image_state_protocol_min_estimate_bytes = out
+                        .image_state_protocol_min_estimate_bytes
+                        .saturating_add(rgba_bytes_estimate(w, h));
+                }
+            }
+        }
+    }
+
+    if let Ok(source) = SOURCE_CACHE.lock() {
+        out.source_cache_entries = source.entries.len();
+        for entry in source.entries.values() {
+            out.source_cache_decoded_estimate_bytes = out
+                .source_cache_decoded_estimate_bytes
+                .saturating_add(rgba_bytes_estimate(
+                    entry.image.width(),
+                    entry.image.height(),
+                ));
+        }
+    }
+
+    if let Ok(diagrams) = ACTIVE_DIAGRAMS.lock() {
+        out.active_diagrams = diagrams.len();
+    }
+
+    out.mermaid_working_set_estimate_bytes = out
+        .render_cache_metadata_estimate_bytes
+        .saturating_add(out.image_state_protocol_min_estimate_bytes)
+        .saturating_add(out.source_cache_decoded_estimate_bytes);
+
+    out
+}
+
+pub fn debug_memory_benchmark(iterations: usize) -> MermaidMemoryBenchmark {
+    let iterations = iterations.clamp(1, 256);
+    let before = debug_memory_profile();
+    let mut peak_rss = before.process_rss_bytes;
+    let mut peak_working_set = before.mermaid_working_set_estimate_bytes;
+    let mut errors = 0usize;
+
+    for idx in 0..iterations {
+        let content = format!(
+            "flowchart TD\n    A{i}[Start {i}] --> B{i}{{Check}}\n    B{i} -->|yes| C{i}[Fast path]\n    B{i} -->|no| D{i}[Slow path]\n    C{i} --> E{i}[Done]\n    D{i} --> E{i}",
+            i = idx
+        );
+
+        if matches!(
+            render_mermaid_untracked(&content, Some(96)),
+            RenderResult::Error(_)
+        ) {
+            errors += 1;
+        }
+
+        let sample = debug_memory_profile();
+        peak_rss = max_opt_u64(peak_rss, sample.process_rss_bytes);
+        peak_working_set = peak_working_set.max(sample.mermaid_working_set_estimate_bytes);
+    }
+
+    let after = debug_memory_profile();
+    peak_rss = max_opt_u64(peak_rss, after.process_rss_bytes);
+    peak_working_set = peak_working_set.max(after.mermaid_working_set_estimate_bytes);
+
+    MermaidMemoryBenchmark {
+        iterations,
+        errors,
+        rss_delta_bytes: diff_opt_u64(after.process_rss_bytes, before.process_rss_bytes),
+        working_set_delta_bytes: diff_u64(
+            after.mermaid_working_set_estimate_bytes,
+            before.mermaid_working_set_estimate_bytes,
+        ),
+        peak_rss_bytes: peak_rss,
+        peak_working_set_estimate_bytes: peak_working_set,
+        before,
+        after,
+    }
+}
+
+fn scan_cache_dir_png_usage(cache_dir: &Path) -> (usize, u64) {
+    let Ok(entries) = fs::read_dir(cache_dir) else {
+        return (0, 0);
+    };
+
+    let mut file_count = 0usize;
+    let mut total_bytes = 0u64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "png") {
+            file_count += 1;
+            if let Ok(meta) = entry.metadata() {
+                total_bytes = total_bytes.saturating_add(meta.len());
+            }
+        }
+    }
+    (file_count, total_bytes)
+}
+
+fn rgba_bytes_estimate(width: u32, height: u32) -> u64 {
+    (width as u64)
+        .saturating_mul(height as u64)
+        .saturating_mul(4)
+}
+
+fn max_opt_u64(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (None, None) => None,
+    }
+}
+
+fn diff_u64(after: u64, before: u64) -> i64 {
+    if after >= before {
+        (after - before).min(i64::MAX as u64) as i64
+    } else {
+        -((before - after).min(i64::MAX as u64) as i64)
+    }
+}
+
+fn diff_opt_u64(after: Option<u64>, before: Option<u64>) -> Option<i64> {
+    match (after, before) {
+        (Some(after), Some(before)) => Some(diff_u64(after, before)),
+        _ => None,
+    }
+}
+
+fn parse_proc_status_kib_line(line: &str, key: &str) -> Option<u64> {
+    let rest = line.strip_prefix(key)?.trim();
+    let value_kib = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+    Some(value_kib.saturating_mul(1024))
+}
+
+fn parse_proc_status_value_bytes(status: &str, key: &str) -> Option<u64> {
+    status
+        .lines()
+        .find_map(|line| parse_proc_status_kib_line(line, key))
+}
+
+#[cfg(target_os = "linux")]
+fn process_memory_snapshot() -> ProcessMemorySnapshot {
+    let Ok(status) = fs::read_to_string("/proc/self/status") else {
+        return ProcessMemorySnapshot::default();
+    };
+    ProcessMemorySnapshot {
+        rss_bytes: parse_proc_status_value_bytes(&status, "VmRSS:"),
+        peak_rss_bytes: parse_proc_status_value_bytes(&status, "VmHWM:"),
+        virtual_bytes: parse_proc_status_value_bytes(&status, "VmSize:"),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_memory_snapshot() -> ProcessMemorySnapshot {
+    ProcessMemorySnapshot::default()
 }
 
 /// Register a diagram as active (call during markdown rendering)
@@ -2184,5 +2434,40 @@ mod tests {
             Some((ACTIVE_DIAGRAMS_MAX + 4) as u64)
         );
         clear_active_diagrams();
+    }
+
+    #[test]
+    fn test_parse_proc_status_value_bytes() {
+        let status = "Name:\tjcode\nVmSize:\t   2048 kB\nVmRSS:\t    512 kB\nVmHWM:\t   1024 kB\n";
+        assert_eq!(
+            parse_proc_status_value_bytes(status, "VmSize:"),
+            Some(2048 * 1024)
+        );
+        assert_eq!(
+            parse_proc_status_value_bytes(status, "VmRSS:"),
+            Some(512 * 1024)
+        );
+        assert_eq!(
+            parse_proc_status_value_bytes(status, "VmHWM:"),
+            Some(1024 * 1024)
+        );
+        assert_eq!(parse_proc_status_value_bytes(status, "VmSwap:"), None);
+    }
+
+    #[test]
+    fn test_memory_profile_exposes_limits() {
+        let profile = debug_memory_profile();
+        assert_eq!(profile.render_cache_limit, RENDER_CACHE_MAX);
+        assert_eq!(profile.image_state_limit, IMAGE_STATE_MAX);
+        assert_eq!(profile.source_cache_limit, SOURCE_CACHE_MAX);
+        assert_eq!(profile.active_diagrams_limit, ACTIVE_DIAGRAMS_MAX);
+        assert_eq!(profile.cache_disk_limit_bytes, CACHE_MAX_SIZE_BYTES);
+        assert_eq!(profile.cache_disk_max_age_secs, CACHE_MAX_AGE_SECS);
+    }
+
+    #[test]
+    fn test_memory_benchmark_clamps_iterations() {
+        let result = debug_memory_benchmark(0);
+        assert_eq!(result.iterations, 1);
     }
 }

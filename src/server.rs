@@ -4882,6 +4882,25 @@ fn execute_client_debug_command(command: &str) -> String {
         return serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string());
     }
 
+    if trimmed == "mermaid:memory" {
+        let profile = mermaid::debug_memory_profile();
+        return serde_json::to_string_pretty(&profile).unwrap_or_else(|_| "{}".to_string());
+    }
+
+    if trimmed == "mermaid:memory-bench" {
+        let result = mermaid::debug_memory_benchmark(40);
+        return serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string());
+    }
+
+    if let Some(raw_iterations) = trimmed.strip_prefix("mermaid:memory-bench ") {
+        let iterations = match raw_iterations.trim().parse::<usize>() {
+            Ok(v) => v,
+            Err(_) => return "Invalid iterations (expected integer)".to_string(),
+        };
+        let result = mermaid::debug_memory_benchmark(iterations);
+        return serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string());
+    }
+
     if trimmed == "mermaid:cache" {
         let entries = mermaid::debug_cache();
         return serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string());
@@ -4960,6 +4979,8 @@ fn execute_client_debug_command(command: &str) -> String {
   anomalies                - Get latest visual debug anomalies
   theme                    - Get palette snapshot
   mermaid:stats            - Get mermaid render/cache stats
+  mermaid:memory           - Mermaid memory profile (RSS + cache estimates)
+  mermaid:memory-bench [n] - Run synthetic Mermaid memory benchmark
   mermaid:cache            - List mermaid cache entries
   mermaid:state            - Get image state (resize modes, areas)
   mermaid:test             - Render test diagram, return results
@@ -6748,6 +6769,8 @@ CLIENT COMMANDS (client: prefix):
   client:anomalies         - Get latest visual debug anomalies
   client:theme             - Get palette snapshot
   client:mermaid:stats     - Get mermaid render/cache stats
+  client:mermaid:memory    - Mermaid memory profile (RSS + cache estimates)
+  client:mermaid:memory-bench [n] - Synthetic Mermaid memory benchmark
   client:mermaid:cache     - List mermaid cache entries
   client:mermaid:state     - Get image state (resize modes)
   client:mermaid:test      - Render test diagram
