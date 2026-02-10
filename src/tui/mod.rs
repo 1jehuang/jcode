@@ -136,6 +136,31 @@ pub trait TuiState {
     fn diagram_pane_enabled(&self) -> bool;
     /// Diagram zoom percentage (100 = normal)
     fn diagram_zoom(&self) -> u8;
+    /// Interactive model/provider picker state (shown as inline row above input)
+    fn picker_state(&self) -> Option<&PickerState>;
+}
+
+/// Interactive picker for model/provider selection
+#[derive(Debug, Clone)]
+pub struct PickerState {
+    pub mode: PickerMode,
+    pub items: Vec<PickerItem>,
+    pub selected: usize,
+    pub filter: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum PickerMode {
+    Model,
+    Provider { model: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct PickerItem {
+    pub label: String,
+    pub value: String,
+    pub detail: String,
+    pub is_current: bool,
 }
 
 pub(crate) fn subscribe_metadata() -> (Option<String>, Option<bool>) {
