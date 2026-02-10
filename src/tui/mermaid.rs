@@ -31,7 +31,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::hash::{Hash as _, Hasher};
 use std::panic;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -54,7 +54,8 @@ static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> =
 const IMAGE_STATE_MAX: usize = 12;
 
 /// Image state cache - holds StatefulProtocol for each rendered image
-/// Key is (hash, target_width) to support multiple sizes of the same diagram
+/// Keyed by content hash; source_path guards prevent stale reuse when
+/// a higher-resolution PNG for the same hash replaces the old one.
 static IMAGE_STATE: LazyLock<Mutex<ImageStateCache>> =
     LazyLock::new(|| Mutex::new(ImageStateCache::new()));
 
@@ -71,6 +72,9 @@ static LAST_RENDER: LazyLock<Mutex<HashMap<u64, LastRenderState>>> =
 static ACTIVE_DIAGRAMS: LazyLock<Mutex<Vec<ActiveDiagram>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
+/// Prevent unbounded growth when a long session contains many unique diagrams.
+const ACTIVE_DIAGRAMS_MAX: usize = 128;
+
 /// Info about an active diagram (for info widget)
 #[derive(Clone)]
 struct ActiveDiagram {
@@ -83,6 +87,7 @@ struct ActiveDiagram {
 /// State for a rendered image
 struct ImageState {
     protocol: StatefulProtocol,
+    source_path: PathBuf,
     /// The area this was last rendered to (for change detection)
     last_area: Option<Rect>,
     /// Resize mode locked at creation time (prevents flickering on scroll)
@@ -182,9 +187,14 @@ enum ResizeMode {
 /// Cache decoded source images for fast viewport cropping
 const SOURCE_CACHE_MAX: usize = 8;
 
+struct SourceImageEntry {
+    path: PathBuf,
+    image: Arc<DynamicImage>,
+}
+
 struct SourceImageCache {
     order: VecDeque<u64>,
-    entries: HashMap<u64, Arc<DynamicImage>>,
+    entries: HashMap<u64, SourceImageEntry>,
 }
 
 impl SourceImageCache {
@@ -202,17 +212,30 @@ impl SourceImageCache {
         self.order.push_back(hash);
     }
 
-    fn get(&mut self, hash: u64) -> Option<Arc<DynamicImage>> {
-        let img = self.entries.get(&hash).cloned();
+    fn get(&mut self, hash: u64, expected_path: &Path) -> Option<Arc<DynamicImage>> {
+        let img = match self.entries.get(&hash) {
+            Some(entry) if entry.path == expected_path => Some(entry.image.clone()),
+            Some(_) => {
+                self.remove(hash);
+                None
+            }
+            None => None,
+        };
         if img.is_some() {
             self.touch(hash);
         }
         img
     }
 
-    fn insert(&mut self, hash: u64, image: DynamicImage) -> Arc<DynamicImage> {
+    fn insert(&mut self, hash: u64, path: PathBuf, image: DynamicImage) -> Arc<DynamicImage> {
         let arc = Arc::new(image);
-        self.entries.insert(hash, arc.clone());
+        self.entries.insert(
+            hash,
+            SourceImageEntry {
+                path,
+                image: arc.clone(),
+            },
+        );
         self.touch(hash);
         while self.order.len() > SOURCE_CACHE_MAX {
             if let Some(old) = self.order.pop_front() {
@@ -220,6 +243,13 @@ impl SourceImageCache {
             }
         }
         arc
+    }
+
+    fn remove(&mut self, hash: u64) {
+        self.entries.remove(&hash);
+        if let Some(pos) = self.order.iter().position(|h| *h == hash) {
+            self.order.remove(pos);
+        }
     }
 }
 
@@ -326,6 +356,9 @@ pub fn register_active_diagram(hash: u64, width: u32, height: u32, label: Option
                 label,
             });
         }
+        while diagrams.len() > ACTIVE_DIAGRAMS_MAX {
+            diagrams.remove(0);
+        }
     }
 }
 
@@ -373,6 +406,9 @@ pub fn restore_active_diagrams(snapshot: Vec<super::info_widget::DiagramInfo>) {
             height: d.height,
             label: d.label,
         }));
+        while diagrams.len() > ACTIVE_DIAGRAMS_MAX {
+            diagrams.remove(0);
+        }
     }
 }
 
@@ -404,6 +440,9 @@ pub fn clear_cache() -> Result<(), String> {
     }
     if let Ok(mut last) = LAST_RENDER.lock() {
         last.clear();
+    }
+    if let Ok(mut diagrams) = ACTIVE_DIAGRAMS.lock() {
+        diagrams.clear();
     }
 
     // Remove cached files on disk
@@ -794,6 +833,9 @@ pub fn get_font_size() -> Option<(u16, u16)> {
 
 /// Maximum in-memory RENDER_CACHE entries (metadata only, not images).
 const RENDER_CACHE_MAX: usize = 64;
+/// Reuse a cached PNG only if it's at least this fraction of requested width.
+/// This avoids visibly blurry upscaling after terminal/pane resizes.
+const CACHE_WIDTH_MATCH_PERCENT: u32 = 85;
 
 /// Mermaid rendering cache
 struct MermaidCache {
@@ -805,6 +847,7 @@ struct MermaidCache {
     cache_dir: PathBuf,
 }
 
+#[derive(Clone)]
 struct CachedDiagram {
     path: PathBuf,
     width: u32,
@@ -829,17 +872,37 @@ impl MermaidCache {
         }
     }
 
-    fn get(&self, hash: u64) -> Option<&CachedDiagram> {
-        self.entries.get(&hash)
+    fn touch(&mut self, hash: u64) {
+        if let Some(pos) = self.order.iter().position(|h| *h == hash) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(hash);
+    }
+
+    fn get(&mut self, hash: u64, min_width: Option<u32>) -> Option<CachedDiagram> {
+        if let Some(existing) = self.entries.get(&hash).cloned() {
+            if existing.path.exists() && cached_width_satisfies(existing.width, min_width) {
+                self.touch(hash);
+                return Some(existing);
+            }
+            self.entries.remove(&hash);
+            if let Some(pos) = self.order.iter().position(|h| *h == hash) {
+                self.order.remove(pos);
+            }
+        }
+
+        if let Some(found) = self.discover_on_disk(hash, min_width) {
+            self.insert(hash, found.clone());
+            return Some(found);
+        }
+
+        None
     }
 
     fn insert(&mut self, hash: u64, diagram: CachedDiagram) {
         if self.entries.contains_key(&hash) {
             self.entries.insert(hash, diagram);
-            if let Some(pos) = self.order.iter().position(|h| *h == hash) {
-                self.order.remove(pos);
-            }
-            self.order.push_back(hash);
+            self.touch(hash);
         } else {
             self.entries.insert(hash, diagram);
             self.order.push_back(hash);
@@ -855,6 +918,89 @@ impl MermaidCache {
         // Include target width in filename for size-specific caching
         self.cache_dir
             .join(format!("{:016x}_w{}.png", hash, target_width))
+    }
+
+    fn discover_on_disk(&self, hash: u64, min_width: Option<u32>) -> Option<CachedDiagram> {
+        let mut candidates: Vec<(PathBuf, u32)> = Vec::new();
+        let entries = fs::read_dir(&self.cache_dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("png") {
+                continue;
+            }
+            let Some((file_hash, width_hint)) = parse_cache_filename(&path) else {
+                continue;
+            };
+            if file_hash == hash {
+                candidates.push((path, width_hint));
+            }
+        }
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let selected = if let Some(min_w) = min_width {
+            if let Some(candidate) = candidates
+                .iter()
+                .filter(|(_, w)| cached_width_satisfies(*w, Some(min_w)))
+                .min_by_key(|(_, w)| *w)
+            {
+                candidate.clone()
+            } else {
+                candidates
+                    .iter()
+                    .max_by_key(|(_, w)| *w)
+                    .cloned()
+                    .unwrap_or_else(|| candidates[0].clone())
+            }
+        } else {
+            candidates
+                .iter()
+                .max_by_key(|(_, w)| *w)
+                .cloned()
+                .unwrap_or_else(|| candidates[0].clone())
+        };
+
+        let (path, width_hint) = selected;
+        let (width, height) = get_png_dimensions(&path).unwrap_or((width_hint, width_hint));
+        Some(CachedDiagram {
+            path,
+            width,
+            height,
+            complexity: 0,
+        })
+    }
+}
+
+fn cached_width_satisfies(width: u32, min_width: Option<u32>) -> bool {
+    let Some(min_width) = min_width else {
+        return true;
+    };
+    if min_width == 0 {
+        return true;
+    }
+    width.saturating_mul(100) >= min_width.saturating_mul(CACHE_WIDTH_MATCH_PERCENT)
+}
+
+fn parse_cache_filename(path: &Path) -> Option<(u64, u32)> {
+    let stem = path.file_stem()?.to_str()?;
+    let (hash_hex, width_part) = stem.split_once("_w")?;
+    let hash = u64::from_str_radix(hash_hex, 16).ok()?;
+    let width = width_part.parse::<u32>().ok()?;
+    Some((hash, width))
+}
+
+fn get_cached_diagram(hash: u64, min_width: Option<u32>) -> Option<CachedDiagram> {
+    let mut cache = RENDER_CACHE.lock().ok()?;
+    cache.get(hash, min_width)
+}
+
+fn invalidate_cached_image(hash: u64) {
+    if let Ok(mut state) = IMAGE_STATE.lock() {
+        state.remove(&hash);
+    }
+    if let Ok(mut source) = SOURCE_CACHE.lock() {
+        source.remove(hash);
     }
 }
 
@@ -1001,27 +1147,22 @@ fn render_mermaid_sized_internal(
         calculate_render_size(node_count, edge_count, terminal_width);
     let target_width_u32 = target_width as u32;
 
-    // Check cache (use blocking lock for consistency)
-    {
-        let cache = RENDER_CACHE.lock().unwrap();
-        if let Some(cached) = cache.get(hash) {
-            if cached.path.exists() {
-                if let Ok(mut state) = MERMAID_DEBUG.lock() {
-                    state.stats.cache_hits += 1;
-                    state.stats.last_hash = Some(format!("{:016x}", hash));
-                }
-                if register_active {
-                    // Register as active diagram (for pinned widget display)
-                    register_active_diagram(hash, cached.width, cached.height, None);
-                }
-                return RenderResult::Image {
-                    hash,
-                    path: cached.path.clone(),
-                    width: cached.width,
-                    height: cached.height,
-                };
-            }
+    // Check cache (memory + on-disk fallback, width-aware).
+    if let Some(cached) = get_cached_diagram(hash, Some(target_width_u32)) {
+        if let Ok(mut state) = MERMAID_DEBUG.lock() {
+            state.stats.cache_hits += 1;
+            state.stats.last_hash = Some(format!("{:016x}", hash));
         }
+        if register_active {
+            // Register as active diagram (for pinned widget display)
+            register_active_diagram(hash, cached.width, cached.height, None);
+        }
+        return RenderResult::Image {
+            hash,
+            path: cached.path,
+            width: cached.width,
+            height: cached.height,
+        };
     }
 
     if let Ok(mut state) = MERMAID_DEBUG.lock() {
@@ -1146,6 +1287,8 @@ fn render_mermaid_sized_internal(
             },
         );
     }
+    // If we re-rendered at a new size/path, force widget state to reload.
+    invalidate_cached_image(hash);
 
     if register_active {
         // Register this diagram as active for info widget display
@@ -1219,14 +1362,15 @@ pub fn render_image_widget(
         return area.height;
     }
 
-    // Get cached image info
-    let (img_width, img_height, path) = {
-        let cache = RENDER_CACHE.lock().unwrap();
-        if let Some(cached) = cache.get(hash) {
-            (cached.width, cached.height, Some(cached.path.clone()))
-        } else {
-            (0, 0, None)
-        }
+    let min_cached_width = PICKER
+        .get()
+        .and_then(|p| p.as_ref())
+        .map(|picker| image_area.width as u32 * picker.font_size().0 as u32);
+    let cached = get_cached_diagram(hash, min_cached_width);
+    let (img_width, path) = if let Some(cached) = cached {
+        (cached.width, Some(cached.path))
+    } else {
+        (0, None)
     };
 
     // Calculate the actual render area (potentially centered within image_area)
@@ -1257,7 +1401,13 @@ pub fn render_image_widget(
         let mut state = IMAGE_STATE.lock().unwrap();
         let needs_reset = state
             .get(&hash)
-            .map(|s| s.resize_mode != ResizeMode::Crop)
+            .map(|s| {
+                s.resize_mode != ResizeMode::Crop
+                    || path
+                        .as_ref()
+                        .map(|p| s.source_path.as_path() != p.as_path())
+                        .unwrap_or(false)
+            })
             .unwrap_or(false);
         if needs_reset {
             state.remove(&hash);
@@ -1304,6 +1454,7 @@ pub fn render_image_widget(
                     hash,
                     ImageState {
                         protocol,
+                        source_path: path.clone(),
                         last_area: Some(render_area),
                         resize_mode: ResizeMode::Crop,
                         last_crop_top: false,
@@ -1381,13 +1532,15 @@ pub fn render_image_widget_fit(
         return area.height;
     }
 
-    let (img_width, path) = {
-        let cache = RENDER_CACHE.lock().unwrap();
-        if let Some(cached) = cache.get(hash) {
-            (cached.width, Some(cached.path.clone()))
-        } else {
-            (0, None)
-        }
+    let min_cached_width = PICKER
+        .get()
+        .and_then(|p| p.as_ref())
+        .map(|picker| image_area.width as u32 * picker.font_size().0 as u32);
+    let cached = get_cached_diagram(hash, min_cached_width);
+    let (img_width, path) = if let Some(cached) = cached {
+        (cached.width, Some(cached.path))
+    } else {
+        (0, None)
     };
 
     let render_area = if centered && img_width > 0 {
@@ -1413,7 +1566,13 @@ pub fn render_image_widget_fit(
         let mut state = IMAGE_STATE.lock().unwrap();
         let needs_reset = state
             .get(&hash)
-            .map(|s| s.resize_mode != ResizeMode::Fit)
+            .map(|s| {
+                s.resize_mode != ResizeMode::Fit
+                    || path
+                        .as_ref()
+                        .map(|p| s.source_path.as_path() != p.as_path())
+                        .unwrap_or(false)
+            })
             .unwrap_or(false);
         if needs_reset {
             state.remove(&hash);
@@ -1438,6 +1597,7 @@ pub fn render_image_widget_fit(
                     hash,
                     ImageState {
                         protocol,
+                        source_path: path.clone(),
                         last_area: Some(render_area),
                         resize_mode: ResizeMode::Fit,
                         last_crop_top: false,
@@ -1463,21 +1623,16 @@ pub fn render_image_widget_fit(
     0
 }
 
-fn load_source_image(hash: u64) -> Option<Arc<DynamicImage>> {
+fn load_source_image(hash: u64, path: &Path) -> Option<Arc<DynamicImage>> {
     if let Ok(mut cache) = SOURCE_CACHE.lock() {
-        if let Some(img) = cache.get(hash) {
+        if let Some(img) = cache.get(hash, path) {
             return Some(img);
         }
     }
 
-    let path = {
-        let cache = RENDER_CACHE.lock().ok()?;
-        cache.get(hash).map(|c| c.path.clone())
-    }?;
-
-    let img = image::open(&path).ok()?;
+    let img = image::open(path).ok()?;
     if let Ok(mut cache) = SOURCE_CACHE.lock() {
-        return Some(cache.insert(hash, img));
+        return Some(cache.insert(hash, path.to_path_buf(), img));
     }
     Some(Arc::new(img))
 }
@@ -1534,7 +1689,13 @@ pub fn render_image_widget_viewport(
         None => return 0,
     };
 
-    let source = match load_source_image(hash) {
+    let cached = match get_cached_diagram(hash, None) {
+        Some(cached) => cached,
+        None => return 0,
+    };
+    let source_path = cached.path.clone();
+
+    let source = match load_source_image(hash, &source_path) {
         Some(img) => img,
         None => return 0,
     };
@@ -1584,7 +1745,10 @@ pub fn render_image_widget_viewport(
         let mut state = IMAGE_STATE.lock().unwrap();
         let needs_reset = state
             .get(&hash)
-            .map(|s| s.resize_mode != ResizeMode::Viewport)
+            .map(|s| {
+                s.resize_mode != ResizeMode::Viewport
+                    || s.source_path.as_path() != source_path.as_path()
+            })
             .unwrap_or(false);
         if needs_reset {
             state.remove(&hash);
@@ -1607,6 +1771,7 @@ pub fn render_image_widget_viewport(
         hash,
         ImageState {
             protocol,
+            source_path,
             last_area: Some(image_area),
             resize_mode: ResizeMode::Viewport,
             last_crop_top: false,
@@ -1860,7 +2025,7 @@ fn hash_content(content: &str) -> u64 {
 }
 
 /// Get PNG dimensions from file
-fn get_png_dimensions(path: &PathBuf) -> Option<(u32, u32)> {
+fn get_png_dimensions(path: &Path) -> Option<(u32, u32)> {
     let data = fs::read(path).ok()?;
     if data.len() > 24 && &data[0..8] == b"\x89PNG\r\n\x1a\n" {
         let width = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
@@ -1988,5 +2153,36 @@ mod tests {
         let (n2, e2) = estimate_diagram_size(complex);
         assert!(n2 > n1);
         assert!(e2 > e1);
+    }
+
+    #[test]
+    fn test_cached_width_satisfies_threshold() {
+        assert!(cached_width_satisfies(850, Some(1000)));
+        assert!(cached_width_satisfies(1000, Some(1000)));
+        assert!(!cached_width_satisfies(849, Some(1000)));
+        assert!(cached_width_satisfies(300, None));
+    }
+
+    #[test]
+    fn test_parse_cache_filename() {
+        let path = std::path::Path::new("/tmp/0123456789abcdef_w640.png");
+        let parsed = parse_cache_filename(path);
+        assert_eq!(parsed, Some((0x0123_4567_89ab_cdef, 640)));
+    }
+
+    #[test]
+    fn test_active_diagrams_are_bounded() {
+        clear_active_diagrams();
+        for idx in 0..(ACTIVE_DIAGRAMS_MAX + 5) {
+            register_active_diagram(idx as u64, 100, 80, None);
+        }
+        let snapshot = snapshot_active_diagrams();
+        assert_eq!(snapshot.len(), ACTIVE_DIAGRAMS_MAX);
+        assert_eq!(snapshot.first().map(|d| d.hash), Some(5));
+        assert_eq!(
+            snapshot.last().map(|d| d.hash),
+            Some((ACTIVE_DIAGRAMS_MAX + 4) as u64)
+        );
+        clear_active_diagrams();
     }
 }

@@ -2693,13 +2693,22 @@ fn draw_messages(
                             width: area.width,
                             height: render_height,
                         };
-                        super::mermaid::render_image_widget(
+                        let rows = super::mermaid::render_image_widget(
                             hash,
                             image_area,
                             frame.buffer_mut(),
                             centered,
                             false,
                         );
+                        if rows == 0 {
+                            frame.render_widget(
+                                Paragraph::new(Line::from(Span::styled(
+                                    "↗ mermaid diagram unavailable",
+                                    Style::default().fg(DIM_COLOR),
+                                ))),
+                                image_area,
+                            );
+                        }
                     }
                 } else {
                     // Marker is off-screen but image would overlap - render the visible portion
@@ -2855,7 +2864,11 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         }
         header_spans.push(Span::styled(
             name.to_string(),
-            if i == col { col_focus_style } else { col_dim_style },
+            if i == col {
+                col_focus_style
+            } else {
+                col_dim_style
+            },
         ));
     }
 
@@ -2952,9 +2965,7 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
         // Provider column
         let route_count = entry.routes.len();
-        let provider_text = route
-            .map(|r| r.provider.as_str())
-            .unwrap_or("—");
+        let provider_text = route.map(|r| r.provider.as_str()).unwrap_or("—");
         // When on model column, show route count hint instead of full provider
         let provider_display = if col == 0 && route_count > 1 {
             let label = format!("{} ({})", provider_text, route_count);
@@ -2964,7 +2975,11 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 format!(" {:<w$}", label, w = provider_width)
             }
         } else if provider_text.len() > provider_width {
-            format!(" {:<w$}", &provider_text[..provider_width], w = provider_width)
+            format!(
+                " {:<w$}",
+                &provider_text[..provider_width],
+                w = provider_width
+            )
         } else {
             format!(" {:<w$}", provider_text, w = provider_width)
         };
@@ -2981,9 +2996,7 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         spans.push(Span::styled(provider_display, provider_style));
 
         // Via/API column
-        let via_text = route
-            .map(|r| r.api_method.as_str())
-            .unwrap_or("—");
+        let via_text = route.map(|r| r.api_method.as_str()).unwrap_or("—");
         let via_display = format!(" {:<w$}", via_text, w = via_width);
         let via_style = if unavailable {
             Style::default().fg(Color::Rgb(80, 80, 80))
