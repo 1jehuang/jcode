@@ -4212,7 +4212,7 @@ impl App {
                     .collect();
                 false
             }
-            ServerEvent::ModelChanged { model, error, .. } => {
+            ServerEvent::ModelChanged { model, provider_name, error, .. } => {
                 if let Some(err) = error {
                     self.push_display_message(DisplayMessage::error(format!(
                         "Failed to switch model: {}",
@@ -4222,6 +4222,9 @@ impl App {
                 } else {
                     self.update_context_limit_for_model(&model);
                     self.remote_provider_model = Some(model.clone());
+                    if let Some(ref pname) = provider_name {
+                        self.remote_provider_name = Some(pname.clone());
+                    }
                     self.push_display_message(DisplayMessage::system(format!(
                         "✓ Switched to model: {}",
                         model

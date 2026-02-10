@@ -457,6 +457,8 @@ pub enum ServerEvent {
         id: u64,
         model: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        provider_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
 

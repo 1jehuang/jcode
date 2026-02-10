@@ -792,7 +792,7 @@ impl ClientApp {
                     }
                 }
             }
-            ServerEvent::ModelChanged { model, error, .. } => {
+            ServerEvent::ModelChanged { model, provider_name, error, .. } => {
                 if let Some(err) = error {
                     self.push_display_message(DisplayMessage {
                         role: "error".to_string(),
@@ -805,6 +805,9 @@ impl ClientApp {
                     self.status_notice = Some(("Model switch failed".to_string(), Instant::now()));
                 } else {
                     self.provider_model = model.clone();
+                    if let Some(ref pname) = provider_name {
+                        self.provider_name = pname.clone();
+                    }
                     self.push_display_message(DisplayMessage {
                         role: "system".to_string(),
                         content: format!("✓ Switched to model: {}", model),
