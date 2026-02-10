@@ -6481,6 +6481,68 @@ async fn handle_debug_client(
                             } else {
                                 Ok("[]".to_string())
                             }
+                        } else if cmd == "ambient:permissions" {
+                            if let Some(ref runner) = ambient_runner {
+                                let pending = runner.safety().pending_requests();
+                                let items: Vec<serde_json::Value> = pending
+                                    .iter()
+                                    .map(|r| {
+                                        serde_json::json!({
+                                            "id": r.id,
+                                            "action": r.action,
+                                            "description": r.description,
+                                            "rationale": r.rationale,
+                                            "urgency": format!("{:?}", r.urgency),
+                                            "wait": r.wait,
+                                            "created_at": r.created_at.to_rfc3339(),
+                                        })
+                                    })
+                                    .collect();
+                                Ok(serde_json::to_string_pretty(&items)
+                                    .unwrap_or_else(|_| "[]".to_string()))
+                            } else {
+                                Ok("[]".to_string())
+                            }
+                        } else if cmd.starts_with("ambient:approve:") {
+                            let request_id = cmd
+                                .strip_prefix("ambient:approve:")
+                                .unwrap_or("")
+                                .trim();
+                            if request_id.is_empty() {
+                                Err(anyhow::anyhow!("Usage: ambient:approve:<request_id>"))
+                            } else if let Some(ref runner) = ambient_runner {
+                                runner.safety().record_decision(
+                                    request_id,
+                                    true,
+                                    "debug_socket",
+                                    None,
+                                )?;
+                                Ok(format!("Approved: {}", request_id))
+                            } else {
+                                Err(anyhow::anyhow!("Ambient mode is not enabled"))
+                            }
+                        } else if cmd.starts_with("ambient:deny:") {
+                            let rest = cmd
+                                .strip_prefix("ambient:deny:")
+                                .unwrap_or("")
+                                .trim();
+                            if rest.is_empty() {
+                                Err(anyhow::anyhow!("Usage: ambient:deny:<request_id> [reason]"))
+                            } else if let Some(ref runner) = ambient_runner {
+                                let mut parts = rest.splitn(2, char::is_whitespace);
+                                let request_id = parts.next().unwrap_or("").trim();
+                                let message =
+                                    parts.next().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                                runner.safety().record_decision(
+                                    request_id,
+                                    false,
+                                    "debug_socket",
+                                    message,
+                                )?;
+                                Ok(format!("Denied: {}", request_id))
+                            } else {
+                                Err(anyhow::anyhow!("Ambient mode is not enabled"))
+                            }
                         } else if cmd == "ambient:stop" {
                             if let Some(ref runner) = ambient_runner {
                                 runner.stop().await;
@@ -6490,11 +6552,14 @@ async fn handle_debug_client(
                             }
                         } else if cmd == "ambient:help" {
                             Ok(r#"Ambient mode debug commands (ambient: prefix):
-  ambient:status   - Current ambient state, cycle count, last run
-  ambient:queue    - Scheduled queue contents
-  ambient:trigger  - Manually trigger an ambient cycle
-  ambient:log      - Recent transcript summaries
-  ambient:stop     - Stop ambient mode"#
+  ambient:status              - Current ambient state, cycle count, last run
+  ambient:queue               - Scheduled queue contents
+  ambient:trigger             - Manually trigger an ambient cycle
+  ambient:log                 - Recent transcript summaries
+  ambient:permissions         - List pending permission requests
+  ambient:approve:<id>        - Approve a permission request
+  ambient:deny:<id> [reason]  - Deny a permission request (optional reason)
+  ambient:stop                - Stop ambient mode"#
                                 .to_string())
                         } else if cmd == "events:recent" || cmd.starts_with("events:recent:") {
                             // Get recent events (default 50, or specify count)
@@ -6742,12 +6807,15 @@ SWARM COMMANDS (swarm: prefix):
   swarm:help               - Full swarm command reference
 
 AMBIENT COMMANDS (ambient: prefix):
-  ambient:status           - Current ambient state, cycle count, last run
-  ambient:queue            - Scheduled queue contents
-  ambient:trigger          - Manually trigger an ambient cycle
-  ambient:log              - Recent transcript summaries
-  ambient:stop             - Stop ambient mode
-  ambient:help             - Ambient command reference
+  ambient:status              - Current ambient state, cycle count, last run
+  ambient:queue               - Scheduled queue contents
+  ambient:trigger             - Manually trigger an ambient cycle
+  ambient:log                 - Recent transcript summaries
+  ambient:permissions         - List pending permission requests
+  ambient:approve:<id>        - Approve a permission request
+  ambient:deny:<id> [reason]  - Deny a permission request (optional reason)
+  ambient:stop                - Stop ambient mode
+  ambient:help                - Ambient command reference
 
 EVENTS COMMANDS (events: prefix):
   events:recent            - Get recent events (default 50)

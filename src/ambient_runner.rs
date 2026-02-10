@@ -94,6 +94,11 @@ impl AmbientRunnerHandle {
         *self.inner.running.read().await
     }
 
+    /// Get a reference to the safety system (for debug socket permission commands).
+    pub fn safety(&self) -> &Arc<SafetySystem> {
+        &self.inner.safety
+    }
+
     /// Manually trigger an ambient cycle (returns immediately, cycle runs async).
     pub async fn trigger(&self) {
         // Set status to idle so should_run returns true
@@ -615,8 +620,8 @@ impl AmbientRunnerHandle {
         }
 
         // Find the jcode binary
-        let jcode_bin = std::env::current_exe()
-            .unwrap_or_else(|_| std::path::PathBuf::from("jcode"));
+        let jcode_bin =
+            std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("jcode"));
 
         // Spawn kitty with `jcode ambient run-visible`
         logging::info("Ambient visible: spawning kitty with jcode TUI");
@@ -648,7 +653,9 @@ impl AmbientRunnerHandle {
                 // Try to read the cycle result from the file
                 if let Ok(result_path) = VisibleCycleContext::result_path() {
                     if result_path.exists() {
-                        if let Ok(result) = crate::storage::read_json::<AmbientCycleResult>(&result_path) {
+                        if let Ok(result) =
+                            crate::storage::read_json::<AmbientCycleResult>(&result_path)
+                        {
                             let _ = std::fs::remove_file(&result_path);
                             return Ok(AmbientCycleResult {
                                 started_at,
