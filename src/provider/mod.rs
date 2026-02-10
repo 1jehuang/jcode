@@ -87,6 +87,12 @@ pub trait Provider: Send + Sync {
         Vec::new()
     }
 
+    /// Provider details for model picker: Vec<(provider_name, detail_string)>.
+    /// Uses cached endpoint data when available (sync, no network).
+    fn provider_details_for_model(&self, _model: &str) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// Prefetch any dynamic model lists (default: no-op).
     async fn prefetch_models(&self) -> Result<()> {
         Ok(())
@@ -640,6 +646,15 @@ impl Provider for MultiProvider {
         if model.contains('/') {
             if let Some(ref openrouter) = self.openrouter {
                 return openrouter.available_providers_for_model(model);
+            }
+        }
+        Vec::new()
+    }
+
+    fn provider_details_for_model(&self, model: &str) -> Vec<(String, String)> {
+        if model.contains('/') {
+            if let Some(ref openrouter) = self.openrouter {
+                return openrouter.provider_details_for_model(model);
             }
         }
         Vec::new()
