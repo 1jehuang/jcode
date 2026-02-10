@@ -343,6 +343,9 @@ impl TuiState for BenchState {
     fn diagram_zoom(&self) -> u8 {
         100
     }
+    fn picker_state(&self) -> Option<&jcode::tui::PickerState> {
+        None
+    }
 }
 
 fn make_text(len: usize) -> String {

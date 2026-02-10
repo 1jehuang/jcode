@@ -1141,6 +1141,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     } else {
         0
     };
+    let picker_height: u16 = if app.picker_state().is_some() { 1 } else { 0 };
     let input_height = base_input_height + hint_line_height;
 
     // Count user messages to show next prompt number
@@ -1212,27 +1213,29 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     }
     let prep_elapsed = prep_start.elapsed();
     let content_height = prepared.wrapped_lines.len().max(1) as u16;
-    let fixed_height = 1 + queued_height + input_height; // status + queued + input
+    let fixed_height = 1 + queued_height + picker_height + input_height; // status + queued + picker + input
     let available_height = area.height;
 
     // Use packed layout when content fits, scrolling layout otherwise
     let use_packed = content_height + fixed_height <= available_height;
 
-    // Layout: messages (includes header), queued, status, input
+    // Layout: messages (includes header), queued, status, picker, input
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if use_packed {
-            [
+            vec![
                 Constraint::Length(content_height.max(1)), // Messages (exact height)
                 Constraint::Length(queued_height),         // Queued messages (above status)
                 Constraint::Length(1),                     // Status line
+                Constraint::Length(picker_height),         // Picker (0 or 1 line)
                 Constraint::Length(input_height),          // Input
             ]
         } else {
-            [
+            vec![
                 Constraint::Min(3),                // Messages (scrollable)
                 Constraint::Length(queued_height), // Queued messages (above status)
                 Constraint::Length(1),             // Status line
+                Constraint::Length(picker_height), // Picker (0 or 1 line)
                 Constraint::Length(input_height),  // Input
             ]
         })
@@ -1247,7 +1250,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
             capture.layout.queued_area = Some(chunks[1].into());
         }
         capture.layout.status_area = Some(chunks[2].into());
-        capture.layout.input_area = Some(chunks[3].into());
+        capture.layout.input_area = Some(chunks[4].into());
         capture.layout.input_lines_raw = app.input().lines().count().max(1);
         capture.layout.input_lines_wrapped = base_input_height as usize;
 
@@ -1371,10 +1374,15 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     if let Some(ref mut capture) = debug_capture {
         capture.render_order.push("draw_input".to_string());
     }
+    // Draw picker line if active
+    if picker_height > 0 {
+        draw_picker_line(frame, app, chunks[3]);
+    }
+
     draw_input(
         frame,
         app,
-        chunks[3],
+        chunks[4],
         user_count + pending_count + 1,
         &mut debug_capture,
     );
@@ -2463,7 +2471,8 @@ fn draw_debug_overlay(
     render_overlay_box(frame, chunks[0], "messages", Color::Red);
     render_overlay_box(frame, chunks[1], "queued", Color::Yellow);
     render_overlay_box(frame, chunks[2], "status", Color::Cyan);
-    render_overlay_box(frame, chunks[3], "input", Color::Green);
+    render_overlay_box(frame, chunks[3], "picker", Color::Magenta);
+    render_overlay_box(frame, chunks[4], "input", Color::Green);
 
     for placement in placements {
         let title = format!("widget:{}", placement.kind.as_str());
@@ -2784,6 +2793,95 @@ fn format_elapsed(secs: f32) -> String {
     } else {
         format!("{:.1}s", secs)
     }
+}
+
+/// Draw the inline model/provider picker line
+fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
+    let picker = match app.picker_state() {
+        Some(p) => p,
+        None => return,
+    };
+
+    let width = area.width as usize;
+    let mut spans: Vec<Span> = Vec::new();
+
+    // Mode label
+    let mode_label = match &picker.mode {
+        super::PickerMode::Model => " model: ",
+        super::PickerMode::Provider { model } => {
+            // We need to build a dynamic string, handled below
+            let _ = model;
+            ""
+        }
+    };
+
+    if let super::PickerMode::Provider { ref model } = picker.mode {
+        // Truncate model name to fit
+        let short = if model.len() > 20 {
+            format!("{}…", &model[..19])
+        } else {
+            model.clone()
+        };
+        spans.push(Span::styled(
+            format!(" {} via: ", short),
+            Style::default().fg(DIM_COLOR),
+        ));
+    } else {
+        spans.push(Span::styled(mode_label, Style::default().fg(DIM_COLOR)));
+    }
+
+    // Render items horizontally with selected highlighted
+    let mut used_width = spans.iter().map(|s| s.width()).sum::<usize>();
+
+    for (i, item) in picker.items.iter().enumerate() {
+        let is_selected = i == picker.selected;
+        let prefix = if is_selected { "▸ " } else { "  " };
+
+        let label_text = if item.detail.is_empty() {
+            format!("{}{}", prefix, item.label)
+        } else {
+            format!("{}{} ({})", prefix, item.label, item.detail)
+        };
+
+        let entry_width = label_text.len() + 1; // +1 for spacing
+        if used_width + entry_width > width {
+            spans.push(Span::styled(" …", Style::default().fg(DIM_COLOR)));
+            break;
+        }
+
+        let style = if is_selected {
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Rgb(60, 60, 80))
+                .bold()
+        } else if item.is_current {
+            Style::default().fg(ACCENT_COLOR)
+        } else {
+            Style::default().fg(DIM_COLOR)
+        };
+
+        spans.push(Span::styled(label_text, style));
+        used_width += entry_width;
+    }
+
+    // Hint at the end
+    let hint = match &picker.mode {
+        super::PickerMode::Model => " ← →  Tab:providers  Enter:select  Esc:cancel",
+        super::PickerMode::Provider { .. } => {
+            " ← →  Shift+Tab:back  Enter:select  Esc:cancel"
+        }
+    };
+    let hint_width = hint.len();
+    if used_width + hint_width <= width {
+        spans.push(Span::styled(
+            hint.to_string(),
+            Style::default().fg(Color::Rgb(80, 80, 100)),
+        ));
+    }
+
+    let line = Line::from(spans);
+    let paragraph = Paragraph::new(line);
+    frame.render_widget(paragraph, area);
 }
 
 fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count: usize) {
