@@ -560,6 +560,10 @@ pub struct App {
     diagram_pane_enabled: bool,
     // Diagram zoom percentage (100 = normal)
     diagram_zoom: u8,
+    // Interactive model/provider picker
+    picker_state: Option<super::PickerState>,
+    // Pending model switch from picker (for remote mode async processing)
+    pending_model_switch: Option<String>,
     // Keybindings for model switching
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for scrolling
@@ -790,6 +794,8 @@ impl App {
             diagram_pane_ratio: 40,
             diagram_pane_enabled: true,
             diagram_zoom: 100,
+            picker_state: None,
+            pending_model_switch: None,
             model_switch_keys: super::keybind::load_model_switch_keys(),
             scroll_keys: super::keybind::load_scroll_keys(),
             status_notice: None,
@@ -3853,6 +3859,10 @@ impl App {
                             Some(Ok(Event::Key(key))) => {
                                 if key.kind == KeyEventKind::Press {
                                     self.handle_remote_key(key.code, key.modifiers, &mut remote).await?;
+                                    // Process deferred model switch from picker
+                                    if let Some(spec) = self.pending_model_switch.take() {
+                                        let _ = remote.set_model(&spec).await;
+                                    }
                                 }
                             }
                             Some(Ok(Event::Paste(text))) => {
@@ -4272,6 +4282,11 @@ impl App {
         modifiers: KeyModifiers,
         remote: &mut super::backend::RemoteConnection,
     ) -> Result<()> {
+        // If picker is active, handle picker keys first
+        if self.picker_state.is_some() {
+            return self.handle_picker_key(code, modifiers);
+        }
+
         if let Some(direction) = self
             .model_switch_keys
             .direction_for(code.clone(), modifiers)
@@ -4587,38 +4602,9 @@ impl App {
                         return Ok(());
                     }
 
-                    // Handle /model commands (remote mode)
+                    // Handle /model commands (remote mode) - open interactive picker
                     if trimmed == "/model" || trimmed == "/models" {
-                        let current = self
-                            .remote_provider_model
-                            .clone()
-                            .unwrap_or_else(|| "unknown".to_string());
-
-                        if self.remote_available_models.is_empty() {
-                            self.push_display_message(DisplayMessage::system(format!(
-                                "**Available models:**\n  • {} (current)\n\nUse `/model <name>` to switch.\nOpenRouter: `/model <name>@<provider>` pins a provider (`@auto` clears).",
-                                current
-                            )));
-                            return Ok(());
-                        }
-
-                        let model_list = self
-                            .remote_available_models
-                            .iter()
-                            .map(|m| {
-                                if m == &current {
-                                    format!("  • **{}** (current)", m)
-                                } else {
-                                    format!("  • {}", m)
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-
-                        self.push_display_message(DisplayMessage::system(format!(
-                            "**Available models:**\n{}\n\nUse `/model <name>` to switch.\nOpenRouter: `/model <name>@<provider>` pins a provider (`@auto` clears).",
-                            model_list
-                        )));
+                        self.open_model_picker();
                         return Ok(());
                     }
 
@@ -4775,6 +4761,11 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+        // If picker is active, handle picker keys first
+        if self.picker_state.is_some() {
+            return self.handle_picker_key(code, modifiers);
+        }
+
         if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('m')) {
             self.toggle_diagram_pane();
             return Ok(());
@@ -5769,38 +5760,9 @@ impl App {
             return;
         }
 
-        // Handle /model command
+        // Handle /model command - open interactive picker
         if trimmed == "/model" || trimmed == "/models" {
-            // List available models
-            let models = self.provider.available_models_display();
-            let current = self.provider.model();
-            let model_list = if models.is_empty() {
-                format!("  • {} (current)", current)
-            } else {
-                models
-                    .iter()
-                    .map(|m| {
-                        if m == &current {
-                            format!("  • **{}** (current)", m)
-                        } else {
-                            format!("  • {}", m)
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            };
-
-            self.push_display_message(DisplayMessage {
-                role: "system".to_string(),
-                content: format!(
-                    "**Available models:**\n{}\n\nUse `/model <name>` to switch.\nOpenRouter: `/model <name>@<provider>` pins a provider (`@auto` clears).",
-                    model_list
-                ),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
+            self.open_model_picker();
             return;
         }
 
@@ -6182,6 +6144,204 @@ impl App {
 
     fn set_status_notice(&mut self, text: impl Into<String>) {
         self.status_notice = Some((text.into(), Instant::now()));
+    }
+
+    /// Open the model picker with available models
+    fn open_model_picker(&mut self) {
+        let (models, current) = if self.is_remote {
+            let models = self.remote_available_models.clone();
+            let current = self
+                .remote_provider_model
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            (models, current)
+        } else {
+            let models: Vec<String> = self
+                .provider
+                .available_models_display()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
+            let current = self.provider.model().to_string();
+            (models, current)
+        };
+
+        if models.is_empty() {
+            self.set_status_notice("No models available to switch");
+            return;
+        }
+
+        let items: Vec<super::PickerItem> = models
+            .iter()
+            .map(|m| {
+                let is_current = *m == current;
+                super::PickerItem {
+                    label: m.clone(),
+                    value: m.clone(),
+                    detail: if is_current {
+                        "current".to_string()
+                    } else {
+                        String::new()
+                    },
+                    is_current,
+                }
+            })
+            .collect();
+
+        let selected = items
+            .iter()
+            .position(|i| i.is_current)
+            .unwrap_or(0);
+
+        self.picker_state = Some(super::PickerState {
+            mode: super::PickerMode::Model,
+            items,
+            selected,
+            filter: String::new(),
+        });
+        self.input.clear();
+        self.cursor_pos = 0;
+    }
+
+    /// Open provider picker for a specific model
+    fn open_provider_picker(&mut self, model: String) {
+        let is_openrouter = if self.is_remote {
+            self.remote_provider_name
+                .as_deref()
+                .map(|p| p.eq_ignore_ascii_case("openrouter"))
+                .unwrap_or(false)
+        } else {
+            self.provider.name().eq_ignore_ascii_case("openrouter")
+        };
+
+        if !is_openrouter {
+            // Non-OpenRouter providers don't have provider selection
+            self.set_status_notice("Provider selection is only available for OpenRouter");
+            return;
+        }
+
+        let providers: Vec<String> = if self.is_remote {
+            crate::provider::openrouter::known_providers()
+        } else {
+            self.provider.available_providers_for_model(&model)
+        };
+
+        if providers.is_empty() {
+            self.set_status_notice("No providers available");
+            return;
+        }
+
+        let mut items: Vec<super::PickerItem> = Vec::new();
+        // Add "auto" option first
+        items.push(super::PickerItem {
+            label: "auto".to_string(),
+            value: "auto".to_string(),
+            detail: "automatic routing".to_string(),
+            is_current: false,
+        });
+        for p in &providers {
+            items.push(super::PickerItem {
+                label: p.clone(),
+                value: p.clone(),
+                detail: String::new(),
+                is_current: false,
+            });
+        }
+
+        self.picker_state = Some(super::PickerState {
+            mode: super::PickerMode::Provider {
+                model: model.clone(),
+            },
+            items,
+            selected: 0,
+            filter: String::new(),
+        });
+    }
+
+    /// Handle keyboard input when picker is active
+    fn handle_picker_key(&mut self, code: KeyCode, _modifiers: KeyModifiers) -> Result<()> {
+        match code {
+            KeyCode::Esc => {
+                self.picker_state = None;
+            }
+            KeyCode::Left => {
+                if let Some(ref mut picker) = self.picker_state {
+                    picker.selected = picker.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Right => {
+                if let Some(ref mut picker) = self.picker_state {
+                    let max = picker.items.len().saturating_sub(1);
+                    picker.selected = (picker.selected + 1).min(max);
+                }
+            }
+            KeyCode::Tab => {
+                // In model mode, switch to provider selection for the selected model
+                let transition = if let Some(ref picker) = self.picker_state {
+                    if let super::PickerMode::Model = &picker.mode {
+                        let model = picker.items[picker.selected].value.clone();
+                        Some(model)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(model) = transition {
+                    self.open_provider_picker(model);
+                }
+            }
+            KeyCode::BackTab => {
+                // In provider mode, go back to model selection
+                let go_back = self
+                    .picker_state
+                    .as_ref()
+                    .map(|p| matches!(p.mode, super::PickerMode::Provider { .. }))
+                    .unwrap_or(false);
+                if go_back {
+                    self.open_model_picker();
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(picker) = self.picker_state.take() {
+                    let selected = &picker.items[picker.selected];
+                    let (spec, notice) = match &picker.mode {
+                        super::PickerMode::Model => {
+                            let model = selected.value.clone();
+                            (model.clone(), format!("Model → {}", model))
+                        }
+                        super::PickerMode::Provider { model } => {
+                            let provider = &selected.value;
+                            if provider == "auto" {
+                                (
+                                    format!("{}@auto", model),
+                                    format!("Model → {} (auto routing)", model),
+                                )
+                            } else {
+                                (
+                                    format!("{}@{}", model, provider),
+                                    format!("Model → {} via {}", model, provider),
+                                )
+                            }
+                        }
+                    };
+
+                    self.upstream_provider = None;
+                    if self.is_remote {
+                        // Queue for async processing in remote loop
+                        self.pending_model_switch = Some(spec);
+                    } else {
+                        let _ = self.provider.set_model(&spec);
+                    }
+                    self.set_status_notice(notice);
+                }
+            }
+            _ => {
+                // Any other key dismisses the picker
+                self.picker_state = None;
+            }
+        }
+        Ok(())
     }
 
     fn extract_thought_line(text: &str) -> Option<String> {
@@ -9358,6 +9518,9 @@ impl super::TuiState for App {
 
     fn diagram_zoom(&self) -> u8 {
         self.diagram_zoom
+    }
+    fn picker_state(&self) -> Option<&super::PickerState> {
+        self.picker_state.as_ref()
     }
 }
 

@@ -1412,4 +1412,7 @@ impl TuiState for ClientApp {
     fn diagram_zoom(&self) -> u8 {
         100
     }
+    fn picker_state(&self) -> Option<&super::PickerState> {
+        None
+    }
 }
