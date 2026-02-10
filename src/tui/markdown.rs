@@ -393,7 +393,8 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                 if is_mermaid {
                     dbg_mermaid_blocks += 1;
                     // Render mermaid diagram (registers active diagram for sidebar)
-                    let result = mermaid::render_mermaid(&code_block_content);
+                    let terminal_width = max_width.and_then(|w| u16::try_from(w).ok());
+                    let result = mermaid::render_mermaid_sized(&code_block_content, terminal_width);
                     match result {
                         mermaid::RenderResult::Image { .. } if side_only => {
                             lines.push(mermaid_sidebar_placeholder("↗ mermaid diagram (sidebar)"));
@@ -1007,7 +1008,8 @@ pub fn render_markdown_lazy(
                     .unwrap_or(false);
 
                 if is_mermaid {
-                    let result = mermaid::render_mermaid(&code_block_content);
+                    let terminal_width = max_width.and_then(|w| u16::try_from(w).ok());
+                    let result = mermaid::render_mermaid_sized(&code_block_content, terminal_width);
                     match result {
                         mermaid::RenderResult::Image { .. } if side_only => {
                             lines.push(mermaid_sidebar_placeholder("↗ mermaid diagram (sidebar)"));
