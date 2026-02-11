@@ -581,6 +581,36 @@ async fn generate_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{EventStream, Provider};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    struct MockSummaryProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for MockSummaryProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        fn name(&self) -> &str {
+            "mock-summary"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(MockSummaryProvider)
+        }
+
+        async fn complete_simple(&self, prompt: &str, _system: &str) -> Result<String> {
+            Ok(format!("summary({} chars)", prompt.len()))
+        }
+    }
 
     fn make_text_message(role: Role, text: &str) -> Message {
         Message {
@@ -666,5 +696,46 @@ mod tests {
 
         let msgs = manager.messages_for_api();
         assert_eq!(msgs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_force_compact_applies_summary() {
+        let mut manager = CompactionManager::new().with_budget(1_000);
+        for i in 0..30 {
+            manager.add_message(make_text_message(
+                Role::User,
+                &format!("Turn {} {}", i, "x".repeat(120)),
+            ));
+        }
+
+        let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
+        manager
+            .force_compact(provider)
+            .expect("manual compaction should start");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            manager.check_and_apply_compaction();
+            if manager.stats().has_summary {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            manager.stats().has_summary,
+            "summary should be applied after compaction task completes"
+        );
+
+        let msgs = manager.messages_for_api();
+        assert!(msgs.len() < 30);
+        let first = msgs.first().expect("summary message missing");
+        assert_eq!(first.role, Role::User);
+        match &first.content[0] {
+            ContentBlock::Text { text, .. } => {
+                assert!(text.contains("Previous Conversation Summary"));
+            }
+            _ => panic!("expected text summary block"),
+        }
     }
 }
