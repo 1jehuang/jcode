@@ -58,6 +58,35 @@ impl ReloadContext {
             Ok(None)
         }
     }
+
+    /// Peek at context for a specific session without consuming it.
+    pub fn peek_for_session(session_id: &str) -> Result<Option<Self>> {
+        let path = Self::path()?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let ctx: Self = storage::read_json(&path)?;
+        if ctx.session_id == session_id {
+            Ok(Some(ctx))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Load context only if it belongs to the given session; consumes on success.
+    pub fn load_for_session(session_id: &str) -> Result<Option<Self>> {
+        let path = Self::path()?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let ctx: Self = storage::read_json(&path)?;
+        if ctx.session_id == session_id {
+            let _ = std::fs::remove_file(&path);
+            Ok(Some(ctx))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 pub struct SelfDevTool;
