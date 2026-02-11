@@ -15,7 +15,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 use std::collections::HashMap;
@@ -337,8 +337,14 @@ pub enum PickerItem {
 pub struct SessionPicker {
     /// Flat list of items (headers and sessions)
     items: Vec<PickerItem>,
-    /// Just the sessions for selection
+    /// Just the sessions for selection (filtered view)
     sessions: Vec<SessionInfo>,
+    /// All sessions (unfiltered, for rebuilding)
+    all_sessions: Vec<SessionInfo>,
+    /// All server groups (unfiltered, for rebuilding)
+    all_server_groups: Vec<ServerGroup>,
+    /// All orphan sessions (unfiltered, for rebuilding)
+    all_orphan_sessions: Vec<SessionInfo>,
     /// Map from items index to sessions index (only for Session items)
     item_to_session: Vec<Option<usize>>,
     list_state: ListState,
@@ -350,25 +356,49 @@ pub struct SessionPicker {
     crashed_sessions: Option<CrashedSessionsInfo>,
     last_list_area: Option<Rect>,
     last_preview_area: Option<Rect>,
+    /// Whether to show debug/test/canary sessions
+    show_test_sessions: bool,
+    /// Search query for filtering sessions
+    search_query: String,
+    /// Whether we're in search input mode
+    search_active: bool,
+    /// Total session count (before filtering)
+    total_session_count: usize,
+    /// Hidden test session count (debug + canary)
+    hidden_test_count: usize,
 }
 
 impl SessionPicker {
     pub fn new(sessions: Vec<SessionInfo>) -> Self {
-        // Simple mode: no server grouping
-        let items: Vec<PickerItem> = sessions.iter().cloned().map(PickerItem::Session).collect();
-        let item_to_session: Vec<Option<usize>> = (0..sessions.len()).map(Some).collect();
+        let total_session_count = sessions.len();
+        let hidden_test_count = sessions
+            .iter()
+            .filter(|s| s.is_debug || s.is_canary)
+            .count();
+
+        // Filter out debug/canary sessions by default
+        let visible: Vec<SessionInfo> = sessions
+            .iter()
+            .filter(|s| !s.is_debug && !s.is_canary)
+            .cloned()
+            .collect();
+
+        let items: Vec<PickerItem> = visible.iter().cloned().map(PickerItem::Session).collect();
+        let item_to_session: Vec<Option<usize>> = (0..visible.len()).map(Some).collect();
 
         let mut list_state = ListState::default();
-        if !sessions.is_empty() {
+        if !visible.is_empty() {
             list_state.select(Some(0));
         }
 
-        // Check for crashed sessions
         let crashed_sessions = session::detect_crashed_sessions().ok().flatten();
 
         Self {
             items,
-            sessions,
+            sessions: visible,
+            all_sessions: sessions,
+            all_server_groups: Vec::new(),
+            all_orphan_sessions: Vec::new(),
             item_to_session,
             list_state,
             scroll_offset: 0,
@@ -377,65 +407,95 @@ impl SessionPicker {
             crashed_sessions,
             last_list_area: None,
             last_preview_area: None,
+            show_test_sessions: false,
+            search_query: String::new(),
+            search_active: false,
+            total_session_count,
+            hidden_test_count,
         }
     }
 
     /// Create a picker with server grouping
     pub fn new_grouped(server_groups: Vec<ServerGroup>, orphan_sessions: Vec<SessionInfo>) -> Self {
+        // Count totals before filtering
+        let total_session_count: usize = server_groups
+            .iter()
+            .map(|g| g.sessions.len())
+            .sum::<usize>()
+            + orphan_sessions.len();
+        let hidden_test_count: usize = server_groups
+            .iter()
+            .flat_map(|g| g.sessions.iter())
+            .chain(orphan_sessions.iter())
+            .filter(|s| s.is_debug || s.is_canary)
+            .count();
+
+        // Build filtered view (hide debug sessions by default)
         let mut items: Vec<PickerItem> = Vec::new();
         let mut all_sessions: Vec<SessionInfo> = Vec::new();
         let mut item_to_session: Vec<Option<usize>> = Vec::new();
 
         let server_count = server_groups.len();
 
-        // Add server groups
-        for group in server_groups {
-            // Server header
+        for group in &server_groups {
+            let visible_sessions: Vec<&SessionInfo> = group
+                .sessions
+                .iter()
+                .filter(|s| !s.is_debug && !s.is_canary)
+                .collect();
+
+            if visible_sessions.is_empty() {
+                continue;
+            }
+
             items.push(PickerItem::ServerHeader {
                 name: group.name.clone(),
                 icon: group.icon.clone(),
                 version: group.version.clone(),
-                session_count: group.sessions.len(),
-            });
-            item_to_session.push(None); // Header is not selectable
-
-            // Sessions under this server
-            for session in group.sessions {
-                let session_idx = all_sessions.len();
-                all_sessions.push(session.clone());
-                items.push(PickerItem::Session(session));
-                item_to_session.push(Some(session_idx));
-            }
-        }
-
-        // Add orphan sessions if any
-        if !orphan_sessions.is_empty() {
-            items.push(PickerItem::OrphanHeader {
-                session_count: orphan_sessions.len(),
+                session_count: visible_sessions.len(),
             });
             item_to_session.push(None);
 
-            for session in orphan_sessions {
+            for session in visible_sessions {
                 let session_idx = all_sessions.len();
                 all_sessions.push(session.clone());
-                items.push(PickerItem::Session(session));
+                items.push(PickerItem::Session(session.clone()));
                 item_to_session.push(Some(session_idx));
             }
         }
 
-        // Find first selectable item
+        let visible_orphans: Vec<&SessionInfo> = orphan_sessions
+            .iter()
+            .filter(|s| !s.is_debug && !s.is_canary)
+            .collect();
+        if !visible_orphans.is_empty() {
+            items.push(PickerItem::OrphanHeader {
+                session_count: visible_orphans.len(),
+            });
+            item_to_session.push(None);
+
+            for session in visible_orphans {
+                let session_idx = all_sessions.len();
+                all_sessions.push(session.clone());
+                items.push(PickerItem::Session(session.clone()));
+                item_to_session.push(Some(session_idx));
+            }
+        }
+
         let first_session_idx = item_to_session.iter().position(|x| x.is_some());
         let mut list_state = ListState::default();
         if let Some(idx) = first_session_idx {
             list_state.select(Some(idx));
         }
 
-        // Check for crashed sessions
         let crashed_sessions = session::detect_crashed_sessions().ok().flatten();
 
         Self {
             items,
             sessions: all_sessions,
+            all_sessions: Vec::new(), // will be populated in rebuild_items
+            all_server_groups: server_groups,
+            all_orphan_sessions: orphan_sessions,
             item_to_session,
             list_state,
             scroll_offset: 0,
@@ -444,6 +504,11 @@ impl SessionPicker {
             crashed_sessions,
             last_list_area: None,
             last_preview_area: None,
+            show_test_sessions: false,
+            search_query: String::new(),
+            search_active: false,
+            total_session_count,
+            hidden_test_count,
         }
     }
 
@@ -546,6 +611,120 @@ impl SessionPicker {
                 }
             }
         }
+    }
+
+    /// Check if a session matches the current search query
+    fn session_matches_search(session: &SessionInfo, query: &str) -> bool {
+        if query.is_empty() {
+            return true;
+        }
+        let q = query.to_lowercase();
+        session.title.to_lowercase().contains(&q)
+            || session.short_name.to_lowercase().contains(&q)
+            || session.id.to_lowercase().contains(&q)
+            || session
+                .working_dir
+                .as_ref()
+                .map(|d| d.to_lowercase().contains(&q))
+                .unwrap_or(false)
+    }
+
+    /// Rebuild the items list based on current filters (show_test_sessions, search_query)
+    fn rebuild_items(&mut self) {
+        let show_test = self.show_test_sessions;
+        let query = self.search_query.clone();
+
+        let session_visible = |s: &SessionInfo| -> bool {
+            (show_test || (!s.is_debug && !s.is_canary)) && Self::session_matches_search(s, &query)
+        };
+
+        self.items.clear();
+        self.sessions.clear();
+        self.item_to_session.clear();
+
+        if !self.all_server_groups.is_empty() {
+            // Grouped mode
+            for group in &self.all_server_groups {
+                let visible: Vec<&SessionInfo> = group
+                    .sessions
+                    .iter()
+                    .filter(|s| session_visible(s))
+                    .collect();
+
+                if visible.is_empty() {
+                    continue;
+                }
+
+                self.items.push(PickerItem::ServerHeader {
+                    name: group.name.clone(),
+                    icon: group.icon.clone(),
+                    version: group.version.clone(),
+                    session_count: visible.len(),
+                });
+                self.item_to_session.push(None);
+
+                for session in visible {
+                    let session_idx = self.sessions.len();
+                    self.sessions.push(session.clone());
+                    self.items.push(PickerItem::Session(session.clone()));
+                    self.item_to_session.push(Some(session_idx));
+                }
+            }
+
+            let visible_orphans: Vec<&SessionInfo> = self
+                .all_orphan_sessions
+                .iter()
+                .filter(|s| session_visible(s))
+                .collect();
+            if !visible_orphans.is_empty() {
+                self.items.push(PickerItem::OrphanHeader {
+                    session_count: visible_orphans.len(),
+                });
+                self.item_to_session.push(None);
+
+                for session in visible_orphans {
+                    let session_idx = self.sessions.len();
+                    self.sessions.push(session.clone());
+                    self.items.push(PickerItem::Session(session.clone()));
+                    self.item_to_session.push(Some(session_idx));
+                }
+            }
+        } else {
+            // Simple mode (no server grouping)
+            for session in &self.all_sessions {
+                if session_visible(session) {
+                    let session_idx = self.sessions.len();
+                    self.sessions.push(session.clone());
+                    self.items.push(PickerItem::Session(session.clone()));
+                    self.item_to_session.push(Some(session_idx));
+                }
+            }
+        }
+
+        // Update hidden debug count based on current search
+        self.hidden_test_count = if show_test {
+            0
+        } else {
+            self.all_server_groups
+                .iter()
+                .flat_map(|g| g.sessions.iter())
+                .chain(self.all_orphan_sessions.iter())
+                .chain(self.all_sessions.iter())
+                .filter(|s| (s.is_debug || s.is_canary) && Self::session_matches_search(s, &query))
+                .count()
+        };
+
+        // Select first selectable item
+        let first = self.item_to_session.iter().position(|x| x.is_some());
+        self.list_state.select(first);
+        self.scroll_offset = 0;
+        self.auto_scroll_preview = true;
+    }
+
+    /// Toggle debug session visibility
+    fn toggle_test_sessions(&mut self) {
+        self.show_test_sessions = !self.show_test_sessions;
+        self.rebuild_items();
     }
 
     fn render_session_item(&self, session: &SessionInfo, is_selected: bool) -> ListItem<'static> {
@@ -723,26 +902,55 @@ impl SessionPicker {
             })
             .collect();
 
-        // Title with server count and help
-        let title = if self.server_count > 0 {
-            format!(
-                " {} servers · {} sessions (↑↓ nav, Enter select, Esc quit) ",
-                self.server_count,
-                self.sessions.len()
-            )
+        // Title with session count and filter state
+        let mut title_parts: Vec<Span> = Vec::new();
+        title_parts.push(Span::styled(
+            format!(" {} ", self.sessions.len()),
+            Style::default()
+                .fg(Color::Rgb(200, 200, 200))
+                .add_modifier(Modifier::BOLD),
+        ));
+        title_parts.push(Span::styled(
+            "sessions",
+            Style::default().fg(Color::Rgb(120, 120, 120)),
+        ));
+
+        if self.hidden_test_count > 0 {
+            title_parts.push(Span::styled(
+                format!(" (+{} hidden)", self.hidden_test_count),
+                Style::default().fg(Color::Rgb(80, 80, 80)),
+            ));
+        }
+
+        if !self.search_query.is_empty() {
+            title_parts.push(Span::styled(
+                format!("  🔍 \"{}\"", self.search_query),
+                Style::default().fg(Color::Rgb(186, 139, 255)),
+            ));
+        }
+
+        title_parts.push(Span::styled(" ", Style::default()));
+
+        // Help text on the right
+        let help = if self.search_active {
+            " type to filter, Esc cancel "
         } else {
-            format!(
-                " {} sessions (↑↓ navigate, Enter select, Esc quit) ",
-                self.sessions.len()
-            )
+            " / search · d show all · ↑↓ · Enter · q "
         };
+
+        const BORDER_COLOR: Color = Color::Rgb(70, 70, 70);
 
         let list = List::new(items)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(title)
-                    .border_style(Style::default().fg(Color::Rgb(138, 180, 248))),
+                    .border_type(BorderType::Rounded)
+                    .title(Line::from(title_parts))
+                    .title_bottom(Line::from(Span::styled(
+                        help,
+                        Style::default().fg(Color::Rgb(80, 80, 80)),
+                    )))
+                    .border_style(Style::default().fg(BORDER_COLOR)),
             )
             .highlight_style(
                 Style::default()
@@ -764,8 +972,9 @@ impl SessionPicker {
         let Some(session) = self.selected_session().cloned() else {
             let block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .title(" Preview ")
-                .border_style(Style::default().fg(Color::DarkGray));
+                .border_style(Style::default().fg(Color::Rgb(50, 50, 50)));
             let paragraph = Paragraph::new("No session selected")
                 .block(block)
                 .style(Style::default().fg(Color::DarkGray));
@@ -962,8 +1171,9 @@ impl SessionPicker {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" Preview (Shift+↑↓/J/K scroll) ")
-            .border_style(Style::default().fg(Color::Rgb(138, 180, 248)));
+            .border_type(BorderType::Rounded)
+            .title(" Preview ")
+            .border_style(Style::default().fg(Color::Rgb(70, 70, 70)));
 
         let visible_height = area.height.saturating_sub(2) as usize;
         let max_scroll = lines.len().saturating_sub(visible_height) as u16;
@@ -1044,22 +1254,61 @@ impl SessionPicker {
 
     pub fn render(&mut self, frame: &mut Frame) {
         let has_banner = self.crashed_sessions.is_some();
+        let has_search = self.search_active || !self.search_query.is_empty();
 
-        // If there's a crash banner, split vertically first
-        let (banner_area, main_area) = if has_banner {
-            let vertical = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(10)])
-                .split(frame.area());
-            (Some(vertical[0]), vertical[1])
-        } else {
-            (None, frame.area())
-        };
+        // Build vertical constraints
+        let mut v_constraints = Vec::new();
+        if has_banner {
+            v_constraints.push(Constraint::Length(1));
+        }
+        if has_search {
+            v_constraints.push(Constraint::Length(1));
+        }
+        v_constraints.push(Constraint::Min(10));
+
+        let v_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(v_constraints)
+            .split(frame.area());
+
+        let mut chunk_idx = 0;
 
         // Render banner if present
-        if let Some(area) = banner_area {
-            self.render_crash_banner(frame, area);
+        if has_banner {
+            self.render_crash_banner(frame, v_chunks[chunk_idx]);
+            chunk_idx += 1;
         }
+
+        // Render search bar if active
+        if has_search {
+            let search_area = v_chunks[chunk_idx];
+            chunk_idx += 1;
+
+            let cursor_char = if self.search_active { "▎" } else { "" };
+            let search_line = Line::from(vec![
+                Span::styled(" 🔍 ", Style::default().fg(Color::Rgb(186, 139, 255))),
+                Span::styled(
+                    &self.search_query,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(cursor_char, Style::default().fg(Color::Rgb(186, 139, 255))),
+                if self.search_active {
+                    Span::styled(
+                        "  Esc to clear",
+                        Style::default().fg(Color::Rgb(60, 60, 60)),
+                    )
+                } else {
+                    Span::styled("  / to edit", Style::default().fg(Color::Rgb(60, 60, 60)))
+                },
+            ]);
+            let search_widget =
+                Paragraph::new(search_line).style(Style::default().bg(Color::Rgb(25, 25, 30)));
+            frame.render_widget(search_widget, search_area);
+        }
+
+        let main_area = v_chunks[chunk_idx];
 
         // Split main area horizontally for list and preview
         let chunks = Layout::default()
@@ -1111,6 +1360,45 @@ impl SessionPicker {
                             continue;
                         }
 
+                        // Search mode: capture typed characters
+                        if self.search_active {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    self.search_active = false;
+                                    self.search_query.clear();
+                                    self.rebuild_items();
+                                }
+                                KeyCode::Enter => {
+                                    self.search_active = false;
+                                    // Keep the query, just exit search input mode
+                                    if self.sessions.is_empty() {
+                                        // No results - clear and continue
+                                    } else {
+                                        // Select current item
+                                        break Ok(self
+                                            .selected_session()
+                                            .map(|s| PickerResult::Selected(s.id.clone())));
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    self.search_query.pop();
+                                    self.rebuild_items();
+                                }
+                                KeyCode::Char(c) => {
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
+                                        break Ok(None);
+                                    }
+                                    self.search_query.push(c);
+                                    self.rebuild_items();
+                                }
+                                KeyCode::Down => self.next(),
+                                KeyCode::Up => self.previous(),
+                                _ => {}
+                            }
+                            continue;
+                        }
+
+                        // Normal mode
                         match key.code {
                             KeyCode::Esc | KeyCode::Char('q') => {
                                 break Ok(None);
@@ -1121,10 +1409,15 @@ impl SessionPicker {
                                     .map(|s| PickerResult::Selected(s.id.clone())));
                             }
                             KeyCode::Char('R') | KeyCode::Char('B') | KeyCode::Char('b') => {
-                                // Only allow batch restore if there are crashed sessions
                                 if self.crashed_sessions.is_some() {
                                     break Ok(Some(PickerResult::RestoreAllCrashed));
                                 }
+                            }
+                            KeyCode::Char('/') => {
+                                self.search_active = true;
+                            }
+                            KeyCode::Char('d') => {
+                                self.toggle_test_sessions();
                             }
                             KeyCode::Down => {
                                 if key.modifiers.contains(KeyModifiers::SHIFT) {
