@@ -1556,6 +1556,74 @@ fn render_mermaid_sized_internal(
 /// Border width for mermaid diagrams (left bar + space)
 const BORDER_WIDTH: u16 = 2;
 
+fn rect_contains_point(rect: Rect, x: u16, y: u16) -> bool {
+    let right = rect.x.saturating_add(rect.width);
+    let bottom = rect.y.saturating_add(rect.height);
+    x >= rect.x && x < right && y >= rect.y && y < bottom
+}
+
+fn set_cell_if_visible(buf: &mut Buffer, x: u16, y: u16, ch: char, style: Option<Style>) {
+    let bounds = *buf.area();
+    if !rect_contains_point(bounds, x, y) {
+        return;
+    }
+    let cell = buf.get_mut(x, y);
+    cell.set_char(ch);
+    if let Some(style) = style {
+        cell.set_style(style);
+    }
+}
+
+fn draw_left_border(buf: &mut Buffer, area: Rect) {
+    let clamped = area.intersection(*buf.area());
+    if clamped.width == 0 || clamped.height == 0 {
+        return;
+    }
+    let border_style = Style::default().fg(Color::Rgb(100, 100, 100)); // DIM_COLOR
+    let y_end = clamped.y.saturating_add(clamped.height);
+    for row in clamped.y..y_end {
+        set_cell_if_visible(buf, clamped.x, row, '│', Some(border_style));
+        if clamped.width > 1 {
+            let spacer_x = clamped.x.saturating_add(1);
+            set_cell_if_visible(buf, spacer_x, row, ' ', None);
+        }
+    }
+}
+
+fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
+fn render_stateful_image_safe(
+    hash: u64,
+    area: Rect,
+    buf: &mut Buffer,
+    protocol: &mut StatefulProtocol,
+    resize: Resize,
+) -> bool {
+    let widget = StatefulImage::default().resize(resize);
+    match panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        widget.render(area, buf, protocol);
+    })) {
+        Ok(()) => true,
+        Err(payload) => {
+            crate::logging::warn(&format!(
+                "Recovered image render panic for diagram {:016x}: {}",
+                hash,
+                panic_payload_to_string(payload.as_ref())
+            ));
+            clear_image_area(area, buf);
+            false
+        }
+    }
+}
+
 /// Render an image at the given area using ratatui-image
 /// If centered is true, the image will be horizontally centered within the area
 /// If crop_top is true, clip from the top to show the bottom portion when partially visible
@@ -1587,17 +1655,7 @@ pub fn render_image_widget(
     }
 
     // Draw left border (vertical bar like code blocks)
-    let border_style = Style::default().fg(Color::Rgb(100, 100, 100)); // DIM_COLOR
-    for row in area.y..area.y.saturating_add(area.height) {
-        if row < buf.area().height {
-            buf.get_mut(area.x, row)
-                .set_char('│')
-                .set_style(border_style);
-            if area.x + 1 < buf.area().width {
-                buf.get_mut(area.x + 1, row).set_char(' ');
-            }
-        }
-    }
+    draw_left_border(buf, area);
 
     // Adjust area for image (after border)
     let image_area = Rect {
@@ -1686,8 +1744,15 @@ pub fn render_image_widget(
                 img_state.last_crop_top = crop_top;
             }
 
-            let widget = StatefulImage::default().resize(Resize::Crop(Some(crop_opts)));
-            widget.render(render_area, buf, &mut img_state.protocol);
+            if !render_stateful_image_safe(
+                hash,
+                render_area,
+                buf,
+                &mut img_state.protocol,
+                Resize::Crop(Some(crop_opts)),
+            ) {
+                return 0;
+            }
             img_state.last_area = Some(render_area);
             return area.height;
         }
@@ -1718,8 +1783,15 @@ pub fn render_image_widget(
                         clip_left: false,
                     };
                     img_state.last_crop_top = crop_top;
-                    let widget = StatefulImage::default().resize(Resize::Crop(Some(crop_opts)));
-                    widget.render(render_area, buf, &mut img_state.protocol);
+                    if !render_stateful_image_safe(
+                        hash,
+                        render_area,
+                        buf,
+                        &mut img_state.protocol,
+                        Resize::Crop(Some(crop_opts)),
+                    ) {
+                        return 0;
+                    }
                     return area.height;
                 }
             }
@@ -1758,17 +1830,7 @@ pub fn render_image_widget_fit(
     }
 
     if draw_border {
-        let border_style = Style::default().fg(Color::Rgb(100, 100, 100)); // DIM_COLOR
-        for row in area.y..area.y.saturating_add(area.height) {
-            if row < buf.area().height {
-                buf.get_mut(area.x, row)
-                    .set_char('│')
-                    .set_style(border_style);
-                if area.x + 1 < buf.area().width {
-                    buf.get_mut(area.x + 1, row).set_char(' ');
-                }
-            }
-        }
+        draw_left_border(buf, area);
     }
 
     let image_area = Rect {
@@ -1830,8 +1892,15 @@ pub fn render_image_widget_fit(
         if let Some(img_state) = state.get_mut(hash) {
             img_state.resize_mode = ResizeMode::Fit;
             img_state.last_viewport = None;
-            let widget = StatefulImage::default().resize(Resize::Fit(None));
-            widget.render(render_area, buf, &mut img_state.protocol);
+            if !render_stateful_image_safe(
+                hash,
+                render_area,
+                buf,
+                &mut img_state.protocol,
+                Resize::Fit(None),
+            ) {
+                return 0;
+            }
             img_state.last_area = Some(render_area);
             return area.height;
         }
@@ -1856,8 +1925,15 @@ pub fn render_image_widget_fit(
                 );
 
                 if let Some(img_state) = state.get_mut(hash) {
-                    let widget = StatefulImage::default().resize(Resize::Fit(None));
-                    widget.render(render_area, buf, &mut img_state.protocol);
+                    if !render_stateful_image_safe(
+                        hash,
+                        render_area,
+                        buf,
+                        &mut img_state.protocol,
+                        Resize::Fit(None),
+                    ) {
+                        return 0;
+                    }
                     return area.height;
                 }
             }
@@ -1910,17 +1986,7 @@ pub fn render_image_widget_viewport(
     }
 
     if draw_border {
-        let border_style = Style::default().fg(Color::Rgb(100, 100, 100)); // DIM_COLOR
-        for row in area.y..area.y.saturating_add(area.height) {
-            if row < buf.area().height {
-                buf.get_mut(area.x, row)
-                    .set_char('│')
-                    .set_style(border_style);
-                if area.x + 1 < buf.area().width {
-                    buf.get_mut(area.x + 1, row).set_char(' ');
-                }
-            }
-        }
+        draw_left_border(buf, area);
     }
 
     let image_area = Rect {
@@ -2005,8 +2071,15 @@ pub fn render_image_widget_viewport(
         }
         if let Some(img_state) = state.get_mut(hash) {
             if img_state.last_viewport == Some(viewport) {
-                let widget = StatefulImage::default().resize(Resize::Fit(None));
-                widget.render(image_area, buf, &mut img_state.protocol);
+                if !render_stateful_image_safe(
+                    hash,
+                    image_area,
+                    buf,
+                    &mut img_state.protocol,
+                    Resize::Fit(None),
+                ) {
+                    return 0;
+                }
                 img_state.last_area = Some(image_area);
                 return area.height;
             }
@@ -2030,8 +2103,15 @@ pub fn render_image_widget_viewport(
     );
 
     if let Some(img_state) = state.get_mut(hash) {
-        let widget = StatefulImage::default().resize(Resize::Fit(None));
-        widget.render(image_area, buf, &mut img_state.protocol);
+        if !render_stateful_image_safe(
+            hash,
+            image_area,
+            buf,
+            &mut img_state.protocol,
+            Resize::Fit(None),
+        ) {
+            return 0;
+        }
         return area.height;
     }
 
@@ -2469,5 +2549,49 @@ mod tests {
     fn test_memory_benchmark_clamps_iterations() {
         let result = debug_memory_benchmark(0);
         assert_eq!(result.iterations, 1);
+    }
+
+    #[test]
+    fn test_set_cell_if_visible_ignores_out_of_bounds_coordinates() {
+        let mut buf = Buffer::empty(Rect {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 2,
+        });
+        set_cell_if_visible(&mut buf, 10, 1, 'X', None);
+        set_cell_if_visible(&mut buf, 2, 1, 'Y', None);
+        assert_eq!(buf[(2, 1)].symbol(), "Y");
+        assert_eq!(buf[(0, 0)].symbol(), " ");
+    }
+
+    #[test]
+    fn test_draw_left_border_clamps_to_buffer_area() {
+        let mut buf = Buffer::empty(Rect {
+            x: 0,
+            y: 0,
+            width: 5,
+            height: 3,
+        });
+        draw_left_border(
+            &mut buf,
+            Rect {
+                x: 10,
+                y: 1,
+                width: 4,
+                height: 2,
+            },
+        );
+        draw_left_border(
+            &mut buf,
+            Rect {
+                x: 3,
+                y: 0,
+                width: 4,
+                height: 3,
+            },
+        );
+        assert_eq!(buf[(3, 0)].symbol(), "│");
+        assert_eq!(buf[(4, 0)].symbol(), " ");
     }
 }
