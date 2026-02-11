@@ -4,6 +4,7 @@ use super::keybind::{ModelSwitchKeys, ScrollKeys};
 use super::markdown::IncrementalMarkdownRenderer;
 use super::stream_buffer::StreamBuffer;
 use crate::bus::{BackgroundTaskStatus, Bus, BusEvent, ToolEvent, ToolStatus};
+use crate::compaction::CompactionEvent;
 use crate::config::config;
 use crate::id;
 use crate::mcp::McpManager;
@@ -541,6 +542,10 @@ pub struct App {
     resume_session_id: Option<String>,
     // Exit code to use when quitting (for canary wrapper communication)
     requested_exit_code: Option<i32>,
+    // Memory feature toggle for this session
+    memory_enabled: bool,
+    // Swarm feature toggle for this session
+    swarm_enabled: bool,
     // Show diffs for edit/write tool outputs (toggle with Alt+D)
     show_diffs: bool,
     // Center all content (from config)
@@ -688,6 +693,7 @@ impl App {
         let mut session = Session::create(None, None);
         session.model = Some(provider.model());
         let display = config().display.clone();
+        let features = config().features.clone();
         let context_limit = crate::provider::context_limit_for_model(&provider.model())
             .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT) as u64;
 
@@ -784,6 +790,8 @@ impl App {
             remote_client_count: None,
             resume_session_id: None,
             requested_exit_code: None,
+            memory_enabled: features.memory,
+            swarm_enabled: features.swarm,
             show_diffs: display.show_diffs,
             centered: display.centered,
             diagram_mode: display.diagram_mode,
@@ -996,13 +1004,11 @@ impl App {
                 });
             }
 
-            // Restore full message history for provider context
-            self.messages = session.messages_for_provider();
-
             // Don't restore provider_session_id - Claude sessions don't persist across
             // process restarts. The messages are restored, so Claude will get full context.
             self.provider_session_id = None;
             self.session = session;
+            self.replace_provider_messages(self.session.messages_for_provider());
             // Clear the saved provider_session_id since it's no longer valid
             self.session.provider_session_id = None;
             let mut restored_model = false;
@@ -3496,7 +3502,7 @@ impl App {
                                 self.push_display_message(DisplayMessage::system(notification.clone()));
                                 // If not currently processing, inject as a message for the agent
                                 if !self.is_processing {
-                                    self.messages.push(Message {
+                                    self.add_provider_message(Message {
                                         role: Role::User,
                                         content: vec![ContentBlock::Text {
                                             text: notification,
@@ -4207,7 +4213,11 @@ impl App {
                 false
             }
             ServerEvent::SwarmStatus { members } => {
-                self.remote_swarm_members = members;
+                if self.swarm_enabled {
+                    self.remote_swarm_members = members;
+                } else {
+                    self.remote_swarm_members.clear();
+                }
                 false
             }
             ServerEvent::McpStatus { servers } => {
@@ -4222,7 +4232,12 @@ impl App {
                     .collect();
                 false
             }
-            ServerEvent::ModelChanged { model, provider_name, error, .. } => {
+            ServerEvent::ModelChanged {
+                model,
+                provider_name,
+                error,
+                ..
+            } => {
                 if let Some(err) = error {
                     self.push_display_message(DisplayMessage::error(format!(
                         "Failed to switch model: {}",
@@ -4266,9 +4281,11 @@ impl App {
                 false
             }
             ServerEvent::MemoryInjected { count } => {
-                // Show notice that memory was injected
-                let plural = if count == 1 { "memory" } else { "memories" };
-                self.set_status_notice(format!("🧠 {} relevant {} injected", count, plural));
+                if self.memory_enabled {
+                    // Show notice that memory was injected
+                    let plural = if count == 1 { "memory" } else { "memories" };
+                    self.set_status_notice(format!("🧠 {} relevant {} injected", count, plural));
+                }
                 false
             }
             _ => false,
@@ -4655,6 +4672,104 @@ impl App {
                         return Ok(());
                     }
 
+                    if trimmed == "/memory" || trimmed == "/memory status" {
+                        let default_enabled = crate::config::config().features.memory;
+                        self.push_display_message(DisplayMessage::system(format!(
+                            "Memory feature: **{}** (config default: {})",
+                            if self.memory_enabled {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            },
+                            if default_enabled {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            }
+                        )));
+                        return Ok(());
+                    }
+
+                    if trimmed == "/memory on" {
+                        remote
+                            .set_feature(crate::protocol::FeatureToggle::Memory, true)
+                            .await?;
+                        self.set_memory_feature_enabled(true);
+                        self.set_status_notice("Memory: ON");
+                        self.push_display_message(DisplayMessage::system(
+                            "Memory feature enabled for this session.".to_string(),
+                        ));
+                        return Ok(());
+                    }
+
+                    if trimmed == "/memory off" {
+                        remote
+                            .set_feature(crate::protocol::FeatureToggle::Memory, false)
+                            .await?;
+                        self.set_memory_feature_enabled(false);
+                        self.set_status_notice("Memory: OFF");
+                        self.push_display_message(DisplayMessage::system(
+                            "Memory feature disabled for this session.".to_string(),
+                        ));
+                        return Ok(());
+                    }
+
+                    if trimmed.starts_with("/memory ") {
+                        self.push_display_message(DisplayMessage::error(
+                            "Usage: /memory [on|off|status]".to_string(),
+                        ));
+                        return Ok(());
+                    }
+
+                    if trimmed == "/swarm" || trimmed == "/swarm status" {
+                        let default_enabled = crate::config::config().features.swarm;
+                        self.push_display_message(DisplayMessage::system(format!(
+                            "Swarm feature: **{}** (config default: {})",
+                            if self.swarm_enabled {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            },
+                            if default_enabled {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            }
+                        )));
+                        return Ok(());
+                    }
+
+                    if trimmed == "/swarm on" {
+                        remote
+                            .set_feature(crate::protocol::FeatureToggle::Swarm, true)
+                            .await?;
+                        self.set_swarm_feature_enabled(true);
+                        self.set_status_notice("Swarm: ON");
+                        self.push_display_message(DisplayMessage::system(
+                            "Swarm feature enabled for this session.".to_string(),
+                        ));
+                        return Ok(());
+                    }
+
+                    if trimmed == "/swarm off" {
+                        remote
+                            .set_feature(crate::protocol::FeatureToggle::Swarm, false)
+                            .await?;
+                        self.set_swarm_feature_enabled(false);
+                        self.set_status_notice("Swarm: OFF");
+                        self.push_display_message(DisplayMessage::system(
+                            "Swarm feature disabled for this session.".to_string(),
+                        ));
+                        return Ok(());
+                    }
+
+                    if trimmed.starts_with("/swarm ") {
+                        self.push_display_message(DisplayMessage::error(
+                            "Usage: /swarm [on|off|status]".to_string(),
+                        ));
+                        return Ok(());
+                    }
+
                     // Queue message if processing, otherwise send
                     match self.send_action(false) {
                         SendAction::Submit => {
@@ -4896,7 +5011,7 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Char('l') if !self.is_processing && !diagram_available => {
-                    self.messages.clear();
+                    self.clear_provider_messages();
                     self.clear_display_messages();
                     self.queued_messages.clear();
                     self.pasted_contents.clear();
@@ -5161,6 +5276,48 @@ impl App {
         }
     }
 
+    fn command_help(&self, topic: &str) -> Option<String> {
+        let topic = topic.trim().trim_start_matches('/').to_lowercase();
+        let help = match topic.as_str() {
+            "help" | "commands" => {
+                "`/help`\nShow general command list and keyboard shortcuts.\n\n`/help <command>`\nShow detailed help for one command."
+            }
+            "compact" => {
+                "`/compact`\nForce context compaction now.\nStarts background summarization and applies it automatically when ready."
+            }
+            "rewind" => {
+                "`/rewind`\nShow numbered conversation history.\n\n`/rewind N`\nRewind to message N (drops everything after it and resets provider session)."
+            }
+            "clear" => {
+                "`/clear`\nClear current conversation, queue, and display; starts a fresh session."
+            }
+            "model" => {
+                "`/model`\nOpen model picker.\n\n`/model <name>`\nSwitch model.\n\n`/model <name>@<provider>`\nPin OpenRouter routing (`@auto` clears pin)."
+            }
+            "memory" => "`/memory [on|off|status]`\nToggle memory features for this session.",
+            "remember" => {
+                "`/remember`\nExtract memories from current conversation and store them."
+            }
+            "swarm" => "`/swarm [on|off|status]`\nToggle swarm features for this session.",
+            "reload" => "`/reload`\nReload to a newer binary if one is available.",
+            "rebuild" => "`/rebuild`\nRun full update flow (git pull + cargo build + tests).",
+            "info" => "`/info`\nShow session metadata and token usage.",
+            "version" => "`/version`\nShow jcode version/build details.",
+            "quit" => "`/quit`\nExit jcode.",
+            "config" => {
+                "`/config`\nShow active configuration.\n\n`/config init`\nCreate default config file.\n\n`/config edit`\nOpen config in `$EDITOR`."
+            }
+            "client-reload" if self.is_remote => {
+                "`/client-reload`\nForce client binary reload in remote mode."
+            }
+            "server-reload" if self.is_remote => {
+                "`/server-reload`\nForce server binary reload in remote mode."
+            }
+            _ => return None,
+        };
+        Some(help.to_string())
+    }
+
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
     fn submit_input(&mut self) {
         let raw_input = std::mem::take(&mut self.input);
@@ -5172,7 +5329,22 @@ impl App {
 
         // Check for built-in commands
         let trimmed = input.trim();
-        if trimmed == "/help" || trimmed == "/?" {
+        if let Some(topic) = trimmed
+            .strip_prefix("/help ")
+            .or_else(|| trimmed.strip_prefix("/? "))
+        {
+            if let Some(help) = self.command_help(topic) {
+                self.push_display_message(DisplayMessage::system(help));
+            } else {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Unknown command '{}'. Use `/help` to list commands.",
+                    topic.trim()
+                )));
+            }
+            return;
+        }
+
+        if trimmed == "/help" || trimmed == "/?" || trimmed == "/commands" {
             let model_next = format!(
                 "• `{}` - Next model (set JCODE_MODEL_SWITCH_KEY)",
                 self.model_switch_keys.next_label
@@ -5199,12 +5371,16 @@ impl App {
                 content: format!(
                     "**Commands:**\n\
                      • `/help` - Show this help\n\
+                     • `/help <command>` - Show details for one command\n\
+                     • `/commands` - Alias for `/help`\n\
                      • `/config` - Show current configuration\n\
                      • `/config init` - Create default config file (~/.jcode/config.toml)\n\
                      • `/config edit` - Open config file in $EDITOR\n\
                      • `/model` - List available models\n\
                      • `/model <name>` - Switch to a different model\n\
                      • `/model <name>@<provider>` - Pin OpenRouter provider (`@auto` clears)\n\
+                     • `/memory [on|off|status]` - Toggle memory features for this session\n\
+                     • `/swarm [on|off|status]` - Toggle swarm features for this session\n\
                      • `/reload` - Smart reload (client/server if newer binary exists)\n\
                      • `/rebuild` - Full rebuild (git pull + cargo build + tests){}\n\
                      • `/clear` - Clear conversation\n\
@@ -5253,7 +5429,7 @@ impl App {
         }
 
         if trimmed == "/clear" {
-            self.messages.clear();
+            self.clear_provider_messages();
             self.clear_display_messages();
             self.queued_messages.clear();
             self.pasted_contents.clear();
@@ -5267,6 +5443,12 @@ impl App {
 
         // Handle /compact command - manual context compaction
         if trimmed == "/compact" {
+            if !self.provider.supports_compaction() {
+                self.push_display_message(DisplayMessage::system(
+                    "Manual compaction is not available for this provider.".to_string(),
+                ));
+                return;
+            }
             let compaction = self.registry.compaction();
             match compaction.try_write() {
                 Ok(mut manager) => {
@@ -5297,7 +5479,8 @@ impl App {
                                 role: "system".to_string(),
                                 content: format!(
                                     "{}\n\n✓ **Compaction started** - summarizing older messages in background.\n\
-                                    The summary will be applied automatically when ready.",
+                                    The summary will be applied automatically when ready.\n\
+                                    Use `/help compact` for details.",
                                     status_msg
                                 ),
                                 tool_calls: vec![],
@@ -5337,6 +5520,13 @@ impl App {
 
         // Handle /remember command - extract memories from current conversation
         if trimmed == "/remember" {
+            if !self.memory_enabled {
+                self.push_display_message(DisplayMessage::system(
+                    "Memory feature is disabled. Use `/memory on` to enable it.".to_string(),
+                ));
+                return;
+            }
+
             use crate::tui::info_widget::{MemoryEventKind, MemoryState};
 
             // Format context for extraction
@@ -5428,6 +5618,92 @@ impl App {
             return;
         }
 
+        if trimmed == "/memory" || trimmed == "/memory status" {
+            let default_enabled = crate::config::config().features.memory;
+            self.push_display_message(DisplayMessage::system(format!(
+                "Memory feature: **{}** (config default: {})",
+                if self.memory_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                if default_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            )));
+            return;
+        }
+
+        if trimmed == "/memory on" {
+            self.set_memory_feature_enabled(true);
+            self.set_status_notice("Memory: ON");
+            self.push_display_message(DisplayMessage::system(
+                "Memory feature enabled for this session.".to_string(),
+            ));
+            return;
+        }
+
+        if trimmed == "/memory off" {
+            self.set_memory_feature_enabled(false);
+            self.set_status_notice("Memory: OFF");
+            self.push_display_message(DisplayMessage::system(
+                "Memory feature disabled for this session.".to_string(),
+            ));
+            return;
+        }
+
+        if trimmed.starts_with("/memory ") {
+            self.push_display_message(DisplayMessage::error(
+                "Usage: `/memory [on|off|status]`".to_string(),
+            ));
+            return;
+        }
+
+        if trimmed == "/swarm" || trimmed == "/swarm status" {
+            let default_enabled = crate::config::config().features.swarm;
+            self.push_display_message(DisplayMessage::system(format!(
+                "Swarm feature: **{}** (config default: {})",
+                if self.swarm_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                if default_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            )));
+            return;
+        }
+
+        if trimmed == "/swarm on" {
+            self.set_swarm_feature_enabled(true);
+            self.set_status_notice("Swarm: ON");
+            self.push_display_message(DisplayMessage::system(
+                "Swarm feature enabled for this session.".to_string(),
+            ));
+            return;
+        }
+
+        if trimmed == "/swarm off" {
+            self.set_swarm_feature_enabled(false);
+            self.set_status_notice("Swarm: OFF");
+            self.push_display_message(DisplayMessage::system(
+                "Swarm feature disabled for this session.".to_string(),
+            ));
+            return;
+        }
+
+        if trimmed.starts_with("/swarm ") {
+            self.push_display_message(DisplayMessage::error(
+                "Usage: `/swarm [on|off|status]`".to_string(),
+            ));
+            return;
+        }
+
         // Handle /rewind command - rewind conversation to a previous point
         if trimmed == "/rewind" {
             // Show numbered history
@@ -5462,8 +5738,8 @@ impl App {
                 Ok(n) if n > 0 && n <= self.session.messages.len() => {
                     let removed = self.session.messages.len() - n;
                     self.session.messages.truncate(n);
+                    self.replace_provider_messages(self.session.messages_for_provider());
                     self.session.updated_at = chrono::Utc::now();
-                    let _ = self.session.save();
 
                     // Rebuild display messages from session
                     self.clear_display_messages();
@@ -5480,6 +5756,8 @@ impl App {
 
                     // Reset provider session since conversation changed
                     self.provider_session_id = None;
+                    self.session.provider_session_id = None;
+                    let _ = self.session.save();
 
                     self.push_display_message(DisplayMessage::system(format!(
                         "✓ Rewound to message {}. Removed {} message{}.",
@@ -5905,6 +6183,11 @@ impl App {
             ));
             info.push_str(&format!("**Terminal:** {}\n", terminal_size));
             info.push_str(&format!("**CWD:** {}\n", cwd));
+            info.push_str(&format!(
+                "**Features:** memory={}, swarm={}\n",
+                if self.memory_enabled { "on" } else { "off" },
+                if self.swarm_enabled { "on" } else { "off" }
+            ));
 
             // Provider info
             if let Some(ref model) = self.remote_provider_model {
@@ -6031,7 +6314,7 @@ impl App {
             tool_data: None,
         });
         // Send expanded content (with actual pasted text) to model
-        self.messages.push(Message::user(&input));
+        self.add_provider_message(Message::user(&input));
         self.session.add_message(
             Role::User,
             vec![ContentBlock::Text {
@@ -6081,7 +6364,7 @@ impl App {
                 tool_data: None,
             });
 
-            self.messages.push(Message::user(&combined));
+            self.add_provider_message(Message::user(&combined));
             self.session.add_message(
                 Role::User,
                 vec![ContentBlock::Text {
@@ -6178,8 +6461,105 @@ impl App {
         }
     }
 
+    fn add_provider_message(&mut self, message: Message) {
+        self.messages.push(message.clone());
+        if self.is_remote || !self.provider.supports_compaction() {
+            return;
+        }
+        let compaction = self.registry.compaction();
+        if let Ok(mut manager) = compaction.try_write() {
+            manager.add_message(message);
+        };
+    }
+
+    fn replace_provider_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
+        self.rebuild_tool_result_index();
+        self.reseed_compaction_from_provider_messages();
+    }
+
+    fn clear_provider_messages(&mut self) {
+        self.messages.clear();
+        self.tool_result_ids.clear();
+        self.reseed_compaction_from_provider_messages();
+    }
+
+    fn rebuild_tool_result_index(&mut self) {
+        self.tool_result_ids.clear();
+        for msg in &self.messages {
+            if let Role::User = msg.role {
+                for block in &msg.content {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                        self.tool_result_ids.insert(tool_use_id.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    fn reseed_compaction_from_provider_messages(&mut self) {
+        if self.is_remote || !self.provider.supports_compaction() {
+            return;
+        }
+        let compaction = self.registry.compaction();
+        if let Ok(mut manager) = compaction.try_write() {
+            manager.reset();
+            manager.set_budget(self.context_limit as usize);
+            for msg in &self.messages {
+                manager.add_message(msg.clone());
+            }
+        };
+    }
+
+    fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
+        if self.is_remote || !self.provider.supports_compaction() {
+            return (self.messages.clone(), None);
+        }
+        let compaction = self.registry.compaction();
+        let result = match compaction.try_write() {
+            Ok(mut manager) => {
+                manager.maybe_start_compaction(self.provider.clone());
+                let messages = manager.messages_for_api();
+                let event = manager.take_compaction_event();
+                (messages, event)
+            }
+            Err(_) => (self.messages.clone(), None),
+        };
+        result
+    }
+
+    fn handle_compaction_event(&mut self, event: CompactionEvent) {
+        self.provider_session_id = None;
+        self.session.provider_session_id = None;
+        self.context_warning_shown = false;
+        let tokens_str = event
+            .pre_tokens
+            .map(|t| format!(" ({} tokens)", t))
+            .unwrap_or_default();
+        self.push_display_message(DisplayMessage::system(format!(
+            "📦 Context compacted ({}){}",
+            event.trigger, tokens_str
+        )));
+    }
+
     fn set_status_notice(&mut self, text: impl Into<String>) {
         self.status_notice = Some((text.into(), Instant::now()));
+    }
+
+    fn set_memory_feature_enabled(&mut self, enabled: bool) {
+        self.memory_enabled = enabled;
+        if !enabled {
+            crate::memory::clear_pending_memory();
+            crate::memory::clear_activity();
+            crate::memory_agent::reset();
+        }
+    }
+
+    fn set_swarm_feature_enabled(&mut self, enabled: bool) {
+        self.swarm_enabled = enabled;
+        if !enabled {
+            self.remote_swarm_members.clear();
+        }
     }
 
     /// Open the model picker with available models
@@ -6202,10 +6582,14 @@ impl App {
             for model in &self.remote_available_models {
                 if model.contains('/') {
                     // OpenRouter model
-                    let cached = crate::provider::openrouter::load_endpoints_disk_cache_public(model);
-                    let auto_detail = cached.as_ref().and_then(|(eps, _)| {
-                        eps.first().map(|ep| format!("→ {}", ep.provider_name))
-                    }).unwrap_or_default();
+                    let cached =
+                        crate::provider::openrouter::load_endpoints_disk_cache_public(model);
+                    let auto_detail = cached
+                        .as_ref()
+                        .and_then(|(eps, _)| {
+                            eps.first().map(|ep| format!("→ {}", ep.provider_name))
+                        })
+                        .unwrap_or_default();
                     routes.push(crate::provider::ModelRoute {
                         model: model.clone(),
                         provider: "auto".to_string(),
@@ -6268,14 +6652,15 @@ impl App {
             if !model_routes.contains_key(&r.model) {
                 model_order.push(r.model.clone());
             }
-            model_routes.entry(r.model.clone()).or_default().push(
-                super::RouteOption {
+            model_routes
+                .entry(r.model.clone())
+                .or_default()
+                .push(super::RouteOption {
                     provider: r.provider.clone(),
                     api_method: r.api_method.clone(),
                     available: r.available,
                     detail: r.detail.clone(),
-                },
-            );
+                });
         }
 
         // Sort routes within each model: available first, then oauth > api-key > openrouter
@@ -6306,8 +6691,16 @@ impl App {
         models.sort_by(|a, b| {
             let a_current = if a.is_current { 0u8 } else { 1 };
             let b_current = if b.is_current { 0u8 } else { 1 };
-            let a_avail = if a.routes.first().map(|r| r.available).unwrap_or(false) { 0u8 } else { 1 };
-            let b_avail = if b.routes.first().map(|r| r.available).unwrap_or(false) { 0u8 } else { 1 };
+            let a_avail = if a.routes.first().map(|r| r.available).unwrap_or(false) {
+                0u8
+            } else {
+                1
+            };
+            let b_avail = if b.routes.first().map(|r| r.available).unwrap_or(false) {
+                0u8
+            } else {
+                1
+            };
             a_current
                 .cmp(&b_current)
                 .then(a_avail.cmp(&b_avail))
@@ -6735,6 +7128,7 @@ impl App {
         }
 
         if repaired > 0 {
+            self.reseed_compaction_from_provider_messages();
             let _ = self.session.save();
         }
 
@@ -6753,13 +7147,12 @@ impl App {
         new_session.provider_session_id = old_session.provider_session_id.clone();
         new_session.model = old_session.model.clone();
 
-        self.messages.clear();
+        self.clear_provider_messages();
         self.clear_display_messages();
         self.queued_messages.clear();
         self.pasted_contents.clear();
         self.active_skill = None;
         self.provider_session_id = None;
-        self.tool_result_ids.clear();
         self.session = new_session;
 
         for msg in old_messages {
@@ -6772,7 +7165,7 @@ impl App {
             if kept_blocks.is_empty() {
                 continue;
             }
-            self.messages.push(Message {
+            self.add_provider_message(Message {
                 role: role.clone(),
                 content: kept_blocks.clone(),
             });
@@ -6826,9 +7219,14 @@ impl App {
                 return Ok(());
             }
 
+            let (provider_messages, compaction_event) = self.messages_for_provider();
+            if let Some(event) = compaction_event {
+                self.handle_compaction_event(event);
+            }
+
             let tools = self.registry.definitions(None).await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
-            let memory_prompt = self.build_memory_prompt_nonblocking(&self.messages);
+            let memory_prompt = self.build_memory_prompt_nonblocking(&provider_messages);
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split(memory_prompt.as_deref());
 
@@ -6836,7 +7234,7 @@ impl App {
             let mut stream = self
                 .provider
                 .complete_split(
-                    &self.messages,
+                    &provider_messages,
                     &tools,
                     &split_prompt.static_part,
                     &split_prompt.dynamic_part,
@@ -7120,7 +7518,7 @@ impl App {
 
             let assistant_message_id = if !content_blocks.is_empty() {
                 let content_clone = content_blocks.clone();
-                self.messages.push(Message {
+                self.add_provider_message(Message {
                     role: Role::Assistant,
                     content: content_blocks,
                 });
@@ -7261,8 +7659,7 @@ impl App {
                     dm.title = tool_title;
                 }
 
-                self.messages
-                    .push(Message::tool_result(&tc.id, &output, is_error));
+                self.add_provider_message(Message::tool_result(&tc.id, &output, is_error));
                 self.session.add_message(
                     Role::User,
                     vec![ContentBlock::ToolResult {
@@ -7306,9 +7703,14 @@ impl App {
                 return Ok(());
             }
 
+            let (provider_messages, compaction_event) = self.messages_for_provider();
+            if let Some(event) = compaction_event {
+                self.handle_compaction_event(event);
+            }
+
             let tools = self.registry.definitions(None).await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
-            let memory_prompt = self.build_memory_prompt_nonblocking(&self.messages);
+            let memory_prompt = self.build_memory_prompt_nonblocking(&provider_messages);
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split(memory_prompt.as_deref());
 
@@ -7317,14 +7719,14 @@ impl App {
 
             crate::logging::info(&format!(
                 "TUI: API call starting ({} messages)",
-                self.messages.len()
+                provider_messages.len()
             ));
             let api_start = std::time::Instant::now();
 
             // Clone data needed for the API call to avoid borrow issues
             // The future would hold references across the select! which conflicts with handle_key
             let provider = self.provider.clone();
-            let messages_clone = self.messages.clone();
+            let messages_clone = provider_messages.clone();
             let session_id_clone = self.provider_session_id.clone();
             let static_part = split_prompt.static_part.clone();
             let dynamic_part = split_prompt.dynamic_part.clone();
@@ -7462,7 +7864,7 @@ impl App {
                                             }
                                             // Add partial assistant response to messages
                                             if !content_blocks.is_empty() {
-                                                self.messages.push(Message {
+                                                self.add_provider_message(Message {
                                                     role: Role::Assistant,
                                                     content: content_blocks,
                                                 });
@@ -7481,7 +7883,7 @@ impl App {
                                             }
                                         }
                                         // Add user's interleaved message
-                                        self.messages.push(Message::user(&interleave_msg));
+                                        self.add_provider_message(Message::user(&interleave_msg));
                                         self.push_display_message(DisplayMessage {
                                             role: "user".to_string(),
                                             content: interleave_msg,
@@ -7799,7 +8201,7 @@ impl App {
 
             let assistant_message_id = if !content_blocks.is_empty() {
                 let content_clone = content_blocks.clone();
-                self.messages.push(Message {
+                self.add_provider_message(Message {
                     role: Role::Assistant,
                     content: content_blocks,
                 });
@@ -7895,7 +8297,7 @@ impl App {
                         dm.title = None;
                     }
 
-                    self.messages.push(Message {
+                    self.add_provider_message(Message {
                         role: Role::User,
                         content: vec![ContentBlock::ToolResult {
                             tool_use_id: tc.id.clone(),
@@ -8028,8 +8430,7 @@ impl App {
                     dm.title = tool_title;
                 }
 
-                self.messages
-                    .push(Message::tool_result(&tc.id, &output, is_error));
+                self.add_provider_message(Message::tool_result(&tc.id, &output, is_error));
                 self.session.add_message(
                     Role::User,
                     vec![ContentBlock::ToolResult {
@@ -8096,7 +8497,7 @@ impl App {
     /// Get memory prompt using async non-blocking approach
     /// Takes any pending memory from background check and sends context to memory agent for next turn
     fn build_memory_prompt_nonblocking(&self, messages: &[Message]) -> Option<String> {
-        if self.is_remote {
+        if self.is_remote || !self.memory_enabled {
             return None;
         }
 
@@ -8130,7 +8531,7 @@ impl App {
     /// Extract and store memories from the session transcript at end of session
     async fn extract_session_memories(&self) {
         // Skip if remote mode or not enough messages
-        if self.is_remote || self.messages.len() < 4 {
+        if self.is_remote || !self.memory_enabled || self.messages.len() < 4 {
             return;
         }
 
@@ -8365,6 +8766,7 @@ impl App {
         // Built-in commands
         let mut commands: Vec<(String, &'static str)> = vec![
             ("/help".into(), "Show help and keyboard shortcuts"),
+            ("/commands".into(), "Alias for /help"),
             ("/model".into(), "List or switch models"),
             ("/clear".into(), "Clear conversation history"),
             ("/rewind".into(), "Rewind conversation to previous message"),
@@ -8376,6 +8778,8 @@ impl App {
                 "/remember".into(),
                 "Extract and save memories from conversation",
             ),
+            ("/memory".into(), "Toggle memory feature (on/off/status)"),
+            ("/swarm".into(), "Toggle swarm feature (on/off/status)"),
             ("/version".into(), "Show current version"),
             ("/info".into(), "Show session info and tokens"),
             ("/reload".into(), "Smart reload (if newer binary exists)"),
@@ -9306,7 +9710,7 @@ impl super::TuiState for App {
         };
 
         // Gather memory info
-        let memory_info = {
+        let memory_info = if self.memory_enabled {
             use crate::memory::MemoryManager;
 
             let manager = MemoryManager::new();
@@ -9360,10 +9764,12 @@ impl super::TuiState for App {
             } else {
                 None
             }
+        } else {
+            None
         };
 
         // Gather swarm info
-        let swarm_info = {
+        let swarm_info = if self.swarm_enabled {
             let subagent_status = self.subagent_status.clone();
             let mut members: Vec<crate::protocol::SwarmMemberStatus> = Vec::new();
             let (session_count, client_count, session_names, has_activity) = if self.is_remote {
@@ -9439,11 +9845,13 @@ impl super::TuiState for App {
             } else {
                 None
             }
+        } else {
+            None
         };
 
         // Gather background task info
         let background_info = {
-            let memory_agent_active = crate::memory_agent::is_active();
+            let memory_agent_active = self.memory_enabled && crate::memory_agent::is_active();
 
             // Get running background tasks count
             let bg_manager = crate::background::global();
@@ -9717,6 +10125,66 @@ mod tests {
         app.queue_mode = false;
         app.show_diffs = true;
         app
+    }
+
+    #[test]
+    fn test_help_topic_shows_command_details() {
+        let mut app = create_test_app();
+        app.input = "/help compact".to_string();
+        app.submit_input();
+
+        let msg = app
+            .display_messages()
+            .last()
+            .expect("missing help response");
+        assert_eq!(msg.role, "system");
+        assert!(msg.content.contains("`/compact`"));
+        assert!(msg.content.contains("background"));
+    }
+
+    #[test]
+    fn test_commands_alias_shows_help() {
+        let mut app = create_test_app();
+        app.input = "/commands".to_string();
+        app.submit_input();
+
+        let msg = app
+            .display_messages()
+            .last()
+            .expect("missing help response");
+        assert_eq!(msg.role, "system");
+        assert!(msg.content.contains("**Commands:**"));
+    }
+
+    #[test]
+    fn test_rewind_truncates_provider_messages() {
+        let mut app = create_test_app();
+
+        for idx in 1..=3 {
+            let text = format!("msg-{}", idx);
+            app.add_provider_message(Message::user(&text));
+            app.session.add_message(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text,
+                    cache_control: None,
+                }],
+            );
+        }
+        app.provider_session_id = Some("provider-session".to_string());
+        app.session.provider_session_id = Some("provider-session".to_string());
+
+        app.input = "/rewind 2".to_string();
+        app.submit_input();
+
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.session.messages.len(), 2);
+        assert!(matches!(
+            &app.messages[1].content[0],
+            ContentBlock::Text { text, .. } if text == "msg-2"
+        ));
+        assert!(app.provider_session_id.is_none());
+        assert!(app.session.provider_session_id.is_none());
     }
 
     #[test]
