@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::message::ToolCall;
+use crate::plan::PlanItem;
 
 /// A message in conversation history (for sync)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +108,14 @@ pub enum Request {
     #[serde(rename = "set_model")]
     SetModel { id: u64, model: String },
 
+    /// Toggle a runtime feature for this session
+    #[serde(rename = "set_feature")]
+    SetFeature {
+        id: u64,
+        feature: FeatureToggle,
+        enabled: bool,
+    },
+
     // === Agent-to-agent communication ===
     /// Register as an external agent
     #[serde(rename = "agent_register")]
@@ -172,6 +181,14 @@ pub enum Request {
     #[serde(rename = "comm_list")]
     CommList { id: u64, session_id: String },
 
+    /// Propose a swarm plan update
+    #[serde(rename = "comm_propose_plan")]
+    CommProposePlan {
+        id: u64,
+        session_id: String,
+        items: Vec<PlanItem>,
+    },
+
     /// Approve a plan proposal (coordinator only)
     #[serde(rename = "comm_approve_plan")]
     CommApprovePlan {
@@ -236,7 +253,7 @@ pub enum Request {
         target_session: String,
     },
 
-    /// Re-sync the swarm plan to this session
+    /// Attach/resync this session with the swarm plan
     #[serde(rename = "comm_resync_plan")]
     CommResyncPlan { id: u64, session_id: String },
 
@@ -339,6 +356,15 @@ pub enum ServerEvent {
     MemoryInjected {
         /// Number of memories injected
         count: usize,
+        /// Exact memory content that was injected
+        #[serde(default)]
+        prompt: String,
+        /// Character length of injected content
+        #[serde(default)]
+        prompt_chars: usize,
+        /// Age of the precomputed memory payload at injection time
+        #[serde(default)]
+        computed_age_ms: u64,
     },
 
     /// Message/turn completed
@@ -587,6 +613,14 @@ pub enum NotificationType {
     },
 }
 
+/// Runtime feature names that can be toggled per session
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FeatureToggle {
+    Memory,
+    Swarm,
+}
+
 impl Request {
     pub fn id(&self) -> u64 {
         match self {
@@ -605,6 +639,7 @@ impl Request {
             Request::ResumeSession { id, .. } => *id,
             Request::CycleModel { id, .. } => *id,
             Request::SetModel { id, .. } => *id,
+            Request::SetFeature { id, .. } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,
             Request::AgentCapabilities { id } => *id,
@@ -613,6 +648,7 @@ impl Request {
             Request::CommRead { id, .. } => *id,
             Request::CommMessage { id, .. } => *id,
             Request::CommList { id, .. } => *id,
+            Request::CommProposePlan { id, .. } => *id,
             Request::CommApprovePlan { id, .. } => *id,
             Request::CommRejectPlan { id, .. } => *id,
             Request::CommSpawn { id, .. } => *id,
@@ -669,6 +705,32 @@ mod tests {
         match decoded {
             ServerEvent::TextDelta { text } => assert_eq!(text, "hello"),
             _ => panic!("wrong event type"),
+        }
+    }
+
+    #[test]
+    fn test_comm_propose_plan_roundtrip() {
+        let req = Request::CommProposePlan {
+            id: 42,
+            session_id: "sess_a".to_string(),
+            items: vec![PlanItem {
+                content: "Refactor parser".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                id: "p1".to_string(),
+                blocked_by: vec!["p0".to_string()],
+                assigned_to: Some("sess_b".to_string()),
+            }],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.id(), 42);
+        match decoded {
+            Request::CommProposePlan { items, .. } => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].id, "p1");
+            }
+            _ => panic!("wrong request type"),
         }
     }
 }

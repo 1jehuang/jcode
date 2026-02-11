@@ -8,6 +8,7 @@
 - **Rebuild and install when done** - Run `cargo build --release && scripts/install_release.sh`
 - **Test before committing** - Run `cargo test` to verify changes
 - **Bump version for releases** - Update version in `Cargo.toml` when making releases
+- **Remote builds available** - Use `scripts/remote_build.sh` to offload cargo work to another machine
 
 ## Versioning
 
@@ -46,6 +47,10 @@ kitten @ --to unix:$sock launch --type=os-window ./target/release/jcode
 cargo build --release && scripts/install_release.sh  # Build and install (versioned + symlink)
 cargo test              # Run all tests
 cargo test --test e2e   # Run only e2e tests
+scripts/remote_build.sh --release  # Build on remote machine, sync binary back
+scripts/remote_build.sh test       # Run tests on remote machine
+JCODE_REMOTE_CARGO=1 scripts/test_e2e.sh   # Route helper script cargo commands remotely
+JCODE_REMOTE_CARGO=1 scripts/agent_trace.sh # Route helper script build remotely
 ```
 
 ## Logs
@@ -226,8 +231,8 @@ Commands can be namespaced with `server:`, `client:`, or `tester:` prefixes. Unn
 | `swarm:info:<swarm_id>` | Full info: members, coordinator, plan, context, conflicts |
 | `swarm:coordinators` | List all coordinators (swarm_id -> session_id) |
 | `swarm:coordinator:<swarm_id>` | Get coordinator for specific swarm |
-| `swarm:plans` | List all swarm plans with todo counts |
-| `swarm:plan:<swarm_id>` | Get todos for specific swarm |
+| `swarm:plans` | List all swarm plans with item counts and participants |
+| `swarm:plan:<swarm_id>` | Get plan items for specific swarm |
 | `swarm:proposals` | List all pending plan proposals |
 | `swarm:proposals:<swarm_id>` | List proposals for specific swarm (with items) |
 | `swarm:proposals:<session_id>` | Get detailed proposal from a session |

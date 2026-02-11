@@ -19,6 +19,7 @@ mod memory_agent;
 mod memory_graph;
 mod message;
 mod notifications;
+mod plan;
 mod prompt;
 mod protocol;
 mod provider;
@@ -82,6 +83,20 @@ fn install_panic_hook() {
     }));
 }
 
+fn mark_current_session_crashed(message: String) {
+    if let Ok(guard) = CURRENT_SESSION_ID.lock() {
+        if let Some(session_id) = guard.as_ref() {
+            if let Ok(mut session) = session::Session::load(session_id) {
+                // Don't overwrite an explicit clean shutdown status.
+                if matches!(session.status, session::SessionStatus::Active) {
+                    session.mark_crashed(Some(message));
+                    let _ = session.save();
+                }
+            }
+        }
+    }
+}
+
 fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
@@ -125,6 +140,56 @@ fn signal_name(sig: i32) -> &'static str {
 fn signal_name(_sig: i32) -> &'static str {
     "unknown"
 }
+
+#[cfg(unix)]
+fn signal_crash_reason(sig: i32) -> String {
+    match sig {
+        libc::SIGHUP => "Terminal or window closed (SIGHUP)".to_string(),
+        libc::SIGTERM => "Terminated (SIGTERM)".to_string(),
+        libc::SIGINT => "Interrupted (SIGINT)".to_string(),
+        libc::SIGQUIT => "Quit signal (SIGQUIT)".to_string(),
+        _ => format!("Terminated by signal {} ({})", signal_name(sig), sig),
+    }
+}
+
+#[cfg(unix)]
+fn handle_termination_signal(sig: i32) -> ! {
+    mark_current_session_crashed(signal_crash_reason(sig));
+    std::process::exit(128 + sig);
+}
+
+#[cfg(unix)]
+fn spawn_session_signal_watchers() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    fn spawn_one(sig: i32, kind: SignalKind) {
+        tokio::spawn(async move {
+            let mut stream = match signal(kind) {
+                Ok(s) => s,
+                Err(e) => {
+                    crate::logging::error(&format!(
+                        "Failed to install {} handler: {}",
+                        signal_name(sig),
+                        e
+                    ));
+                    return;
+                }
+            };
+            if stream.recv().await.is_some() {
+                crate::logging::info(&format!("Received {} in TUI process", signal_name(sig)));
+                handle_termination_signal(sig);
+            }
+        });
+    }
+
+    spawn_one(libc::SIGHUP, SignalKind::hangup());
+    spawn_one(libc::SIGTERM, SignalKind::terminate());
+    spawn_one(libc::SIGINT, SignalKind::interrupt());
+    spawn_one(libc::SIGQUIT, SignalKind::quit());
+}
+
+#[cfg(not(unix))]
+fn spawn_session_signal_watchers() {}
 
 #[derive(Debug, Clone, ValueEnum)]
 enum ProviderChoice {
@@ -261,6 +326,9 @@ enum Command {
     /// Ambient mode management
     #[command(subcommand)]
     Ambient(AmbientCommand),
+
+    /// Review and respond to pending ambient permission requests
+    Permissions,
 }
 
 #[derive(Subcommand, Debug)]
@@ -489,6 +557,9 @@ async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Ambient(subcmd)) => {
             run_ambient_command(subcmd).await?;
         }
+        Some(Command::Permissions) => {
+            tui::permissions::run_permissions()?;
+        }
         None => {
             // Auto-detect jcode repo and enable self-dev mode
             let cwd = std::env::current_dir()?;
@@ -682,6 +753,7 @@ async fn run_tui(
 
     // Set current session for panic recovery
     set_current_session(app.session_id());
+    spawn_session_signal_watchers();
 
     // Save session info before running (for resume message)
     let session_id = app.session_id().to_string();
@@ -745,6 +817,12 @@ fn hot_reload(session_id: &str) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
     let cwd = std::env::current_dir()?;
+    let in_selfdev = std::env::var("JCODE_SELFDEV_MODE").is_ok()
+        || std::env::var("JCODE_SOCKET")
+            .ok()
+            .as_deref()
+            .map(|p| p == SELFDEV_SOCKET)
+            .unwrap_or(false);
 
     // Check if this is a migration to a specific binary (auto-migration to stable)
     if let Ok(migrate_binary) = std::env::var("JCODE_MIGRATE_BINARY") {
@@ -766,8 +844,23 @@ fn hot_reload(session_id: &str) -> Result<()> {
         }
     }
 
-    // Get the binary path - prefer repo release if available
-    let exe = if let Some(repo_dir) = get_repo_dir() {
+    // Pick binary based on mode:
+    // - self-dev: prefer canary symlink so /reload converges to tested canary.
+    // - normal: prefer repo release binary, then PATH/current.
+    let exe = if in_selfdev {
+        crate::build::canary_binary_path()
+            .ok()
+            .filter(|p| p.exists())
+            .or_else(|| {
+                get_repo_dir().and_then(|repo_dir| {
+                    let candidate = repo_dir.join("target/release/jcode");
+                    candidate.exists().then_some(candidate)
+                })
+            })
+            .or_else(crate::build::jcode_path_in_path)
+            .or_else(|| std::env::current_exe().ok())
+            .ok_or_else(|| anyhow::anyhow!("No reloadable binary found for self-dev mode"))?
+    } else if let Some(repo_dir) = get_repo_dir() {
         let candidate = repo_dir.join("target/release/jcode");
         if candidate.exists() {
             candidate
@@ -1652,6 +1745,11 @@ async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
     }
 
+    if let Some(ref session_id) = resume_session {
+        set_current_session(session_id);
+    }
+    spawn_session_signal_watchers();
+
     // Use App in remote mode - same UI, connects to server
     let app = tui::App::new_for_remote(resume_session).await;
     let result = app.run_remote(terminal).await;
@@ -2228,6 +2326,8 @@ async fn run_canary_wrapper(
         .unwrap_or_else(|| session_id.to_string());
 
     eprintln!("Starting TUI client...");
+    set_current_session(session_id);
+    spawn_session_signal_watchers();
 
     // Run client TUI
     let terminal = init_tui_terminal()?;

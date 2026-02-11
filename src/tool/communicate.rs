@@ -1,4 +1,5 @@
 use super::{Tool, ToolContext, ToolOutput};
+use crate::plan::PlanItem;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -80,6 +81,8 @@ struct CommunicateInput {
     limit: Option<usize>,
     #[serde(default)]
     task_id: Option<String>,
+    #[serde(default)]
+    plan_items: Option<Vec<PlanItem>>,
 }
 
 #[async_trait]
@@ -98,6 +101,7 @@ impl Tool for CommunicateTool {
          - \"dm\": Send a direct message to a specific session.\n\
          - \"channel\": Send a message to a named channel in this swarm.\n\
          - \"list\": See who else is working in this codebase and what files they've touched.\n\
+         - \"propose_plan\": Propose plan items to the swarm coordinator.\n\
          - \"approve_plan\": (Coordinator only) Approve a plan proposal from another agent.\n\
          - \"reject_plan\": (Coordinator only) Reject a plan proposal with an optional reason.\n\
          - \"spawn\": (Coordinator only) Spawn a new agent session.\n\
@@ -105,7 +109,7 @@ impl Tool for CommunicateTool {
          - \"assign_role\": (Coordinator only) Assign a role to an agent.\n\
          - \"summary\": Get a summary of another agent's recent tool calls.\n\
          - \"read_context\": Read another agent's full conversation context.\n\
-         - \"resync_plan\": Re-sync the swarm plan to your session.\n\
+         - \"resync_plan\": Attach your session to the current swarm plan and re-sync.\n\
          - \"assign_task\": (Coordinator only) Assign a plan task to a specific agent.\n\
          - \"subscribe_channel\": Subscribe to a named channel.\n\
          - \"unsubscribe_channel\": Unsubscribe from a named channel."
@@ -119,7 +123,7 @@ impl Tool for CommunicateTool {
                 "action": {
                     "type": "string",
                     "enum": ["share", "read", "message", "broadcast", "dm", "channel", "list",
-                             "approve_plan", "reject_plan", "spawn", "stop", "assign_role",
+                             "propose_plan", "approve_plan", "reject_plan", "spawn", "stop", "assign_role",
                              "summary", "read_context", "resync_plan", "assign_task",
                              "subscribe_channel", "unsubscribe_channel"],
                     "description": "The communication action to perform"
@@ -176,6 +180,41 @@ impl Tool for CommunicateTool {
                 "task_id": {
                     "type": "string",
                     "description": "For 'assign_task': the ID of the task in the swarm plan to assign."
+                },
+                "plan_items": {
+                    "type": "array",
+                    "description": "For 'propose_plan': plan items to propose to the coordinator.",
+                    "items": {
+                        "type": "object",
+                        "required": ["content", "status", "priority", "id"],
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "description": "Brief description of the plan item"
+                            },
+                            "status": {
+                                "type": "string",
+                                "description": "queued, running, done, blocked, failed, etc."
+                            },
+                            "priority": {
+                                "type": "string",
+                                "description": "high, medium, low"
+                            },
+                            "id": {
+                                "type": "string",
+                                "description": "Unique identifier for the plan item"
+                            },
+                            "blocked_by": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional item IDs this item depends on"
+                            },
+                            "assigned_to": {
+                                "type": "string",
+                                "description": "Optional session ID owner"
+                            }
+                        }
+                    }
                 }
             }
         })
@@ -387,6 +426,42 @@ impl Tool for CommunicateTool {
                         }
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to list agents: {}", e)),
+                }
+            }
+
+            "propose_plan" => {
+                let items = params.plan_items.ok_or_else(|| {
+                    anyhow::anyhow!("'plan_items' is required for propose_plan action")
+                })?;
+                if items.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "'plan_items' must include at least one item"
+                    ));
+                }
+                let item_count = items.len();
+
+                let request = json!({
+                    "type": "comm_propose_plan",
+                    "id": 1,
+                    "session_id": ctx.session_id,
+                    "items": items
+                });
+
+                match send_request(&request) {
+                    Ok(response) => {
+                        if let Some(err) = check_error(&response) {
+                            return Err(anyhow::anyhow!("{}", err));
+                        }
+                        let response_count = response
+                            .get("item_count")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(item_count as u64);
+                        Ok(ToolOutput::new(format!(
+                            "Plan proposal submitted ({} items).",
+                            response_count
+                        )))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to propose plan: {}", e)),
                 }
             }
 
