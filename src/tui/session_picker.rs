@@ -19,6 +19,7 @@ use ratatui::{
     Frame,
 };
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::time::Duration;
 
 /// Session info for display
@@ -1075,7 +1076,22 @@ impl SessionPicker {
 
     /// Run the interactive picker, returns selected session ID or None if cancelled
     pub fn run(mut self) -> Result<Option<PickerResult>> {
-        let mut terminal = ratatui::init();
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            anyhow::bail!(
+                "session picker requires an interactive terminal (stdin/stdout must be a TTY)"
+            );
+        }
+        let mut terminal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init))
+            .map_err(|payload| {
+                let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else if let Some(s) = payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic payload".to_string()
+                };
+                anyhow::anyhow!("failed to initialize session picker terminal: {}", msg)
+            })?;
         // Initialize mermaid image picker (queries terminal for graphics protocol support)
         super::mermaid::init_picker();
         let keyboard_enhanced = super::enable_keyboard_enhancement();
