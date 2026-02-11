@@ -5,6 +5,7 @@
 //! In left-aligned mode, widgets only appear on the right margin.
 
 use crate::ambient::AmbientStatus;
+use crate::memory_graph::EdgeKind;
 use crate::prompt::ContextInfo;
 use crate::protocol::SwarmMemberStatus;
 use crate::provider::DEFAULT_CONTEXT_LIMIT;
@@ -13,7 +14,6 @@ use ratatui::{
     prelude::*,
     widgets::{Block, BorderType, Borders, Paragraph},
 };
-use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -23,7 +23,7 @@ use std::time::Instant;
 pub fn build_graph_topology(
     project: Option<&crate::memory_graph::MemoryGraph>,
     global: Option<&crate::memory_graph::MemoryGraph>,
-) -> (Vec<GraphNode>, Vec<(usize, usize)>) {
+) -> (Vec<GraphNode>, Vec<GraphEdge>) {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
     let mut id_to_idx: HashMap<String, usize> = HashMap::new();
@@ -43,7 +43,12 @@ pub fn build_graph_topology(
                 let idx = nodes.len();
                 id_to_idx.insert(id.clone(), idx);
                 nodes.push(GraphNode {
+                    id: id.clone(),
+                    label: truncate_smart(&entry.content, 30),
                     kind: entry.category.to_string(),
+                    is_memory: true,
+                    is_active: entry.active,
+                    confidence: entry.effective_confidence(),
                     degree: 0,
                 });
             }
@@ -54,9 +59,43 @@ pub fn build_graph_topology(
         for id in tag_ids {
             if !id_to_idx.contains_key(id) {
                 let idx = nodes.len();
+                let label = graph
+                    .tags
+                    .get(id)
+                    .map(|tag| truncate_smart(&tag.name, 22))
+                    .unwrap_or_else(|| id.trim_start_matches("tag:").to_string());
                 id_to_idx.insert(id.clone(), idx);
                 nodes.push(GraphNode {
+                    id: id.clone(),
+                    label,
                     kind: "tag".to_string(),
+                    is_memory: false,
+                    is_active: true,
+                    confidence: 1.0,
+                    degree: 0,
+                });
+            }
+        }
+
+        let mut cluster_ids: Vec<&String> = graph.clusters.keys().collect();
+        cluster_ids.sort();
+        for id in cluster_ids {
+            if !id_to_idx.contains_key(id) {
+                let idx = nodes.len();
+                let label = graph
+                    .clusters
+                    .get(id)
+                    .and_then(|cluster| cluster.name.clone())
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| id.trim_start_matches("cluster:").to_string());
+                id_to_idx.insert(id.clone(), idx);
+                nodes.push(GraphNode {
+                    id: id.clone(),
+                    label: truncate_smart(&label, 22),
+                    kind: "cluster".to_string(),
+                    is_memory: false,
+                    is_active: true,
+                    confidence: 1.0,
                     degree: 0,
                 });
             }
@@ -64,6 +103,7 @@ pub fn build_graph_topology(
     }
 
     // Collect edges (sort for deterministic order)
+    let mut edge_seen: HashSet<(usize, usize, String)> = HashSet::new();
     for graph in &graphs {
         let mut edge_src_ids: Vec<&String> = graph.edges.keys().collect();
         edge_src_ids.sort();
@@ -72,12 +112,26 @@ pub fn build_graph_topology(
             let Some(&src_idx) = id_to_idx.get(src_id) else {
                 continue;
             };
-            for edge in edge_list {
+            let mut sorted_edges = edge_list.clone();
+            sorted_edges.sort_by(|a, b| {
+                a.target
+                    .cmp(&b.target)
+                    .then_with(|| edge_kind_name(&a.kind).cmp(edge_kind_name(&b.kind)))
+            });
+            for edge in sorted_edges {
                 let Some(&tgt_idx) = id_to_idx.get(&edge.target) else {
                     continue;
                 };
                 if src_idx != tgt_idx {
-                    edges.push((src_idx, tgt_idx));
+                    let kind = edge_kind_name(&edge.kind).to_string();
+                    if !edge_seen.insert((src_idx, tgt_idx, kind.clone())) {
+                        continue;
+                    }
+                    edges.push(GraphEdge {
+                        source: src_idx,
+                        target: tgt_idx,
+                        kind,
+                    });
                     if src_idx < nodes.len() {
                         nodes[src_idx].degree += 1;
                     }
@@ -89,17 +143,20 @@ pub fn build_graph_topology(
         }
     }
 
-    // If too many nodes, sample the most connected ones + some random
-    let max_nodes = 40;
+    // Bound topology size for stable redraw cost while preserving enough
+    // neighborhood signal for contextual subgraph selection.
+    let max_nodes = 96;
     if nodes.len() > max_nodes {
-        // Sort indices by degree (most connected first)
         let mut indices: Vec<usize> = (0..nodes.len()).collect();
-        indices.sort_by(|&a, &b| nodes[b].degree.cmp(&nodes[a].degree));
+        indices.sort_by(|&a, &b| {
+            graph_node_score(&nodes[b])
+                .partial_cmp(&graph_node_score(&nodes[a]))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.cmp(&a))
+        });
 
-        // Take top connected nodes
-        let keep: std::collections::HashSet<usize> = indices.into_iter().take(max_nodes).collect();
+        let keep: HashSet<usize> = indices.into_iter().take(max_nodes).collect();
 
-        // Rebuild with only kept nodes
         let mut new_nodes = Vec::new();
         let mut old_to_new: HashMap<usize, usize> = HashMap::new();
         for old_idx in 0..nodes.len() {
@@ -110,12 +167,16 @@ pub fn build_graph_topology(
             }
         }
 
-        let new_edges: Vec<(usize, usize)> = edges
+        let new_edges: Vec<GraphEdge> = edges
             .iter()
-            .filter_map(|&(a, b)| {
-                let na = old_to_new.get(&a)?;
-                let nb = old_to_new.get(&b)?;
-                Some((*na, *nb))
+            .filter_map(|edge| {
+                let na = old_to_new.get(&edge.source)?;
+                let nb = old_to_new.get(&edge.target)?;
+                Some(GraphEdge {
+                    source: *na,
+                    target: *nb,
+                    kind: edge.kind.clone(),
+                })
             })
             .collect();
 
@@ -123,6 +184,23 @@ pub fn build_graph_topology(
     }
 
     (nodes, edges)
+}
+
+fn edge_kind_name(kind: &EdgeKind) -> &'static str {
+    match kind {
+        EdgeKind::HasTag => "has_tag",
+        EdgeKind::InCluster => "in_cluster",
+        EdgeKind::RelatesTo { .. } => "relates_to",
+        EdgeKind::Supersedes => "supersedes",
+        EdgeKind::Contradicts => "contradicts",
+        EdgeKind::DerivedFrom => "derived_from",
+    }
+}
+
+fn graph_node_score(node: &GraphNode) -> f32 {
+    let memory_bias = if node.is_memory { 2.0 } else { 0.0 };
+    let active_bias = if node.is_active { 1.0 } else { 0.0 };
+    node.degree as f32 + memory_bias + active_bias + node.confidence * 2.0
 }
 
 /// Types of info widgets that can be displayed
@@ -377,17 +455,38 @@ pub struct MemoryInfo {
     pub activity: Option<MemoryActivity>,
     /// Graph topology for visualization (node positions + edges)
     pub graph_nodes: Vec<GraphNode>,
-    /// Edges as (source_index, target_index) into graph_nodes
-    pub graph_edges: Vec<(usize, usize)>,
+    /// Directed edges into graph_nodes
+    pub graph_edges: Vec<GraphEdge>,
 }
 
 /// A node in the mini graph visualization
 #[derive(Debug, Clone)]
 pub struct GraphNode {
+    /// Stable node ID from memory graph (mem:*, tag:*, cluster:*)
+    pub id: String,
+    /// Human-readable display label
+    pub label: String,
     /// Category: "fact", "preference", "correction", "tag"
     pub kind: String,
+    /// Whether this node is a memory (vs tag/cluster)
+    pub is_memory: bool,
+    /// Whether this node is active (superseded memories are inactive)
+    pub is_active: bool,
+    /// Effective confidence score (0.0-1.0)
+    pub confidence: f32,
     /// Number of connections (degree)
     pub degree: usize,
+}
+
+/// A directed edge in the memory graph visualization
+#[derive(Debug, Clone)]
+pub struct GraphEdge {
+    /// Source index into MemoryInfo::graph_nodes
+    pub source: usize,
+    /// Target index into MemoryInfo::graph_nodes
+    pub target: usize,
+    /// Edge kind (has_tag, supersedes, contradicts, ...)
+    pub kind: String,
 }
 
 /// Represents current memory system activity
@@ -844,10 +943,30 @@ pub fn calculate_placements(
                 .all(|row| widths[row] + STICKY_WIDTH_TOLERANCE >= prev.rect.width);
 
         if still_fits {
-            // Keep the widget at the exact same position — x, y, width all preserved.
-            // The widget is anchored to the edge; only a side panel change (which
-            // invalidates the position entirely) should move it horizontally.
-            placements.push(prev.clone());
+            // Keep the same rows/side, but clamp width to the current actual margin.
+            // This preserves sticky positioning without allowing text overlap.
+            let actual_fit_width = widths[row_start..row_end]
+                .iter()
+                .copied()
+                .min()
+                .unwrap_or(0)
+                .min(MAX_WIDGET_WIDTH);
+            if actual_fit_width < MIN_WIDGET_WIDTH {
+                continue;
+            }
+            let kept_width = prev.rect.width.min(actual_fit_width);
+            let kept_x = match prev.side {
+                Side::Right => messages_area
+                    .x
+                    .saturating_add(messages_area.width)
+                    .saturating_sub(kept_width),
+                Side::Left => messages_area.x,
+            };
+            placements.push(WidgetPlacement {
+                kind: prev.kind,
+                rect: Rect::new(kept_x, prev.rect.y, kept_width, prev.rect.height),
+                side: prev.side,
+            });
             kept.insert(prev.kind);
 
             // Remove the kept widget's rows from available rects so greedy placement
@@ -1018,8 +1137,11 @@ fn calculate_widget_height(
                 return 0;
             };
             let mut h = 1u16; // Title
-            if !info.graph_nodes.is_empty() {
-                h += 6.min(max_height.saturating_sub(border_height + 2)); // Graph rows
+            if info.total_count > 0 {
+                h += 1; // Project/global + topology summary
+                if !info.by_category.is_empty() {
+                    h += 1; // Category summary
+                }
             }
             if info.activity.is_some() {
                 h += 1; // State line
@@ -1247,11 +1369,6 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
         render_overview_widget(frame, inner, data);
         return;
     }
-    if placement.kind == WidgetKind::MemoryActivity {
-        render_memory_widget_with_mermaid(frame, inner, data);
-        return;
-    }
-
     let lines = render_widget_content(placement.kind, data, inner);
     let para = Paragraph::new(lines);
     frame.render_widget(para, inner);
@@ -1336,157 +1453,168 @@ fn render_overview_widget(frame: &mut Frame, inner: Rect, data: &InfoWidgetData)
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-const MEMORY_MERMAID_MAX_NODES: usize = 16;
-const MEMORY_MERMAID_MAX_TOTAL_MEMORIES: usize = 80;
+const MEMORY_TEXT_SUBGRAPH_MAX_NODES: usize = 8;
+const MEMORY_TEXT_SUBGRAPH_MAX_EDGES: usize = 10;
 
-fn render_memory_widget_with_mermaid(frame: &mut Frame, inner: Rect, data: &InfoWidgetData) {
-    let Some(info) = &data.memory_info else {
-        return;
-    };
-    if info.total_count == 0 && info.activity.is_none() {
-        return;
-    }
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let mut lines = render_memory_widget(data, inner);
-    if lines.is_empty() {
-        return;
-    }
-
-    let title_line = lines.remove(0);
-    let activity_lines = lines;
-
-    // Title row.
-    let title_rect = Rect::new(inner.x, inner.y, inner.width, 1);
-    frame.render_widget(Paragraph::new(vec![title_line]), title_rect);
-
-    let activity_height = (activity_lines.len() as u16).min(inner.height.saturating_sub(1));
-    let graph_height = inner.height.saturating_sub(1 + activity_height);
-    let prefer_custom_graph = info.total_count > MEMORY_MERMAID_MAX_TOTAL_MEMORIES;
-
-    if graph_height > 0 && !info.graph_nodes.is_empty() {
-        let graph_rect = Rect::new(inner.x, inner.y + 1, inner.width, graph_height);
-        let rendered_image = if prefer_custom_graph {
-            false
-        } else {
-            render_memory_mermaid_graph(frame, graph_rect, info)
-        };
-        if !rendered_image {
-            // Fallback for terminals without image protocol support.
-            let fallback = render_mini_graph(info, graph_rect.width, graph_rect.height);
-            if !fallback.is_empty() {
-                frame.render_widget(Paragraph::new(fallback), graph_rect);
-            }
-        }
-    }
-
-    if activity_height > 0 {
-        let start = activity_lines
-            .len()
-            .saturating_sub(activity_height as usize);
-        let activity_rect = Rect::new(
-            inner.x,
-            inner.y + inner.height.saturating_sub(activity_height),
-            inner.width,
-            activity_height,
-        );
-        frame.render_widget(
-            Paragraph::new(activity_lines[start..].to_vec()),
-            activity_rect,
-        );
-    }
+#[derive(Debug, Clone)]
+struct MemorySubgraph {
+    nodes: Vec<GraphNode>,
+    edges: Vec<GraphEdge>,
 }
 
-fn render_memory_mermaid_graph(frame: &mut Frame, graph_rect: Rect, info: &MemoryInfo) -> bool {
-    if graph_rect.width < 6 || graph_rect.height < 3 || info.graph_nodes.is_empty() {
-        return false;
-    }
-
-    let Some(diagram) = build_memory_graph_mermaid(info, MEMORY_MERMAID_MAX_NODES) else {
-        return false;
-    };
-
-    match super::mermaid::render_mermaid_untracked(&diagram, Some(graph_rect.width)) {
-        super::mermaid::RenderResult::Image { hash, .. } => {
-            // Scale to fit the tiny widget so we show the full graph shape
-            // instead of a clipped top slice.
-            super::mermaid::render_image_widget_fit(
-                hash,
-                graph_rect,
-                frame.buffer_mut(),
-                false,
-                false,
-            ) > 0
-        }
-        super::mermaid::RenderResult::Error(_) => false,
-    }
-}
-
-fn build_memory_graph_mermaid(info: &MemoryInfo, max_nodes: usize) -> Option<String> {
+fn select_contextual_subgraph(
+    info: &MemoryInfo,
+    max_nodes: usize,
+    max_edges: usize,
+) -> Option<MemorySubgraph> {
     if info.graph_nodes.is_empty() || max_nodes == 0 {
         return None;
     }
 
-    let mut selected: Vec<usize> = (0..info.graph_nodes.len()).collect();
-    if selected.len() > max_nodes {
-        selected.sort_by_key(|&idx| (Reverse(info.graph_nodes[idx].degree), idx));
-        selected.truncate(max_nodes);
-        selected.sort_unstable();
-    }
+    let node_count = info.graph_nodes.len();
+    let center_idx = pick_subgraph_center(info)?;
+    let mut neighbors: Vec<Vec<(usize, usize)>> = vec![Vec::new(); node_count];
 
-    let mut old_to_new: HashMap<usize, usize> = HashMap::new();
-    for (new_idx, old_idx) in selected.iter().copied().enumerate() {
-        old_to_new.insert(old_idx, new_idx);
-    }
-
-    let mut kind_counts: HashMap<String, usize> = HashMap::new();
-    let mut lines = Vec::with_capacity(selected.len() + info.graph_edges.len() + 1);
-    lines.push("graph TD".to_string());
-
-    for (new_idx, old_idx) in selected.iter().copied().enumerate() {
-        let node = &info.graph_nodes[old_idx];
-        let counter = kind_counts.entry(node.kind.clone()).or_insert(0);
-        *counter += 1;
-        let token = memory_kind_token(&node.kind, *counter);
-        let id = format!("n{}", new_idx);
-        let def = match node.kind.as_str() {
-            "preference" => format!("    {}({})", id, token),
-            "correction" => format!("    {}{{{{{}}}}}", id, token),
-            "tag" => format!("    {}(({}))", id, token),
-            _ => format!("    {}[{}]", id, token),
-        };
-        lines.push(def);
-    }
-
-    let mut edge_set: HashSet<(usize, usize)> = HashSet::new();
-    for &(src, dst) in &info.graph_edges {
-        let Some(&a) = old_to_new.get(&src) else {
+    for (edge_idx, edge) in info.graph_edges.iter().enumerate() {
+        if edge.source >= node_count || edge.target >= node_count {
             continue;
-        };
-        let Some(&b) = old_to_new.get(&dst) else {
-            continue;
-        };
-        if a != b {
-            edge_set.insert((a, b));
+        }
+        neighbors[edge.source].push((edge.target, edge_idx));
+        neighbors[edge.target].push((edge.source, edge_idx));
+    }
+
+    let mut selected = Vec::with_capacity(max_nodes.min(node_count));
+    let mut selected_set: HashSet<usize> = HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    selected.push(center_idx);
+    selected_set.insert(center_idx);
+    queue.push_back(center_idx);
+
+    while let Some(current) = queue.pop_front() {
+        if selected.len() >= max_nodes {
+            break;
+        }
+
+        let mut ranked = neighbors[current].clone();
+        ranked.sort_by(|(a_idx, a_edge), (b_idx, b_edge)| {
+            edge_kind_priority(&info.graph_edges[*b_edge].kind)
+                .cmp(&edge_kind_priority(&info.graph_edges[*a_edge].kind))
+                .then_with(|| {
+                    graph_node_score(&info.graph_nodes[*b_idx])
+                        .partial_cmp(&graph_node_score(&info.graph_nodes[*a_idx]))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a_idx.cmp(b_idx))
+        });
+
+        for (next_idx, _) in ranked {
+            if selected.len() >= max_nodes {
+                break;
+            }
+            if selected_set.insert(next_idx) {
+                selected.push(next_idx);
+                queue.push_back(next_idx);
+            }
         }
     }
-    let mut edges: Vec<(usize, usize)> = edge_set.into_iter().collect();
-    edges.sort_unstable();
-    for (a, b) in edges {
-        lines.push(format!("    n{} --> n{}", a, b));
+
+    if selected.len() < max_nodes {
+        let mut remaining: Vec<usize> = (0..node_count)
+            .filter(|idx| !selected_set.contains(idx))
+            .collect();
+        remaining.sort_by(|a, b| {
+            graph_node_score(&info.graph_nodes[*b])
+                .partial_cmp(&graph_node_score(&info.graph_nodes[*a]))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.cmp(b))
+        });
+        for idx in remaining {
+            if selected.len() >= max_nodes {
+                break;
+            }
+            selected_set.insert(idx);
+            selected.push(idx);
+        }
     }
 
-    Some(lines.join("\n"))
+    let mut old_to_new = HashMap::new();
+    let mut sub_nodes = Vec::with_capacity(selected.len());
+    for (new_idx, old_idx) in selected.iter().copied().enumerate() {
+        old_to_new.insert(old_idx, new_idx);
+        sub_nodes.push(info.graph_nodes[old_idx].clone());
+    }
+
+    let center_new = old_to_new.get(&center_idx).copied().unwrap_or(0);
+    let mut dedup: HashSet<(usize, usize, String)> = HashSet::new();
+    let mut sub_edges: Vec<GraphEdge> = info
+        .graph_edges
+        .iter()
+        .filter_map(|edge| {
+            let source = *old_to_new.get(&edge.source)?;
+            let target = *old_to_new.get(&edge.target)?;
+            if source == target {
+                return None;
+            }
+            if !dedup.insert((source, target, edge.kind.clone())) {
+                return None;
+            }
+            Some(GraphEdge {
+                source,
+                target,
+                kind: edge.kind.clone(),
+            })
+        })
+        .collect();
+
+    sub_edges.sort_by(|a, b| {
+        let a_center = a.source == center_new || a.target == center_new;
+        let b_center = b.source == center_new || b.target == center_new;
+        b_center
+            .cmp(&a_center)
+            .then_with(|| edge_kind_priority(&b.kind).cmp(&edge_kind_priority(&a.kind)))
+            .then_with(|| a.source.cmp(&b.source))
+            .then_with(|| a.target.cmp(&b.target))
+    });
+    if sub_edges.len() > max_edges {
+        sub_edges.truncate(max_edges);
+    }
+
+    Some(MemorySubgraph {
+        nodes: sub_nodes,
+        edges: sub_edges,
+    })
 }
 
-fn memory_kind_token(kind: &str, index: usize) -> String {
+fn pick_subgraph_center(info: &MemoryInfo) -> Option<usize> {
+    let mut best_idx: Option<usize> = None;
+    let mut best_score: f32 = -1.0;
+
+    for (idx, node) in info.graph_nodes.iter().enumerate() {
+        let mut score = graph_node_score(node);
+        if node.kind == "tag" || node.kind == "cluster" {
+            score -= 0.75;
+        }
+        if !node.is_active {
+            score -= 1.0;
+        }
+        if score > best_score {
+            best_score = score;
+            best_idx = Some(idx);
+        }
+    }
+
+    best_idx
+}
+
+fn edge_kind_priority(kind: &str) -> u8 {
     match kind {
-        "preference" => format!("P{}", index),
-        "correction" => format!("C{}", index),
-        "tag" => format!("T{}", index),
-        _ => format!("F{}", index),
+        "contradicts" => 6,
+        "supersedes" => 5,
+        "derived_from" => 4,
+        "relates_to" => 3,
+        "in_cluster" => 2,
+        "has_tag" => 1,
+        _ => 1,
     }
 }
 
@@ -1677,6 +1805,40 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
         ),
     ]));
 
+    if info.total_count > 0 {
+        let summary = format!(
+            "{}p/{}g · {}n {}e",
+            info.project_count,
+            info.global_count,
+            info.graph_nodes.len(),
+            info.graph_edges.len()
+        );
+        lines.push(Line::from(vec![Span::styled(
+            summary,
+            Style::default().fg(Color::Rgb(130, 130, 140)),
+        )]));
+
+        if !info.by_category.is_empty() {
+            let mut categories: Vec<(&String, &usize)> = info.by_category.iter().collect();
+            categories.sort_by(|(name_a, count_a), (name_b, count_b)| {
+                count_b.cmp(count_a).then_with(|| name_a.cmp(name_b))
+            });
+
+            let cat_text = categories
+                .into_iter()
+                .take(4)
+                .map(|(name, count)| format!("{}:{}", truncate_chars(name, 3), count))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let cat_text = truncate_smart(&cat_text, inner.width.saturating_sub(2) as usize);
+
+            lines.push(Line::from(vec![Span::styled(
+                cat_text,
+                Style::default().fg(Color::Rgb(105, 105, 115)),
+            )]));
+        }
+    }
+
     // Activity state if active
     if let Some(activity) = &info.activity {
         let state_line = match &activity.state {
@@ -1779,7 +1941,10 @@ fn format_memory_event(event: &MemoryEvent, max_width: usize) -> (&'static str, 
                 .map(|item| format!("[{}] {}", item.section, item.content))
                 .unwrap_or_else(|| preview.clone());
             let msg = truncate_smart(
-                &format!("{} mem ({}c, {}ms) {}", count, prompt_chars, age_ms, snippet),
+                &format!(
+                    "{} mem ({}c, {}ms) {}",
+                    count, prompt_chars, age_ms, snippet
+                ),
                 max_width.saturating_sub(2),
             );
             ("↳", msg, Color::Rgb(140, 210, 255))
@@ -1847,26 +2012,46 @@ fn render_mini_graph(info: &MemoryInfo, width: u16, height: u16) -> Vec<Line<'st
         return Vec::new();
     }
 
-    let nodes = &info.graph_nodes;
-    let edges = &info.graph_edges;
+    let max_nodes = (w.saturating_mul(h)).saturating_div(3).clamp(6, 18);
+    let Some(subgraph) = select_contextual_subgraph(
+        info,
+        max_nodes,
+        max_nodes.saturating_mul(2).min(MEMORY_SUBGRAPH_MAX_EDGES),
+    ) else {
+        return Vec::new();
+    };
 
     // Assign positions using a deterministic layout
-    let positions = spread_overlapping_positions(layout_nodes(nodes.len(), edges, w, h), w, h);
+    let positions = spread_overlapping_positions(
+        layout_nodes(subgraph.nodes.len(), &subgraph.edges, w, h),
+        w,
+        h,
+    );
 
     // Braille subpixel canvas (2x width, 4x height)
     let px_w = w.saturating_mul(2);
     let px_h = h.saturating_mul(4);
-    let mut edge_pixels = vec![false; px_w.saturating_mul(px_h)];
-    let edge_color = Color::Rgb(72, 72, 84);
+    let mut edge_pixels = vec![0u8; px_w.saturating_mul(px_h)];
 
     // Draw edges first on the subpixel canvas (behind nodes)
-    for &(src, tgt) in edges {
+    for edge in &subgraph.edges {
+        let src = edge.source;
+        let tgt = edge.target;
         if src >= positions.len() || tgt >= positions.len() {
             continue;
         }
         let (sx, sy) = positions[src];
         let (tx, ty) = positions[tgt];
-        draw_edge_pixels(&mut edge_pixels, px_w, px_h, sx, sy, tx, ty);
+        draw_edge_pixels(
+            &mut edge_pixels,
+            px_w,
+            px_h,
+            sx,
+            sy,
+            tx,
+            ty,
+            edge_kind_priority(&edge.kind),
+        );
     }
 
     // Build a character grid
@@ -1875,17 +2060,17 @@ fn render_mini_graph(info: &MemoryInfo, width: u16, height: u16) -> Vec<Line<'st
     // Convert subpixel edge raster into braille glyphs
     for y in 0..h {
         for x in 0..w {
-            let mask = braille_mask_for_cell(&edge_pixels, px_w, px_h, x, y);
+            let (mask, style_kind) = braille_mask_for_cell(&edge_pixels, px_w, px_h, x, y);
             if mask != 0 {
                 if let Some(ch) = char::from_u32(0x2800 + mask as u32) {
-                    grid[y][x] = (ch, edge_color);
+                    grid[y][x] = (ch, edge_style_color(style_kind));
                 }
             }
         }
     }
 
     // Draw nodes on top
-    for (i, node) in nodes.iter().enumerate() {
+    for (i, node) in subgraph.nodes.iter().enumerate() {
         if i >= positions.len() {
             break;
         }
@@ -1916,13 +2101,14 @@ fn render_mini_graph(info: &MemoryInfo, width: u16, height: u16) -> Vec<Line<'st
 
 /// Draw an edge in braille-subpixel space between two cell coordinates.
 fn draw_edge_pixels(
-    pixels: &mut [bool],
+    pixels: &mut [u8],
     px_w: usize,
     px_h: usize,
     x0_cell: usize,
     y0_cell: usize,
     x1_cell: usize,
     y1_cell: usize,
+    style_kind: u8,
 ) {
     if px_w == 0 || px_h == 0 {
         return;
@@ -1942,7 +2128,8 @@ fn draw_edge_pixels(
 
     loop {
         if x0 >= 0 && y0 >= 0 && (x0 as usize) < px_w && (y0 as usize) < px_h {
-            pixels[y0 as usize * px_w + x0 as usize] = true;
+            let index = y0 as usize * px_w + x0 as usize;
+            pixels[index] = pixels[index].max(style_kind);
         }
 
         if x0 == x1 && y0 == y1 {
@@ -1963,15 +2150,16 @@ fn draw_edge_pixels(
 
 /// Map a 2x4 subpixel block to a unicode braille bitmask.
 fn braille_mask_for_cell(
-    edge_pixels: &[bool],
+    edge_pixels: &[u8],
     px_w: usize,
     px_h: usize,
     cell_x: usize,
     cell_y: usize,
-) -> u8 {
+) -> (u8, u8) {
     let base_x = cell_x.saturating_mul(2);
     let base_y = cell_y.saturating_mul(4);
     let mut mask = 0u8;
+    let mut strongest = 0u8;
     let dots = [
         (0usize, 0usize, 0x01u8), // dot 1
         (0, 1, 0x02),             // dot 2
@@ -1986,12 +2174,28 @@ fn braille_mask_for_cell(
     for (dx, dy, bit) in dots {
         let x = base_x + dx;
         let y = base_y + dy;
-        if x < px_w && y < px_h && edge_pixels[y * px_w + x] {
-            mask |= bit;
+        if x < px_w && y < px_h {
+            let kind = edge_pixels[y * px_w + x];
+            if kind > 0 {
+                strongest = strongest.max(kind);
+                mask |= bit;
+            }
         }
     }
 
-    mask
+    (mask, strongest)
+}
+
+fn edge_style_color(kind: u8) -> Color {
+    match kind {
+        6 => Color::Rgb(210, 110, 110), // contradictions
+        5 => Color::Rgb(220, 170, 120), // supersedes
+        4 => Color::Rgb(110, 190, 200), // derived
+        3 => Color::Rgb(100, 170, 210), // relates
+        2 => Color::Rgb(120, 130, 170), // in_cluster
+        1 => Color::Rgb(72, 72, 84),    // has_tag
+        _ => Color::Rgb(72, 72, 84),
+    }
 }
 
 /// Spread overlapping node coordinates to nearby free cells.
@@ -2050,17 +2254,25 @@ fn nearest_free_position(
 
 /// Pick character and color for a graph node
 fn node_char(node: &GraphNode) -> (char, Color) {
-    match node.kind.as_str() {
+    let (base, color) = match node.kind.as_str() {
         "preference" => ('●', Color::Rgb(140, 200, 255)),
         "correction" => ('●', Color::Rgb(255, 160, 100)),
+        "entity" => ('●', Color::Rgb(150, 215, 185)),
         "tag" => ('◆', Color::Rgb(160, 140, 200)),
-        _ => ('●', Color::Rgb(130, 200, 130)), // fact = green
+        "cluster" => ('◈', Color::Rgb(130, 140, 180)),
+        _ => ('●', Color::Rgb(130, 200, 130)),
+    };
+
+    if node.is_memory && !node.is_active {
+        ('○', Color::Rgb(105, 105, 115))
+    } else {
+        (base, color)
     }
 }
 
 /// Simple deterministic layout: place nodes in a spiral/circle pattern
 /// with connected nodes pulled closer together
-fn layout_nodes(count: usize, edges: &[(usize, usize)], w: usize, h: usize) -> Vec<(usize, usize)> {
+fn layout_nodes(count: usize, edges: &[GraphEdge], w: usize, h: usize) -> Vec<(usize, usize)> {
     if count == 0 {
         return Vec::new();
     }
@@ -2087,7 +2299,9 @@ fn layout_nodes(count: usize, edges: &[(usize, usize)], w: usize, h: usize) -> V
         let mut forces: Vec<(f64, f64)> = vec![(0.0, 0.0); count];
 
         // Attraction along edges
-        for &(a, b) in edges {
+        for edge in edges {
+            let a = edge.source;
+            let b = edge.target;
             if a >= count || b >= count {
                 continue;
             }
@@ -3286,7 +3500,7 @@ fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
 mod tests {
     use super::{
         build_memory_graph_mermaid, calculate_placements, render_memory_widget, render_mini_graph,
-        truncate_smart, GraphNode, InfoWidgetData, Margins, MemoryInfo, WidgetKind,
+        truncate_smart, GraphEdge, GraphNode, InfoWidgetData, Margins, MemoryInfo, WidgetKind,
     };
     use ratatui::layout::Rect;
     use ratatui::text::Line;
@@ -3299,29 +3513,41 @@ mod tests {
         assert_eq!(out, "eagle runnin...");
     }
 
+    fn node(kind: &str, label: &str, degree: usize) -> GraphNode {
+        GraphNode {
+            id: format!("{}:{}", kind, label.replace(' ', "_")),
+            label: label.to_string(),
+            kind: kind.to_string(),
+            is_memory: kind != "tag" && kind != "cluster",
+            is_active: true,
+            confidence: 0.9,
+            degree,
+        }
+    }
+
+    fn edge(source: usize, target: usize, kind: &str) -> GraphEdge {
+        GraphEdge {
+            source,
+            target,
+            kind: kind.to_string(),
+        }
+    }
+
     #[test]
     fn mini_graph_renders_braille_edges_and_nodes() {
         let info = MemoryInfo {
             total_count: 4,
             graph_nodes: vec![
-                GraphNode {
-                    kind: "fact".to_string(),
-                    degree: 2,
-                },
-                GraphNode {
-                    kind: "preference".to_string(),
-                    degree: 2,
-                },
-                GraphNode {
-                    kind: "correction".to_string(),
-                    degree: 1,
-                },
-                GraphNode {
-                    kind: "tag".to_string(),
-                    degree: 1,
-                },
+                node("fact", "Rust project uses cargo", 2),
+                node("preference", "User likes concise answers", 2),
+                node("correction", "Use oauth flow", 1),
+                node("tag", "rust", 1),
             ],
-            graph_edges: vec![(0, 1), (1, 2), (1, 3)],
+            graph_edges: vec![
+                edge(0, 1, "relates_to"),
+                edge(1, 2, "contradicts"),
+                edge(1, 3, "has_tag"),
+            ],
             ..Default::default()
         };
         let lines = render_mini_graph(&info, 24, 4);
@@ -3354,20 +3580,11 @@ mod tests {
         let info = MemoryInfo {
             total_count: 3,
             graph_nodes: vec![
-                GraphNode {
-                    kind: "fact".to_string(),
-                    degree: 1,
-                },
-                GraphNode {
-                    kind: "preference".to_string(),
-                    degree: 2,
-                },
-                GraphNode {
-                    kind: "tag".to_string(),
-                    degree: 1,
-                },
+                node("fact", "build uses release binary", 1),
+                node("preference", "Prefer small commits", 2),
+                node("tag", "workflow", 1),
             ],
-            graph_edges: vec![(0, 1), (1, 2)],
+            graph_edges: vec![edge(0, 1, "relates_to"), edge(1, 2, "has_tag")],
             ..Default::default()
         };
         let data = InfoWidgetData {
@@ -3375,10 +3592,9 @@ mod tests {
             ..Default::default()
         };
 
-        // Mermaid graph is rendered separately by render_memory_widget_with_mermaid.
-        // The line renderer should only include title/activity text.
+        // Memory widget is text-only.
         let lines = render_memory_widget(&data, Rect::new(0, 0, 24, 5));
-        assert_eq!(lines.len(), 1);
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]
@@ -3386,27 +3602,50 @@ mod tests {
         let info = MemoryInfo {
             total_count: 4,
             graph_nodes: vec![
-                GraphNode {
-                    kind: "fact".to_string(),
-                    degree: 1,
-                },
-                GraphNode {
-                    kind: "preference".to_string(),
-                    degree: 2,
-                },
-                GraphNode {
-                    kind: "tag".to_string(),
-                    degree: 1,
-                },
+                node("fact", "Project uses rust", 1),
+                node("preference", "Use semantic versions", 2),
+                node("tag", "memory", 1),
             ],
-            graph_edges: vec![(0, 1), (1, 2)],
+            graph_edges: vec![edge(0, 1, "relates_to"), edge(1, 2, "has_tag")],
             ..Default::default()
         };
 
         let mermaid = build_memory_graph_mermaid(&info, 16).expect("expected mermaid content");
-        assert!(mermaid.contains("graph TD"));
+        assert!(mermaid.contains("flowchart LR"));
         assert!(mermaid.contains("n0"));
         assert!(mermaid.contains("-->"));
+    }
+
+    #[test]
+    fn contextual_subgraph_prefers_memory_hub() {
+        let mut nodes = vec![
+            node("fact", "core build flow", 6),
+            node("preference", "use cargo test", 4),
+            node("tag", "rust", 5),
+            node("tag", "testing", 3),
+            node("fact", "docs in readme", 1),
+        ];
+        nodes[0].is_active = true;
+        nodes[0].confidence = 0.95;
+
+        let info = MemoryInfo {
+            total_count: 5,
+            graph_nodes: nodes,
+            graph_edges: vec![
+                edge(0, 1, "relates_to"),
+                edge(0, 2, "has_tag"),
+                edge(1, 3, "has_tag"),
+                edge(4, 2, "has_tag"),
+            ],
+            ..Default::default()
+        };
+
+        let subgraph = super::select_contextual_subgraph(&info, 3, 6).expect("subgraph");
+        assert_eq!(subgraph.nodes.len(), 3);
+        assert!(subgraph
+            .nodes
+            .iter()
+            .any(|n| n.label.contains("core build flow")));
     }
 
     #[test]
@@ -3450,6 +3689,66 @@ mod tests {
         assert!(
             placements.iter().any(|p| p.kind == WidgetKind::Overview),
             "expected overview widget placement"
+        );
+    }
+
+    #[test]
+    fn sticky_placement_clamps_width_to_current_margin() {
+        {
+            let mut guard = super::get_or_init_state();
+            if let Some(state) = guard.as_mut() {
+                state.enabled = true;
+                state.placements.clear();
+                state.widget_states.clear();
+            }
+        }
+
+        let data = InfoWidgetData {
+            model: Some("gpt-test".to_string()),
+            queue_mode: Some(true),
+            ..Default::default()
+        };
+        let area = Rect::new(0, 0, 100, 10);
+
+        // First frame places a wide widget.
+        let first = calculate_placements(
+            area,
+            &Margins {
+                right_widths: vec![30; 10],
+                left_widths: Vec::new(),
+                centered: false,
+            },
+            &data,
+        );
+        assert!(!first.is_empty(), "expected initial placement");
+        assert_eq!(first[0].rect.width, 30);
+
+        // Second frame shrinks margin by 4 columns (within sticky tolerance).
+        let second_margins = vec![26; 10];
+        let second = calculate_placements(
+            area,
+            &Margins {
+                right_widths: second_margins.clone(),
+                left_widths: Vec::new(),
+                centered: false,
+            },
+            &data,
+        );
+        assert!(!second.is_empty(), "expected sticky placement");
+
+        let p = &second[0];
+        let row_start = p.rect.y.saturating_sub(area.y) as usize;
+        let row_end = row_start + p.rect.height as usize;
+        let min_margin = second_margins[row_start..row_end]
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or(0);
+        assert!(
+            p.rect.width <= min_margin,
+            "sticky width {} exceeded current margin {}",
+            p.rect.width,
+            min_margin
         );
     }
 
@@ -3698,7 +3997,10 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
             {
                 let plural = if *count == 1 { "memory" } else { "memories" };
                 let summary = truncate_with_ellipsis(
-                    &format!("Injected {} {} ({}c, {}ms)", count, plural, prompt_chars, age_ms),
+                    &format!(
+                        "Injected {} {} ({}c, {}ms)",
+                        count, plural, prompt_chars, age_ms
+                    ),
                     max_width,
                 );
                 lines.push(Line::from(vec![
@@ -3721,10 +4023,7 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
                             max_width.saturating_sub(4),
                         );
                         lines.push(Line::from(vec![
-                            Span::styled(
-                                "    • ",
-                                Style::default().fg(Color::Rgb(170, 170, 180)),
-                            ),
+                            Span::styled("    • ", Style::default().fg(Color::Rgb(170, 170, 180))),
                             Span::styled(text, Style::default().fg(Color::Rgb(140, 140, 150))),
                         ]));
                     }

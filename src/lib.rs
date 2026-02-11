@@ -20,6 +20,7 @@ pub mod memory_agent;
 pub mod memory_graph;
 pub mod message;
 pub mod notifications;
+pub mod plan;
 pub mod prompt;
 pub mod protocol;
 pub mod provider;

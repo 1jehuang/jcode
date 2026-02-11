@@ -71,22 +71,23 @@ integrate work with optional git worktrees.
 
 ## Plan Distribution and Updates
 
-- Plan v1 is created by the coordinator and sent to all agents on spawn.
-- Each agent keeps a local copy of the plan and tracks the plan version.
+- Swarm plan is a server-level object scoped by `swarm_id` (not a session todo list).
+- Session todos remain private to each session and are not used as swarm plan storage.
+- Plan v1 is created/owned by the coordinator.
 - Plan updates are proposed by agents and must be reviewed by the coordinator.
-- Agents must request plan changes by DMing the coordinator.
-- Only approved updates are broadcast to all agents.
-- The plan is not stored in a repo file; it is distributed on spawn and via broadcast.
-- Agents that miss a broadcast can request a plan resync from the coordinator.
+- Plan updates are propagated to plan participants, not every agent in the swarm.
+- Plan participation is explicit (coordinator assignment/spawn policy or resync attach).
+- The plan is not stored in a repo file.
+- Agents can explicitly request plan attachment/resync when needed.
 
 Plan update flow:
 
 ```mermaid
 flowchart LR
   Agent[Agent] -->|propose update| Coordinator
-  Coordinator -->|approve update| Broadcast
-  Coordinator -->|direct update| Broadcast
-  Broadcast --> Agents[All Agents]
+  Coordinator -->|approve update| Plan[Swarm Plan]
+  Coordinator -->|direct update| Plan
+  Plan --> Participants[Plan Participants]
 ```
 
 ## Worktree Usage
