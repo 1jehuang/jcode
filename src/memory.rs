@@ -9,11 +9,13 @@
 use crate::memory_graph::{EdgeKind, MemoryGraph, GRAPH_VERSION};
 use crate::sidecar::HaikuSidecar;
 use crate::storage;
-use crate::tui::info_widget::{MemoryActivity, MemoryEvent, MemoryEventKind, MemoryState};
+use crate::tui::info_widget::{
+    InjectedMemoryItem, MemoryActivity, MemoryEvent, MemoryEventKind, MemoryState,
+};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -31,9 +33,15 @@ const MAX_RECENT_EVENTS: usize = 10;
 /// Pending memory prompt from background check - ready to inject on next turn
 static PENDING_MEMORY: Mutex<Option<PendingMemory>> = Mutex::new(None);
 
+/// Signature of the last injected prompt to suppress near-immediate duplicates.
+static LAST_INJECTED_PROMPT_SIGNATURE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+
 /// Guard to ensure only one memory check runs at a time
 static MEMORY_CHECK_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// Suppress repeated identical memory payloads within this many seconds.
+const MEMORY_REPEAT_SUPPRESSION_SECS: u64 = 90;
 
 /// A pending memory result from async checking
 #[derive(Debug, Clone)]
@@ -54,13 +62,37 @@ impl PendingMemory {
     }
 }
 
+fn prompt_signature(prompt: &str) -> String {
+    prompt
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase()
+}
+
 /// Take pending memory if available and fresh
 pub fn take_pending_memory() -> Option<PendingMemory> {
     if let Ok(mut guard) = PENDING_MEMORY.lock() {
         if let Some(pending) = guard.take() {
-            if pending.is_fresh() {
-                return Some(pending);
+            if !pending.is_fresh() {
+                return None;
             }
+
+            let sig = prompt_signature(&pending.prompt);
+            if let Ok(mut last_guard) = LAST_INJECTED_PROMPT_SIGNATURE.lock() {
+                if let Some((last_sig, last_at)) = last_guard.as_ref() {
+                    if *last_sig == sig
+                        && last_at.elapsed().as_secs() < MEMORY_REPEAT_SUPPRESSION_SECS
+                    {
+                        return None;
+                    }
+                }
+                *last_guard = Some((sig, Instant::now()));
+            }
+
+            return Some(pending);
         }
     }
     None
@@ -74,6 +106,16 @@ pub fn set_pending_memory(prompt: String, count: usize) {
             computed_at: Instant::now(),
             count,
         });
+    }
+}
+
+/// Clear any pending memory result that has not been consumed yet.
+pub fn clear_pending_memory() {
+    if let Ok(mut guard) = PENDING_MEMORY.lock() {
+        *guard = None;
+    }
+    if let Ok(mut guard) = LAST_INJECTED_PROMPT_SIGNATURE.lock() {
+        *guard = None;
     }
 }
 
@@ -130,6 +172,123 @@ pub fn add_event(kind: MemoryEventKind) {
 pub fn clear_activity() {
     if let Ok(mut guard) = MEMORY_ACTIVITY.lock() {
         *guard = None;
+    }
+}
+
+/// Record that a memory payload was injected into model context.
+/// This feeds the memory info widget with injected content + metadata.
+pub fn record_injected_prompt(prompt: &str, count: usize, age_ms: u64) {
+    let items = parse_injected_items(prompt, 8);
+    let preview = prompt_preview(prompt, 72);
+    add_event(MemoryEventKind::MemoryInjected {
+        count,
+        prompt_chars: prompt.chars().count(),
+        age_ms,
+        preview: preview.clone(),
+        items,
+    });
+    add_event(MemoryEventKind::MemorySurfaced {
+        memory_preview: preview,
+    });
+}
+
+fn parse_injected_items(prompt: &str, max_items: usize) -> Vec<InjectedMemoryItem> {
+    let mut items: Vec<InjectedMemoryItem> = Vec::new();
+    let mut section = String::from("Memory");
+
+    for raw_line in prompt.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line == "# Memory" {
+            continue;
+        }
+        if let Some(header) = line.strip_prefix("## ") {
+            let header = header.trim();
+            if !header.is_empty() {
+                section = header.to_string();
+            }
+            continue;
+        }
+
+        let content = if let Some(rest) = line.strip_prefix("- ") {
+            Some(rest.trim())
+        } else if let Some((prefix, rest)) = line.split_once(". ") {
+            if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
+                Some(rest.trim())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(content) = content {
+            if content.is_empty() {
+                continue;
+            }
+            items.push(InjectedMemoryItem {
+                section: section.clone(),
+                content: content.to_string(),
+            });
+            if items.len() >= max_items {
+                return items;
+            }
+        }
+    }
+
+    if items.is_empty() {
+        let fallback = prompt
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                !line.is_empty()
+                    && !line.starts_with('#')
+                    && !line.starts_with("## ")
+                    && !line.starts_with("- ")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !fallback.is_empty() {
+            items.push(InjectedMemoryItem {
+                section,
+                content: fallback,
+            });
+        }
+    }
+
+    items
+}
+
+fn prompt_preview(prompt: &str, max_chars: usize) -> String {
+    let bullet = prompt
+        .lines()
+        .map(str::trim)
+        .find_map(|line| {
+            if line.starts_with("- ") {
+                Some(line.trim_start_matches("- ").trim())
+            } else if let Some((prefix, rest)) = line.split_once(". ") {
+                if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
+                    Some(rest.trim())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| prompt.trim());
+
+    if bullet.chars().count() <= max_chars {
+        bullet.to_string()
+    } else {
+        let mut out = String::new();
+        for (i, ch) in bullet.chars().enumerate() {
+            if i >= max_chars.saturating_sub(3) {
+                break;
+            }
+            out.push(ch);
+        }
+        out.push_str("...");
+        out
     }
 }
 
@@ -426,48 +585,8 @@ impl MemoryStore {
     }
 
     pub fn format_for_prompt(&self, limit: usize) -> Option<String> {
-        let relevant = self.get_relevant(limit);
-        if relevant.is_empty() {
-            return None;
-        }
-
-        let mut sections: HashMap<&MemoryCategory, Vec<&str>> = HashMap::new();
-        for entry in &relevant {
-            sections
-                .entry(&entry.category)
-                .or_default()
-                .push(&entry.content);
-        }
-
-        let mut output = String::new();
-        let order = [
-            MemoryCategory::Correction,
-            MemoryCategory::Fact,
-            MemoryCategory::Preference,
-            MemoryCategory::Entity,
-        ];
-
-        for cat in &order {
-            if let Some(items) = sections.remove(cat) {
-                output.push_str(&format!("\n### {}s\n", cat));
-                for item in items {
-                    output.push_str(&format!("- {}\n", item));
-                }
-            }
-        }
-
-        for (cat, items) in sections {
-            output.push_str(&format!("\n### {}\n", cat));
-            for item in items {
-                output.push_str(&format!("- {}\n", item));
-            }
-        }
-
-        if output.is_empty() {
-            None
-        } else {
-            Some(output)
-        }
+        let relevant: Vec<MemoryEntry> = self.get_relevant(limit).into_iter().cloned().collect();
+        format_entries_for_prompt(&relevant, limit)
     }
 }
 
@@ -570,11 +689,24 @@ pub fn format_context_for_relevance(messages: &[crate::message::Message]) -> Str
 
 fn format_entries_for_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
     let mut sections: HashMap<MemoryCategory, Vec<&MemoryEntry>> = HashMap::new();
+    let mut seen_content = HashSet::new();
     let mut added = 0usize;
+
     for entry in entries.iter().filter(|e| e.active) {
         if added >= limit {
             break;
         }
+
+        let dedupe_key = entry
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        if dedupe_key.is_empty() || !seen_content.insert(dedupe_key) {
+            continue;
+        }
+
         sections
             .entry(entry.category.clone())
             .or_default()
@@ -594,27 +726,53 @@ fn format_entries_for_prompt(entries: &[MemoryEntry], limit: usize) -> Option<St
         MemoryCategory::Entity,
     ];
 
+    let mut write_section = |title: &str, items: Vec<&MemoryEntry>| {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&format!("## {}\n", title));
+        for (idx, item) in items.into_iter().enumerate() {
+            output.push_str(&format!("{}. {}\n", idx + 1, item.content.trim()));
+        }
+    };
+
     for cat in &order {
         if let Some(items) = sections.remove(cat) {
-            output.push_str(&format!("\n### {}s\n", cat));
-            for item in items {
-                output.push_str(&format!("- {}\n", item.content));
-            }
+            let title = match cat {
+                MemoryCategory::Correction => "Corrections",
+                MemoryCategory::Fact => "Facts",
+                MemoryCategory::Preference => "Preferences",
+                MemoryCategory::Entity => "Entities",
+                MemoryCategory::Custom(_) => "Custom",
+            };
+            write_section(title, items);
         }
     }
 
+    let mut custom_sections: BTreeMap<String, Vec<&MemoryEntry>> = BTreeMap::new();
     for (cat, items) in sections {
-        output.push_str(&format!("\n### {}\n", cat));
-        for item in items {
-            output.push_str(&format!("- {}\n", item.content));
+        match cat {
+            MemoryCategory::Custom(name) => {
+                custom_sections.insert(name, items);
+            }
+            other => {
+                custom_sections.insert(other.to_string(), items);
+            }
         }
+    }
+    for (name, items) in custom_sections {
+        write_section(&name, items);
     }
 
     if output.is_empty() {
         None
     } else {
-        Some(output)
+        Some(output.trim().to_string())
     }
+}
+
+pub(crate) fn format_relevant_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
+    format_entries_for_prompt(entries, limit).map(|formatted| format!("# Memory\n\n{}", formatted))
 }
 
 fn memory_score(entry: &MemoryEntry) -> f64 {
@@ -967,8 +1125,7 @@ impl MemoryManager {
         if relevant.is_empty() {
             return Ok(None);
         }
-        Ok(format_entries_for_prompt(&relevant, limit)
-            .map(|entries| format!("# Memory\n\n{}", entries)))
+        Ok(format_relevant_prompt(&relevant, limit))
     }
 
     pub fn search(&self, query: &str) -> Result<Vec<MemoryEntry>> {
@@ -1198,7 +1355,21 @@ impl MemoryManager {
 
             match manager.get_relevant_parallel(&messages).await {
                 Ok(Some(prompt)) => {
-                    let count = prompt.matches("\n-").count(); // rough count
+                    let count = prompt
+                        .lines()
+                        .map(str::trim_start)
+                        .filter(|line| {
+                            line.starts_with("- ")
+                                || line
+                                    .split_once(". ")
+                                    .map(|(prefix, _)| {
+                                        !prefix.is_empty()
+                                            && prefix.chars().all(|c| c.is_ascii_digit())
+                                    })
+                                    .unwrap_or(false)
+                        })
+                        .count()
+                        .max(1);
                     set_pending_memory(prompt, count);
                     add_event(MemoryEventKind::SidecarComplete { latency_ms: 0 });
                 }
@@ -1359,10 +1530,10 @@ impl MemoryManager {
             count: relevant.len(),
         });
 
-        Ok(
-            format_entries_for_prompt(&relevant, MEMORY_RELEVANCE_MAX_RESULTS)
-                .map(|entries| format!("# Memory\n\n{}", entries)),
-        )
+        Ok(format_relevant_prompt(
+            &relevant,
+            MEMORY_RELEVANCE_MAX_RESULTS,
+        ))
     }
 
     // ==================== Graph-Based Operations ====================
@@ -1653,10 +1824,7 @@ mod tests {
 
     #[test]
     fn pending_memory_freshness_and_clear() {
-        {
-            let mut guard = PENDING_MEMORY.lock().expect("pending memory lock");
-            *guard = None;
-        }
+        clear_pending_memory();
 
         set_pending_memory("hello".to_string(), 2);
         assert!(has_pending_memory());
@@ -1674,6 +1842,20 @@ mod tests {
             });
         }
         assert!(take_pending_memory().is_none());
+    }
+
+    #[test]
+    fn pending_memory_suppresses_immediate_duplicate_payloads() {
+        clear_pending_memory();
+
+        set_pending_memory("same payload".to_string(), 1);
+        assert!(take_pending_memory().is_some());
+
+        set_pending_memory("same payload".to_string(), 1);
+        assert!(
+            take_pending_memory().is_none(),
+            "identical payload should be suppressed when repeated immediately"
+        );
     }
 
     #[test]
@@ -1729,11 +1911,11 @@ mod tests {
         store.add(custom);
 
         let output = store.format_for_prompt(10).expect("formatted output");
-        let correction_idx = output.find("### corrections").expect("correction heading");
-        let fact_idx = output.find("### facts").expect("fact heading");
-        let preference_idx = output.find("### preferences").expect("preference heading");
-        let entity_idx = output.find("### entitys").expect("entity heading");
-        let custom_idx = output.find("### team").expect("custom heading");
+        let correction_idx = output.find("## Corrections").expect("correction heading");
+        let fact_idx = output.find("## Facts").expect("fact heading");
+        let preference_idx = output.find("## Preferences").expect("preference heading");
+        let entity_idx = output.find("## Entities").expect("entity heading");
+        let custom_idx = output.find("## team").expect("custom heading");
 
         assert!(correction_idx < fact_idx);
         assert!(fact_idx < preference_idx);
