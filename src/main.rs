@@ -38,7 +38,7 @@ mod util;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use provider::Provider;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::panic;
 use std::process::Command as ProcessCommand;
 use std::sync::{Arc, Mutex};
@@ -80,6 +80,28 @@ fn install_panic_hook() {
             }
         }
     }));
+}
+
+fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
+fn init_tui_terminal() -> Result<ratatui::DefaultTerminal> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        anyhow::bail!("jcode TUI requires an interactive terminal (stdin/stdout must be a TTY)");
+    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init)).map_err(|payload| {
+        anyhow::anyhow!(
+            "failed to initialize terminal: {}",
+            panic_payload_to_string(payload.as_ref())
+        )
+    })
 }
 
 #[cfg(unix)]
@@ -627,7 +649,7 @@ async fn run_tui(
     resume_session: Option<String>,
     debug_socket: bool,
 ) -> Result<()> {
-    let terminal = ratatui::init();
+    let terminal = init_tui_terminal()?;
     // Initialize mermaid image picker (queries terminal for graphics protocol support)
     crate::tui::mermaid::init_picker();
     let mouse_capture = crate::config::config().display.mouse_capture;
@@ -1001,8 +1023,12 @@ async fn run_ambient_visible() -> Result<()> {
     use crate::ambient::VisibleCycleContext;
 
     // Load the cycle context saved by the ambient runner
-    let context = VisibleCycleContext::load()
-        .map_err(|e| anyhow::anyhow!("Failed to load visible cycle context: {}\nIs the ambient runner running?", e))?;
+    let context = VisibleCycleContext::load().map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to load visible cycle context: {}\nIs the ambient runner running?",
+            e
+        )
+    })?;
 
     // Initialize provider (uses same auth as normal jcode)
     let (provider, registry) = init_provider_and_registry(&ProviderChoice::Auto, None).await?;
@@ -1015,7 +1041,7 @@ async fn run_ambient_visible() -> Result<()> {
     crate::tool::ambient::init_safety_system(safety);
 
     // Start TUI with ambient mode
-    let terminal = ratatui::init();
+    let terminal = init_tui_terminal()?;
     crate::tui::mermaid::init_picker();
     let mouse_capture = crate::config::config().display.mouse_capture;
     let keyboard_enhanced = tui::enable_keyboard_enhancement();
@@ -1616,7 +1642,7 @@ async fn run_client() -> Result<()> {
 
 /// Run TUI client connected to server
 async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
-    let terminal = ratatui::init();
+    let terminal = init_tui_terminal()?;
     // Initialize mermaid image picker (queries terminal for graphics protocol support)
     crate::tui::mermaid::init_picker();
     let mouse_capture = crate::config::config().display.mouse_capture;
@@ -2204,7 +2230,7 @@ async fn run_canary_wrapper(
     eprintln!("Starting TUI client...");
 
     // Run client TUI
-    let terminal = ratatui::init();
+    let terminal = init_tui_terminal()?;
     // Initialize mermaid image picker (queries terminal for graphics protocol support)
     crate::tui::mermaid::init_picker();
     let mouse_capture = crate::config::config().display.mouse_capture;
