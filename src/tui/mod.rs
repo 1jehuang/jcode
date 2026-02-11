@@ -6,6 +6,7 @@ pub mod info_widget;
 mod keybind;
 pub mod markdown;
 pub mod mermaid;
+pub mod permissions;
 pub mod screenshot;
 pub mod session_picker;
 mod stream_buffer;

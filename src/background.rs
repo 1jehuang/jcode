@@ -318,6 +318,19 @@ impl BackgroundTaskManager {
 
         Ok(removed)
     }
+
+    /// Best-effort synchronous snapshot of currently running tasks.
+    /// This avoids async calls in render paths.
+    pub fn running_snapshot(&self) -> (usize, Vec<String>) {
+        let Ok(tasks) = self.tasks.try_read() else {
+            return (0, Vec::new());
+        };
+
+        let mut names: Vec<String> = tasks.values().map(|t| t.tool_name.clone()).collect();
+        names.sort();
+        names.dedup();
+        (tasks.len(), names)
+    }
 }
 
 impl Default for BackgroundTaskManager {

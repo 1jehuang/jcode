@@ -135,9 +135,7 @@ impl EndpointInfo {
     fn extract_p50(value: &serde_json::Value) -> Option<f64> {
         match value {
             serde_json::Value::Number(n) => n.as_f64(),
-            serde_json::Value::Object(map) => {
-                map.get("p50").and_then(|v| v.as_f64())
-            }
+            serde_json::Value::Object(map) => map.get("p50").and_then(|v| v.as_f64()),
             _ => None,
         }
     }
@@ -2438,7 +2436,10 @@ mod tests {
         let routing = rt.block_on(provider.effective_routing("moonshotai/kimi-k2.5"));
         let order = routing.order.expect("provider order");
         assert_eq!(order.first().map(|s| s.as_str()), Some("Fireworks"));
-        assert!(!routing.allow_fallbacks, "Kimi should disable fallbacks to force provider");
+        assert!(
+            !routing.allow_fallbacks,
+            "Kimi should disable fallbacks to force provider"
+        );
     }
 
     #[test]
@@ -2462,10 +2463,22 @@ mod tests {
             status: Some(0),
         };
         let detail = ep.detail_string();
-        assert!(detail.contains("$0.45/M"), "should contain price: {}", detail);
+        assert!(
+            detail.contains("$0.45/M"),
+            "should contain price: {}",
+            detail
+        );
         assert!(detail.contains("100%"), "should contain uptime: {}", detail);
-        assert!(detail.contains("42tps"), "should contain throughput: {}", detail);
+        assert!(
+            detail.contains("42tps"),
+            "should contain throughput: {}",
+            detail
+        );
         assert!(detail.contains("cache"), "should contain cache: {}", detail);
-        assert!(detail.contains("fp8"), "should contain quantization: {}", detail);
+        assert!(
+            detail.contains("fp8"),
+            "should contain quantization: {}",
+            detail
+        );
     }
 }

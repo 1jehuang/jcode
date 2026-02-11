@@ -326,14 +326,19 @@ impl Session {
 
         if let Some(pid) = self.last_pid {
             if !is_pid_running(pid) {
-                self.mark_crashed(Some(format!("Process {} not running", pid)));
+                self.mark_crashed(Some(format!(
+                    "Process {} exited unexpectedly (no shutdown signal captured)",
+                    pid
+                )));
                 return true;
             }
         } else {
             // No PID info (older sessions): fall back to age heuristic
             let age = Utc::now().signed_duration_since(self.updated_at);
             if age.num_seconds() > 120 {
-                self.mark_crashed(Some("Stale active session".to_string()));
+                self.mark_crashed(Some(
+                    "Stale active session (possible abrupt termination)".to_string(),
+                ));
                 return true;
             }
         }
