@@ -128,6 +128,8 @@ pub fn build_graph_topology(
 /// Types of info widgets that can be displayed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WidgetKind {
+    /// Combined overview to reduce scattered widgets
+    Overview,
     /// Todo list with progress
     Todos,
     /// Token/context usage bar
@@ -153,14 +155,15 @@ impl WidgetKind {
     pub fn priority(self) -> u8 {
         match self {
             WidgetKind::Diagrams => 0, // Highest priority - user explicitly wants to see it
-            WidgetKind::Todos => 1,
-            WidgetKind::ContextUsage => 2,
-            WidgetKind::MemoryActivity => 3,
-            WidgetKind::SwarmStatus => 4,
-            WidgetKind::BackgroundTasks => 5,
-            WidgetKind::AmbientMode => 6,
-            WidgetKind::UsageLimits => 7,
-            WidgetKind::ModelInfo => 8,
+            WidgetKind::Overview => 1,
+            WidgetKind::Todos => 2,
+            WidgetKind::ContextUsage => 3,
+            WidgetKind::MemoryActivity => 4,
+            WidgetKind::SwarmStatus => 5,
+            WidgetKind::BackgroundTasks => 6,
+            WidgetKind::AmbientMode => 7,
+            WidgetKind::UsageLimits => 8,
+            WidgetKind::ModelInfo => 9,
         }
     }
 
@@ -168,6 +171,7 @@ impl WidgetKind {
     pub fn preferred_side(self) -> Side {
         match self {
             WidgetKind::Diagrams => Side::Right, // Diagrams on right
+            WidgetKind::Overview => Side::Right,
             WidgetKind::Todos => Side::Right,
             WidgetKind::ContextUsage => Side::Right,
             WidgetKind::MemoryActivity => Side::Right,
@@ -183,6 +187,7 @@ impl WidgetKind {
     pub fn min_height(self) -> u16 {
         match self {
             WidgetKind::Diagrams => 10, // Diagrams need more space
+            WidgetKind::Overview => 8,
             WidgetKind::Todos => 3,
             WidgetKind::ContextUsage => 2,
             WidgetKind::MemoryActivity => 3,
@@ -198,6 +203,7 @@ impl WidgetKind {
     pub fn all_by_priority() -> &'static [WidgetKind] {
         &[
             WidgetKind::Diagrams,
+            WidgetKind::Overview,
             WidgetKind::Todos,
             WidgetKind::ContextUsage,
             WidgetKind::MemoryActivity,
@@ -212,6 +218,7 @@ impl WidgetKind {
     pub fn as_str(self) -> &'static str {
         match self {
             WidgetKind::Diagrams => "diagrams",
+            WidgetKind::Overview => "overview",
             WidgetKind::Todos => "todos",
             WidgetKind::ContextUsage => "context",
             WidgetKind::MemoryActivity => "memory",
@@ -238,6 +245,18 @@ impl Side {
             Side::Right => "right",
         }
     }
+}
+
+fn is_overview_mergeable(kind: WidgetKind) -> bool {
+    matches!(
+        kind,
+        WidgetKind::Todos
+            | WidgetKind::ContextUsage
+            | WidgetKind::SwarmStatus
+            | WidgetKind::BackgroundTasks
+            | WidgetKind::UsageLimits
+            | WidgetKind::ModelInfo
+    )
 }
 
 /// A placed widget with its location and type
@@ -393,6 +412,8 @@ pub enum MemoryState {
     FoundRelevant { count: usize },
     /// Extracting memories from conversation
     Extracting { reason: String },
+    /// Background maintenance/gardening of the memory graph
+    Maintaining { phase: String },
 }
 
 impl Default for MemoryState {
@@ -413,6 +434,12 @@ pub struct MemoryEvent {
 }
 
 #[derive(Debug, Clone)]
+pub struct InjectedMemoryItem {
+    pub section: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone)]
 pub enum MemoryEventKind {
     /// Embedding search started
     EmbeddingStarted,
@@ -428,6 +455,28 @@ pub enum MemoryEventKind {
     SidecarComplete { latency_ms: u64 },
     /// Memory was surfaced to main agent
     MemorySurfaced { memory_preview: String },
+    /// Memory payload was injected into model context
+    MemoryInjected {
+        count: usize,
+        prompt_chars: usize,
+        age_ms: u64,
+        preview: String,
+        items: Vec<InjectedMemoryItem>,
+    },
+    /// Background maintenance started
+    MaintenanceStarted { verified: usize, rejected: usize },
+    /// Background maintenance discovered/strengthened links
+    MaintenanceLinked { links: usize },
+    /// Background maintenance adjusted confidence
+    MaintenanceConfidence { boosted: usize, decayed: usize },
+    /// Background maintenance refined clusters
+    MaintenanceCluster { clusters: usize, members: usize },
+    /// Background maintenance inferred/applied a shared tag
+    MaintenanceTagInferred { tag: String, applied: usize },
+    /// Background maintenance detected a gap
+    MaintenanceGap { candidates: usize },
+    /// Background maintenance completed
+    MaintenanceComplete { latency_ms: u64 },
     /// Extraction started
     ExtractionStarted { reason: String },
     /// Extraction completed
@@ -521,6 +570,57 @@ impl InfoWidgetData {
     pub fn has_data_for(&self, kind: WidgetKind) -> bool {
         match kind {
             WidgetKind::Diagrams => !self.diagrams.is_empty(),
+            WidgetKind::Overview => {
+                let mut sections = 0usize;
+                if self.model.is_some() {
+                    sections += 1;
+                }
+                if self
+                    .context_info
+                    .as_ref()
+                    .map(|c| c.total_chars > 0)
+                    .unwrap_or(false)
+                {
+                    sections += 1;
+                }
+                if !self.todos.is_empty() {
+                    sections += 1;
+                }
+                if self
+                    .swarm_info
+                    .as_ref()
+                    .map(|s| {
+                        s.subagent_status.is_some()
+                            || s.session_count > 1
+                            || s.client_count.is_some()
+                            || !s.members.is_empty()
+                    })
+                    .unwrap_or(false)
+                {
+                    sections += 1;
+                }
+                if self
+                    .background_info
+                    .as_ref()
+                    .map(|b| b.running_count > 0 || b.memory_agent_active)
+                    .unwrap_or(false)
+                {
+                    sections += 1;
+                }
+                if self
+                    .usage_info
+                    .as_ref()
+                    .map(|u| u.available)
+                    .unwrap_or(false)
+                {
+                    sections += 1;
+                }
+                if self.queue_mode.is_some() {
+                    sections += 1;
+                }
+                // Only useful as a "join" mode when there are multiple sections.
+                sections >= 2
+            }
             WidgetKind::Todos => !self.todos.is_empty(),
             WidgetKind::ContextUsage => self
                 .context_info
@@ -670,6 +770,7 @@ pub fn calculate_placements(
         state.placements.clear();
         return Vec::new();
     }
+    let overview_requested = available.contains(&WidgetKind::Overview);
 
     // Build margin spaces
     let mut margin_spaces: Vec<MarginSpace> = Vec::new();
@@ -719,6 +820,11 @@ pub fn calculate_placements(
 
     for prev in &prev_placements {
         if !available.contains(&prev.kind) {
+            continue;
+        }
+        // When overview is available, prefer reflowing mergeable widgets into one panel
+        // rather than sticking to old scattered placements.
+        if overview_requested && is_overview_mergeable(prev.kind) {
             continue;
         }
 
@@ -772,8 +878,12 @@ pub fn calculate_placements(
     }
 
     // Phase 2: Greedy placement for widgets that couldn't keep their position
+    let mut overview_placed = placements.iter().any(|p| p.kind == WidgetKind::Overview);
     for kind in available {
         if kept.contains(&kind) {
+            continue;
+        }
+        if overview_placed && is_overview_mergeable(kind) {
             continue;
         }
 
@@ -817,6 +927,9 @@ pub fn calculate_placements(
                 rect: Rect::new(x, y, width, widget_height),
                 side,
             });
+            if kind == WidgetKind::Overview {
+                overview_placed = true;
+            }
 
             // Shrink the rect: move top down, reduce height, recalculate width
             let remaining_height = height.saturating_sub(widget_height);
@@ -871,6 +984,14 @@ fn calculate_widget_height(
     let border_height = 2u16;
 
     let content_height = match kind {
+        WidgetKind::Overview => {
+            let mut overview = data.clone();
+            // Keep memory in its own widget so graph rendering stays focused.
+            overview.memory_info = None;
+            let inner_h = max_height.saturating_sub(border_height);
+            let layout = compute_page_layout(&overview, inner_width, inner_h);
+            layout.max_page_height
+        }
         WidgetKind::Diagrams => {
             if data.diagrams.is_empty() {
                 return 0;
@@ -1122,6 +1243,10 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
         render_diagrams_widget(frame, inner, data);
         return;
     }
+    if placement.kind == WidgetKind::Overview {
+        render_overview_widget(frame, inner, data);
+        return;
+    }
     if placement.kind == WidgetKind::MemoryActivity {
         render_memory_widget_with_mermaid(frame, inner, data);
         return;
@@ -1146,7 +1271,73 @@ fn render_diagrams_widget(frame: &mut Frame, inner: Rect, data: &InfoWidgetData)
     super::mermaid::render_image_widget(diagram.hash, inner, frame.buffer_mut(), false, false);
 }
 
+fn render_overview_widget(frame: &mut Frame, inner: Rect, data: &InfoWidgetData) {
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let mut overview = data.clone();
+    // Keep memory graph and diagram visuals in dedicated widgets.
+    overview.memory_info = None;
+    overview.diagrams.clear();
+
+    let layout = compute_page_layout(&overview, inner.width as usize, inner.height);
+    if layout.pages.is_empty() {
+        return;
+    }
+
+    let mut guard = get_or_init_state();
+    let state = match guard.as_mut() {
+        Some(state) => state,
+        None => return,
+    };
+    let widget_state = state.widget_states.entry(WidgetKind::Overview).or_default();
+
+    if layout.pages.len() > 1 {
+        let now = Instant::now();
+        let should_advance = widget_state
+            .last_page_switch
+            .map(|last| now.duration_since(last).as_secs() >= PAGE_SWITCH_SECONDS)
+            .unwrap_or(true);
+        if should_advance {
+            widget_state.page_index = (widget_state.page_index + 1) % layout.pages.len();
+            widget_state.last_page_switch = Some(now);
+        }
+    } else {
+        widget_state.page_index = 0;
+        widget_state.last_page_switch = None;
+    }
+
+    let page_index = widget_state.page_index.min(layout.pages.len() - 1);
+    let page = layout.pages[page_index];
+    let mut lines = render_page(page.kind, &overview, inner);
+
+    if layout.show_dots && inner.height > 0 {
+        let mut dots: Vec<Span<'static>> = Vec::new();
+        for i in 0..layout.pages.len() {
+            if i == page_index {
+                dots.push(Span::styled(
+                    "● ",
+                    Style::default().fg(Color::Rgb(170, 170, 180)),
+                ));
+            } else {
+                dots.push(Span::styled(
+                    "○ ",
+                    Style::default().fg(Color::Rgb(100, 100, 110)),
+                ));
+            }
+        }
+        if !dots.is_empty() {
+            lines.push(Line::from(dots));
+        }
+    }
+
+    lines.truncate(inner.height as usize);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 const MEMORY_MERMAID_MAX_NODES: usize = 16;
+const MEMORY_MERMAID_MAX_TOTAL_MEMORIES: usize = 80;
 
 fn render_memory_widget_with_mermaid(frame: &mut Frame, inner: Rect, data: &InfoWidgetData) {
     let Some(info) = &data.memory_info else {
@@ -1173,13 +1364,18 @@ fn render_memory_widget_with_mermaid(frame: &mut Frame, inner: Rect, data: &Info
 
     let activity_height = (activity_lines.len() as u16).min(inner.height.saturating_sub(1));
     let graph_height = inner.height.saturating_sub(1 + activity_height);
+    let prefer_custom_graph = info.total_count > MEMORY_MERMAID_MAX_TOTAL_MEMORIES;
 
     if graph_height > 0 && !info.graph_nodes.is_empty() {
         let graph_rect = Rect::new(inner.x, inner.y + 1, inner.width, graph_height);
-        let rendered_image = render_memory_mermaid_graph(frame, graph_rect, info);
+        let rendered_image = if prefer_custom_graph {
+            false
+        } else {
+            render_memory_mermaid_graph(frame, graph_rect, info)
+        };
         if !rendered_image {
             // Fallback for terminals without image protocol support.
-            let fallback = render_mini_graph(info, graph_rect.width, graph_rect.height.min(6));
+            let fallback = render_mini_graph(info, graph_rect.width, graph_rect.height);
             if !fallback.is_empty() {
                 frame.render_widget(Paragraph::new(fallback), graph_rect);
             }
@@ -1302,6 +1498,7 @@ fn render_widget_content(
 ) -> Vec<Line<'static>> {
     match kind {
         WidgetKind::Diagrams => Vec::new(), // Handled specially in render_single_widget
+        WidgetKind::Overview => Vec::new(), // Handled specially in render_single_widget
         WidgetKind::Todos => render_todos_widget(data, inner),
         WidgetKind::ContextUsage => render_context_widget(data, inner),
         WidgetKind::MemoryActivity => render_memory_widget(data, inner),
@@ -1515,6 +1712,16 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
                     Style::default().fg(Color::Rgb(180, 180, 190)),
                 ),
             ]),
+            MemoryState::Maintaining { phase } => Line::from(vec![
+                Span::styled("🌿 ", Style::default().fg(Color::Rgb(120, 220, 180))),
+                Span::styled(
+                    truncate_smart(
+                        &format!("Maintaining ({})", phase),
+                        inner.width.saturating_sub(4) as usize,
+                    ),
+                    Style::default().fg(Color::Rgb(180, 180, 190)),
+                ),
+            ]),
         };
         lines.push(state_line);
 
@@ -1560,6 +1767,56 @@ fn format_memory_event(event: &MemoryEvent, max_width: usize) -> (&'static str, 
             let preview = truncate_smart(memory_preview, max_width.saturating_sub(2));
             ("★", preview, Color::Rgb(255, 220, 100))
         }
+        MemoryEventKind::MemoryInjected {
+            count,
+            prompt_chars,
+            age_ms,
+            preview,
+            items,
+        } => {
+            let snippet = items
+                .first()
+                .map(|item| format!("[{}] {}", item.section, item.content))
+                .unwrap_or_else(|| preview.clone());
+            let msg = truncate_smart(
+                &format!("{} mem ({}c, {}ms) {}", count, prompt_chars, age_ms, snippet),
+                max_width.saturating_sub(2),
+            );
+            ("↳", msg, Color::Rgb(140, 210, 255))
+        }
+        MemoryEventKind::MaintenanceStarted { verified, rejected } => (
+            "🌿",
+            format!("maintain v{} r{}", verified, rejected),
+            Color::Rgb(120, 220, 180),
+        ),
+        MemoryEventKind::MaintenanceLinked { links } => {
+            ("⇄", format!("{} links", links), Color::Rgb(120, 220, 180))
+        }
+        MemoryEventKind::MaintenanceConfidence { boosted, decayed } => (
+            "±",
+            format!("conf +{} -{}", boosted, decayed),
+            Color::Rgb(120, 220, 180),
+        ),
+        MemoryEventKind::MaintenanceCluster { clusters, members } => (
+            "◈",
+            format!("clusters {} ({} mem)", clusters, members),
+            Color::Rgb(120, 220, 180),
+        ),
+        MemoryEventKind::MaintenanceTagInferred { tag, applied } => (
+            "#",
+            format!("tag {} (+{})", truncate_smart(tag, 20), applied),
+            Color::Rgb(120, 220, 180),
+        ),
+        MemoryEventKind::MaintenanceGap { candidates } => (
+            "?",
+            format!("gap after {} candidates", candidates),
+            Color::Rgb(220, 180, 120),
+        ),
+        MemoryEventKind::MaintenanceComplete { latency_ms } => (
+            "✓",
+            format!("maint {}ms", latency_ms),
+            Color::Rgb(120, 220, 180),
+        ),
         MemoryEventKind::ExtractionStarted { reason } => {
             let msg = truncate_smart(reason, max_width.saturating_sub(2));
             (
@@ -3028,8 +3285,8 @@ fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_memory_graph_mermaid, render_memory_widget, render_mini_graph, truncate_smart,
-        GraphNode, InfoWidgetData, MemoryInfo,
+        build_memory_graph_mermaid, calculate_placements, render_memory_widget, render_mini_graph,
+        truncate_smart, GraphNode, InfoWidgetData, Margins, MemoryInfo, WidgetKind,
     };
     use ratatui::layout::Rect;
     use ratatui::text::Line;
@@ -3150,6 +3407,50 @@ mod tests {
         assert!(mermaid.contains("graph TD"));
         assert!(mermaid.contains("n0"));
         assert!(mermaid.contains("-->"));
+    }
+
+    #[test]
+    fn overview_requires_multiple_sections() {
+        let one_section = InfoWidgetData {
+            model: Some("gpt-test".to_string()),
+            ..Default::default()
+        };
+        assert!(!one_section.has_data_for(WidgetKind::Overview));
+
+        let two_sections = InfoWidgetData {
+            model: Some("gpt-test".to_string()),
+            queue_mode: Some(true),
+            ..Default::default()
+        };
+        assert!(two_sections.has_data_for(WidgetKind::Overview));
+    }
+
+    #[test]
+    fn overview_widget_is_placed_when_space_allows() {
+        {
+            let mut guard = super::get_or_init_state();
+            if let Some(state) = guard.as_mut() {
+                state.enabled = true;
+                state.placements.clear();
+                state.widget_states.clear();
+            }
+        }
+
+        let data = InfoWidgetData {
+            model: Some("gpt-test".to_string()),
+            queue_mode: Some(true),
+            ..Default::default()
+        };
+        let margins = Margins {
+            right_widths: vec![40; 20],
+            left_widths: Vec::new(),
+            centered: false,
+        };
+        let placements = calculate_placements(Rect::new(0, 0, 80, 20), &margins, &data);
+        assert!(
+            placements.iter().any(|p| p.kind == WidgetKind::Overview),
+            "expected overview widget placement"
+        );
     }
 
     fn flatten_lines(lines: &[Line<'_>]) -> String {
@@ -3279,6 +3580,16 @@ fn render_memory_compact(info: &MemoryInfo) -> Vec<Line<'static>> {
                     Style::default().fg(Color::Rgb(200, 150, 255)),
                 ));
             }
+            MemoryState::Maintaining { .. } => {
+                spans.push(Span::styled(
+                    " · ",
+                    Style::default().fg(Color::Rgb(100, 100, 110)),
+                ));
+                spans.push(Span::styled(
+                    "🌿",
+                    Style::default().fg(Color::Rgb(120, 220, 180)),
+                ));
+            }
             MemoryState::Idle => {}
         }
     }
@@ -3361,12 +3672,75 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
                     Style::default().fg(Color::Rgb(180, 180, 190)),
                 ),
             ]),
+            MemoryState::Maintaining { phase } => Line::from(vec![
+                Span::styled("🌿 ", Style::default().fg(Color::Rgb(120, 220, 180))),
+                Span::styled(
+                    truncate_smart(
+                        &format!("Maintaining ({})", phase),
+                        inner.width.saturating_sub(4) as usize,
+                    ),
+                    Style::default().fg(Color::Rgb(180, 180, 190)),
+                ),
+            ]),
         };
         lines.push(state_line);
 
         // Recent events
         let max_width = inner.width.saturating_sub(4) as usize;
         for event in activity.recent_events.iter().take(MAX_MEMORY_EVENTS) {
+            if let MemoryEventKind::MemoryInjected {
+                count,
+                prompt_chars,
+                age_ms,
+                preview,
+                items,
+            } = &event.kind
+            {
+                let plural = if *count == 1 { "memory" } else { "memories" };
+                let summary = truncate_with_ellipsis(
+                    &format!("Injected {} {} ({}c, {}ms)", count, plural, prompt_chars, age_ms),
+                    max_width,
+                );
+                lines.push(Line::from(vec![
+                    Span::styled("  ↳ ", Style::default().fg(Color::Rgb(140, 210, 255))),
+                    Span::styled(summary, Style::default().fg(Color::Rgb(140, 140, 150))),
+                ]));
+
+                if items.is_empty() {
+                    let fallback = truncate_with_ellipsis(preview, max_width.saturating_sub(4));
+                    lines.push(Line::from(vec![
+                        Span::styled("    • ", Style::default().fg(Color::Rgb(170, 170, 180))),
+                        Span::styled(fallback, Style::default().fg(Color::Rgb(140, 140, 150))),
+                    ]));
+                } else {
+                    let max_items = 5usize;
+                    for item in items.iter().take(max_items) {
+                        let label = truncate_with_ellipsis(&item.section, 16);
+                        let text = truncate_with_ellipsis(
+                            &format!("[{}] {}", label, item.content),
+                            max_width.saturating_sub(4),
+                        );
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                "    • ",
+                                Style::default().fg(Color::Rgb(170, 170, 180)),
+                            ),
+                            Span::styled(text, Style::default().fg(Color::Rgb(140, 140, 150))),
+                        ]));
+                    }
+                    if items.len() > max_items {
+                        lines.push(Line::from(vec![
+                            Span::styled("    … ", Style::default().fg(Color::Rgb(120, 120, 130))),
+                            Span::styled(
+                                format!("+{} more", items.len() - max_items),
+                                Style::default().fg(Color::Rgb(120, 120, 130)),
+                            ),
+                        ]));
+                    }
+                }
+                continue;
+            }
+
             let (icon, text, color) = match &event.kind {
                 MemoryEventKind::EmbeddingStarted => {
                     ("🔍", "Embedding...".to_string(), Color::Rgb(140, 180, 255))
@@ -3397,6 +3771,55 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
                         truncate_with_ellipsis(memory_preview, max_width.saturating_sub(4));
                     ("★", preview, Color::Rgb(255, 220, 100))
                 }
+                MemoryEventKind::MemoryInjected {
+                    count,
+                    prompt_chars,
+                    age_ms,
+                    preview,
+                    items: _,
+                } => {
+                    let msg = truncate_with_ellipsis(
+                        &format!(
+                            "{} mem ({}c, {}ms) {}",
+                            count, prompt_chars, age_ms, preview
+                        ),
+                        max_width.saturating_sub(4),
+                    );
+                    ("↳", msg, Color::Rgb(140, 210, 255))
+                }
+                MemoryEventKind::MaintenanceStarted { verified, rejected } => (
+                    "🌿",
+                    format!("maintain v{} r{}", verified, rejected),
+                    Color::Rgb(120, 220, 180),
+                ),
+                MemoryEventKind::MaintenanceLinked { links } => {
+                    ("⇄", format!("{} links", links), Color::Rgb(120, 220, 180))
+                }
+                MemoryEventKind::MaintenanceConfidence { boosted, decayed } => (
+                    "±",
+                    format!("conf +{} -{}", boosted, decayed),
+                    Color::Rgb(120, 220, 180),
+                ),
+                MemoryEventKind::MaintenanceCluster { clusters, members } => (
+                    "◈",
+                    format!("clusters {} ({} mem)", clusters, members),
+                    Color::Rgb(120, 220, 180),
+                ),
+                MemoryEventKind::MaintenanceTagInferred { tag, applied } => (
+                    "#",
+                    format!("tag {} (+{})", truncate_with_ellipsis(tag, 20), applied),
+                    Color::Rgb(120, 220, 180),
+                ),
+                MemoryEventKind::MaintenanceGap { candidates } => (
+                    "?",
+                    format!("gap after {} candidates", candidates),
+                    Color::Rgb(220, 180, 120),
+                ),
+                MemoryEventKind::MaintenanceComplete { latency_ms } => (
+                    "✓",
+                    format!("maint {}ms", latency_ms),
+                    Color::Rgb(120, 220, 180),
+                ),
                 MemoryEventKind::ExtractionStarted { reason } => {
                     let msg = truncate_with_ellipsis(reason, max_width.saturating_sub(4));
                     (
