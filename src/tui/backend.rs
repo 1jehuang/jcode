@@ -6,7 +6,7 @@
 //! Also provides debug socket events for exposing full TUI state.
 
 use crate::message::ToolCall;
-use crate::protocol::{Request, ServerEvent};
+use crate::protocol::{FeatureToggle, Request, ServerEvent};
 use crate::server;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -344,6 +344,17 @@ impl RemoteConnection {
         let request = Request::SetModel {
             id: self.next_request_id,
             model: model.to_string(),
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
+    /// Toggle a runtime feature on the server for this session
+    pub async fn set_feature(&mut self, feature: FeatureToggle, enabled: bool) -> Result<()> {
+        let request = Request::SetFeature {
+            id: self.next_request_id,
+            feature,
+            enabled,
         };
         self.next_request_id += 1;
         self.send_request(request).await

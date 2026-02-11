@@ -792,7 +792,12 @@ impl ClientApp {
                     }
                 }
             }
-            ServerEvent::ModelChanged { model, provider_name, error, .. } => {
+            ServerEvent::ModelChanged {
+                model,
+                provider_name,
+                error,
+                ..
+            } => {
                 if let Some(err) = error {
                     self.push_display_message(DisplayMessage {
                         role: "error".to_string(),
@@ -852,8 +857,28 @@ impl ClientApp {
                 });
                 self.status_notice = Some(("Notification received".to_string(), Instant::now()));
             }
-            ServerEvent::MemoryInjected { count } => {
+            ServerEvent::MemoryInjected {
+                count,
+                prompt,
+                prompt_chars,
+                computed_age_ms,
+            } => {
                 let plural = if count == 1 { "memory" } else { "memories" };
+                let display_prompt = if prompt.trim().is_empty() {
+                    "# Memory\n\n## Notes\n1. (content unavailable from server event)".to_string()
+                } else {
+                    prompt.clone()
+                };
+                let display_chars = if prompt_chars == 0 {
+                    display_prompt.chars().count()
+                } else {
+                    prompt_chars
+                };
+                crate::memory::record_injected_prompt(&display_prompt, count, computed_age_ms);
+                self.push_display_message(DisplayMessage::system(format!(
+                    "🧠 Injected {} {} into context ({} chars, computed {}ms ago)\n\n---\n\n{}",
+                    count, plural, display_chars, computed_age_ms, display_prompt
+                )));
                 self.status_notice =
                     Some((format!("🧠 {} {} injected", count, plural), Instant::now()));
             }
@@ -986,19 +1011,12 @@ impl ClientApp {
                 }
             }
             KeyCode::Up | KeyCode::PageUp => {
-                let max = super::ui::last_max_scroll();
                 let inc = if code == KeyCode::PageUp { 10 } else { 1 };
-                self.scroll_offset = (self.scroll_offset + inc).min(max);
-                if self.is_processing {
-                    self.auto_scroll_paused = true;
-                }
+                self.scroll_up(inc);
             }
             KeyCode::Down | KeyCode::PageDown => {
                 let dec = if code == KeyCode::PageDown { 10 } else { 1 };
-                self.scroll_offset = self.scroll_offset.saturating_sub(dec);
-                if self.scroll_offset == 0 {
-                    self.auto_scroll_paused = false;
-                }
+                self.scroll_down(dec);
             }
             _ => {}
         }
@@ -1361,11 +1379,28 @@ impl TuiState for ClientApp {
             }
         };
 
+        let background_info = {
+            let memory_agent_active = crate::memory_agent::is_active();
+            let memory_stats = crate::memory_agent::stats();
+            let (running_count, running_tasks) = crate::background::global().running_snapshot();
+            if memory_agent_active || running_count > 0 {
+                Some(super::info_widget::BackgroundInfo {
+                    running_count,
+                    running_tasks,
+                    memory_agent_active,
+                    memory_agent_turns: memory_stats.turns_processed,
+                })
+            } else {
+                None
+            }
+        };
+
         super::info_widget::InfoWidgetData {
             usage_info,
             tokens_per_second,
             auth_method,
             memory_info,
+            background_info,
             upstream_provider: None, // Client mode doesn't have upstream provider info
             ..Default::default()
         }

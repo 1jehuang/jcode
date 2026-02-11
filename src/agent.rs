@@ -74,6 +74,8 @@ pub struct Agent {
     locked_tools: Option<Vec<ToolDefinition>>,
     /// Override system prompt (used by ambient mode to inject a custom prompt)
     system_prompt_override: Option<String>,
+    /// Whether memory features are enabled for this session
+    memory_enabled: bool,
 }
 
 impl Agent {
@@ -94,6 +96,7 @@ impl Agent {
             last_usage: TokenUsage::default(),
             locked_tools: None,
             system_prompt_override: None,
+            memory_enabled: crate::config::config().features.memory,
         };
         agent.session.model = Some(agent.provider.model());
         agent.seed_compaction_from_session();
@@ -123,6 +126,7 @@ impl Agent {
             last_usage: TokenUsage::default(),
             locked_tools: None,
             system_prompt_override: None,
+            memory_enabled: crate::config::config().features.memory,
         };
         if let Some(model) = agent.session.model.clone() {
             if let Err(e) = agent.provider.set_model(&model) {
@@ -355,6 +359,9 @@ impl Agent {
             "cache_tracker": {
                 "turn_count": self.cache_tracker.turn_count(),
                 "had_violation": self.cache_tracker.had_violation(),
+            },
+            "features": {
+                "memory_enabled": self.memory_enabled,
             },
             "token_usage": {
                 "input": self.last_usage.input_tokens,
@@ -842,7 +849,14 @@ impl Agent {
     }
 
     /// Non-blocking memory prompt - takes pending result and spawns check for next turn
-    fn build_memory_prompt_nonblocking(&self, messages: &[Message]) -> Option<String> {
+    fn build_memory_prompt_nonblocking(
+        &self,
+        messages: &[Message],
+    ) -> Option<crate::memory::PendingMemory> {
+        if !self.memory_enabled {
+            return None;
+        }
+
         // Take pending memory if available (computed in background during last turn)
         let pending = crate::memory::take_pending_memory();
 
@@ -851,7 +865,7 @@ impl Agent {
         manager.spawn_relevance_check(messages.to_vec());
 
         // Return pending memory from previous turn
-        pending.map(|p| p.prompt)
+        pending
     }
 
     /// Legacy blocking memory prompt - kept for fallback
@@ -890,6 +904,19 @@ impl Agent {
         if let Err(err) = self.session.save() {
             logging::error(&format!("Failed to persist debug session state: {}", err));
         }
+    }
+
+    /// Enable or disable memory features for this session.
+    pub fn set_memory_enabled(&mut self, enabled: bool) {
+        self.memory_enabled = enabled;
+        if !enabled {
+            crate::memory::clear_pending_memory();
+        }
+    }
+
+    /// Check whether memory features are enabled for this session.
+    pub fn memory_enabled(&self) -> bool {
+        self.memory_enabled
     }
 
     async fn tool_definitions(&mut self) -> Vec<ToolDefinition> {
@@ -1097,6 +1124,10 @@ impl Agent {
     /// Extract memories from the session transcript
     /// Returns the number of memories extracted, or 0 if none/skipped
     pub async fn extract_session_memories(&self) -> usize {
+        if !self.memory_enabled {
+            return 0;
+        }
+
         // Need at least 4 messages for meaningful extraction
         if self.session.messages.len() < 4 {
             return 0;
@@ -1211,18 +1242,22 @@ impl Agent {
 
             let tools = self.tool_definitions().await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
-            let memory_prompt = self.build_memory_prompt_nonblocking(&messages);
+            let memory_pending = self.build_memory_prompt_nonblocking(&messages);
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split(None);
 
             // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory = messages;
-            if let Some(ref memory) = memory_prompt {
+            if let Some(memory) = memory_pending.as_ref() {
+                let memory_count = memory.count.max(1);
+                let age_ms = memory.computed_at.elapsed().as_millis() as u64;
+                crate::memory::record_injected_prompt(&memory.prompt, memory_count, age_ms);
                 logging::info(&format!(
                     "Memory injected as message ({} chars)",
-                    memory.len()
+                    memory.prompt.len()
                 ));
-                let memory_msg = format!("<system-reminder>\n{}\n</system-reminder>", memory);
+                let memory_msg =
+                    format!("<system-reminder>\n{}\n</system-reminder>", memory.prompt);
                 messages_with_memory.push(Message::user(&memory_msg));
             }
 
@@ -1792,18 +1827,28 @@ impl Agent {
 
             let tools = self.tool_definitions().await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
-            let memory_prompt = self.build_memory_prompt_nonblocking(&messages);
+            let memory_pending = self.build_memory_prompt_nonblocking(&messages);
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split(None);
 
             // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory = messages;
-            if let Some(ref memory) = memory_prompt {
-                let memory_count = memory.matches("\n-").count().max(1);
+            if let Some(memory) = memory_pending.as_ref() {
+                let memory_count = memory.count.max(1);
+                let computed_age_ms = memory.computed_at.elapsed().as_millis() as u64;
+                crate::memory::record_injected_prompt(
+                    &memory.prompt,
+                    memory_count,
+                    computed_age_ms,
+                );
                 let _ = event_tx.send(ServerEvent::MemoryInjected {
                     count: memory_count,
+                    prompt: memory.prompt.clone(),
+                    prompt_chars: memory.prompt.chars().count(),
+                    computed_age_ms,
                 });
-                let memory_msg = format!("<system-reminder>\n{}\n</system-reminder>", memory);
+                let memory_msg =
+                    format!("<system-reminder>\n{}\n</system-reminder>", memory.prompt);
                 messages_with_memory.push(Message::user(&memory_msg));
             }
 
@@ -2254,18 +2299,28 @@ impl Agent {
 
             let tools = self.tool_definitions().await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
-            let memory_prompt = self.build_memory_prompt_nonblocking(&messages);
+            let memory_pending = self.build_memory_prompt_nonblocking(&messages);
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split(None);
 
             // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory = messages;
-            if let Some(ref memory) = memory_prompt {
-                let memory_count = memory.matches("\n-").count().max(1);
+            if let Some(memory) = memory_pending.as_ref() {
+                let memory_count = memory.count.max(1);
+                let computed_age_ms = memory.computed_at.elapsed().as_millis() as u64;
+                crate::memory::record_injected_prompt(
+                    &memory.prompt,
+                    memory_count,
+                    computed_age_ms,
+                );
                 let _ = event_tx.send(ServerEvent::MemoryInjected {
                     count: memory_count,
+                    prompt: memory.prompt.clone(),
+                    prompt_chars: memory.prompt.chars().count(),
+                    computed_age_ms,
                 });
-                let memory_msg = format!("<system-reminder>\n{}\n</system-reminder>", memory);
+                let memory_msg =
+                    format!("<system-reminder>\n{}\n</system-reminder>", memory.prompt);
                 messages_with_memory.push(Message::user(&memory_msg));
             }
 

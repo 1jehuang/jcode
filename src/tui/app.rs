@@ -897,14 +897,21 @@ impl App {
             }
         }
 
-        // Check canary binary - in self-dev mode, the server may have reloaded
-        // with a newer canary while this client is still running an older binary
-        if let Ok(canary) = crate::build::canary_binary_path() {
-            if canary.exists() {
-                if let Ok(metadata) = std::fs::metadata(&canary) {
-                    if let Ok(canary_mtime) = metadata.modified() {
-                        if canary_mtime > startup_mtime {
-                            return true;
+        // In canary/self-dev sessions, also track canary binary freshness.
+        // This keeps client/server update checks aligned in self-dev flows.
+        let is_canary_session = if self.is_remote {
+            self.remote_is_canary.unwrap_or(false)
+        } else {
+            self.session.is_canary
+        };
+        if is_canary_session {
+            if let Ok(canary) = crate::build::canary_binary_path() {
+                if canary.exists() {
+                    if let Ok(metadata) = std::fs::metadata(&canary) {
+                        if let Ok(canary_mtime) = metadata.modified() {
+                            if canary_mtime > startup_mtime {
+                                return true;
+                            }
                         }
                     }
                 }
@@ -4295,10 +4302,30 @@ impl App {
                 }
                 false
             }
-            ServerEvent::MemoryInjected { count } => {
+            ServerEvent::MemoryInjected {
+                count,
+                prompt,
+                prompt_chars,
+                computed_age_ms,
+            } => {
                 if self.memory_enabled {
-                    // Show notice that memory was injected
                     let plural = if count == 1 { "memory" } else { "memories" };
+                    let display_prompt = if prompt.trim().is_empty() {
+                        "# Memory\n\n## Notes\n1. (content unavailable from server event)"
+                            .to_string()
+                    } else {
+                        prompt.clone()
+                    };
+                    let display_chars = if prompt_chars == 0 {
+                        display_prompt.chars().count()
+                    } else {
+                        prompt_chars
+                    };
+                    crate::memory::record_injected_prompt(&display_prompt, count, computed_age_ms);
+                    self.push_display_message(DisplayMessage::system(format!(
+                        "🧠 Injected {} {} into context ({} chars, computed {}ms ago)\n\n---\n\n{}",
+                        count, plural, display_chars, computed_age_ms, display_prompt
+                    )));
                     self.set_status_notice(format!("🧠 {} relevant {} injected", count, plural));
                 }
                 false
@@ -7241,9 +7268,14 @@ impl App {
 
             let tools = self.registry.definitions(None).await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
-            let memory_prompt = self.build_memory_prompt_nonblocking(&provider_messages);
+            let memory_pending = self.build_memory_prompt_nonblocking(&provider_messages);
             // Use split prompt for better caching - static content cached, dynamic not
-            let split_prompt = self.build_system_prompt_split(memory_prompt.as_deref());
+            let split_prompt =
+                self.build_system_prompt_split(memory_pending.as_ref().map(|p| p.prompt.as_str()));
+            if let Some(pending) = &memory_pending {
+                let age_ms = pending.computed_at.elapsed().as_millis() as u64;
+                self.show_injected_memory_context(&pending.prompt, pending.count, age_ms);
+            }
 
             self.status = ProcessingStatus::Sending;
             let mut stream = self
@@ -7725,9 +7757,14 @@ impl App {
 
             let tools = self.registry.definitions(None).await;
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
-            let memory_prompt = self.build_memory_prompt_nonblocking(&provider_messages);
+            let memory_pending = self.build_memory_prompt_nonblocking(&provider_messages);
             // Use split prompt for better caching - static content cached, dynamic not
-            let split_prompt = self.build_system_prompt_split(memory_prompt.as_deref());
+            let split_prompt =
+                self.build_system_prompt_split(memory_pending.as_ref().map(|p| p.prompt.as_str()));
+            if let Some(pending) = &memory_pending {
+                let age_ms = pending.computed_at.elapsed().as_millis() as u64;
+                self.show_injected_memory_context(&pending.prompt, pending.count, age_ms);
+            }
 
             self.status = ProcessingStatus::Sending;
             terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
@@ -8509,9 +8546,29 @@ impl App {
         split
     }
 
+    fn show_injected_memory_context(&mut self, prompt: &str, count: usize, age_ms: u64) {
+        let count = count.max(1);
+        let plural = if count == 1 { "memory" } else { "memories" };
+        let display_prompt = if prompt.trim().is_empty() {
+            "# Memory\n\n## Notes\n1. (empty injection payload)".to_string()
+        } else {
+            prompt.to_string()
+        };
+        let prompt_chars = display_prompt.chars().count();
+        crate::memory::record_injected_prompt(&display_prompt, count, age_ms);
+        self.push_display_message(DisplayMessage::system(format!(
+            "🧠 Injected {} {} into context ({} chars, computed {}ms ago)\n\n---\n\n{}",
+            count, plural, prompt_chars, age_ms, display_prompt
+        )));
+        self.set_status_notice(format!("🧠 {} {} injected", count, plural));
+    }
+
     /// Get memory prompt using async non-blocking approach
     /// Takes any pending memory from background check and sends context to memory agent for next turn
-    fn build_memory_prompt_nonblocking(&self, messages: &[Message]) -> Option<String> {
+    fn build_memory_prompt_nonblocking(
+        &self,
+        messages: &[Message],
+    ) -> Option<crate::memory::PendingMemory> {
         if self.is_remote || !self.memory_enabled {
             return None;
         }
@@ -8523,7 +8580,7 @@ impl App {
         crate::memory_agent::update_context_sync(messages.to_vec());
 
         // Return pending memory from previous turn
-        pending.map(|p| p.prompt)
+        pending
     }
 
     /// Legacy blocking memory prompt - kept for fallback but not used in normal flow
@@ -9867,18 +9924,18 @@ impl super::TuiState for App {
         // Gather background task info
         let background_info = {
             let memory_agent_active = self.memory_enabled && crate::memory_agent::is_active();
+            let memory_stats = crate::memory_agent::stats();
 
             // Get running background tasks count
             let bg_manager = crate::background::global();
-            // We can't easily get running count without async, so just check if memory agent is active
-            // Background tasks will show via swarm_info subagent_status
+            let (running_count, running_tasks) = bg_manager.running_snapshot();
 
-            if memory_agent_active {
+            if memory_agent_active || running_count > 0 {
                 Some(super::info_widget::BackgroundInfo {
-                    running_count: 0, // TODO: track this properly
-                    running_tasks: Vec::new(),
+                    running_count,
+                    running_tasks,
                     memory_agent_active,
-                    memory_agent_turns: 0, // TODO: expose this from memory_agent
+                    memory_agent_turns: memory_stats.turns_processed,
                 })
             } else {
                 None
@@ -11024,6 +11081,30 @@ mod tests {
     }
 
     #[test]
+    fn test_streaming_repaint_does_not_leave_bracket_artifact() {
+        let mut app = create_test_app();
+        let backend = ratatui::backend::TestBackend::new(90, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.streaming_text = "[".to_string();
+        let _ = render_and_snap(&app, &mut terminal);
+
+        app.streaming_text = "Process A: |██████████|".to_string();
+        let text = render_and_snap(&app, &mut terminal);
+
+        assert!(
+            text.contains("Process A: |██████████|"),
+            "expected updated streaming content to be visible"
+        );
+        assert!(
+            !text.lines().any(|line| line.trim() == "["),
+            "stale standalone '[' artifact should not persist after repaint"
+        );
+    }
+
+    #[test]
     fn test_scroll_ctrl_k_j_offset() {
         let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
 
@@ -11121,6 +11202,30 @@ mod tests {
         assert!(
             text.contains('↓'),
             "expected ↓ indicator when scrolled up from bottom"
+        );
+    }
+
+    #[test]
+    fn test_scroll_top_does_not_snap_to_bottom() {
+        let (mut app, mut terminal) = create_scroll_test_app(80, 25, 1, 12);
+
+        // Top position in paused mode (absolute offset from top).
+        app.scroll_offset = 0;
+        app.auto_scroll_paused = true;
+        let text_top = render_and_snap(&app, &mut terminal);
+
+        // Bottom position (auto-follow mode).
+        app.scroll_offset = 0;
+        app.auto_scroll_paused = false;
+        let text_bottom = render_and_snap(&app, &mut terminal);
+
+        assert_ne!(
+            text_top, text_bottom,
+            "top viewport should differ from bottom viewport"
+        );
+        assert!(
+            text_top.contains("Intro line 01"),
+            "top viewport should include earliest content"
         );
     }
 
