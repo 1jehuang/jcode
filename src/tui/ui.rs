@@ -1998,16 +1998,30 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 }
             }
             "system" => {
-                lines.push(
-                    Line::from(vec![
-                        Span::styled(if centered { "" } else { "  " }, Style::default()),
-                        Span::styled(
-                            msg.content.clone(),
-                            Style::default().fg(ACCENT_COLOR).italic(),
-                        ),
-                    ])
-                    .alignment(align),
-                );
+                let should_render_markdown = msg.content.contains('\n')
+                    || msg.content.contains("```")
+                    || msg.content.contains("# ")
+                    || msg.content.contains("- ");
+
+                if should_render_markdown {
+                    let content_width = width.saturating_sub(4) as usize;
+                    let rendered =
+                        markdown::render_markdown_with_width(&msg.content, Some(content_width));
+                    for line in rendered {
+                        lines.push(align_if_unset(line, align));
+                    }
+                } else {
+                    lines.push(
+                        Line::from(vec![
+                            Span::styled(if centered { "" } else { "  " }, Style::default()),
+                            Span::styled(
+                                msg.content.clone(),
+                                Style::default().fg(ACCENT_COLOR).italic(),
+                            ),
+                        ])
+                        .alignment(align),
+                    );
+                }
             }
             "usage" => {
                 lines.push(
@@ -2385,10 +2399,19 @@ fn compute_visible_margins(
             }
 
             if centered {
-                // In centered mode, content is centered, so margins are equal
+                // Respect each line's effective alignment. Some lines (e.g. code/diff blocks)
+                // are explicitly left-aligned even in centered mode.
                 let total_margin = area.width.saturating_sub(used);
-                let left_margin = total_margin / 2;
-                let right_margin = total_margin.saturating_sub(left_margin);
+                let effective_alignment = lines[line_idx].alignment.unwrap_or(Alignment::Center);
+                let (left_margin, right_margin) = match effective_alignment {
+                    Alignment::Left => (0, total_margin),
+                    Alignment::Center => {
+                        let left = total_margin / 2;
+                        let right = total_margin.saturating_sub(left);
+                        (left, right)
+                    }
+                    Alignment::Right => (total_margin, 0),
+                };
                 left_widths.push(left_margin);
                 right_widths.push(right_margin);
             } else {
@@ -2683,7 +2706,7 @@ fn draw_messages(
     // scroll_offset semantics:
     // - When auto_scroll_paused: scroll_offset is absolute line from top
     // - When !auto_scroll_paused: scroll_offset should be 0 (at bottom)
-    let scroll = if app.auto_scroll_paused() && user_scroll > 0 {
+    let scroll = if app.auto_scroll_paused() {
         user_scroll.min(max_scroll)
     } else {
         max_scroll
@@ -2707,6 +2730,10 @@ fn draw_messages(
         visible_lines
             .extend(std::iter::repeat(Line::from("")).take(visible_height - visible_lines.len()));
     }
+
+    // Clear message pane before repainting to prevent stale glyph artifacts
+    // during streaming/incremental markdown updates.
+    frame.render_widget(Clear, area);
 
     // Render text first
     let paragraph = Paragraph::new(visible_lines);
@@ -2818,8 +2845,8 @@ fn draw_messages(
     }
 
     // Content below indicator (bottom-right) when user has scrolled up
-    if user_scroll > 0 {
-        let indicator = format!("↓{}", user_scroll);
+    if app.auto_scroll_paused() && scroll < max_scroll {
+        let indicator = format!("↓{}", max_scroll - scroll);
         let indicator_area = Rect {
             x: area.x + area.width.saturating_sub(indicator.len() as u16 + 2),
             y: area.y + area.height.saturating_sub(1),
@@ -4482,5 +4509,28 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert_eq!(cursor_line, 3); // on 'd' line
         assert_eq!(cursor_col, 0);
+    }
+
+    #[test]
+    fn test_compute_visible_margins_centered_respects_line_alignment() {
+        let lines = vec![
+            ratatui::text::Line::from("centered").centered(),
+            ratatui::text::Line::from("left block").left_aligned(),
+            ratatui::text::Line::from("right").right_aligned(),
+        ];
+        let area = Rect::new(0, 0, 20, 3);
+        let margins = compute_visible_margins(&lines, &[], 0, area, true);
+
+        // centered: used=8 => total_margin=12 => 6/6 split
+        assert_eq!(margins.left_widths[0], 6);
+        assert_eq!(margins.right_widths[0], 6);
+
+        // left-aligned: used=10 => left=0, right=10
+        assert_eq!(margins.left_widths[1], 0);
+        assert_eq!(margins.right_widths[1], 10);
+
+        // right-aligned: used=5 => left=15, right=0
+        assert_eq!(margins.left_widths[2], 15);
+        assert_eq!(margins.right_widths[2], 0);
     }
 }

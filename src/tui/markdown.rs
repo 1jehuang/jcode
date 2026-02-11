@@ -146,11 +146,9 @@ impl IncrementalMarkdownRenderer {
 
         // Fast path: text was only appended
         if full_text.starts_with(&self.rendered_text) {
-            let appended = &full_text[self.rendered_text.len()..];
-
             // Find a safe re-render point
             // Safe points are after: double newlines (paragraph end), code block end
-            let rerender_from = self.find_safe_rerender_point(full_text);
+            let rerender_from = self.find_safe_rerender_point();
 
             if rerender_from >= self.last_checkpoint {
                 // Re-render from the safe point
@@ -161,11 +159,9 @@ impl IncrementalMarkdownRenderer {
                 self.rendered_lines.truncate(self.lines_at_checkpoint);
                 self.rendered_lines.extend(new_lines);
 
-                // Update checkpoint if we found a new complete block
-                if let Some(new_checkpoint) = self.find_new_checkpoint(full_text, appended) {
-                    self.last_checkpoint = new_checkpoint;
-                    self.lines_at_checkpoint = self.rendered_lines.len();
-                }
+                // Update checkpoint only at markdown-safe boundaries.
+                // This prevents checkpointing inside fenced code blocks during streaming.
+                self.refresh_checkpoint(full_text, false);
 
                 self.rendered_text = full_text.to_string();
                 return self.rendered_lines.clone();
@@ -178,67 +174,78 @@ impl IncrementalMarkdownRenderer {
         self.rendered_text = full_text.to_string();
 
         // Find checkpoint for next incremental update
-        if let Some(checkpoint) = self.find_last_complete_block(full_text) {
-            self.last_checkpoint = checkpoint;
-            // Count lines up to this point
-            let prefix_lines = render_markdown_with_width(&full_text[..checkpoint], self.max_width);
-            self.lines_at_checkpoint = prefix_lines.len();
-        } else {
-            self.last_checkpoint = 0;
-            self.lines_at_checkpoint = 0;
-        }
+        self.refresh_checkpoint(full_text, true);
 
         self.rendered_lines.clone()
     }
 
     /// Find a safe point to start re-rendering from
-    fn find_safe_rerender_point(&self, text: &str) -> usize {
+    fn find_safe_rerender_point(&self) -> usize {
         // Start from the last checkpoint
         self.last_checkpoint
     }
 
-    /// Find a new checkpoint after appended text
-    fn find_new_checkpoint(&self, full_text: &str, appended: &str) -> Option<usize> {
-        // Look for complete blocks in the appended portion
-        let start = full_text.len() - appended.len();
-
-        // Check for paragraph end (double newline)
-        if let Some(pos) = appended.rfind("\n\n") {
-            return Some(start + pos + 2);
-        }
-
-        // Check for code block end
-        if appended.contains("```") {
-            // Find the last code block end - ensure we land on a char boundary
-            let mut search_start = start.saturating_sub(10); // Look back a bit
-            while search_start > 0 && !full_text.is_char_boundary(search_start) {
-                search_start -= 1;
-            }
-            let search_text = &full_text[search_start..];
-            if let Some(pos) = search_text.rfind("\n```\n") {
-                return Some(search_start + pos + 5);
-            }
-            if search_text.ends_with("\n```") {
-                return Some(full_text.len());
-            }
-        }
-
-        None
-    }
-
     /// Find the last complete block in text
     fn find_last_complete_block(&self, text: &str) -> Option<usize> {
-        // Find last double newline (paragraph boundary)
-        if let Some(pos) = text.rfind("\n\n") {
-            return Some(pos + 2);
+        let mut checkpoint = None;
+        let mut line_start = 0usize;
+        let mut fence_state: Option<(char, usize)> = None;
+
+        while line_start <= text.len() {
+            let relative_end = text[line_start..].find('\n');
+            let (line_end, line_ends_with_newline) = match relative_end {
+                Some(end) => (line_start + end, true),
+                None => (text.len(), false),
+            };
+            let line = &text[line_start..line_end];
+            let line_end_including_newline = if line_ends_with_newline {
+                line_end + 1
+            } else {
+                line_end
+            };
+
+            match fence_state {
+                Some((fence_char, fence_len)) => {
+                    if is_closing_fence(line, fence_char, fence_len) {
+                        fence_state = None;
+                        checkpoint = Some(line_end_including_newline);
+                    }
+                }
+                None => {
+                    if let Some((fence_char, fence_len)) = parse_opening_fence(line) {
+                        fence_state = Some((fence_char, fence_len));
+                    } else if line.trim().is_empty() {
+                        checkpoint = Some(line_end_including_newline);
+                    }
+                }
+            }
+
+            if !line_ends_with_newline {
+                break;
+            }
+            line_start = line_end + 1;
         }
 
-        // Find last code block end
-        if let Some(pos) = text.rfind("\n```\n") {
-            return Some(pos + 5);
+        checkpoint
+    }
+
+    /// Refresh checkpoint metadata from the latest rendered text.
+    ///
+    /// `force = true` recomputes prefix line counts even when checkpoint byte position is unchanged.
+    fn refresh_checkpoint(&mut self, full_text: &str, force: bool) {
+        let new_checkpoint = self.find_last_complete_block(full_text).unwrap_or(0);
+        if !force && new_checkpoint == self.last_checkpoint {
+            return;
         }
 
-        None
+        self.last_checkpoint = new_checkpoint;
+        if new_checkpoint == 0 {
+            self.lines_at_checkpoint = 0;
+        } else {
+            let prefix_lines =
+                render_markdown_with_width(&full_text[..new_checkpoint], self.max_width);
+            self.lines_at_checkpoint = prefix_lines.len();
+        }
     }
 
     /// Reset the renderer state
@@ -279,6 +286,40 @@ fn mermaid_sidebar_placeholder(text: &str) -> Line<'static> {
         text.to_string(),
         Style::default().fg(DIM_COLOR),
     ))
+}
+
+fn parse_opening_fence(line: &str) -> Option<(char, usize)> {
+    let indent = line.chars().take_while(|c| *c == ' ').count();
+    if indent > 3 {
+        return None;
+    }
+    let trimmed = &line[indent..];
+    let first = trimmed.chars().next()?;
+    if first != '`' && first != '~' {
+        return None;
+    }
+
+    let fence_len = trimmed.chars().take_while(|c| *c == first).count();
+    if fence_len < 3 {
+        return None;
+    }
+
+    Some((first, fence_len))
+}
+
+fn is_closing_fence(line: &str, fence_char: char, min_len: usize) -> bool {
+    let indent = line.chars().take_while(|c| *c == ' ').count();
+    if indent > 3 {
+        return false;
+    }
+    let trimmed = &line[indent..];
+
+    let fence_len = trimmed.chars().take_while(|c| *c == fence_char).count();
+    if fence_len < min_len {
+        return false;
+    }
+
+    trimmed[fence_len..].trim().is_empty()
 }
 const TABLE_COLOR: Color = Color::Rgb(150, 150, 150); // Table borders/separators
 
@@ -1397,6 +1438,14 @@ mod tests {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
+    fn lines_to_string(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(line_to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn test_simple_markdown() {
         let lines = render_markdown("Hello **world**");
@@ -1511,6 +1560,55 @@ mod tests {
 
         // Should have rendered both paragraphs
         assert!(lines.len() >= 2);
+    }
+
+    #[test]
+    fn test_incremental_renderer_streams_fenced_block_before_close() {
+        let mut renderer = IncrementalMarkdownRenderer::new(Some(80));
+        let _ = renderer.update("Plan:\n\n```\n");
+        let lines = renderer.update("Plan:\n\n```\nProcess A: |████\n");
+        let rendered = lines_to_string(&lines);
+
+        assert!(
+            rendered.contains("Process A"),
+            "Expected streamed code-block content before closing fence: {}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_does_not_enter_unclosed_fence() {
+        let renderer = IncrementalMarkdownRenderer::new(Some(80));
+        let text = "Intro\n\n```\nProcess A\n\nProcess B";
+        let checkpoint = renderer.find_last_complete_block(text);
+        assert_eq!(checkpoint, Some("Intro\n\n".len()));
+    }
+
+    #[test]
+    fn test_incremental_renderer_replaces_stale_prefix_chars() {
+        let mut renderer = IncrementalMarkdownRenderer::new(Some(80));
+        let _ = renderer.update("Plan:\n\n```\n[\n");
+        let lines = renderer.update("Plan:\n\n```\nProcess A\n");
+        let rendered = lines_to_string(&lines);
+
+        assert!(
+            !rendered.contains("│ ["),
+            "Expected stale '[' to be replaced during streaming: {}",
+            rendered
+        );
+        assert!(rendered.contains("Process A"));
+    }
+
+    #[test]
+    fn test_streaming_unclosed_bracket_keeps_text_visible() {
+        let mut renderer = IncrementalMarkdownRenderer::new(Some(80));
+        let lines = renderer.update("[Process A: |████");
+        let rendered = lines_to_string(&lines);
+        assert!(
+            rendered.contains("Process A"),
+            "Expected unclosed bracket line to remain visible: {}",
+            rendered
+        );
     }
 
     #[test]

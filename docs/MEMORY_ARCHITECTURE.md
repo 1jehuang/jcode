@@ -721,7 +721,7 @@ memory { action: "tag", id: "...", tags: ["new", "tags"] }
 ### Phase 4: Graph-Based Architecture ✅
 - [x] HashMap-based graph structure (simpler than petgraph for JSON serialization)
 - [x] Tag nodes and HasTag edges
-- [ ] Cluster discovery and InCluster edges
+- [x] Cluster discovery and InCluster edges
 - [x] Semantic link edges (RelatesTo)
 - [x] Cascade retrieval algorithm with BFS traversal
 
@@ -729,32 +729,32 @@ memory { action: "tag", id: "...", tags: ["new", "tags"] }
 - [x] Link discovery (co-relevant memories)
 - [x] Confidence boost/decay on retrieval
 - [x] Gap detection for missing knowledge
-- [ ] Periodic cluster refinement
-- [ ] Tag inference from context
+- [x] Periodic cluster refinement
+- [x] Tag inference from context
 
 ### Phase 6: Advanced Features ✅
 - [x] Confidence decay system (time-based with category-specific half-lives)
 - [ ] Negative memories and trigger patterns
 - [ ] Procedural memory support
-- [ ] Provenance tracking
+- [x] Provenance tracking
 - [x] Feedback loops (boost on use, decay on rejection)
 - [ ] Temporal awareness
 
 ### Phase 7: Full Integration ✅
 - [x] End-of-session extraction
-- [ ] Sidecar consolidation on write (see below)
+- [x] Sidecar consolidation on write (see below)
 - [x] User control CLI (`jcode memory` commands)
 - [x] Memory export/import
 
-### Phase 7.5: Sidecar Consolidation (Inline, Per-Turn) 📋
+### Phase 7.5: Sidecar Consolidation (Inline, Per-Turn) ✅
 
 Lightweight consolidation that runs in the memory sidecar after returning results to the main agent. Only operates on memories already retrieved — no extra lookups, zero added latency.
 
-Currently `extract_from_context()` blindly creates new memories without checking for duplicates or contradictions. These tasks fix that:
+`extract_from_context()` now performs inline write-time consolidation:
 
-- [ ] **Duplicate detection on write** — before storing an extracted memory, check if a semantically similar one already exists in the retrieved set. If so, reinforce the existing memory instead of creating a duplicate.
-- [ ] **Contradiction detection on write** — if a new memory contradicts an existing one in the retrieved set, supersede the old one rather than storing both.
-- [ ] **Reinforcement provenance** — add `Vec<Reinforcement>` to `MemoryEntry` where each reinforcement records `session_id`, `message_index`, and `timestamp`. The system automatically attaches this breadcrumb when `reinforce()` is called, so consolidation agents can later trace back why a memory has its current strength.
+- [x] **Duplicate detection on write** — semantically similar memories are reinforced instead of duplicated.
+- [x] **Contradiction detection on write** — contradictory memories are superseded during incremental extraction.
+- [x] **Reinforcement provenance** — `MemoryEntry` tracks `Vec<Reinforcement>` breadcrumbs (`session_id`, `message_index`, `timestamp`).
 
 ### Phase 8: Deep Memory Consolidation (Ambient Garden) 📋
 

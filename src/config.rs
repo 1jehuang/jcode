@@ -25,6 +25,9 @@ pub struct Config {
     /// Display/UI configuration
     pub display: DisplayConfig,
 
+    /// Feature toggles
+    pub features: FeatureConfig,
+
     /// Provider configuration
     pub provider: ProviderConfig,
 
@@ -109,6 +112,25 @@ impl Default for DisplayConfig {
             centered: true,
             show_thinking: false,
             diagram_mode: DiagramDisplayMode::default(),
+        }
+    }
+}
+
+/// Runtime feature toggles
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FeatureConfig {
+    /// Enable memory retrieval/extraction features (default: true)
+    pub memory: bool,
+    /// Enable swarm coordination features (default: true)
+    pub swarm: bool,
+}
+
+impl Default for FeatureConfig {
+    fn default() -> Self {
+        Self {
+            memory: true,
+            swarm: true,
         }
     }
 }
@@ -306,6 +328,18 @@ impl Config {
             }
         }
 
+        // Features
+        if let Ok(v) = std::env::var("JCODE_MEMORY_ENABLED") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.features.memory = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_SWARM_ENABLED") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.features.swarm = parsed;
+            }
+        }
+
         // Ambient
         if let Ok(v) = std::env::var("JCODE_AMBIENT_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
@@ -431,6 +465,12 @@ debug_socket = false
 # Show thinking/reasoning content (default: false)
 show_thinking = false
 
+[features]
+# Memory: retrieval + extraction sidecar features
+memory = true
+# Swarm: multi-session coordination features
+swarm = true
+
 [provider]
 # Default model (optional, uses provider default if not set)
 # default_model = "claude-sonnet-4-20250514"
@@ -514,6 +554,10 @@ desktop_notifications = true
 - Mouse capture: {}
 - Debug socket: {}
 
+**Features:**
+- Memory: {}
+- Swarm: {}
+
 **Provider:**
 - Default model: {}
 - OpenAI reasoning effort: {}
@@ -547,6 +591,8 @@ desktop_notifications = true
             self.display.queue_mode,
             self.display.mouse_capture,
             self.display.debug_socket,
+            self.features.memory,
+            self.features.swarm,
             self.provider
                 .default_model
                 .as_deref()

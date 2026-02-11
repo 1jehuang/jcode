@@ -1839,6 +1839,11 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
         }
     }
 
+    let remaining = inner.height.saturating_sub(lines.len() as u16);
+    if remaining > 0 {
+        lines.extend(render_memory_topology_lines(info, Rect::new(0, 0, inner.width, remaining)));
+    }
+
     // Activity state if active
     if let Some(activity) = &info.activity {
         let state_line = match &activity.state {
@@ -2002,356 +2007,79 @@ fn format_memory_event(event: &MemoryEvent, max_width: usize) -> (&'static str, 
     }
 }
 
-/// Render a tiny graph visualization of memory nodes and edges.
-/// Uses a 2x4 sub-cell braille raster so edges stay legible in tight widgets.
-/// Returns lines of styled spans representing the graph.
-fn render_mini_graph(info: &MemoryInfo, width: u16, height: u16) -> Vec<Line<'static>> {
-    let w = width as usize;
-    let h = height as usize;
-    if w < 6 || h < 2 || info.graph_nodes.is_empty() {
+fn render_memory_topology_lines(
+    info: &MemoryInfo,
+    inner: Rect,
+) -> Vec<Line<'static>> {
+    if info.graph_nodes.is_empty() || inner.width < 8 || inner.height == 0 {
         return Vec::new();
     }
 
-    let max_nodes = (w.saturating_mul(h)).saturating_div(3).clamp(6, 18);
+    let max_lines = inner.height.min(3) as usize;
     let Some(subgraph) = select_contextual_subgraph(
         info,
-        max_nodes,
-        max_nodes.saturating_mul(2).min(MEMORY_SUBGRAPH_MAX_EDGES),
+        MEMORY_TEXT_SUBGRAPH_MAX_NODES,
+        MEMORY_TEXT_SUBGRAPH_MAX_EDGES,
     ) else {
         return Vec::new();
     };
-
-    // Assign positions using a deterministic layout
-    let positions = spread_overlapping_positions(
-        layout_nodes(subgraph.nodes.len(), &subgraph.edges, w, h),
-        w,
-        h,
-    );
-
-    // Braille subpixel canvas (2x width, 4x height)
-    let px_w = w.saturating_mul(2);
-    let px_h = h.saturating_mul(4);
-    let mut edge_pixels = vec![0u8; px_w.saturating_mul(px_h)];
-
-    // Draw edges first on the subpixel canvas (behind nodes)
-    for edge in &subgraph.edges {
-        let src = edge.source;
-        let tgt = edge.target;
-        if src >= positions.len() || tgt >= positions.len() {
-            continue;
-        }
-        let (sx, sy) = positions[src];
-        let (tx, ty) = positions[tgt];
-        draw_edge_pixels(
-            &mut edge_pixels,
-            px_w,
-            px_h,
-            sx,
-            sy,
-            tx,
-            ty,
-            edge_kind_priority(&edge.kind),
-        );
-    }
-
-    // Build a character grid
-    let mut grid: Vec<Vec<(char, Color)>> = vec![vec![(' ', Color::Reset); w]; h];
-
-    // Convert subpixel edge raster into braille glyphs
-    for y in 0..h {
-        for x in 0..w {
-            let (mask, style_kind) = braille_mask_for_cell(&edge_pixels, px_w, px_h, x, y);
-            if mask != 0 {
-                if let Some(ch) = char::from_u32(0x2800 + mask as u32) {
-                    grid[y][x] = (ch, edge_style_color(style_kind));
-                }
-            }
-        }
-    }
-
-    // Draw nodes on top
-    for (i, node) in subgraph.nodes.iter().enumerate() {
-        if i >= positions.len() {
-            break;
-        }
-        let (x, y) = positions[i];
-        if x < w && y < h {
-            let (ch, color) = node_char(node);
-            grid[y][x] = (ch, color);
-        }
-    }
-
-    // Convert grid to Lines
-    grid.iter()
-        .map(|row| {
-            let spans: Vec<Span<'static>> = row
-                .iter()
-                .map(|&(ch, color)| {
-                    if color == Color::Reset {
-                        Span::raw(ch.to_string())
-                    } else {
-                        Span::styled(ch.to_string(), Style::default().fg(color))
-                    }
-                })
-                .collect();
-            Line::from(spans)
-        })
-        .collect()
-}
-
-/// Draw an edge in braille-subpixel space between two cell coordinates.
-fn draw_edge_pixels(
-    pixels: &mut [u8],
-    px_w: usize,
-    px_h: usize,
-    x0_cell: usize,
-    y0_cell: usize,
-    x1_cell: usize,
-    y1_cell: usize,
-    style_kind: u8,
-) {
-    if px_w == 0 || px_h == 0 {
-        return;
-    }
-
-    // Route through cell centers for stable visual alignment.
-    let mut x0 = x0_cell.saturating_mul(2).saturating_add(1) as i32;
-    let mut y0 = y0_cell.saturating_mul(4).saturating_add(2) as i32;
-    let x1 = x1_cell.saturating_mul(2).saturating_add(1) as i32;
-    let y1 = y1_cell.saturating_mul(4).saturating_add(2) as i32;
-
-    let dx = (x1 - x0).abs();
-    let dy = (y1 - y0).abs();
-    let sx = if x0 < x1 { 1 } else { -1 };
-    let sy = if y0 < y1 { 1 } else { -1 };
-    let mut err = dx - dy;
-
-    loop {
-        if x0 >= 0 && y0 >= 0 && (x0 as usize) < px_w && (y0 as usize) < px_h {
-            let index = y0 as usize * px_w + x0 as usize;
-            pixels[index] = pixels[index].max(style_kind);
-        }
-
-        if x0 == x1 && y0 == y1 {
-            break;
-        }
-
-        let e2 = err * 2;
-        if e2 > -dy {
-            err -= dy;
-            x0 += sx;
-        }
-        if e2 < dx {
-            err += dx;
-            y0 += sy;
-        }
-    }
-}
-
-/// Map a 2x4 subpixel block to a unicode braille bitmask.
-fn braille_mask_for_cell(
-    edge_pixels: &[u8],
-    px_w: usize,
-    px_h: usize,
-    cell_x: usize,
-    cell_y: usize,
-) -> (u8, u8) {
-    let base_x = cell_x.saturating_mul(2);
-    let base_y = cell_y.saturating_mul(4);
-    let mut mask = 0u8;
-    let mut strongest = 0u8;
-    let dots = [
-        (0usize, 0usize, 0x01u8), // dot 1
-        (0, 1, 0x02),             // dot 2
-        (0, 2, 0x04),             // dot 3
-        (1, 0, 0x08),             // dot 4
-        (1, 1, 0x10),             // dot 5
-        (1, 2, 0x20),             // dot 6
-        (0, 3, 0x40),             // dot 7
-        (1, 3, 0x80),             // dot 8
-    ];
-
-    for (dx, dy, bit) in dots {
-        let x = base_x + dx;
-        let y = base_y + dy;
-        if x < px_w && y < px_h {
-            let kind = edge_pixels[y * px_w + x];
-            if kind > 0 {
-                strongest = strongest.max(kind);
-                mask |= bit;
-            }
-        }
-    }
-
-    (mask, strongest)
-}
-
-fn edge_style_color(kind: u8) -> Color {
-    match kind {
-        6 => Color::Rgb(210, 110, 110), // contradictions
-        5 => Color::Rgb(220, 170, 120), // supersedes
-        4 => Color::Rgb(110, 190, 200), // derived
-        3 => Color::Rgb(100, 170, 210), // relates
-        2 => Color::Rgb(120, 130, 170), // in_cluster
-        1 => Color::Rgb(72, 72, 84),    // has_tag
-        _ => Color::Rgb(72, 72, 84),
-    }
-}
-
-/// Spread overlapping node coordinates to nearby free cells.
-fn spread_overlapping_positions(
-    mut positions: Vec<(usize, usize)>,
-    w: usize,
-    h: usize,
-) -> Vec<(usize, usize)> {
-    let mut occupied: HashSet<(usize, usize)> = HashSet::new();
-    for pos in &mut positions {
-        if occupied.insert(*pos) {
-            continue;
-        }
-        if let Some(free) = nearest_free_position(*pos, &occupied, w, h) {
-            *pos = free;
-            occupied.insert(free);
-        }
-    }
-    positions
-}
-
-fn nearest_free_position(
-    origin: (usize, usize),
-    occupied: &HashSet<(usize, usize)>,
-    w: usize,
-    h: usize,
-) -> Option<(usize, usize)> {
-    if w == 0 || h == 0 {
-        return None;
-    }
-    let ox = origin.0 as i32;
-    let oy = origin.1 as i32;
-    let max_radius = w.max(h) as i32;
-
-    for r in 1..=max_radius {
-        for dy in -r..=r {
-            for dx in -r..=r {
-                if dx.abs() != r && dy.abs() != r {
-                    continue;
-                }
-                let x = ox + dx;
-                let y = oy + dy;
-                if x < 0 || y < 0 || x >= w as i32 || y >= h as i32 {
-                    continue;
-                }
-                let candidate = (x as usize, y as usize);
-                if !occupied.contains(&candidate) {
-                    return Some(candidate);
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// Pick character and color for a graph node
-fn node_char(node: &GraphNode) -> (char, Color) {
-    let (base, color) = match node.kind.as_str() {
-        "preference" => ('●', Color::Rgb(140, 200, 255)),
-        "correction" => ('●', Color::Rgb(255, 160, 100)),
-        "entity" => ('●', Color::Rgb(150, 215, 185)),
-        "tag" => ('◆', Color::Rgb(160, 140, 200)),
-        "cluster" => ('◈', Color::Rgb(130, 140, 180)),
-        _ => ('●', Color::Rgb(130, 200, 130)),
-    };
-
-    if node.is_memory && !node.is_active {
-        ('○', Color::Rgb(105, 105, 115))
-    } else {
-        (base, color)
-    }
-}
-
-/// Simple deterministic layout: place nodes in a spiral/circle pattern
-/// with connected nodes pulled closer together
-fn layout_nodes(count: usize, edges: &[GraphEdge], w: usize, h: usize) -> Vec<(usize, usize)> {
-    if count == 0 {
+    if subgraph.nodes.is_empty() {
         return Vec::new();
     }
 
-    let cx = w as f64 / 2.0;
-    let cy = h as f64 / 2.0;
-    let rx = (w as f64 / 2.0 - 1.0).max(1.0);
-    let ry = (h as f64 / 2.0 - 0.5).max(0.5);
+    let mut lines: Vec<Line> = Vec::new();
+    let hub = &subgraph.nodes[0];
+    let hub_label = truncate_smart(&hub.label, inner.width.saturating_sub(8) as usize);
+    let hub_kind = if hub.kind == "tag" { "tag" } else { "mem" };
+    lines.push(Line::from(vec![
+        Span::styled("• ", Style::default().fg(Color::Rgb(140, 180, 220))),
+        Span::styled(
+            format!("hub {}: {}", hub_kind, hub_label),
+            Style::default().fg(Color::Rgb(145, 145, 155)),
+        ),
+    ]));
 
-    // Start with circular layout
-    let mut pos: Vec<(f64, f64)> = (0..count)
-        .map(|i| {
-            let angle = 2.0 * std::f64::consts::PI * (i as f64) / (count as f64)
-                - std::f64::consts::FRAC_PI_2;
-            let x = cx + rx * angle.cos();
-            let y = cy + ry * angle.sin();
-            (x, y)
-        })
-        .collect();
+    let mut edges = subgraph.edges;
+    edges.sort_by(|a, b| {
+        let a_hub = a.source == 0 || a.target == 0;
+        let b_hub = b.source == 0 || b.target == 0;
+        b_hub
+            .cmp(&a_hub)
+            .then_with(|| edge_kind_priority(&b.kind).cmp(&edge_kind_priority(&a.kind)))
+            .then_with(|| a.source.cmp(&b.source))
+            .then_with(|| a.target.cmp(&b.target))
+    });
 
-    // Run a few iterations of force-directed adjustment
-    // Pull connected nodes together, push overlapping nodes apart
-    for _ in 0..20 {
-        let mut forces: Vec<(f64, f64)> = vec![(0.0, 0.0); count];
-
-        // Attraction along edges
-        for edge in edges {
-            let a = edge.source;
-            let b = edge.target;
-            if a >= count || b >= count {
-                continue;
-            }
-            let dx = pos[b].0 - pos[a].0;
-            let dy = pos[b].1 - pos[a].1;
-            let dist = (dx * dx + dy * dy).sqrt().max(0.1);
-            let force = (dist - 2.0) * 0.05;
-            let fx = dx / dist * force;
-            let fy = dy / dist * force;
-            forces[a].0 += fx;
-            forces[a].1 += fy;
-            forces[b].0 -= fx;
-            forces[b].1 -= fy;
-        }
-
-        // Repulsion between all nodes (only nearby)
-        for i in 0..count {
-            for j in (i + 1)..count {
-                let dx = pos[j].0 - pos[i].0;
-                let dy = pos[j].1 - pos[i].1;
-                let dist_sq = dx * dx + dy * dy;
-                if dist_sq < 9.0 {
-                    let dist = dist_sq.sqrt().max(0.1);
-                    let force = 0.5 / dist;
-                    let fx = dx / dist * force;
-                    let fy = dy / dist * force;
-                    forces[i].0 -= fx;
-                    forces[i].1 -= fy;
-                    forces[j].0 += fx;
-                    forces[j].1 += fy;
-                }
-            }
-        }
-
-        // Apply forces with clamping
-        for i in 0..count {
-            pos[i].0 = (pos[i].0 + forces[i].0).clamp(0.5, w as f64 - 0.5);
-            pos[i].1 = (pos[i].1 + forces[i].1).clamp(0.2, h as f64 - 0.2);
+    for edge in edges.into_iter().take(max_lines.saturating_sub(1)) {
+        let other_idx = if edge.source == 0 { edge.target } else { edge.source };
+        let Some(other) = subgraph.nodes.get(other_idx) else {
+            continue;
+        };
+        let relation = memory_edge_label(&edge.kind);
+        let text = format!("↳ {} {}", relation, other.label);
+        let text = truncate_smart(&text, inner.width.saturating_sub(2) as usize);
+        lines.push(Line::from(vec![Span::styled(
+            text,
+            Style::default().fg(Color::Rgb(110, 110, 122)),
+        )]));
+        if lines.len() >= max_lines {
+            break;
         }
     }
 
-    // Convert to integer grid positions
-    pos.iter()
-        .map(|&(x, y)| {
-            (
-                (x.round() as usize).min(w.saturating_sub(1)),
-                (y.round() as usize).min(h.saturating_sub(1)),
-            )
-        })
-        .collect()
+    lines
+}
+
+fn memory_edge_label(kind: &str) -> &'static str {
+    match kind {
+        "has_tag" => "tag",
+        "in_cluster" => "cluster",
+        "supersedes" => "sup",
+        "contradicts" => "contra",
+        "derived_from" => "derived",
+        "relates_to" => "rel",
+        _ => "rel",
+    }
 }
 
 fn swarm_member_label(member: &SwarmMemberStatus) -> String {
@@ -3499,12 +3227,10 @@ fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_memory_graph_mermaid, calculate_placements, render_memory_widget, render_mini_graph,
-        truncate_smart, GraphEdge, GraphNode, InfoWidgetData, Margins, MemoryInfo, WidgetKind,
+        calculate_placements, render_memory_topology_lines, render_memory_widget, truncate_smart,
+        GraphEdge, GraphNode, InfoWidgetData, Margins, MemoryInfo, WidgetKind,
     };
     use ratatui::layout::Rect;
-    use ratatui::text::Line;
-    use std::collections::HashSet;
 
     #[test]
     fn truncate_smart_handles_unicode() {
@@ -3534,7 +3260,7 @@ mod tests {
     }
 
     #[test]
-    fn mini_graph_renders_braille_edges_and_nodes() {
+    fn topology_lines_render_hub_and_edges() {
         let info = MemoryInfo {
             total_count: 4,
             graph_nodes: vec![
@@ -3550,29 +3276,18 @@ mod tests {
             ],
             ..Default::default()
         };
-        let lines = render_mini_graph(&info, 24, 4);
-        assert_eq!(lines.len(), 4);
 
-        let text = flatten_lines(&lines);
-        let has_node = text.chars().any(|ch| ch == '●' || ch == '◆');
-        let has_braille_edge = text
-            .chars()
-            .any(|ch| ('\u{2801}'..='\u{28FF}').contains(&ch));
+        let lines = render_memory_topology_lines(&info, Rect::new(0, 0, 30, 3));
+        assert!(!lines.is_empty());
 
-        assert!(has_node, "expected node glyphs in mini graph");
-        assert!(
-            has_braille_edge,
-            "expected braille edge glyphs in mini graph"
-        );
-    }
-
-    #[test]
-    fn overlapping_positions_are_spread_for_node_visibility() {
-        let positions = vec![(1, 1), (1, 1), (1, 1), (2, 1)];
-        let spread = super::spread_overlapping_positions(positions, 6, 4);
-        let unique: HashSet<(usize, usize)> = spread.iter().copied().collect();
-        assert_eq!(spread.len(), 4);
-        assert_eq!(unique.len(), 4);
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("hub"));
+        assert!(text.contains("↳"));
     }
 
     #[test]
@@ -3595,25 +3310,6 @@ mod tests {
         // Memory widget is text-only.
         let lines = render_memory_widget(&data, Rect::new(0, 0, 24, 5));
         assert_eq!(lines.len(), 2);
-    }
-
-    #[test]
-    fn memory_graph_mermaid_contains_nodes_and_edges() {
-        let info = MemoryInfo {
-            total_count: 4,
-            graph_nodes: vec![
-                node("fact", "Project uses rust", 1),
-                node("preference", "Use semantic versions", 2),
-                node("tag", "memory", 1),
-            ],
-            graph_edges: vec![edge(0, 1, "relates_to"), edge(1, 2, "has_tag")],
-            ..Default::default()
-        };
-
-        let mermaid = build_memory_graph_mermaid(&info, 16).expect("expected mermaid content");
-        assert!(mermaid.contains("flowchart LR"));
-        assert!(mermaid.contains("n0"));
-        assert!(mermaid.contains("-->"));
     }
 
     #[test]
@@ -3750,15 +3446,6 @@ mod tests {
             p.rect.width,
             min_margin
         );
-    }
-
-    fn flatten_lines(lines: &[Line<'_>]) -> String {
-        lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect::<Vec<_>>()
-            .join("")
     }
 }
 

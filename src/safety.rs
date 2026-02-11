@@ -524,6 +524,9 @@ mod tests {
             .pending_requests()
             .iter()
             .any(|r| r.id == "req_file_test");
-        assert!(!still_pending, "request should have been removed from queue");
+        assert!(
+            !still_pending,
+            "request should have been removed from queue"
+        );
     }
 }

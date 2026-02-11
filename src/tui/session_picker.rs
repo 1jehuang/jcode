@@ -15,10 +15,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
     Frame,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::time::Duration;
 
@@ -354,6 +354,8 @@ pub struct SessionPicker {
     server_count: usize,
     /// Crashed sessions pending batch restore
     crashed_sessions: Option<CrashedSessionsInfo>,
+    /// IDs of sessions that are eligible for current batch restore
+    crashed_session_ids: HashSet<String>,
     last_list_area: Option<Rect>,
     last_preview_area: Option<Rect>,
     /// Whether to show debug/test/canary sessions
@@ -392,6 +394,10 @@ impl SessionPicker {
         }
 
         let crashed_sessions = session::detect_crashed_sessions().ok().flatten();
+        let crashed_session_ids: HashSet<String> = crashed_sessions
+            .as_ref()
+            .map(|info| info.session_ids.iter().cloned().collect())
+            .unwrap_or_default();
 
         Self {
             items,
@@ -405,6 +411,7 @@ impl SessionPicker {
             auto_scroll_preview: true,
             server_count: 0,
             crashed_sessions,
+            crashed_session_ids,
             last_list_area: None,
             last_preview_area: None,
             show_test_sessions: false,
@@ -489,6 +496,10 @@ impl SessionPicker {
         }
 
         let crashed_sessions = session::detect_crashed_sessions().ok().flatten();
+        let crashed_session_ids: HashSet<String> = crashed_sessions
+            .as_ref()
+            .map(|info| info.session_ids.iter().cloned().collect())
+            .unwrap_or_default();
 
         Self {
             items,
@@ -502,6 +513,7 @@ impl SessionPicker {
             auto_scroll_preview: true,
             server_count,
             crashed_sessions,
+            crashed_session_ids,
             last_list_area: None,
             last_preview_area: None,
             show_test_sessions: false,
@@ -727,14 +739,40 @@ impl SessionPicker {
         self.rebuild_items();
     }
 
+    fn crash_reason_line(session: &SessionInfo) -> Option<Line<'static>> {
+        let reason = match &session.status {
+            SessionStatus::Crashed { message } => message
+                .as_deref()
+                .unwrap_or("Unexpected termination (no additional details)"),
+            _ => return None,
+        };
+
+        let reason_display = if reason.chars().count() > 54 {
+            format!("{}...", safe_truncate(reason, 51))
+        } else {
+            reason.to_string()
+        };
+
+        Some(Line::from(vec![
+            Span::styled("     ", Style::default()),
+            Span::styled(
+                format!("reason: {}", reason_display),
+                Style::default().fg(Color::Rgb(220, 120, 120)),
+            ),
+        ]))
+    }
+
     fn render_session_item(&self, session: &SessionInfo, is_selected: bool) -> ListItem<'static> {
         const DIM: Color = Color::Rgb(100, 100, 100);
         const DIMMER: Color = Color::Rgb(70, 70, 70);
         const USER_CLR: Color = Color::Rgb(138, 180, 248);
         const ACCENT: Color = Color::Rgb(186, 139, 255);
+        const BATCH_RESTORE: Color = Color::Rgb(255, 140, 140);
+        const BATCH_ROW_BG: Color = Color::Rgb(36, 18, 18);
 
         let last_msg_ago = format_time_ago(session.last_message_time);
         let created_ago = format_time_ago(session.created_at);
+        let in_batch_restore = self.crashed_session_ids.contains(&session.id);
 
         // Name style
         let name_style = if is_selected {
@@ -760,7 +798,7 @@ impl SessionPicker {
         };
 
         // Line 1: icon + name + status + last message time
-        let line1 = Line::from(vec![
+        let mut line1_spans = vec![
             Span::styled("  ", Style::default()), // Indent for sessions under server
             Span::styled(
                 format!("{} ", session.icon),
@@ -777,7 +815,16 @@ impl SessionPicker {
                 format!("  last: {}", last_msg_ago),
                 Style::default().fg(DIM),
             ),
-        ]);
+        ];
+        if in_batch_restore {
+            line1_spans.push(Span::styled(
+                "  [BATCH]",
+                Style::default()
+                    .fg(BATCH_RESTORE)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        let line1 = Line::from(line1_spans);
 
         // Line 2: title (truncated)
         let title_display = if session.title.chars().count() > 42 {
@@ -845,7 +892,17 @@ impl SessionPicker {
             Span::styled(dir_part, Style::default().fg(DIMMER)),
         ]);
 
-        ListItem::new(vec![line1, line2, line3, line4, Line::from("")])
+        let mut rows = vec![line1, line2, line3, line4];
+        if let Some(reason_line) = Self::crash_reason_line(session) {
+            rows.push(reason_line);
+        }
+        rows.push(Line::from(""));
+
+        let mut item = ListItem::new(rows);
+        if in_batch_restore && !is_selected {
+            item = item.style(Style::default().bg(BATCH_ROW_BG));
+        }
+        item
     }
 
     fn render_session_list(&mut self, frame: &mut Frame, area: Rect) {
@@ -935,7 +992,7 @@ impl SessionPicker {
         let help = if self.search_active {
             " type to filter, Esc cancel "
         } else {
-            " / search · d show all · ↑↓ · Enter · q "
+            " / search · d show all · [BATCH]=restore set · ↑↓ · Enter · q "
         };
 
         const BORDER_COLOR: Color = Color::Rgb(70, 70, 70);
@@ -992,7 +1049,7 @@ impl SessionPicker {
                 Style::default().fg(HEADER_ICON_COLOR),
             ),
             Span::styled(
-                &session.short_name,
+                session.short_name.clone(),
                 Style::default()
                     .fg(HEADER_SESSION_COLOR)
                     .add_modifier(Modifier::BOLD),
@@ -1005,7 +1062,7 @@ impl SessionPicker {
 
         // Title
         lines.push(Line::from(vec![Span::styled(
-            &session.title,
+            session.title.clone(),
             Style::default().fg(Color::White),
         )]));
 
@@ -1023,7 +1080,7 @@ impl SessionPicker {
             SessionStatus::Closed => ("✓", "Closed normally".to_string(), Color::DarkGray),
             SessionStatus::Crashed { message } => {
                 let text = match message {
-                    Some(msg) => format!("Crashed: {}", safe_truncate(msg, 40)),
+                    Some(msg) => format!("Crashed: {}", safe_truncate(msg, 80)),
                     None => "Crashed".to_string(),
                 };
                 ("💥", text, Color::Rgb(220, 100, 100))
@@ -1049,6 +1106,15 @@ impl SessionPicker {
             ),
             Span::styled(status_text, Style::default().fg(status_color)),
         ]));
+
+        if self.crashed_session_ids.contains(&session.id) {
+            lines.push(Line::from(vec![Span::styled(
+                "Included in batch restore",
+                Style::default()
+                    .fg(Color::Rgb(255, 140, 140))
+                    .add_modifier(Modifier::BOLD),
+            )]));
+        }
 
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
@@ -1175,6 +1241,14 @@ impl SessionPicker {
             .title(" Preview ")
             .border_style(Style::default().fg(Color::Rgb(70, 70, 70)));
 
+        // Pre-wrap preview lines to keep rendering and scroll bounds aligned.
+        let preview_width = area.width.saturating_sub(2) as usize;
+        let lines = if preview_width > 0 {
+            markdown::wrap_lines(lines, preview_width)
+        } else {
+            lines
+        };
+
         let visible_height = area.height.saturating_sub(2) as usize;
         let max_scroll = lines.len().saturating_sub(visible_height) as u16;
         if self.auto_scroll_preview {
@@ -1186,7 +1260,6 @@ impl SessionPicker {
 
         let paragraph = Paragraph::new(lines)
             .block(block)
-            .wrap(Wrap { trim: false })
             .scroll((self.scroll_offset, 0));
 
         frame.render_widget(paragraph, area);
@@ -1524,6 +1597,46 @@ pub fn pick_session() -> Result<Option<PickerResult>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    fn make_session(
+        id: &str,
+        short_name: &str,
+        is_debug: bool,
+        status: SessionStatus,
+    ) -> SessionInfo {
+        let now = Utc::now();
+        SessionInfo {
+            id: id.to_string(),
+            short_name: short_name.to_string(),
+            icon: "🧪".to_string(),
+            title: "Test session".to_string(),
+            message_count: 2,
+            user_message_count: 1,
+            assistant_message_count: 1,
+            created_at: now - ChronoDuration::minutes(5),
+            last_message_time: now - ChronoDuration::minutes(1),
+            working_dir: Some("/tmp".to_string()),
+            is_canary: false,
+            is_debug,
+            status,
+            estimated_tokens: 200,
+            messages_preview: vec![
+                PreviewMessage {
+                    role: "user".to_string(),
+                    content: "hello".to_string(),
+                    timestamp: None,
+                },
+                PreviewMessage {
+                    role: "assistant".to_string(),
+                    content: "world".to_string(),
+                    timestamp: None,
+                },
+            ],
+            server_name: None,
+            server_icon: None,
+        }
+    }
 
     #[test]
     fn test_status_inference() {
@@ -1532,5 +1645,47 @@ mod tests {
         for session in &sessions {
             let _ = session.status.display();
         }
+    }
+
+    #[test]
+    fn test_toggle_test_sessions_rebuilds_visibility() {
+        let normal = make_session("session_normal", "normal", false, SessionStatus::Closed);
+        let debug = make_session("session_debug", "debug", true, SessionStatus::Closed);
+
+        let mut picker = SessionPicker::new(vec![normal.clone(), debug.clone()]);
+
+        assert_eq!(picker.sessions.len(), 1);
+        assert!(!picker.show_test_sessions);
+        assert_eq!(picker.hidden_test_count, 1);
+
+        picker.toggle_test_sessions();
+        assert!(picker.show_test_sessions);
+        assert_eq!(picker.sessions.len(), 2);
+        assert_eq!(picker.hidden_test_count, 0);
+
+        picker.toggle_test_sessions();
+        assert!(!picker.show_test_sessions);
+        assert_eq!(picker.sessions.len(), 1);
+        assert_eq!(picker.hidden_test_count, 1);
+    }
+
+    #[test]
+    fn test_crash_reason_line_for_crashed_sessions() {
+        let crashed = make_session(
+            "session_crash",
+            "crash",
+            false,
+            SessionStatus::Crashed {
+                message: Some("Terminal or window closed (SIGHUP)".to_string()),
+            },
+        );
+        let line = SessionPicker::crash_reason_line(&crashed).expect("crash reason should render");
+        let text: String = line
+            .spans
+            .into_iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(text.contains("reason:"));
+        assert!(text.contains("SIGHUP"));
     }
 }
