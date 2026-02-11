@@ -1108,7 +1108,7 @@ impl App {
             // Only do this if there's actually a conversation to continue
             if total_turns > 0 {
                 // Try to load reload context for richer continuation message
-                let reload_ctx = ReloadContext::load().ok().flatten();
+                let reload_ctx = ReloadContext::load_for_session(session_id).ok().flatten();
 
                 let continuation_msg = if let Some(ctx) = reload_ctx {
                     let action = if ctx.is_rollback {
@@ -1149,7 +1149,7 @@ impl App {
             crate::logging::error(&format!("Failed to restore session: {}", session_id));
 
             // Check if this was a reload that failed - inject failure message if so
-            if let Ok(Some(ctx)) = ReloadContext::load() {
+            if let Ok(Some(ctx)) = ReloadContext::load_for_session(session_id) {
                 let action = if ctx.is_rollback {
                     "Rollback"
                 } else {
@@ -3630,6 +3630,11 @@ impl App {
                 }
             };
 
+            let has_reload_ctx_for_session = session_to_resume
+                .as_deref()
+                .and_then(|sid| ReloadContext::peek_for_session(sid).ok().flatten())
+                .is_some();
+
             // Show reconnection message if applicable
             if reconnect_attempts > 0 {
                 if self.reload_info.is_empty() {
@@ -3671,6 +3676,8 @@ impl App {
                 // Build success message with reload info if available
                 let reload_details = if !self.reload_info.is_empty() {
                     format!("\n  {}", self.reload_info.join("\n  "))
+                } else if has_reload_ctx_for_session {
+                    "\n  Reload context restored".to_string()
                 } else {
                     String::new()
                 };
@@ -3679,45 +3686,53 @@ impl App {
                     "✓ Reconnected successfully.{}",
                     reload_details
                 )));
+            }
 
-                // Queue message to notify the agent about the reload
-                if !self.reload_info.is_empty() {
-                    // Try to load reload context for richer continuation message
-                    let reload_ctx = ReloadContext::load().ok().flatten();
+            // Queue message to notify the agent about reload completion.
+            // This must run on both reconnect and first connect after a client hot-reload.
+            let should_queue_reload_continuation =
+                !self.reload_info.is_empty() || has_reload_ctx_for_session;
+            if should_queue_reload_continuation {
+                let reload_ctx = session_to_resume
+                    .as_deref()
+                    .and_then(|sid| ReloadContext::load_for_session(sid).ok().flatten());
 
-                    let continuation_msg = if let Some(ctx) = reload_ctx {
-                        let action = if ctx.is_rollback {
-                            "Rollback"
-                        } else {
-                            "Reload"
-                        };
-                        let task_info = ctx
-                            .task_context
-                            .map(|t| format!("\nYou were working on: {}", t))
-                            .unwrap_or_default();
-
-                        format!(
-                            "[{} complete. Previous version: {}, New version: {}.{}\nContinue with your task. Do not wait for user input — pick up where you left off and keep going.]",
-                            action,
-                            ctx.version_before,
-                            ctx.version_after,
-                            task_info
-                        )
+                let continuation_msg = if let Some(ctx) = reload_ctx {
+                    let action = if ctx.is_rollback {
+                        "Rollback"
                     } else {
-                        // Fallback to basic message
-                        let cwd = std::env::current_dir()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|_| "unknown".to_string());
-                        let reload_summary = self.reload_info.join(", ");
-                        format!(
-                            "[Reload complete. {}. CWD: {}. Session restored — continue where you left off. Do not wait for user input — keep going.]",
-                            reload_summary, cwd
-                        )
+                        "Reload"
                     };
+                    let task_info = ctx
+                        .task_context
+                        .map(|t| format!("\nYou were working on: {}", t))
+                        .unwrap_or_default();
 
-                    self.queued_messages.push(continuation_msg);
-                    self.reload_info.clear();
-                }
+                    format!(
+                        "[{} complete. Previous version: {}, New version: {}.{}\nContinue with your task. Do not wait for user input — pick up where you left off and keep going.]",
+                        action,
+                        ctx.version_before,
+                        ctx.version_after,
+                        task_info
+                    )
+                } else {
+                    // Fallback to basic message
+                    let cwd = std::env::current_dir()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "unknown".to_string());
+                    let reload_summary = if self.reload_info.is_empty() {
+                        "Reloaded session restored".to_string()
+                    } else {
+                        self.reload_info.join(", ")
+                    };
+                    format!(
+                        "[Reload complete. {}. CWD: {}. Session restored — continue where you left off. Do not wait for user input — keep going.]",
+                        reload_summary, cwd
+                    )
+                };
+
+                self.queued_messages.push(continuation_msg);
+                self.reload_info.clear();
             }
 
             // Reset reconnect counter after handling reconnection
