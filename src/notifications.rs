@@ -95,7 +95,22 @@ impl NotificationDispatcher {
             action, description, request_id
         );
 
-        self.send_all(&title, &safe_body, &detailed_body, Priority::High, Some(request_id));
+        // Build rich HTML email with approve/deny buttons
+        let reply_to = self
+            .config
+            .email_from
+            .as_deref()
+            .unwrap_or("jcode@localhost");
+        let email_html = build_permission_email_html(action, description, request_id, reply_to);
+
+        self.send_all_with_email_override(
+            &title,
+            &safe_body,
+            &detailed_body,
+            Priority::High,
+            Some(request_id),
+            Some(&email_html),
+        );
     }
 
     /// Send through all configured channels (fire-and-forget).
@@ -110,6 +125,28 @@ impl NotificationDispatcher {
         detailed_body: &str,
         priority: Priority,
         cycle_id: Option<&str>,
+    ) {
+        self.send_all_with_email_override(
+            title,
+            safe_body,
+            detailed_body,
+            priority,
+            cycle_id,
+            None,
+        );
+    }
+
+    /// Like `send_all`, but with an optional pre-built HTML body for the email channel.
+    /// When `email_html_override` is Some, it's used directly as the email body instead
+    /// of converting `detailed_body` through `markdown_to_html_email`.
+    fn send_all_with_email_override(
+        &self,
+        title: &str,
+        safe_body: &str,
+        detailed_body: &str,
+        priority: Priority,
+        cycle_id: Option<&str>,
+        email_html_override: Option<&str>,
     ) {
         // Guard: only dispatch if inside a tokio runtime
         if tokio::runtime::Handle::try_current().is_err() {
@@ -145,6 +182,7 @@ impl NotificationDispatcher {
         }
 
         // Email — uses DETAILED body (sent to your own address, private)
+        // If email_html_override is provided, send it directly as HTML.
         if self.config.email_enabled {
             if let (Some(ref to), Some(ref host), Some(ref from)) = (
                 &self.config.email_to,
@@ -159,6 +197,7 @@ impl NotificationDispatcher {
                 let title = title.to_string();
                 let body = detailed_body.to_string();
                 let cycle_id = cycle_id.map(|s| s.to_string());
+                let html_override = email_html_override.map(|s| s.to_string());
                 tokio::spawn(async move {
                     if let Err(e) = send_email(
                         &host,
@@ -169,6 +208,7 @@ impl NotificationDispatcher {
                         &title,
                         &body,
                         cycle_id.as_deref(),
+                        html_override.as_deref(),
                     )
                     .await
                     {
@@ -252,12 +292,16 @@ async fn send_email(
     subject: &str,
     body: &str,
     cycle_id: Option<&str>,
+    html_override: Option<&str>,
 ) -> anyhow::Result<()> {
     use lettre::message::header::ContentType;
     use lettre::transport::smtp::authentication::Credentials;
     use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
-    let html_body = markdown_to_html_email(body);
+    let html_body = match html_override {
+        Some(html) => html.to_string(),
+        None => markdown_to_html_email(body),
+    };
 
     let mut builder = Message::builder()
         .from(from.parse()?)
@@ -457,17 +501,26 @@ fn poll_imap_once(host: &str, port: u16, user: &str, pass: &str) -> anyhow::Resu
 
     session.select("INBOX")?;
 
-    // Search for unseen replies to our ambient emails
-    let search = session.search("UNSEEN HEADER In-Reply-To \"@jcode>\"")?;
+    // Search for unseen replies to ambient emails AND button-generated permission emails.
+    // Two patterns:
+    //   1. Replies: In-Reply-To header contains "@jcode>"
+    //   2. Button emails: Subject contains "[jcode-perm:" (from mailto: buttons)
+    let reply_search = session.search("UNSEEN HEADER In-Reply-To \"@jcode>\"")?;
+    let button_search = session.search("UNSEEN SUBJECT \"[jcode-perm:\"")?;
+
+    // Merge and deduplicate sequence numbers
+    let mut all_seqs: Vec<u32> = reply_search.into_iter().chain(button_search).collect();
+    all_seqs.sort_unstable();
+    all_seqs.dedup();
 
     let mut processed = 0;
-    if search.is_empty() {
+    if all_seqs.is_empty() {
         session.logout()?;
         return Ok(0);
     }
 
     // Build sequence set from search results
-    let seq_set: String = search
+    let seq_set: String = all_seqs
         .iter()
         .map(|s| s.to_string())
         .collect::<Vec<_>>()
@@ -477,14 +530,25 @@ fn poll_imap_once(host: &str, port: u16, user: &str, pass: &str) -> anyhow::Resu
     for message in messages.iter() {
         if let Some(body) = message.body() {
             if let Some(parsed) = mail_parser::MessageParser::default().parse(body) {
-                // Extract the cycle ID from In-Reply-To header
+                // Try to extract request/cycle ID from two sources:
+                //   1. In-Reply-To header: "<ambient-{id}@jcode>"
+                //   2. Subject: "[jcode-perm:{id}] ..."
                 let in_reply_to = parsed.in_reply_to().as_text().unwrap_or("").to_string();
+                let subject = parsed.subject().unwrap_or("");
 
-                // Parse cycle_id from "<ambient-{id}@jcode>"
-                let cycle_id = in_reply_to
-                    .trim_start_matches("<ambient-")
-                    .trim_end_matches("@jcode>")
-                    .to_string();
+                let cycle_id = if in_reply_to.contains("@jcode>") {
+                    // Reply path: extract from In-Reply-To
+                    in_reply_to
+                        .trim_start_matches("<ambient-")
+                        .trim_end_matches("@jcode>")
+                        .to_string()
+                } else if let Some(start) = subject.find("[jcode-perm:") {
+                    // Button path: extract request ID from subject
+                    let rest = &subject[start + "[jcode-perm:".len()..];
+                    rest.split(']').next().unwrap_or("").to_string()
+                } else {
+                    continue; // Neither pattern matched — skip
+                };
 
                 // Get reply body text (strip quoted content)
                 let body_text = parsed
@@ -492,10 +556,19 @@ fn poll_imap_once(host: &str, port: u16, user: &str, pass: &str) -> anyhow::Resu
                     .map(|s| strip_quoted_reply(&s))
                     .unwrap_or_default();
 
-                if !body_text.trim().is_empty() {
+                // For button-generated emails, also check subject for approval intent
+                // (the body may just be "Approved" or "Denied" from the mailto: pre-fill)
+                let effective_text = if body_text.trim().is_empty() {
+                    // Fall back to subject for intent
+                    subject.to_string()
+                } else {
+                    body_text
+                };
+
+                if !effective_text.trim().is_empty() {
                     if cycle_id.starts_with("req_") {
                         // Reply to a permission request — parse approve/deny
-                        let (approved, message) = parse_permission_reply(body_text.trim());
+                        let (approved, message) = parse_permission_reply(effective_text.trim());
                         if let Err(e) = crate::safety::record_permission_via_file(
                             &cycle_id,
                             approved,
@@ -516,7 +589,7 @@ fn poll_imap_once(host: &str, port: u16, user: &str, pass: &str) -> anyhow::Resu
                     } else {
                         // Normal directive reply to a cycle notification
                         if let Err(e) = crate::ambient::add_directive(
-                            body_text.trim().to_string(),
+                            effective_text.trim().to_string(),
                             cycle_id,
                         ) {
                             logging::error(&format!("Failed to save directive: {}", e));
@@ -561,7 +634,9 @@ fn parse_permission_reply(text: &str) -> (bool, Option<String>) {
     let lower = text.to_lowercase();
     let first_line = lower.lines().next().unwrap_or("").trim();
 
-    let approve_words = ["approve", "approved", "yes", "lgtm", "go ahead", "ok", "sure"];
+    let approve_words = [
+        "approve", "approved", "yes", "lgtm", "go ahead", "ok", "sure",
+    ];
     let deny_words = ["deny", "denied", "no", "reject", "rejected", "stop", "nope"];
 
     let has_approve = approve_words.iter().any(|w| first_line.contains(w));
@@ -577,6 +652,161 @@ fn parse_permission_reply(text: &str) -> (bool, Option<String>) {
     };
 
     (approved, message)
+}
+
+// ---------------------------------------------------------------------------
+// Permission email HTML builder
+// ---------------------------------------------------------------------------
+
+/// Build a styled HTML email for a permission request, with Approve/Deny mailto: buttons.
+///
+/// The buttons create a new email to `reply_to` with a subject containing the request ID
+/// (pattern: `[jcode-perm:req_xxx] Approved/Denied`) so the IMAP poller can match them.
+fn build_permission_email_html(
+    action: &str,
+    description: &str,
+    request_id: &str,
+    reply_to: &str,
+) -> String {
+    let now = chrono::Utc::now();
+    let timestamp = now.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+
+    // URL-encode components for mailto: links
+    let approve_subj_raw = format!("[jcode-perm:{}] Approved", request_id);
+    let deny_subj_raw = format!("[jcode-perm:{}] Denied", request_id);
+    let approve_subject = urlencoding::encode(&approve_subj_raw);
+    let deny_subject = urlencoding::encode(&deny_subj_raw);
+    let approve_body = urlencoding::encode("Approved");
+    let deny_body = urlencoding::encode("Denied");
+
+    let approve_href = format!(
+        "mailto:{}?subject={}&body={}",
+        reply_to, approve_subject, approve_body
+    );
+    let deny_href = format!(
+        "mailto:{}?subject={}&body={}",
+        reply_to, deny_subject, deny_body
+    );
+
+    format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    color: #1a1a1a;
+    line-height: 1.6;
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 20px;
+    background: #f5f5f5;
+  }}
+  .container {{
+    background: #ffffff;
+    border-radius: 8px;
+    padding: 24px 28px;
+    border: 1px solid #e0e0e0;
+  }}
+  h1 {{
+    font-size: 1.3em;
+    color: #2d2d2d;
+    border-bottom: 2px solid #f59e0b;
+    padding-bottom: 6px;
+    margin-top: 0;
+  }}
+  .field {{
+    margin-bottom: 12px;
+  }}
+  .field-label {{
+    font-weight: 600;
+    color: #555;
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }}
+  .field-value {{
+    margin-top: 2px;
+    color: #1a1a1a;
+  }}
+  .request-id {{
+    font-family: monospace;
+    background: #f0f0f0;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.85em;
+  }}
+  .buttons {{
+    margin-top: 24px;
+    text-align: center;
+  }}
+  .btn {{
+    display: inline-block;
+    padding: 12px 32px;
+    border-radius: 6px;
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 1em;
+    margin: 0 8px;
+  }}
+  .btn-approve {{
+    background: #22c55e;
+    color: #ffffff;
+  }}
+  .btn-deny {{
+    background: #ef4444;
+    color: #ffffff;
+  }}
+  .timestamp {{
+    margin-top: 16px;
+    font-size: 0.8em;
+    color: #888;
+  }}
+  .hint {{
+    margin-top: 8px;
+    font-size: 0.8em;
+    color: #999;
+    font-style: italic;
+  }}
+  .footer {{
+    margin-top: 20px;
+    padding-top: 12px;
+    border-top: 1px solid #e0e0e0;
+    font-size: 0.8em;
+    color: #888;
+  }}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Permission Request</h1>
+  <div class="field">
+    <div class="field-label">Action</div>
+    <div class="field-value"><strong>{action}</strong></div>
+  </div>
+  <div class="field">
+    <div class="field-label">Description</div>
+    <div class="field-value">{description}</div>
+  </div>
+  <div class="field">
+    <div class="field-label">Request ID</div>
+    <div class="field-value"><span class="request-id">{request_id}</span></div>
+  </div>
+  <div class="buttons">
+    <a href="{approve_href}" class="btn btn-approve">Approve</a>
+    <a href="{deny_href}" class="btn btn-deny">Deny</a>
+  </div>
+  <div class="hint">Clicking opens a pre-filled email — just hit Send.</div>
+  <div class="hint">Or reply to this email with "Approved" or "Denied".</div>
+  <div class="timestamp">Sent at {timestamp}</div>
+</div>
+<div class="footer">
+  Sent by jcode ambient mode
+</div>
+</body>
+</html>"#
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -825,7 +1055,8 @@ mod tests {
         assert!(message.is_none());
 
         // Longer replies: message included
-        let (_, message) = parse_permission_reply("Approved, but please use a feature branch for this");
+        let (_, message) =
+            parse_permission_reply("Approved, but please use a feature branch for this");
         assert!(message.is_some());
     }
 }
