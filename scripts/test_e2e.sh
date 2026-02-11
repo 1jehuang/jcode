@@ -3,6 +3,13 @@
 
 set -e
 
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cargo_exec="$repo_root/scripts/cargo_exec.sh"
+
+run_cargo() {
+    (cd "$repo_root" && "$cargo_exec" "$@")
+}
+
 echo "=== E2E Testing Script for jcode ==="
 echo ""
 
@@ -19,31 +26,31 @@ fi
 # Test 2: Run unit tests
 echo ""
 echo "Test 2: Run unit tests..."
-cargo test 2>&1 | tail -5
+run_cargo test 2>&1 | tail -5
 echo "✓ Unit tests passed"
 
 # Test 3: Check protocol serialization
 echo ""
 echo "Test 3: Protocol serialization test..."
-cargo test protocol::tests --quiet
+run_cargo test protocol::tests --quiet
 echo "✓ Protocol tests passed"
 
 # Test 4: Check TUI app tests
 echo ""
 echo "Test 4: TUI app tests..."
-cargo test tui::app::tests --quiet
+run_cargo test tui::app::tests --quiet
 echo "✓ TUI app tests passed"
 
 # Test 5: Check markdown rendering tests
 echo ""
 echo "Test 5: Markdown rendering tests..."
-cargo test tui::markdown::tests --quiet
+run_cargo test tui::markdown::tests --quiet
 echo "✓ Markdown tests passed"
 
 # Test 6: E2E tests
 echo ""
 echo "Test 6: E2E integration tests..."
-cargo test --test e2e --quiet
+run_cargo test --test e2e --quiet
 echo "✓ E2E tests passed"
 
 if [[ "${JCODE_REAL_PROVIDER:-0}" == "1" ]]; then

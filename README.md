@@ -36,6 +36,21 @@ cargo build --release
 ./target/release/jcode
 ```
 
+Remote build/test (offload local CPU/RAM):
+```bash
+# Defaults: host=desktop-tailscale, remote dir=~/jcode
+scripts/remote_build.sh --release
+scripts/remote_build.sh test
+
+# Override host/dir if needed
+JCODE_REMOTE_HOST=my-builder JCODE_REMOTE_DIR=~/src/jcode scripts/remote_build.sh check --all-targets
+
+# Make repo helper scripts use remote cargo automatically
+export JCODE_REMOTE_CARGO=1
+scripts/test_e2e.sh
+scripts/agent_trace.sh
+```
+
 ## Usage
 
 ```bash
