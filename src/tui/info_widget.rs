@@ -1841,7 +1841,10 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
 
     let remaining = inner.height.saturating_sub(lines.len() as u16);
     if remaining > 0 {
-        lines.extend(render_memory_topology_lines(info, Rect::new(0, 0, inner.width, remaining)));
+        lines.extend(render_memory_topology_lines(
+            info,
+            Rect::new(0, 0, inner.width, remaining),
+        ));
     }
 
     // Activity state if active
@@ -2007,10 +2010,7 @@ fn format_memory_event(event: &MemoryEvent, max_width: usize) -> (&'static str, 
     }
 }
 
-fn render_memory_topology_lines(
-    info: &MemoryInfo,
-    inner: Rect,
-) -> Vec<Line<'static>> {
+fn render_memory_topology_lines(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> {
     if info.graph_nodes.is_empty() || inner.width < 8 || inner.height == 0 {
         return Vec::new();
     }
@@ -2051,7 +2051,11 @@ fn render_memory_topology_lines(
     });
 
     for edge in edges.into_iter().take(max_lines.saturating_sub(1)) {
-        let other_idx = if edge.source == 0 { edge.target } else { edge.source };
+        let other_idx = if edge.source == 0 {
+            edge.target
+        } else {
+            edge.source
+        };
         let Some(other) = subgraph.nodes.get(other_idx) else {
             continue;
         };
