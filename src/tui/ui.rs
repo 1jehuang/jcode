@@ -10,7 +10,7 @@ use super::{DisplayMessage, ProcessingStatus, TuiState};
 use crate::message::ToolCall;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 /// Last known max scroll value from the renderer. Updated each frame.
 /// Scroll handlers use this to clamp scroll_offset and prevent overshoot.
 static LAST_MAX_SCROLL: AtomicUsize = AtomicUsize::new(0);
+/// Number of recovered panics while rendering the frame.
+static DRAW_PANIC_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Get the last known max scroll value (from the most recent render frame).
 /// Returns 0 if no frame has been rendered yet.
@@ -1115,7 +1117,52 @@ fn record_profile(prepare: Duration, draw: Duration, total: Duration) {
 }
 
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
-    let area = frame.area();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| draw_inner(frame, app))) {
+        Ok(()) => {}
+        Err(payload) => {
+            let panic_count = DRAW_PANIC_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            let msg = panic_payload_to_string(&payload);
+            if panic_count <= 3 || panic_count % 50 == 0 {
+                crate::logging::error(&format!(
+                    "Recovered TUI draw panic #{}: {}",
+                    panic_count, msg
+                ));
+            }
+            let area = frame.area().intersection(*frame.buffer_mut().area());
+            if area.width == 0 || area.height == 0 {
+                return;
+            }
+            frame.render_widget(Clear, area);
+            let lines = vec![
+                Line::from(Span::styled(
+                    "rendering error recovered",
+                    Style::default().fg(Color::Red),
+                )),
+                Line::from(Span::styled(
+                    "continuing with a safe fallback frame",
+                    Style::default().fg(DIM_COLOR),
+                )),
+            ];
+            frame.render_widget(Paragraph::new(lines), area);
+        }
+    }
+}
+
+fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
+fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
+    let area = frame.area().intersection(*frame.buffer_mut().area());
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
 
     // Initialize visual debug capture if enabled
     let mut debug_capture = if visual_debug::is_enabled() {
@@ -2465,7 +2512,7 @@ fn draw_debug_overlay(
     placements: &[info_widget::WidgetPlacement],
     chunks: &[Rect],
 ) {
-    if chunks.len() < 4 {
+    if chunks.len() < 5 {
         return;
     }
     render_overlay_box(frame, chunks[0], "messages", Color::Red);
