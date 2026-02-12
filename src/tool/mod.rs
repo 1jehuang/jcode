@@ -360,15 +360,23 @@ impl Registry {
     /// Register MCP tools (MCP management and server tools)
     /// Connections happen in background to avoid blocking startup.
     /// If `event_tx` is provided, sends an McpStatus event when connections complete.
+    /// If `shared_pool` is provided, shared servers reuse processes from the pool.
     pub async fn register_mcp_tools(
         &self,
         event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::protocol::ServerEvent>>,
+        shared_pool: Option<std::sync::Arc<crate::mcp::SharedMcpPool>>,
+        session_id: Option<String>,
     ) {
         use crate::mcp::McpManager;
         use std::sync::Arc;
         use tokio::sync::RwLock;
 
-        let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
+        let mcp_manager = if let Some(pool) = shared_pool {
+            let sid = session_id.unwrap_or_else(|| "unknown".to_string());
+            Arc::new(RwLock::new(McpManager::with_shared_pool(pool, sid)))
+        } else {
+            Arc::new(RwLock::new(McpManager::new()))
+        };
 
         // Register MCP management tool immediately (with registry for dynamic tool registration)
         let mcp_tool =

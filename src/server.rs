@@ -604,6 +604,8 @@ pub struct Server {
     event_counter: Arc<std::sync::atomic::AtomicU64>,
     /// Ambient mode runner handle (None if ambient is disabled)
     ambient_runner: Option<AmbientRunnerHandle>,
+    /// Shared MCP server pool (processes shared across sessions)
+    mcp_pool: Arc<crate::mcp::SharedMcpPool>,
 }
 
 impl Server {
@@ -643,6 +645,7 @@ impl Server {
             event_history: Arc::new(RwLock::new(Vec::new())),
             event_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             ambient_runner,
+            mcp_pool: Arc::new(crate::mcp::SharedMcpPool::from_default_config()),
         }
     }
 
@@ -699,6 +702,7 @@ impl Server {
             event_history: Arc::new(RwLock::new(Vec::new())),
             event_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             ambient_runner,
+            mcp_pool: Arc::new(crate::mcp::SharedMcpPool::from_default_config()),
         }
     }
 
@@ -1079,6 +1083,7 @@ impl Server {
         let main_server_name = self.identity.name.clone();
         let main_server_icon = self.identity.icon.clone();
         let main_ambient_runner = self.ambient_runner.clone();
+        let main_mcp_pool = Arc::clone(&self.mcp_pool);
 
         let main_handle = tokio::spawn(async move {
             loop {
@@ -1103,6 +1108,7 @@ impl Server {
                         let server_name = main_server_name.clone();
                         let server_icon = main_server_icon.clone();
                         let ambient_runner = main_ambient_runner.clone();
+                        let mcp_pool = Arc::clone(&main_mcp_pool);
 
                         // Increment client count
                         *client_count.write().await += 1;
@@ -1128,6 +1134,7 @@ impl Server {
                                 client_debug_response_tx,
                                 server_name,
                                 server_icon,
+                                mcp_pool,
                             )
                             .await;
 
@@ -1258,6 +1265,7 @@ async fn handle_client(
     client_debug_response_tx: broadcast::Sender<(u64, String)>,
     server_name: String,
     server_icon: String,
+    mcp_pool: Arc<crate::mcp::SharedMcpPool>,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -1836,8 +1844,13 @@ async fn handle_client(
                 }
 
                 // Register MCP tools (management tool + server tool proxies)
+                // Shared pool means shared servers only spawn once across sessions
                 registry
-                    .register_mcp_tools(Some(client_event_tx.clone()))
+                    .register_mcp_tools(
+                        Some(client_event_tx.clone()),
+                        Some(Arc::clone(&mcp_pool)),
+                        Some(client_session_id.clone()),
+                    )
                     .await;
 
                 // Note: Don't send SessionId here - it's included in the History response
@@ -1978,7 +1991,11 @@ async fn handle_client(
                 // Register MCP tools for resumed sessions
                 if result.is_ok() {
                     registry
-                        .register_mcp_tools(Some(client_event_tx.clone()))
+                        .register_mcp_tools(
+                            Some(client_event_tx.clone()),
+                            Some(Arc::clone(&mcp_pool)),
+                            Some(client_session_id.clone()),
+                        )
                         .await;
                 }
 
@@ -4193,7 +4210,7 @@ async fn create_headless_session(
     }
 
     // Register MCP tools for headless sessions (no event channel)
-    registry.register_mcp_tools(None).await;
+    registry.register_mcp_tools(None, None, None).await;
 
     // Create a new agent
     let mut new_agent = Agent::new(Arc::clone(&provider), registry);
@@ -6797,14 +6814,31 @@ async fn handle_debug_client(
                                 let items: Vec<serde_json::Value> = pending
                                     .iter()
                                     .map(|r| {
+                                        let review_summary = r
+                                            .context
+                                            .as_ref()
+                                            .and_then(|ctx| ctx.get("review"))
+                                            .and_then(|review| review.get("summary"))
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or(&r.description);
+                                        let review_why = r
+                                            .context
+                                            .as_ref()
+                                            .and_then(|ctx| ctx.get("review"))
+                                            .and_then(|review| review.get("why_permission_needed"))
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or(&r.rationale);
                                         serde_json::json!({
                                             "id": r.id,
                                             "action": r.action,
                                             "description": r.description,
                                             "rationale": r.rationale,
+                                            "summary": review_summary,
+                                            "why_permission_needed": review_why,
                                             "urgency": format!("{:?}", r.urgency),
                                             "wait": r.wait,
                                             "created_at": r.created_at.to_rfc3339(),
+                                            "context": r.context,
                                         })
                                     })
                                     .collect();

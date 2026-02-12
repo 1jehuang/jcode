@@ -13,16 +13,101 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-/// MCP Client for a single server
-pub struct McpClient {
-    name: String,
-    child: Child,
-    request_id: AtomicU64,
+/// Shared communication handle for an MCP server.
+/// Multiple sessions can hold clones of this and send concurrent requests.
+/// Request/response correlation by ID ensures no interference.
+#[derive(Clone)]
+pub struct McpHandle {
+    pub(crate) name: String,
+    request_id: Arc<AtomicU64>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
     writer_tx: mpsc::Sender<String>,
-    server_info: Option<ServerInfo>,
-    capabilities: ServerCapabilities,
-    tools: Vec<McpToolDef>,
+    server_info: Arc<std::sync::RwLock<Option<ServerInfo>>>,
+    capabilities: Arc<std::sync::RwLock<ServerCapabilities>>,
+    tools: Arc<std::sync::RwLock<Vec<McpToolDef>>>,
+}
+
+impl McpHandle {
+    /// Send a request and wait for response
+    pub async fn request(&self, method: &str, params: Option<Value>) -> Result<JsonRpcResponse> {
+        let id = self.request_id.fetch_add(1, Ordering::SeqCst);
+        let request = JsonRpcRequest::new(id, method, params);
+
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut pending = self.pending.lock().await;
+            pending.insert(id, tx);
+        }
+
+        let msg = serde_json::to_string(&request)? + "\n";
+        self.writer_tx
+            .send(msg)
+            .await
+            .context("Failed to send request")?;
+
+        let response = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
+            .await
+            .context("Request timeout")?
+            .context("Channel closed")?;
+
+        if let Some(err) = &response.error {
+            anyhow::bail!("MCP error {}: {}", err.code, err.message);
+        }
+
+        Ok(response)
+    }
+
+    /// Call a tool
+    pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolCallResult> {
+        let params = ToolCallParams {
+            name: name.to_string(),
+            arguments,
+        };
+
+        let response = self
+            .request("tools/call", Some(serde_json::to_value(params)?))
+            .await?;
+
+        let result = response.result.context("No result from tool call")?;
+        let tool_result: ToolCallResult = serde_json::from_value(result)?;
+
+        Ok(tool_result)
+    }
+
+    /// Get the server name
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Get server info
+    pub fn server_info(&self) -> Option<ServerInfo> {
+        self.server_info.read().unwrap().clone()
+    }
+
+    /// Get available tools
+    pub fn tools(&self) -> Vec<McpToolDef> {
+        self.tools.read().unwrap().clone()
+    }
+
+    /// Refresh the list of available tools
+    pub async fn refresh_tools(&self) -> Result<()> {
+        let response = self.request("tools/list", None).await?;
+
+        if let Some(result) = response.result {
+            let tools_result: ToolsListResult = serde_json::from_value(result)?;
+            *self.tools.write().unwrap() = tools_result.tools;
+        }
+
+        Ok(())
+    }
+}
+
+/// MCP Client - owns the child process and provides shared handles.
+/// Only one McpClient exists per MCP server process, but many McpHandle
+/// clones can be distributed to different sessions.
+pub struct McpClient {
+    handle: McpHandle,
+    child: Child,
 }
 
 impl McpClient {
@@ -33,11 +118,9 @@ impl McpClient {
             name, config.command, config.args
         ));
 
-        // Build environment
         let mut env: HashMap<String, String> = std::env::vars().collect();
         env.extend(config.env.clone());
 
-        // Spawn the process
         let mut child = Command::new(&config.command)
             .args(&config.args)
             .envs(&env)
@@ -51,7 +134,7 @@ impl McpClient {
         let stdout = child.stdout.take().context("No stdout")?;
         let stderr = child.stderr.take().context("No stderr")?;
 
-        // Spawn stderr reader to log errors
+        // Spawn stderr reader
         let server_name = name.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr);
@@ -59,7 +142,7 @@ impl McpClient {
             loop {
                 line.clear();
                 match reader.read_line(&mut line).await {
-                    Ok(0) => break, // EOF
+                    Ok(0) => break,
                     Ok(_) => {
                         let trimmed = line.trim();
                         if !trimmed.is_empty() {
@@ -103,7 +186,7 @@ impl McpClient {
                 match reader.read_line(&mut line).await {
                     Ok(0) => {
                         crate::logging::debug(&format!("MCP [{}]: stdout EOF", reader_name));
-                        break; // EOF
+                        break;
                     }
                     Ok(_) => {
                         if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&line) {
@@ -114,7 +197,6 @@ impl McpClient {
                                 }
                             }
                         } else {
-                            // Log non-JSON lines for debugging
                             let trimmed = line.trim();
                             if !trimmed.is_empty() {
                                 crate::logging::debug(&format!(
@@ -132,25 +214,25 @@ impl McpClient {
             }
         });
 
-        let mut client = Self {
+        let handle = McpHandle {
             name: name.clone(),
-            child,
-            request_id: AtomicU64::new(1),
+            request_id: Arc::new(AtomicU64::new(1)),
             pending,
             writer_tx,
-            server_info: None,
-            capabilities: ServerCapabilities::default(),
-            tools: Vec::new(),
+            server_info: Arc::new(std::sync::RwLock::new(None)),
+            capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
+            tools: Arc::new(std::sync::RwLock::new(Vec::new())),
         };
 
-        // Initialize
+        let mut client = Self { handle, child };
+
         client
             .initialize()
             .await
             .with_context(|| format!("MCP server '{}' failed to initialize", name))?;
 
-        // Get tools
         client
+            .handle
             .refresh_tools()
             .await
             .with_context(|| format!("MCP server '{}' failed to list tools", name))?;
@@ -158,39 +240,15 @@ impl McpClient {
         crate::logging::info(&format!(
             "MCP: Connected to '{}' with {} tools",
             name,
-            client.tools.len()
+            client.handle.tools().len()
         ));
 
         Ok(client)
     }
 
-    /// Send a request and wait for response
-    async fn request(&self, method: &str, params: Option<Value>) -> Result<JsonRpcResponse> {
-        let id = self.request_id.fetch_add(1, Ordering::SeqCst);
-        let request = JsonRpcRequest::new(id, method, params);
-
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().await;
-            pending.insert(id, tx);
-        }
-
-        let msg = serde_json::to_string(&request)? + "\n";
-        self.writer_tx
-            .send(msg)
-            .await
-            .context("Failed to send request")?;
-
-        let response = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
-            .await
-            .context("Request timeout")?
-            .context("Channel closed")?;
-
-        if let Some(err) = &response.error {
-            anyhow::bail!("MCP error {}: {}", err.code, err.message);
-        }
-
-        Ok(response)
+    /// Get a shareable handle to this client
+    pub fn handle(&self) -> McpHandle {
+        self.handle.clone()
     }
 
     /// Initialize the MCP connection
@@ -205,95 +263,71 @@ impl McpClient {
         };
 
         let response = self
+            .handle
             .request("initialize", Some(serde_json::to_value(params)?))
             .await?;
 
         if let Some(result) = response.result {
             let init_result: InitializeResult = serde_json::from_value(result)?;
-            self.server_info = init_result.server_info;
-            self.capabilities = init_result.capabilities;
+            *self.handle.server_info.write().unwrap() = init_result.server_info;
+            *self.handle.capabilities.write().unwrap() = init_result.capabilities;
         }
 
         // Send initialized notification
         let notif = JsonRpcRequest::new(0, "notifications/initialized", None);
         let msg = serde_json::to_string(&notif)? + "\n";
-        self.writer_tx.send(msg).await?;
+        self.handle.writer_tx.send(msg).await?;
 
         Ok(())
-    }
-
-    /// Refresh the list of available tools
-    pub async fn refresh_tools(&mut self) -> Result<()> {
-        let response = self.request("tools/list", None).await?;
-
-        if let Some(result) = response.result {
-            let tools_result: ToolsListResult = serde_json::from_value(result)?;
-            self.tools = tools_result.tools;
-        }
-
-        Ok(())
-    }
-
-    /// Call a tool
-    pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolCallResult> {
-        let params = ToolCallParams {
-            name: name.to_string(),
-            arguments,
-        };
-
-        let response = self
-            .request("tools/call", Some(serde_json::to_value(params)?))
-            .await?;
-
-        let result = response.result.context("No result from tool call")?;
-        let tool_result: ToolCallResult = serde_json::from_value(result)?;
-
-        Ok(tool_result)
-    }
-
-    /// Get the server name
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Get server info
-    pub fn server_info(&self) -> Option<&ServerInfo> {
-        self.server_info.as_ref()
-    }
-
-    /// Get available tools
-    pub fn tools(&self) -> &[McpToolDef] {
-        &self.tools
     }
 
     /// Check if server is still running
     pub fn is_running(&mut self) -> bool {
         match self.child.try_wait() {
-            Ok(None) => true,     // Still running
-            Ok(Some(_)) => false, // Exited
+            Ok(None) => true,
+            Ok(Some(_)) => false,
             Err(_) => false,
         }
     }
 
     /// Shutdown the server
     pub async fn shutdown(&mut self) {
-        // Try graceful shutdown first
         let _ = self
+            .handle
             .writer_tx
             .send("{\"jsonrpc\":\"2.0\",\"method\":\"shutdown\"}\n".to_string())
             .await;
 
-        // Give it a moment
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        // Force kill if needed
         let _ = self.child.kill().await;
+    }
+
+    // === Legacy compatibility methods that delegate to handle ===
+
+    pub fn name(&self) -> &str {
+        &self.handle.name
+    }
+
+    pub fn server_info(&self) -> Option<ServerInfo> {
+        self.handle.server_info()
+    }
+
+    pub fn tools(&self) -> Vec<McpToolDef> {
+        self.handle.tools()
+    }
+
+    pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolCallResult> {
+        self.handle.call_tool(name, arguments).await
+    }
+
+    pub async fn refresh_tools(&self) -> Result<()> {
+        self.handle.refresh_tools().await
     }
 }
 
 impl Drop for McpClient {
     fn drop(&mut self) {
-        // Best effort cleanup
         let _ = self.child.start_kill();
     }
 }
