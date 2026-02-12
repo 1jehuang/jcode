@@ -113,6 +113,22 @@ fn parse_rate_limit_error(error: &str) -> Option<Duration> {
     None
 }
 
+fn is_context_limit_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("context length")
+        || lower.contains("context window")
+        || lower.contains("maximum context")
+        || lower.contains("max context")
+        || lower.contains("token limit")
+        || lower.contains("too many tokens")
+        || lower.contains("prompt is too long")
+        || lower.contains("input is too long")
+        || lower.contains("request too large")
+        || lower.contains("length limit")
+        || lower.contains("maximum tokens")
+        || (lower.contains("exceeded") && lower.contains("tokens"))
+}
+
 /// Parse a clock time like "5am" or "12:30pm" and return duration until that time
 fn parse_clock_time_to_duration(time_str: &str) -> Option<Duration> {
     let time_lower = time_str.to_lowercase();
@@ -593,6 +609,8 @@ pub struct App {
     rate_limit_reset: Option<Instant>,
     // Message that was being sent when rate limit hit (to auto-retry)
     rate_limit_pending_message: Option<String>,
+    // Last turn-level stream error (used by /fix to choose recovery actions)
+    last_stream_error: Option<String>,
     // Store reload info to pass to agent after reconnection (remote mode)
     reload_info: Vec<String>,
     // Debug trace for scripted testing
@@ -818,6 +836,7 @@ impl App {
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
             rate_limit_pending_message: None,
+            last_stream_error: None,
             reload_info: Vec::new(),
             debug_trace: DebugTrace::new(),
             streaming_md_renderer: RefCell::new(IncrementalMarkdownRenderer::new(None)),
@@ -1455,9 +1474,14 @@ impl App {
         };
         self.scroll_offset = (self.scroll_offset + amount).min(max);
         if self.scroll_offset >= max {
-            self.scroll_offset = 0;
-            self.auto_scroll_paused = false;
+            self.follow_chat_bottom();
         }
+    }
+
+    /// Resume follow mode and keep the viewport pinned to the latest content.
+    fn follow_chat_bottom(&mut self) {
+        self.scroll_offset = 0;
+        self.auto_scroll_paused = false;
     }
 
     fn debug_scroll_up(&mut self, amount: usize) {
@@ -1474,8 +1498,7 @@ impl App {
     }
 
     fn debug_scroll_bottom(&mut self) {
-        self.scroll_offset = 0;
-        self.auto_scroll_paused = false;
+        self.follow_chat_bottom();
     }
 
     fn build_scroll_test_content(
@@ -1787,10 +1810,9 @@ impl App {
             },
         ];
         self.bump_display_messages_version();
-        self.scroll_offset = 0;
-        self.auto_scroll_paused = false;
+        self.follow_chat_bottom();
         self.is_processing = false;
-        self.streaming_text.clear();
+        self.clear_streaming_render_state();
         self.queued_messages.clear();
         self.interleave_message = None;
         self.pending_soft_interrupt = None;
@@ -1819,8 +1841,7 @@ impl App {
         };
 
         // Baseline render (bottom) for metrics
-        self.scroll_offset = 0;
-        self.auto_scroll_paused = false;
+        self.follow_chat_bottom();
         if let Err(e) = terminal.draw(|f| crate::tui::ui::draw(f, self)) {
             errors.push(format!("baseline draw error: {}", e));
         }
@@ -3990,7 +4011,7 @@ impl App {
                 }
                 // Commit streaming text as assistant message
                 if !self.streaming_text.is_empty() {
-                    let content = std::mem::take(&mut self.streaming_text);
+                    let content = self.take_streaming_text();
                     self.push_display_message(DisplayMessage {
                         role: "assistant".to_string(),
                         content,
@@ -4000,6 +4021,7 @@ impl App {
                         tool_data: None,
                     });
                 }
+                crate::tui::mermaid::clear_streaming_preview_diagram();
                 // Add tool result message
                 self.push_display_message(DisplayMessage {
                     role: "tool".to_string(),
@@ -4049,7 +4071,7 @@ impl App {
                     }
                     if !self.streaming_text.is_empty() {
                         let duration = self.processing_started.map(|s| s.elapsed().as_secs_f32());
-                        let content = std::mem::take(&mut self.streaming_text);
+                        let content = self.take_streaming_text();
                         self.push_display_message(DisplayMessage {
                             role: "assistant".to_string(),
                             content,
@@ -4060,6 +4082,7 @@ impl App {
                         });
                         self.push_turn_footer(duration);
                     }
+                    crate::tui::mermaid::clear_streaming_preview_diagram();
                     self.is_processing = false;
                     self.status = ProcessingStatus::Idle;
                     self.processing_started = None;
@@ -4085,6 +4108,7 @@ impl App {
                 self.status = ProcessingStatus::Idle;
                 self.interleave_message = None;
                 self.pending_soft_interrupt = None;
+                crate::tui::mermaid::clear_streaming_preview_diagram();
                 self.thought_line_inserted = false;
                 self.thinking_prefix_emitted = false;
                 self.thinking_buffer.clear();
@@ -4171,7 +4195,7 @@ impl App {
 
                 if session_changed {
                     self.clear_display_messages();
-                    self.streaming_text.clear();
+                    self.clear_streaming_render_state();
                     self.streaming_tool_calls.clear();
                     self.thought_line_inserted = false;
                     self.thinking_prefix_emitted = false;
@@ -4184,7 +4208,7 @@ impl App {
                     self.last_stream_activity = None;
                     self.is_processing = false;
                     self.status = ProcessingStatus::Idle;
-                    self.scroll_offset = 0;
+                    self.follow_chat_bottom();
                     self.queued_messages.clear();
                     self.interleave_message = None;
                     self.pending_soft_interrupt = None;
@@ -4331,6 +4355,38 @@ impl App {
                 false
             }
             _ => false,
+        }
+    }
+
+    fn handle_remote_char_input(&mut self, c: char) {
+        self.input.insert(self.cursor_pos, c);
+        self.cursor_pos += 1;
+        // Typing should return to latest content, not absolute top when paused.
+        self.follow_chat_bottom();
+        self.reset_tab_completion();
+
+        // Preemptively show model picker preview when user types /model
+        if self.picker_state.is_none() {
+            let trimmed = self.input.trim();
+            if trimmed == "/model" || trimmed == "/models" {
+                let saved_input = self.input.clone();
+                let saved_cursor = self.cursor_pos;
+                self.open_model_picker();
+                if let Some(ref mut picker) = self.picker_state {
+                    picker.preview = true;
+                }
+                // Restore input - preview doesn't steal it
+                self.input = saved_input;
+                self.cursor_pos = saved_cursor;
+            }
+        } else if let Some(ref picker) = self.picker_state {
+            // Close preview if user keeps typing past /model
+            if picker.preview {
+                let trimmed = self.input.trim();
+                if trimmed != "/model" && trimmed != "/models" {
+                    self.picker_state = None;
+                }
+            }
         }
     }
 
@@ -4537,33 +4593,7 @@ impl App {
         // Regular keys
         match code {
             KeyCode::Char(c) => {
-                self.input.insert(self.cursor_pos, c);
-                self.cursor_pos += 1;
-                self.scroll_offset = 0;
-                self.reset_tab_completion();
-                // Preemptively show model picker preview when user types /model
-                if self.picker_state.is_none() {
-                    let trimmed = self.input.trim();
-                    if trimmed == "/model" || trimmed == "/models" {
-                        let saved_input = self.input.clone();
-                        let saved_cursor = self.cursor_pos;
-                        self.open_model_picker();
-                        if let Some(ref mut picker) = self.picker_state {
-                            picker.preview = true;
-                        }
-                        // Restore input — preview doesn't steal it
-                        self.input = saved_input;
-                        self.cursor_pos = saved_cursor;
-                    }
-                } else if let Some(ref picker) = self.picker_state {
-                    // Close preview if user keeps typing past /model
-                    if picker.preview {
-                        let trimmed = self.input.trim();
-                        if trimmed != "/model" && trimmed != "/models" {
-                            self.picker_state = None;
-                        }
-                    }
-                }
+                self.handle_remote_char_input(c);
             }
             KeyCode::Backspace => {
                 if self.cursor_pos > 0 {
@@ -4873,8 +4903,7 @@ impl App {
                     remote.cancel().await?;
                     self.set_status_notice("Interrupting...");
                 } else {
-                    self.scroll_offset = 0;
-                    self.auto_scroll_paused = false;
+                    self.follow_chat_bottom();
                     self.input.clear();
                     self.cursor_pos = 0;
                 }
@@ -4894,15 +4923,13 @@ impl App {
         // We need to run the turn logic step by step, checking for input between steps
         // For now, run the turn but poll for input during streaming
 
-        if let Err(e) = self.run_turn_interactive(terminal, event_stream).await {
-            self.push_display_message(DisplayMessage {
-                role: "error".to_string(),
-                content: format!("Error: {}", e),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
+        match self.run_turn_interactive(terminal, event_stream).await {
+            Ok(()) => {
+                self.last_stream_error = None;
+            }
+            Err(e) => {
+                self.handle_turn_error(e.to_string());
+            }
         }
 
         // Process any queued messages
@@ -5224,8 +5251,7 @@ impl App {
                     self.pending_soft_interrupt = None;
                 } else {
                     // Reset scroll to bottom and clear input
-                    self.scroll_offset = 0;
-                    self.auto_scroll_paused = false;
+                    self.follow_chat_bottom();
                     self.input.clear();
                     self.cursor_pos = 0;
                 }
@@ -5318,6 +5344,19 @@ impl App {
         }
     }
 
+    fn clear_streaming_render_state(&mut self) {
+        self.streaming_text.clear();
+        self.streaming_md_renderer.borrow_mut().reset();
+        crate::tui::mermaid::clear_streaming_preview_diagram();
+    }
+
+    fn take_streaming_text(&mut self) -> String {
+        let content = std::mem::take(&mut self.streaming_text);
+        self.streaming_md_renderer.borrow_mut().reset();
+        crate::tui::mermaid::clear_streaming_preview_diagram();
+        content
+    }
+
     fn command_help(&self, topic: &str) -> Option<String> {
         let topic = topic.trim().trim_start_matches('/').to_lowercase();
         let help = match topic.as_str() {
@@ -5326,6 +5365,9 @@ impl App {
             }
             "compact" => {
                 "`/compact`\nForce context compaction now.\nStarts background summarization and applies it automatically when ready."
+            }
+            "fix" => {
+                "`/fix`\nRun recovery actions when the model cannot continue.\nRepairs missing tool outputs, resets provider session state, and starts compaction when possible."
             }
             "rewind" => {
                 "`/rewind`\nShow numbered conversation history.\n\n`/rewind N`\nRewind to message N (drops everything after it and resets provider session)."
@@ -5366,8 +5408,7 @@ impl App {
         let input = self.expand_paste_placeholders(&raw_input);
         self.pasted_contents.clear();
         self.cursor_pos = 0;
-        self.scroll_offset = 0; // Reset to bottom on new input
-        self.auto_scroll_paused = false; // Resume auto-scroll on new input
+        self.follow_chat_bottom(); // Reset to bottom and resume auto-scroll on new input
 
         // Check for built-in commands
         let trimmed = input.trim();
@@ -5428,6 +5469,7 @@ impl App {
                      • `/clear` - Clear conversation\n\
                      • `/rewind` - Show history with numbers, `/rewind N` to rewind\n\
                      • `/compact` - Manually compact context (summarize old messages)\n\
+                     • `/fix` - Attempt session recovery (context/tool/session issues)\n\
                      • `/debug-visual` - Enable visual debugging for TUI issues\n\
                      • `/<skill>` - Activate a skill\n\n\
                      **Available skills:** {}\n\n\
@@ -5499,11 +5541,12 @@ impl App {
                     let status_msg = format!(
                         "**Context Status:**\n\
                         • Messages: {} (active), {} (total history)\n\
-                        • Token estimate: ~{}k / {}k ({:.1}%)\n\
+                        • Token usage: ~{}k (estimate ~{}k) / {}k ({:.1}%)\n\
                         • Has summary: {}\n\
                         • Compacting: {}",
                         stats.active_messages,
                         stats.total_turns,
+                        stats.effective_tokens / 1000,
                         stats.token_estimate / 1000,
                         manager.token_budget() / 1000,
                         stats.context_usage * 100.0,
@@ -5557,6 +5600,11 @@ impl App {
                     });
                 }
             }
+            return;
+        }
+
+        if trimmed == "/fix" {
+            self.run_fix_command();
             return;
         }
 
@@ -6369,8 +6417,7 @@ impl App {
         // Set up processing state - actual processing happens after UI redraws
         self.is_processing = true;
         self.status = ProcessingStatus::Sending;
-        self.streaming_text.clear();
-        self.streaming_md_renderer.borrow_mut().reset();
+        self.clear_streaming_render_state();
         self.stream_buffer.clear();
         self.thought_line_inserted = false;
         self.thinking_prefix_emitted = false;
@@ -6415,7 +6462,7 @@ impl App {
                 }],
             );
             let _ = self.session.save();
-            self.streaming_text.clear();
+            self.clear_streaming_render_state();
             self.stream_buffer.clear();
             self.thought_line_inserted = false;
             self.thinking_prefix_emitted = false;
@@ -6429,15 +6476,13 @@ impl App {
             self.processing_started = Some(Instant::now());
             self.status = ProcessingStatus::Sending;
 
-            if let Err(e) = self.run_turn_interactive(terminal, event_stream).await {
-                self.push_display_message(DisplayMessage {
-                    role: "error".to_string(),
-                    content: format!("Error: {}", e),
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: None,
-                    tool_data: None,
-                });
+            match self.run_turn_interactive(terminal, event_stream).await {
+                Ok(()) => {
+                    self.last_stream_error = None;
+                }
+                Err(e) => {
+                    self.handle_turn_error(e.to_string());
+                }
             }
             // Loop will check if more messages were queued during this turn
         }
@@ -6501,6 +6546,147 @@ impl App {
                 manager.set_budget(limit);
             };
         }
+    }
+
+    fn effective_context_tokens_from_usage(
+        &self,
+        input_tokens: u64,
+        cache_read_input_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
+    ) -> u64 {
+        if input_tokens == 0 {
+            return 0;
+        }
+        let cache_read = cache_read_input_tokens.unwrap_or(0);
+        let cache_creation = cache_creation_input_tokens.unwrap_or(0);
+        let provider_name = if self.is_remote {
+            self.remote_provider_name.clone().unwrap_or_default()
+        } else {
+            self.provider.name().to_string()
+        }
+        .to_lowercase();
+
+        // Some providers report cache tokens as separate counters, others report them as subsets.
+        // When in doubt, avoid over-counting unless we have strong evidence of split accounting.
+        let split_cache_accounting = provider_name.contains("anthropic")
+            || provider_name.contains("claude")
+            || cache_creation > 0
+            || cache_read > input_tokens;
+
+        if split_cache_accounting {
+            input_tokens
+                .saturating_add(cache_read)
+                .saturating_add(cache_creation)
+        } else {
+            input_tokens
+        }
+    }
+
+    fn current_stream_context_tokens(&self) -> Option<u64> {
+        if self.streaming_input_tokens == 0 {
+            return None;
+        }
+        Some(self.effective_context_tokens_from_usage(
+            self.streaming_input_tokens,
+            self.streaming_cache_read_tokens,
+            self.streaming_cache_creation_tokens,
+        ))
+    }
+
+    fn update_compaction_usage_from_stream(&mut self) {
+        if self.is_remote || !self.provider.supports_compaction() {
+            return;
+        }
+        let Some(tokens) = self.current_stream_context_tokens() else {
+            return;
+        };
+        let compaction = self.registry.compaction();
+        if let Ok(mut manager) = compaction.try_write() {
+            manager.update_observed_input_tokens(tokens);
+        };
+    }
+
+    fn handle_turn_error(&mut self, error: impl Into<String>) {
+        let error = error.into();
+        self.last_stream_error = Some(error.clone());
+        let hint = if is_context_limit_error(&error) {
+            " Context limit likely exceeded. Run `/fix` to compact and recover."
+        } else {
+            " Run `/fix` to attempt recovery."
+        };
+        self.push_display_message(DisplayMessage::error(format!("Error: {}{}", error, hint)));
+    }
+
+    fn run_fix_command(&mut self) {
+        let mut actions: Vec<String> = Vec::new();
+        let mut notes: Vec<String> = Vec::new();
+        let last_error = self.last_stream_error.clone();
+        let context_error = last_error
+            .as_deref()
+            .map(is_context_limit_error)
+            .unwrap_or(false);
+
+        let repaired = self.repair_missing_tool_outputs();
+        if repaired > 0 {
+            actions.push(format!("Recovered {} missing tool output(s).", repaired));
+        }
+
+        if self.summarize_tool_results_missing().is_some() {
+            self.recover_session_without_tools();
+            actions.push("Created a recovery session with text-only history.".to_string());
+        }
+
+        if self.provider_session_id.is_some() || self.session.provider_session_id.is_some() {
+            self.provider_session_id = None;
+            self.session.provider_session_id = None;
+            actions.push("Reset provider session resume state.".to_string());
+        }
+
+        if !self.is_remote && self.provider.supports_compaction() {
+            let observed_tokens = self
+                .current_stream_context_tokens()
+                .or_else(|| context_error.then_some(self.context_limit));
+            let compaction = self.registry.compaction();
+            match compaction.try_write() {
+                Ok(mut manager) => {
+                    if let Some(tokens) = observed_tokens {
+                        manager.update_observed_input_tokens(tokens);
+                    }
+                    match manager.force_compact(self.provider.clone()) {
+                        Ok(()) => {
+                            actions.push("Started background context compaction.".to_string())
+                        }
+                        Err(reason) => notes.push(format!("Compaction not started: {}", reason)),
+                    }
+                }
+                Err(_) => notes.push("Could not access compaction manager (busy).".to_string()),
+            };
+        } else {
+            notes.push("Compaction is unavailable for this provider.".to_string());
+        }
+
+        self.context_warning_shown = false;
+        self.last_stream_error = None;
+        self.set_status_notice("Fix applied");
+
+        let mut content = String::from("**Fix Results:**\n");
+        if actions.is_empty() {
+            content.push_str("• No structural issues detected.\n");
+        } else {
+            for action in &actions {
+                content.push_str(&format!("• {}\n", action));
+            }
+        }
+        for note in &notes {
+            content.push_str(&format!("• {}\n", note));
+        }
+        if let Some(last_error) = &last_error {
+            content.push_str(&format!(
+                "\nLast error: `{}`",
+                crate::util::truncate_str(last_error, 200)
+            ));
+        }
+        self.push_display_message(DisplayMessage::system(content));
     }
 
     fn add_provider_message(&mut self, message: Message) {
@@ -7188,6 +7374,10 @@ impl App {
         new_session.title = old_session.title.clone();
         new_session.provider_session_id = old_session.provider_session_id.clone();
         new_session.model = old_session.model.clone();
+        new_session.is_canary = old_session.is_canary;
+        new_session.testing_build = old_session.testing_build.clone();
+        new_session.is_debug = old_session.is_debug;
+        new_session.working_dir = old_session.working_dir.clone();
 
         self.clear_provider_messages();
         self.clear_display_messages();
@@ -7349,7 +7539,7 @@ impl App {
                                     title: None,
                                     tool_data: None,
                                 });
-                                self.streaming_text.clear();
+                                self.clear_streaming_render_state();
                                 self.stream_buffer.clear();
                             }
 
@@ -7373,19 +7563,27 @@ impl App {
                         cache_read_input_tokens,
                         cache_creation_input_tokens,
                     } => {
+                        let mut usage_changed = false;
                         if let Some(input) = input_tokens {
                             self.streaming_input_tokens = input;
-                            // Warn when approaching context limit (80%)
-                            self.check_context_warning(input);
+                            usage_changed = true;
                         }
                         if let Some(output) = output_tokens {
                             self.streaming_output_tokens = output;
                         }
                         if cache_read_input_tokens.is_some() {
                             self.streaming_cache_read_tokens = cache_read_input_tokens;
+                            usage_changed = true;
                         }
                         if cache_creation_input_tokens.is_some() {
                             self.streaming_cache_creation_tokens = cache_creation_input_tokens;
+                            usage_changed = true;
+                        }
+                        if usage_changed {
+                            self.update_compaction_usage_from_stream();
+                            if let Some(context_tokens) = self.current_stream_context_tokens() {
+                                self.check_context_warning(context_tokens);
+                            }
                         }
                     }
                     StreamEvent::MessageEnd { .. } => {
@@ -7423,7 +7621,7 @@ impl App {
                                 queued_info
                             )));
                             self.status = ProcessingStatus::Idle;
-                            self.streaming_text.clear();
+                            self.clear_streaming_render_state();
                             return Ok(());
                         }
                         return Err(anyhow::anyhow!("Stream error: {}", message));
@@ -7615,7 +7813,7 @@ impl App {
                     self.push_turn_footer(duration);
                 }
             }
-            self.streaming_text.clear();
+            self.clear_streaming_render_state();
             self.stream_buffer.clear();
             self.streaming_tool_calls.clear();
 
@@ -7923,7 +8121,7 @@ impl App {
                                             }
                                             // Add display message for partial response
                                             if !self.streaming_text.is_empty() {
-                                                let content = std::mem::take(&mut self.streaming_text);
+                                                let content = self.take_streaming_text();
                                                 self.push_display_message(DisplayMessage {
                                                     role: "assistant".to_string(),
                                                     content,
@@ -7945,7 +8143,7 @@ impl App {
                                             tool_data: None,
                                         });
                                         // Clear streaming state and continue with new turn
-                                        self.streaming_text.clear();
+                                        self.clear_streaming_render_state();
                                         self.streaming_tool_calls.clear();
                                         self.stream_buffer = StreamBuffer::new();
                                         reasoning_content.clear();
@@ -8035,7 +8233,7 @@ impl App {
                                                     title: None,
                                                     tool_data: None,
                                                 });
-                                                self.streaming_text.clear();
+                                                self.clear_streaming_render_state();
                                                 self.stream_buffer.clear();
                                             }
 
@@ -8059,19 +8257,28 @@ impl App {
                                         cache_read_input_tokens,
                                         cache_creation_input_tokens,
                                     } => {
+                                        let mut usage_changed = false;
                                         if let Some(input) = input_tokens {
                                             self.streaming_input_tokens = input;
-                                            self.check_context_warning(input);
+                                            usage_changed = true;
                                         }
                                         if let Some(output) = output_tokens {
                                             self.streaming_output_tokens = output;
                                         }
                                         if cache_read_input_tokens.is_some() {
                                             self.streaming_cache_read_tokens = cache_read_input_tokens;
+                                            usage_changed = true;
                                         }
                                         if cache_creation_input_tokens.is_some() {
                                             self.streaming_cache_creation_tokens =
                                                 cache_creation_input_tokens;
+                                            usage_changed = true;
+                                        }
+                                        if usage_changed {
+                                            self.update_compaction_usage_from_stream();
+                                            if let Some(context_tokens) = self.current_stream_context_tokens() {
+                                                self.check_context_warning(context_tokens);
+                                            }
                                         }
                                         self.broadcast_debug(super::backend::DebugEvent::TokenUsage {
                                             input_tokens: self.streaming_input_tokens,
@@ -8303,7 +8510,7 @@ impl App {
                     self.push_turn_footer(duration);
                 }
             }
-            self.streaming_text.clear();
+            self.clear_streaming_render_state();
             self.stream_buffer.clear();
             self.streaming_tool_calls.clear();
 
@@ -8846,6 +9053,7 @@ impl App {
                 "/compact".into(),
                 "Compact context (summarize old messages)",
             ),
+            ("/fix".into(), "Recover when the model cannot continue"),
             (
                 "/remember".into(),
                 "Extract and save memories from conversation",
@@ -9103,11 +9311,9 @@ impl App {
 
     /// Get context usage as percentage
     pub fn context_usage_percent(&self) -> f64 {
-        if self.streaming_input_tokens == 0 {
-            0.0
-        } else {
-            (self.streaming_input_tokens as f64 / self.context_limit as f64) * 100.0
-        }
+        self.current_stream_context_tokens()
+            .map(|tokens| (tokens as f64 / self.context_limit as f64) * 100.0)
+            .unwrap_or(0.0)
     }
 
     /// Time since last streaming event (for detecting stale connections)
@@ -9242,7 +9448,7 @@ impl App {
         }
 
         // No user message found below, go to bottom
-        self.scroll_offset = 0;
+        self.follow_chat_bottom();
     }
 
     // ==================== Debug Socket Methods ====================
@@ -10215,6 +10421,20 @@ mod tests {
     }
 
     #[test]
+    fn test_help_topic_shows_fix_command_details() {
+        let mut app = create_test_app();
+        app.input = "/help fix".to_string();
+        app.submit_input();
+
+        let msg = app
+            .display_messages()
+            .last()
+            .expect("missing help response");
+        assert_eq!(msg.role, "system");
+        assert!(msg.content.contains("`/fix`"));
+    }
+
+    #[test]
     fn test_commands_alias_shows_help() {
         let mut app = create_test_app();
         app.input = "/commands".to_string();
@@ -10226,6 +10446,41 @@ mod tests {
             .expect("missing help response");
         assert_eq!(msg.role, "system");
         assert!(msg.content.contains("**Commands:**"));
+    }
+
+    #[test]
+    fn test_fix_resets_provider_session() {
+        let mut app = create_test_app();
+        app.provider_session_id = Some("provider-session".to_string());
+        app.session.provider_session_id = Some("provider-session".to_string());
+        app.last_stream_error = Some("Stream error: context window exceeded".to_string());
+
+        app.input = "/fix".to_string();
+        app.submit_input();
+
+        assert!(app.provider_session_id.is_none());
+        assert!(app.session.provider_session_id.is_none());
+
+        let msg = app
+            .display_messages()
+            .last()
+            .expect("missing /fix response");
+        assert_eq!(msg.role, "system");
+        assert!(msg.content.contains("Fix Results"));
+        assert!(msg.content.contains("Reset provider session resume state"));
+    }
+
+    #[test]
+    fn test_context_limit_error_detection() {
+        assert!(is_context_limit_error(
+            "OpenAI API error 400: This model's maximum context length is 200000 tokens"
+        ));
+        assert!(is_context_limit_error(
+            "request too large: prompt is too long for context window"
+        ));
+        assert!(!is_context_limit_error(
+            "rate limit exceeded, retry after 20s"
+        ));
     }
 
     #[test]
@@ -11105,6 +11360,23 @@ mod tests {
     }
 
     #[test]
+    fn test_remote_typing_resumes_bottom_follow_mode() {
+        let mut app = create_test_app();
+        app.scroll_offset = 7;
+        app.auto_scroll_paused = true;
+
+        app.handle_remote_char_input('x');
+
+        assert_eq!(app.input, "x");
+        assert_eq!(app.cursor_pos, 1);
+        assert_eq!(app.scroll_offset, 0);
+        assert!(
+            !app.auto_scroll_paused,
+            "typing in remote mode should follow newest content, not pin top"
+        );
+    }
+
+    #[test]
     fn test_scroll_ctrl_k_j_offset() {
         let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
 
@@ -11271,13 +11543,17 @@ mod tests {
             "mermaid: expected diagram content at bottom"
         );
 
-        // Verify scrolled past first diagram - content should differ
-        app.scroll_offset = 20;
+        // Verify explicit top viewport in paused mode differs from bottom follow mode.
+        app.scroll_offset = 0;
         app.auto_scroll_paused = true;
         let text_scrolled = render_and_snap(&app, &mut terminal);
         assert_ne!(
             text_bottom, text_scrolled,
             "mermaid: scrolled view should differ from bottom"
+        );
+        assert!(
+            text_scrolled.contains("Intro line 01"),
+            "mermaid: top viewport should include earliest content"
         );
     }
 

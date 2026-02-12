@@ -13,6 +13,7 @@ use jcode::server;
 use jcode::session::Session;
 use jcode::tool::Registry;
 use mock_provider::MockProvider;
+use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -28,10 +29,58 @@ fn lock_jcode_home() -> std::sync::MutexGuard<'static, ()> {
     }
 }
 
+struct TestEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prev_home: Option<OsString>,
+    prev_test_session: Option<OsString>,
+    _temp_home: tempfile::TempDir,
+}
+
+impl TestEnvGuard {
+    fn new() -> Result<Self> {
+        let lock = lock_jcode_home();
+        let temp_home = tempfile::Builder::new()
+            .prefix("jcode-e2e-home-")
+            .tempdir()?;
+        let prev_home = std::env::var_os("JCODE_HOME");
+        let prev_test_session = std::env::var_os("JCODE_TEST_SESSION");
+
+        std::env::set_var("JCODE_HOME", temp_home.path());
+        std::env::set_var("JCODE_TEST_SESSION", "1");
+
+        Ok(Self {
+            _lock: lock,
+            prev_home,
+            prev_test_session,
+            _temp_home: temp_home,
+        })
+    }
+}
+
+impl Drop for TestEnvGuard {
+    fn drop(&mut self) {
+        if let Some(prev_home) = &self.prev_home {
+            std::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            std::env::remove_var("JCODE_HOME");
+        }
+
+        if let Some(prev_test_session) = &self.prev_test_session {
+            std::env::set_var("JCODE_TEST_SESSION", prev_test_session);
+        } else {
+            std::env::remove_var("JCODE_TEST_SESSION");
+        }
+    }
+}
+
+fn setup_test_env() -> Result<TestEnvGuard> {
+    TestEnvGuard::new()
+}
+
 /// Test that a simple text response works
 #[tokio::test]
 async fn test_simple_response() -> Result<()> {
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
     let provider = MockProvider::new();
 
     // Queue a simple response
@@ -49,15 +98,17 @@ async fn test_simple_response() -> Result<()> {
     let mut agent = Agent::new(provider, registry);
 
     let response = agent.run_once_capture("Say hello").await?;
+    let saved = Session::load(agent.session_id())?;
 
     assert_eq!(response, "Hello! How can I help?");
+    assert!(saved.is_debug, "test sessions should be marked debug");
     Ok(())
 }
 
 /// Test that multi-turn conversation works with session resume
 #[tokio::test]
 async fn test_multi_turn_conversation() -> Result<()> {
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
     let provider = MockProvider::new();
 
     // First turn response
@@ -96,7 +147,7 @@ async fn test_multi_turn_conversation() -> Result<()> {
 /// Test that token usage is tracked
 #[tokio::test]
 async fn test_token_usage() -> Result<()> {
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
     let provider = MockProvider::new();
 
     provider.queue_response(vec![
@@ -126,7 +177,7 @@ async fn test_token_usage() -> Result<()> {
 /// Test error handling
 #[tokio::test]
 async fn test_stream_error() -> Result<()> {
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
     let provider = MockProvider::new();
 
     provider.queue_response(vec![
@@ -154,7 +205,7 @@ async fn test_stream_error() -> Result<()> {
 /// Test model cycling over the socket interface (server + client)
 #[tokio::test]
 async fn test_socket_model_cycle_supported_models() -> Result<()> {
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
     let runtime_dir = std::env::temp_dir().join(format!(
         "jcode-test-{}",
         std::time::SystemTime::now()
@@ -215,7 +266,7 @@ async fn test_socket_model_cycle_supported_models() -> Result<()> {
 /// Test that resume restores model selection and tool output in history
 #[tokio::test]
 async fn test_resume_restores_model_and_tool_history() -> Result<()> {
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
     let runtime_dir = std::env::temp_dir().join(format!(
         "jcode-resume-test-{}",
         std::time::SystemTime::now()
@@ -224,12 +275,6 @@ async fn test_resume_restores_model_and_tool_history() -> Result<()> {
             .as_nanos()
     ));
     std::fs::create_dir_all(&runtime_dir)?;
-
-    let jcode_home = runtime_dir.join("home");
-    std::fs::create_dir_all(&jcode_home)?;
-
-    let prev_home = std::env::var("JCODE_HOME").ok();
-    std::env::set_var("JCODE_HOME", &jcode_home);
 
     let mut session = Session::create(None, Some("Resume Test".to_string()));
     session.model = Some("gpt-5.2-codex".to_string());
@@ -307,11 +352,6 @@ async fn test_resume_restores_model_and_tool_history() -> Result<()> {
     server_handle.abort();
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&debug_socket_path);
-    if let Some(prev) = prev_home {
-        std::env::set_var("JCODE_HOME", prev);
-    } else {
-        std::env::remove_var("JCODE_HOME");
-    }
 
     let (messages, provider_model) =
         history_event.ok_or_else(|| anyhow::anyhow!("Did not receive history event"))?;
@@ -335,7 +375,7 @@ async fn test_resume_restores_model_and_tool_history() -> Result<()> {
 /// Test that subscribe selfdev hint marks the session as canary
 #[tokio::test]
 async fn test_subscribe_selfdev_hint_marks_canary() -> Result<()> {
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
     let runtime_dir = std::env::temp_dir().join(format!(
         "jcode-test-{}",
         std::time::SystemTime::now()
@@ -393,7 +433,7 @@ async fn test_subscribe_selfdev_hint_marks_canary() -> Result<()> {
 /// Test that switching models resets the provider resume session
 #[tokio::test]
 async fn test_model_switch_resets_provider_session() -> Result<()> {
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
     let runtime_dir = std::env::temp_dir().join(format!(
         "jcode-test-{}",
         std::time::SystemTime::now()
@@ -491,7 +531,7 @@ async fn test_model_switch_resets_provider_session() -> Result<()> {
 /// Test that switching models only affects the active session
 #[tokio::test]
 async fn test_model_switch_is_per_session() -> Result<()> {
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
     let runtime_dir = std::env::temp_dir().join(format!(
         "jcode-test-{}",
         std::time::SystemTime::now()
@@ -612,7 +652,7 @@ async fn test_model_switch_is_per_session() -> Result<()> {
 /// The agent should identify as "jcode" or just a generic "coding assistant powered by Claude"
 #[tokio::test]
 async fn test_system_prompt_no_claude_code_identity() -> Result<()> {
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
     let provider = Arc::new(MockProvider::new());
 
     // Queue a simple response
@@ -684,7 +724,7 @@ async fn test_system_prompt_no_claude_code_identity() -> Result<()> {
 #[ignore] // Requires Claude credentials
 async fn binary_integration_standalone_claude() -> Result<()> {
     use std::process::Command;
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
 
     let output = Command::new("cargo")
         .args([
@@ -716,7 +756,7 @@ async fn binary_integration_standalone_claude() -> Result<()> {
 #[ignore] // Requires OpenAI/Codex credentials
 async fn binary_integration_openai_provider() -> Result<()> {
     use std::process::Command;
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
 
     let output = Command::new("cargo")
         .args([
@@ -754,7 +794,7 @@ async fn binary_integration_openai_provider() -> Result<()> {
 #[tokio::test]
 async fn binary_version_command() -> Result<()> {
     use std::process::Command;
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
 
     let output = Command::new("cargo")
         .args(["run", "--release", "--bin", "jcode", "--", "--version"])
@@ -1058,7 +1098,7 @@ fn test_adaptive_scheduler_pause() {
 /// Test ambient tools: end_ambient_cycle via mock agent
 #[tokio::test]
 async fn test_ambient_end_cycle_tool() -> Result<()> {
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
     let provider = MockProvider::new();
 
     // Mock: agent calls end_ambient_cycle tool
@@ -1115,7 +1155,7 @@ async fn test_ambient_end_cycle_tool() -> Result<()> {
 /// Test ambient tools: request_permission via mock agent
 #[tokio::test]
 async fn test_ambient_request_permission_tool() -> Result<()> {
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
     let provider = MockProvider::new();
 
     let tool_input = serde_json::json!({
@@ -1162,7 +1202,7 @@ async fn test_ambient_request_permission_tool() -> Result<()> {
 /// Test ambient tools: schedule_ambient via mock agent
 #[tokio::test]
 async fn test_ambient_schedule_tool() -> Result<()> {
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
     let provider = MockProvider::new();
 
     let tool_input = serde_json::json!({
@@ -1429,7 +1469,7 @@ fn test_ambient_lock() {
 /// Simulates: agent receives prompt → uses tools → calls end_ambient_cycle
 #[tokio::test]
 async fn test_full_ambient_cycle_simulation() -> Result<()> {
-    let _lock = lock_jcode_home();
+    let _env = setup_test_env()?;
     let provider = MockProvider::new();
 
     // Turn 1: Agent calls end_ambient_cycle with full data

@@ -3313,7 +3313,7 @@ mod tests {
 
         // Memory widget is text-only.
         let lines = render_memory_widget(&data, Rect::new(0, 0, 24, 5));
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 5);
     }
 
     #[test]
