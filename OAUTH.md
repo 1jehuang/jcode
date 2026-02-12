@@ -116,9 +116,9 @@ These use each provider's local CLI session/auth and shell out in print mode.
   - `JCODE_CURSOR_MODEL` (default: `gpt-5`)
 
 ### GitHub Copilot
-- Login: `jcode login --provider copilot` (runs `copilot auth login`)
+- Login: `jcode login --provider copilot` (runs `copilot -i /login`, or `gh copilot -- -i /login` if `copilot` is not on PATH)
 - Env vars:
-  - `JCODE_COPILOT_CLI_PATH` (default: `copilot`)
+  - `JCODE_COPILOT_CLI_PATH` (optional override for CLI path)
   - `JCODE_COPILOT_MODEL` (default: `claude-sonnet-4`)
 
 ### Antigravity

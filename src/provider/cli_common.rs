@@ -6,6 +6,33 @@ use tokio::sync::mpsc;
 
 const MAX_PROMPT_CHARS: usize = 120_000;
 
+fn provider_login_hint(provider_name: &str) -> Option<&'static str> {
+    match provider_name.to_ascii_lowercase().as_str() {
+        "cursor" => Some("Run `jcode login --provider cursor` to re-authenticate."),
+        "copilot" => Some(
+            "Run `jcode login --provider copilot` to authenticate (or install Copilot CLI via https://gh.io/copilot-cli).",
+        ),
+        "antigravity" => Some("Run `jcode login --provider antigravity` to re-authenticate."),
+        _ => None,
+    }
+}
+
+fn looks_like_auth_error(stderr_text: &str) -> bool {
+    let lower = stderr_text.to_ascii_lowercase();
+    [
+        "unauthorized",
+        "forbidden",
+        "auth",
+        "token",
+        "login",
+        "log in",
+        "sign in",
+        "not installed",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 pub fn build_cli_prompt(system: &str, messages: &[Message]) -> String {
     let mut out = String::new();
 
@@ -86,9 +113,17 @@ pub async fn run_cli_text_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("Failed to spawn {} CLI", provider_name))?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                if let Some(hint) = provider_login_hint(provider_name) {
+                    anyhow::bail!("Failed to spawn {} CLI: {}. {}", provider_name, e, hint);
+                }
+            }
+            return Err(e).with_context(|| format!("Failed to spawn {} CLI", provider_name));
+        }
+    };
 
     let stdout = child
         .stdout
@@ -141,12 +176,36 @@ pub async fn run_cli_text_command(
     let stderr_text = stderr_task.await.unwrap_or_default();
 
     if !status.success() {
+        let hint = if looks_like_auth_error(&stderr_text) {
+            provider_login_hint(provider_name)
+        } else {
+            None
+        };
+
         if !stderr_text.trim().is_empty() {
+            if let Some(hint) = hint {
+                anyhow::bail!(
+                    "{} CLI exited with status {}: {}\n{}",
+                    provider_name,
+                    status,
+                    stderr_text.trim(),
+                    hint
+                );
+            }
             anyhow::bail!(
                 "{} CLI exited with status {}: {}",
                 provider_name,
                 status,
                 stderr_text.trim()
+            );
+        }
+
+        if let Some(hint) = hint {
+            anyhow::bail!(
+                "{} CLI exited with status {}. {}",
+                provider_name,
+                status,
+                hint
             );
         }
         anyhow::bail!("{} CLI exited with status {}", provider_name, status);
