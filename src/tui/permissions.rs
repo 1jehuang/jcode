@@ -9,6 +9,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
     Frame,
 };
+use serde_json::{Map, Value};
 use std::io::IsTerminal;
 use std::time::Duration;
 
@@ -245,34 +246,121 @@ impl PermissionsApp {
             return;
         };
 
-        let mut lines: Vec<Line> = Vec::new();
+        let mut lines: Vec<Line<'static>> = Vec::new();
 
         let label_style = Style::default()
             .fg(Color::Rgb(140, 180, 255))
             .add_modifier(Modifier::BOLD);
         let value_style = Style::default().fg(Color::Rgb(180, 180, 190));
+        let review = extract_permission_review(req);
 
-        lines.push(Line::from(vec![
-            Span::styled(" Rationale: ", label_style),
-            Span::styled(
-                truncate(&req.rationale, area.width.saturating_sub(14) as usize),
+        push_wrapped_field(
+            &mut lines,
+            " Summary: ",
+            &review.summary,
+            area.width,
+            label_style,
+            value_style,
+        );
+        push_wrapped_field(
+            &mut lines,
+            " Why: ",
+            &review.why_permission_needed,
+            area.width,
+            label_style,
+            value_style,
+        );
+
+        if let Some(current_activity) = review.current_activity.as_deref() {
+            push_wrapped_field(
+                &mut lines,
+                " Activity: ",
+                current_activity,
+                area.width,
+                label_style,
                 value_style,
-            ),
-        ]));
+            );
+        }
 
-        if req.rationale.len() > (area.width.saturating_sub(14) as usize) {
-            let rest = &req.rationale[(area.width.saturating_sub(14) as usize)..];
-            for chunk in rest
-                .as_bytes()
-                .chunks(area.width.saturating_sub(2) as usize)
-            {
-                if let Ok(s) = std::str::from_utf8(chunk) {
-                    lines.push(Line::from(vec![
-                        Span::raw(" "),
-                        Span::styled(s.to_string(), value_style),
-                    ]));
-                }
-            }
+        if !review.planned_steps.is_empty() {
+            let plan = summarize_list(&review.planned_steps, " -> ", 4);
+            push_wrapped_field(
+                &mut lines,
+                " Plan: ",
+                &plan,
+                area.width,
+                label_style,
+                value_style,
+            );
+        }
+
+        if !review.files.is_empty() {
+            let files = summarize_list(&review.files, ", ", 6);
+            push_wrapped_field(
+                &mut lines,
+                " Files: ",
+                &files,
+                area.width,
+                label_style,
+                value_style,
+            );
+        }
+
+        if !review.commands.is_empty() {
+            let commands = summarize_list(&review.commands, " ; ", 4);
+            push_wrapped_field(
+                &mut lines,
+                " Commands: ",
+                &commands,
+                area.width,
+                label_style,
+                value_style,
+            );
+        }
+
+        if let Some(expected_outcome) = review.expected_outcome.as_deref() {
+            push_wrapped_field(
+                &mut lines,
+                " Outcome: ",
+                expected_outcome,
+                area.width,
+                label_style,
+                value_style,
+            );
+        }
+
+        if let Some(impact) = review.impact.as_deref() {
+            push_wrapped_field(
+                &mut lines,
+                " Impact: ",
+                impact,
+                area.width,
+                label_style,
+                value_style,
+            );
+        }
+
+        if !review.risks.is_empty() {
+            let risks = summarize_list(&review.risks, " | ", 4);
+            push_wrapped_field(
+                &mut lines,
+                " Risks: ",
+                &risks,
+                area.width,
+                label_style,
+                value_style,
+            );
+        }
+
+        if let Some(rollback_plan) = review.rollback_plan.as_deref() {
+            push_wrapped_field(
+                &mut lines,
+                " Rollback: ",
+                rollback_plan,
+                area.width,
+                label_style,
+                value_style,
+            );
         }
 
         lines.push(Line::raw(""));
@@ -301,21 +389,6 @@ impl PermissionsApp {
                     Style::default().fg(Color::Rgb(255, 200, 100)),
                 ),
             ]));
-        }
-
-        if let Some(ref ctx) = req.context {
-            lines.push(Line::raw(""));
-            lines.push(Line::from(vec![Span::styled(" Context: ", label_style)]));
-            let ctx_str = serde_json::to_string_pretty(ctx).unwrap_or_else(|_| format!("{}", ctx));
-            for ctx_line in ctx_str.lines().take(area.height.saturating_sub(8) as usize) {
-                lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(
-                        truncate(ctx_line, area.width.saturating_sub(5) as usize),
-                        Style::default().fg(Color::Rgb(140, 140, 150)),
-                    ),
-                ]));
-            }
         }
 
         if let Some(ref deny_text) = self.deny_input {
@@ -532,7 +605,215 @@ fn detail_height(total: u16) -> u16 {
     let help = 1;
     let separators = 2;
     let available = total.saturating_sub(min_list + help + separators);
-    available.max(4).min(10)
+    available.max(4).min(16)
+}
+
+#[derive(Default)]
+struct PermissionReview {
+    summary: String,
+    why_permission_needed: String,
+    current_activity: Option<String>,
+    expected_outcome: Option<String>,
+    impact: Option<String>,
+    rollback_plan: Option<String>,
+    planned_steps: Vec<String>,
+    files: Vec<String>,
+    commands: Vec<String>,
+    risks: Vec<String>,
+}
+
+fn extract_permission_review(req: &PermissionRequest) -> PermissionReview {
+    let root = req.context.as_ref().and_then(Value::as_object);
+    let review = root
+        .and_then(|m| m.get("review"))
+        .and_then(Value::as_object);
+    let details = root
+        .and_then(|m| m.get("details"))
+        .and_then(Value::as_object);
+
+    let summary = pick_context_string(review, details, root, &["summary", "what"])
+        .unwrap_or_else(|| req.description.clone());
+    let why_permission_needed = pick_context_string(
+        review,
+        details,
+        root,
+        &[
+            "why_permission_needed",
+            "why",
+            "reason",
+            "rationale",
+            "justification",
+        ],
+    )
+    .unwrap_or_else(|| req.rationale.clone());
+
+    PermissionReview {
+        summary,
+        why_permission_needed,
+        current_activity: pick_context_string(
+            review,
+            details,
+            root,
+            &["current_activity", "activity", "task", "current_task"],
+        ),
+        expected_outcome: pick_context_string(
+            review,
+            details,
+            root,
+            &["expected_outcome", "outcome", "success_criteria", "success"],
+        ),
+        impact: pick_context_string(review, details, root, &["impact", "user_impact"]),
+        rollback_plan: pick_context_string(review, details, root, &["rollback_plan", "rollback"]),
+        planned_steps: pick_context_list(
+            review,
+            details,
+            root,
+            &["planned_steps", "steps", "plan", "checklist"],
+        ),
+        files: pick_context_list(
+            review,
+            details,
+            root,
+            &["files", "file_paths", "planned_files"],
+        ),
+        commands: pick_context_list(review, details, root, &["commands", "planned_commands"]),
+        risks: pick_context_list(review, details, root, &["risks", "risk", "safety_risks"]),
+    }
+}
+
+fn context_string(map: Option<&Map<String, Value>>, keys: &[&str]) -> Option<String> {
+    let map = map?;
+    keys.iter().find_map(|key| {
+        map.get(*key).and_then(|value| {
+            value.as_str().and_then(|s| {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+        })
+    })
+}
+
+fn context_list(map: Option<&Map<String, Value>>, keys: &[&str]) -> Option<Vec<String>> {
+    let map = map?;
+    for key in keys {
+        let Some(value) = map.get(*key) else {
+            continue;
+        };
+        if let Some(items) = value.as_array() {
+            let list: Vec<String> = items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string)
+                .collect();
+            if !list.is_empty() {
+                return Some(list);
+            }
+        } else if let Some(single) = value.as_str() {
+            let trimmed = single.trim();
+            if !trimmed.is_empty() {
+                return Some(vec![trimmed.to_string()]);
+            }
+        }
+    }
+    None
+}
+
+fn pick_context_string(
+    review: Option<&Map<String, Value>>,
+    details: Option<&Map<String, Value>>,
+    root: Option<&Map<String, Value>>,
+    keys: &[&str],
+) -> Option<String> {
+    context_string(review, keys)
+        .or_else(|| context_string(details, keys))
+        .or_else(|| context_string(root, keys))
+}
+
+fn pick_context_list(
+    review: Option<&Map<String, Value>>,
+    details: Option<&Map<String, Value>>,
+    root: Option<&Map<String, Value>>,
+    keys: &[&str],
+) -> Vec<String> {
+    context_list(review, keys)
+        .or_else(|| context_list(details, keys))
+        .or_else(|| context_list(root, keys))
+        .unwrap_or_default()
+}
+
+fn summarize_list(items: &[String], separator: &str, max_items: usize) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let shown: Vec<&str> = items.iter().take(max_items).map(|s| s.as_str()).collect();
+    let mut text = shown.join(separator);
+    if items.len() > max_items {
+        text.push_str(&format!(" (+{} more)", items.len() - max_items));
+    }
+    text
+}
+
+fn wrap_by_chars(text: &str, width: usize) -> Vec<String> {
+    if text.is_empty() || width == 0 {
+        return Vec::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let end = (i + width).min(chars.len());
+        out.push(chars[i..end].iter().collect());
+        i = end;
+    }
+    out
+}
+
+fn push_wrapped_field(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    value: &str,
+    area_width: u16,
+    label_style: Style,
+    value_style: Style,
+) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+
+    let label_width = label.chars().count();
+    let first_width = area_width.saturating_sub(label_width as u16).max(1) as usize;
+    let continued_width = area_width.saturating_sub(1).max(1) as usize;
+
+    let mut chunks = wrap_by_chars(value, first_width);
+    if chunks.is_empty() {
+        return;
+    }
+
+    lines.push(Line::from(vec![
+        Span::styled(label.to_string(), label_style),
+        Span::styled(chunks.remove(0), value_style),
+    ]));
+
+    if chunks.is_empty() {
+        return;
+    }
+
+    let indent = " ".repeat(label_width);
+    for chunk in chunks {
+        for wrapped in wrap_by_chars(&chunk, continued_width) {
+            lines.push(Line::from(vec![
+                Span::raw(indent.clone()),
+                Span::styled(wrapped, value_style),
+            ]));
+        }
+    }
 }
 
 fn format_age(duration: chrono::Duration) -> String {

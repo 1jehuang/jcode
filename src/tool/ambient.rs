@@ -7,7 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -324,6 +324,136 @@ fn default_false() -> bool {
     false
 }
 
+fn extract_context_string(map: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        map.get(*key).and_then(|value| {
+            value.as_str().and_then(|s| {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+        })
+    })
+}
+
+fn extract_context_list(map: &Map<String, Value>, keys: &[&str]) -> Vec<String> {
+    for key in keys {
+        let Some(value) = map.get(*key) else {
+            continue;
+        };
+
+        if let Some(items) = value.as_array() {
+            let list: Vec<String> = items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string)
+                .collect();
+            if !list.is_empty() {
+                return list;
+            }
+        } else if let Some(single) = value.as_str() {
+            let trimmed = single.trim();
+            if !trimmed.is_empty() {
+                return vec![trimmed.to_string()];
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn build_permission_review_context(
+    action: &str,
+    description: &str,
+    rationale: &str,
+    context: Option<&Value>,
+) -> Value {
+    let context_obj = context.and_then(Value::as_object);
+
+    let summary = context_obj
+        .and_then(|m| extract_context_string(m, &["summary", "what", "activity_summary"]))
+        .unwrap_or_else(|| description.to_string());
+
+    let why_permission_needed = context_obj
+        .and_then(|m| {
+            extract_context_string(
+                m,
+                &[
+                    "why_permission_needed",
+                    "why",
+                    "reason",
+                    "rationale",
+                    "justification",
+                ],
+            )
+        })
+        .unwrap_or_else(|| rationale.to_string());
+
+    let mut review = Map::new();
+    review.insert("summary".to_string(), Value::String(summary));
+    review.insert(
+        "why_permission_needed".to_string(),
+        Value::String(why_permission_needed),
+    );
+    review.insert(
+        "requested_action".to_string(),
+        Value::String(action.to_string()),
+    );
+
+    let string_fields: [(&str, &[&str]); 4] = [
+        (
+            "current_activity",
+            &["current_activity", "activity", "task", "current_task"],
+        ),
+        (
+            "expected_outcome",
+            &["expected_outcome", "outcome", "success_criteria", "success"],
+        ),
+        ("impact", &["impact", "user_impact"]),
+        ("rollback_plan", &["rollback_plan", "rollback"]),
+    ];
+
+    if let Some(map) = context_obj {
+        for (field_name, keys) in string_fields {
+            if let Some(value) = extract_context_string(map, keys) {
+                review.insert(field_name.to_string(), Value::String(value));
+            }
+        }
+
+        let list_fields: [(&str, &[&str]); 4] = [
+            (
+                "planned_steps",
+                &["planned_steps", "steps", "plan", "checklist"],
+            ),
+            ("files", &["files", "file_paths", "planned_files"]),
+            ("commands", &["commands", "planned_commands"]),
+            ("risks", &["risks", "risk", "safety_risks"]),
+        ];
+
+        for (field_name, keys) in list_fields {
+            let items = extract_context_list(map, keys);
+            if !items.is_empty() {
+                review.insert(
+                    field_name.to_string(),
+                    Value::Array(items.into_iter().map(Value::String).collect()),
+                );
+            }
+        }
+    }
+
+    if let Some(raw) = context {
+        if !raw.is_object() {
+            review.insert("notes".to_string(), raw.clone());
+        }
+    }
+
+    Value::Object(review)
+}
+
 #[async_trait]
 impl Tool for RequestPermissionTool {
     fn name(&self) -> &str {
@@ -365,7 +495,50 @@ impl Tool for RequestPermissionTool {
                 },
                 "context": {
                     "type": "object",
-                    "description": "Additional review details (planned files, commands, impact, rollback plan, etc.)."
+                    "description": "Structured reviewer context. Include summary of current work and why permission is needed.",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": "One-paragraph summary of what you are currently doing"
+                        },
+                        "why_permission_needed": {
+                            "type": "string",
+                            "description": "Why this action needs user approval right now"
+                        },
+                        "current_activity": {
+                            "type": "string",
+                            "description": "Current task or ambient objective"
+                        },
+                        "planned_steps": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Short ordered plan of intended steps"
+                        },
+                        "files": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Files expected to be created/modified"
+                        },
+                        "commands": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Commands expected to be executed"
+                        },
+                        "risks": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Known risks or side effects"
+                        },
+                        "rollback_plan": {
+                            "type": "string",
+                            "description": "How to back out changes if needed"
+                        },
+                        "expected_outcome": {
+                            "type": "string",
+                            "description": "What successful completion should look like"
+                        }
+                    },
+                    "additionalProperties": true
                 }
             }
         })
@@ -382,6 +555,12 @@ impl Tool for RequestPermissionTool {
 
         let request_id = safety::new_request_id();
         let now = Utc::now();
+        let review = build_permission_review_context(
+            &params.action,
+            &params.description,
+            &params.rationale,
+            params.context.as_ref(),
+        );
         let mut request_context = json!({
             "session_id": ctx.session_id,
             "message_id": ctx.message_id,
@@ -389,8 +568,9 @@ impl Tool for RequestPermissionTool {
             "working_dir": ctx.working_dir.as_ref().map(|p| p.display().to_string()),
             "requested_at": now.to_rfc3339(),
         });
-        if let Some(user_context) = params.context {
-            if let Some(obj) = request_context.as_object_mut() {
+        if let Some(obj) = request_context.as_object_mut() {
+            obj.insert("review".to_string(), review);
+            if let Some(user_context) = params.context {
                 obj.insert("details".to_string(), user_context);
             }
         }
@@ -572,5 +752,87 @@ mod tests {
         let parsed: RequestPermissionInput = serde_json::from_value(input).unwrap();
         assert!(parsed.urgency.is_none());
         assert!(!parsed.wait);
+    }
+
+    #[test]
+    fn test_build_permission_review_context_defaults() {
+        let review = build_permission_review_context(
+            "edit",
+            "Fix typo in docs",
+            "Needs write permission",
+            None,
+        );
+
+        assert_eq!(
+            review
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+            "Fix typo in docs"
+        );
+        assert_eq!(
+            review
+                .get("why_permission_needed")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+            "Needs write permission"
+        );
+        assert_eq!(
+            review
+                .get("requested_action")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+            "edit"
+        );
+    }
+
+    #[test]
+    fn test_build_permission_review_context_uses_structured_fields() {
+        let context = json!({
+            "summary": "Preparing a focused refactor",
+            "why_permission_needed": "Need to modify tracked files",
+            "planned_steps": ["Update parser", "Run tests"],
+            "files": ["src/parser.rs", "src/tests.rs"],
+            "commands": ["cargo test"],
+            "risks": ["Could regress parsing edge cases"],
+            "rollback_plan": "Revert commit if tests fail",
+            "expected_outcome": "Parser handles edge-case input",
+        });
+        let review = build_permission_review_context(
+            "edit",
+            "fallback summary",
+            "fallback why",
+            Some(&context),
+        );
+
+        assert_eq!(
+            review
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+            "Preparing a focused refactor"
+        );
+        assert_eq!(
+            review
+                .get("why_permission_needed")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+            "Need to modify tracked files"
+        );
+        assert_eq!(
+            review
+                .get("rollback_plan")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+            "Revert commit if tests fail"
+        );
+        assert_eq!(
+            review
+                .get("planned_steps")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or_default(),
+            2
+        );
     }
 }

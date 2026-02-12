@@ -891,6 +891,13 @@ pub fn build_ambient_system_prompt(
          no surprise. Check the user feedback memories -- if they've rejected \
          similar work before, don't do it. Code changes must go on a worktree \
          branch with a PR via request_permission.\n\n\
+         Every request_permission call must be reviewer-ready. Include:\n\
+         - description: concise summary of what you are about to do\n\
+         - rationale: why approval is needed right now\n\
+         - context.summary: what you are working on in this cycle\n\
+         - context.why_permission_needed: explicit justification for permission\n\
+         - context.planned_steps, context.files, context.commands (if known)\n\
+         - context.risks and context.rollback_plan (if relevant)\n\n\
          Good sources for scouting proactive work:\n\
          - Todoist (via MCP) — check for relevant tasks and deadlines\n\
          - Canvas (via MCP) — check for upcoming assignments or deadlines\n\
@@ -1137,6 +1144,8 @@ mod tests {
         assert!(prompt.contains("anthropic-oauth"));
         assert!(prompt.contains("## Instructions"));
         assert!(prompt.contains("end_ambient_cycle"));
+        assert!(prompt.contains("reviewer-ready"));
+        assert!(prompt.contains("context.why_permission_needed"));
     }
 
     #[test]
