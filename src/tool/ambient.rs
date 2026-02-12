@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -39,6 +40,8 @@ pub fn take_cycle_result() -> Option<AmbientCycleResult> {
 
 /// Global SafetySystem instance shared with ambient tools.
 static SAFETY_SYSTEM: OnceLock<Arc<SafetySystem>> = OnceLock::new();
+/// Session IDs currently allowed to use ambient-only permission workflows.
+static AMBIENT_SESSION_IDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 pub fn init_safety_system(system: Arc<SafetySystem>) {
     let _ = SAFETY_SYSTEM.set(system);
@@ -49,6 +52,42 @@ fn get_safety_system() -> Arc<SafetySystem> {
         .get()
         .cloned()
         .unwrap_or_else(|| Arc::new(SafetySystem::new()))
+}
+
+fn ambient_session_ids() -> &'static Mutex<HashSet<String>> {
+    AMBIENT_SESSION_IDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Mark a session ID as ambient-enabled for ambient-only tooling.
+pub fn register_ambient_session(session_id: impl Into<String>) {
+    if let Ok(mut ids) = ambient_session_ids().lock() {
+        ids.insert(session_id.into());
+    }
+}
+
+/// Remove a session ID from the ambient-enabled set.
+pub fn unregister_ambient_session(session_id: &str) {
+    if let Ok(mut ids) = ambient_session_ids().lock() {
+        ids.remove(session_id);
+    }
+}
+
+fn is_ambient_session_registered(session_id: &str) -> bool {
+    ambient_session_ids()
+        .lock()
+        .map(|ids| ids.contains(session_id))
+        .unwrap_or(false)
+}
+
+fn ensure_ambient_session(ctx: &ToolContext) -> Result<()> {
+    if is_ambient_session_registered(&ctx.session_id) {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "request_permission is only available to ambient sessions (session '{}')",
+            ctx.session_id
+        )
+    }
 }
 
 // ===========================================================================
@@ -462,6 +501,7 @@ impl Tool for RequestPermissionTool {
 
     fn description(&self) -> &str {
         "Request user permission for a Tier 2 action (e.g., code changes, PRs, pushes). \
+         Only ambient sessions may call this tool. \
          The request is queued for user review. If wait=true, the tool blocks until a \
          decision is made (with timeout). Include rich context so reviewers can make \
          an informed decision."
@@ -545,6 +585,8 @@ impl Tool for RequestPermissionTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        ensure_ambient_session(&ctx)?;
+
         let params: RequestPermissionInput = serde_json::from_value(input)?;
 
         let urgency = match params.urgency.as_deref() {
@@ -834,5 +876,42 @@ mod tests {
                 .unwrap_or_default(),
             2
         );
+    }
+
+    #[test]
+    fn test_register_unregister_ambient_session() {
+        let session_id = "ambient_tool_test_session";
+        unregister_ambient_session(session_id);
+        assert!(!is_ambient_session_registered(session_id));
+
+        register_ambient_session(session_id.to_string());
+        assert!(is_ambient_session_registered(session_id));
+
+        unregister_ambient_session(session_id);
+        assert!(!is_ambient_session_registered(session_id));
+    }
+
+    #[tokio::test]
+    async fn test_request_permission_rejects_non_ambient_session() {
+        let tool = RequestPermissionTool::new();
+        let input = json!({
+            "action": "edit",
+            "description": "Update docs",
+            "rationale": "Fix typo"
+        });
+        let ctx = ToolContext {
+            session_id: "normal_session_test".to_string(),
+            message_id: "msg_1".to_string(),
+            tool_call_id: "call_1".to_string(),
+            working_dir: None,
+        };
+
+        let err = tool
+            .execute(input, ctx)
+            .await
+            .expect_err("non-ambient session should be rejected");
+        assert!(err
+            .to_string()
+            .contains("request_permission is only available to ambient sessions"));
     }
 }

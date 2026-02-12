@@ -557,6 +557,8 @@ impl AmbientRunnerHandle {
         let mut agent = Agent::new(cycle_provider.clone(), registry);
         agent.set_debug(true);
         agent.set_system_prompt(&system_prompt);
+        let ambient_session_id = agent.session_id().to_string();
+        ambient_tools::register_ambient_session(ambient_session_id.clone());
 
         // Clear any previous cycle result
         ambient_tools::take_cycle_result();
@@ -567,6 +569,7 @@ impl AmbientRunnerHandle {
 
         // Check if end_ambient_cycle was called
         if let Some(result) = ambient_tools::take_cycle_result() {
+            ambient_tools::unregister_ambient_session(&ambient_session_id);
             let conversation = agent.export_conversation_markdown();
             agent.mark_closed();
             return Ok(AmbientCycleResult {
@@ -593,6 +596,7 @@ impl AmbientRunnerHandle {
 
         // Check again
         if let Some(result) = ambient_tools::take_cycle_result() {
+            ambient_tools::unregister_ambient_session(&ambient_session_id);
             let conversation = agent.export_conversation_markdown();
             agent.mark_closed();
             return Ok(AmbientCycleResult {
@@ -604,6 +608,7 @@ impl AmbientRunnerHandle {
         }
 
         // Forced end
+        ambient_tools::unregister_ambient_session(&ambient_session_id);
         logging::warn("Ambient cycle: forced end after 2 attempts without end_ambient_cycle");
         let forced = AmbientCycleResult {
             summary: "Cycle ended without calling end_ambient_cycle (forced end after 2 attempts)"
