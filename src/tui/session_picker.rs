@@ -1605,6 +1605,16 @@ mod tests {
         is_debug: bool,
         status: SessionStatus,
     ) -> SessionInfo {
+        make_session_with_flags(id, short_name, is_debug, false, status)
+    }
+
+    fn make_session_with_flags(
+        id: &str,
+        short_name: &str,
+        is_debug: bool,
+        is_canary: bool,
+        status: SessionStatus,
+    ) -> SessionInfo {
         let now = Utc::now();
         SessionInfo {
             id: id.to_string(),
@@ -1617,7 +1627,7 @@ mod tests {
             created_at: now - ChronoDuration::minutes(5),
             last_message_time: now - ChronoDuration::minutes(1),
             working_dir: Some("/tmp".to_string()),
-            is_canary: false,
+            is_canary,
             is_debug,
             status,
             estimated_tokens: 200,
@@ -1667,6 +1677,50 @@ mod tests {
         assert!(!picker.show_test_sessions);
         assert_eq!(picker.sessions.len(), 1);
         assert_eq!(picker.hidden_test_count, 1);
+    }
+
+    #[test]
+    fn test_new_grouped_hides_debug_and_canary_by_default() {
+        let normal = make_session("session_normal", "normal", false, SessionStatus::Closed);
+        let debug = make_session("session_debug", "debug", true, SessionStatus::Closed);
+        let canary = make_session_with_flags(
+            "session_canary",
+            "canary",
+            false,
+            true,
+            SessionStatus::Closed,
+        );
+        let orphan_normal = make_session(
+            "orphan_normal",
+            "orphan-normal",
+            false,
+            SessionStatus::Closed,
+        );
+        let orphan_debug =
+            make_session("orphan_debug", "orphan-debug", true, SessionStatus::Closed);
+
+        let groups = vec![ServerGroup {
+            name: "main".to_string(),
+            icon: "🛰".to_string(),
+            version: "v0.1.0".to_string(),
+            git_hash: "abc1234".to_string(),
+            is_running: true,
+            sessions: vec![normal.clone(), debug.clone(), canary.clone()],
+        }];
+
+        let mut picker = SessionPicker::new_grouped(groups, vec![orphan_normal, orphan_debug]);
+
+        assert!(!picker.show_test_sessions);
+        assert_eq!(picker.sessions.len(), 2);
+        assert!(picker.sessions.iter().all(|s| !s.is_debug && !s.is_canary));
+        assert_eq!(picker.hidden_test_count, 3);
+
+        picker.toggle_test_sessions();
+        assert!(picker.show_test_sessions);
+        assert_eq!(picker.sessions.len(), 5);
+        assert_eq!(picker.hidden_test_count, 0);
+        assert!(picker.sessions.iter().any(|s| s.is_debug));
+        assert!(picker.sessions.iter().any(|s| s.is_canary));
     }
 
     #[test]

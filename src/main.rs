@@ -2642,6 +2642,70 @@ fn run_promote() -> Result<()> {
 }
 
 #[cfg(test)]
+mod test_env {
+    use std::ffi::OsString;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        let mutex = ENV_LOCK.get_or_init(|| Mutex::new(()));
+        match mutex.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    pub struct TestEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev_home: Option<OsString>,
+        prev_test_session: Option<OsString>,
+        _temp_home: tempfile::TempDir,
+    }
+
+    impl TestEnvGuard {
+        fn new() -> anyhow::Result<Self> {
+            let lock = lock_env();
+            let temp_home = tempfile::Builder::new()
+                .prefix("jcode-main-test-home-")
+                .tempdir()?;
+            let prev_home = std::env::var_os("JCODE_HOME");
+            let prev_test_session = std::env::var_os("JCODE_TEST_SESSION");
+
+            std::env::set_var("JCODE_HOME", temp_home.path());
+            std::env::set_var("JCODE_TEST_SESSION", "1");
+
+            Ok(Self {
+                _lock: lock,
+                prev_home,
+                prev_test_session,
+                _temp_home: temp_home,
+            })
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            if let Some(prev_home) = &self.prev_home {
+                std::env::set_var("JCODE_HOME", prev_home);
+            } else {
+                std::env::remove_var("JCODE_HOME");
+            }
+
+            if let Some(prev_test_session) = &self.prev_test_session {
+                std::env::set_var("JCODE_TEST_SESSION", prev_test_session);
+            } else {
+                std::env::remove_var("JCODE_TEST_SESSION");
+            }
+        }
+    }
+
+    pub fn setup() -> TestEnvGuard {
+        TestEnvGuard::new().expect("failed to setup isolated test environment")
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
@@ -2744,6 +2808,8 @@ mod selfdev_integration_tests {
 
     #[tokio::test]
     async fn test_selfdev_tool_registration() {
+        let _env = super::test_env::setup();
+
         // Create a canary session
         let mut session = session::Session::create(None, Some("Test".to_string()));
         session.set_canary("test");
@@ -2787,6 +2853,8 @@ mod selfdev_e2e_tests {
 
     #[tokio::test]
     async fn test_selfdev_session_and_registry() {
+        let _env = super::test_env::setup();
+
         // 1. Create a canary session
         let mut session = session::Session::create(None, Some("Test E2E".to_string()));
         session.set_canary("test-build");
