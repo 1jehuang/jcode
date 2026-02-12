@@ -372,7 +372,16 @@ fn build_auth_status_line(auth: &crate::auth::AuthStatus) -> Line<'static> {
         dot_char(auth.openai),
         Style::default().fg(dot_color(auth.openai)),
     ));
-    spans.push(Span::styled(" openai ", Style::default().fg(DIM_COLOR)));
+    let openai_label = if auth.openai_has_oauth && auth.openai_has_api_key {
+        " openai(oauth+key) "
+    } else if auth.openai_has_oauth {
+        " openai(oauth) "
+    } else if auth.openai_has_api_key {
+        " openai(key) "
+    } else {
+        " openai "
+    };
+    spans.push(Span::styled(openai_label, Style::default().fg(DIM_COLOR)));
 
     // Cursor
     spans.push(Span::styled(
