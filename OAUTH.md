@@ -4,9 +4,10 @@ This document explains how authentication works in J-Code.
 
 ## Overview
 
-J-Code uses the Claude Code CLI for Claude, and OAuth for OpenAI.
+J-Code auto-imports existing local credentials and can also run built-in OAuth login flows.
 
 Credentials are stored locally:
+- J-Code Claude OAuth (if logged in via `jcode login --provider claude`): `~/.jcode/auth.json`
 - Claude Code CLI: `~/.claude/.credentials.json`
 - OpenCode (optional): `~/.local/share/opencode/auth.json`
 - OpenAI/Codex: `~/.codex/auth.json`
@@ -17,15 +18,17 @@ Relevant code:
 - OpenAI credentials parsing: `src/auth/codex.rs`
 - OpenAI requests: `src/provider/openai.rs`
 
-## Claude Code CLI (Claude Max)
+## Claude (Claude Max)
 
 ### Login steps
-1. Install the Claude Code CLI.
-2. Run `claude` (or `claude setup-token`) and complete login.
+1. Run `jcode login --provider claude` (recommended), or `jcode login` and choose Claude.
+2. Alternative: run `claude` (or `claude setup-token`) and J-Code will auto-import `~/.claude/.credentials.json`.
 3. Verify with `jcode --provider claude run "Say hello from jcode"`.
 
-J-Code does **not** store Claude OAuth tokens; it relies on the Claude Code CLI
-credentials in `~/.claude/.credentials.json` (or OpenCode credentials, if present).
+Credential discovery order is:
+1. `~/.jcode/auth.json`
+2. `~/.claude/.credentials.json`
+3. `~/.local/share/opencode/auth.json`
 
 ### Configuration knobs
 These environment variables control the Claude Code CLI provider:
@@ -92,6 +95,7 @@ Otherwise it uses:
 - `https://api.openai.com/v1/responses`
 
 ### Troubleshooting
+- Claude 401/auth errors: run `jcode login --provider claude`.
 - 401/403: re-run `jcode login --provider openai`.
 - Callback issues: make sure port 9876 is free and the browser can reach
   `http://localhost:9876/callback`.

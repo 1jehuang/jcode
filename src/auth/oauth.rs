@@ -317,7 +317,7 @@ pub fn load_claude_tokens() -> Result<OAuthTokens> {
         return Ok(tokens);
     }
 
-    if let Ok(creds) = claude_auth::load_opencode_credentials() {
+    if let Ok(creds) = claude_auth::load_credentials() {
         let tokens = OAuthTokens {
             access_token: creds.access_token,
             refresh_token: creds.refresh_token,

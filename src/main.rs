@@ -684,13 +684,13 @@ async fn init_provider_and_registry(
 
                 match input.trim() {
                     "1" => {
-                        eprintln!("\nRun `claude` and complete the login flow, then retry.\n");
+                        login_claude_flow().await?;
+                        eprintln!();
                         Arc::new(provider::MultiProvider::new())
                     }
                     "2" => {
-                        let tokens = auth::oauth::login_openai().await?;
-                        auth::oauth::save_openai_tokens(&tokens)?;
-                        eprintln!("\nSuccessfully logged in to OpenAI!\n");
+                        login_openai_flow().await?;
+                        eprintln!();
                         Arc::new(provider::MultiProvider::with_preference(true))
                     }
                     _ => {
@@ -1650,19 +1650,44 @@ async fn debug_start_server(arg: &str, socket_path: Option<String>) -> Result<()
 async fn run_login(choice: &ProviderChoice) -> Result<()> {
     match choice {
         ProviderChoice::Claude | ProviderChoice::ClaudeSubprocess => {
-            eprintln!("Claude Code CLI provider uses Claude Code CLI credentials.");
-            eprintln!("Run `claude` or `claude setup-token` to authenticate.");
+            login_claude_flow().await?;
         }
         ProviderChoice::Openai => {
-            eprintln!("Logging in to OpenAI/Codex...");
-            let tokens = auth::oauth::login_openai().await?;
-            auth::oauth::save_openai_tokens(&tokens)?;
-            eprintln!("Successfully logged in to OpenAI!");
+            login_openai_flow().await?;
         }
         ProviderChoice::Auto => {
-            eprintln!("Please specify a provider: --provider claude or --provider openai");
+            eprintln!("Choose a provider to log in:");
+            eprintln!("  1. Claude (Claude Max)");
+            eprintln!("  2. OpenAI (ChatGPT Pro)");
+            eprint!("\nEnter 1 or 2: ");
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            match input.trim() {
+                "1" => login_claude_flow().await?,
+                "2" => login_openai_flow().await?,
+                _ => anyhow::bail!("Invalid choice. Use --provider claude or --provider openai"),
+            }
         }
     }
+    Ok(())
+}
+
+async fn login_claude_flow() -> Result<()> {
+    eprintln!("Logging in to Claude...");
+    let tokens = auth::oauth::login_claude().await?;
+    auth::oauth::save_claude_tokens(&tokens)?;
+    eprintln!("Successfully logged in to Claude!");
+    eprintln!("Stored at ~/.jcode/auth.json");
+    Ok(())
+}
+
+async fn login_openai_flow() -> Result<()> {
+    eprintln!("Logging in to OpenAI/Codex...");
+    let tokens = auth::oauth::login_openai().await?;
+    auth::oauth::save_openai_tokens(&tokens)?;
+    eprintln!("Successfully logged in to OpenAI!");
     Ok(())
 }
 
