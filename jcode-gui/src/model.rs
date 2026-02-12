@@ -16,6 +16,7 @@ pub enum RuntimeFeature {
 #[derive(Clone, Debug)]
 pub enum BackendCommand {
     SendMessage(String),
+    RefreshHistory,
     Cancel,
     SoftInterrupt {
         content: String,
@@ -49,6 +50,7 @@ pub enum BackendEvent {
         mcp_servers: Vec<String>,
         skills: Vec<String>,
         total_tokens: Option<(u64, u64)>,
+        all_sessions: Vec<String>,
         client_count: Option<usize>,
         is_canary: Option<bool>,
         server_version: Option<String>,
@@ -113,6 +115,7 @@ pub struct GuiModel {
     pub provider_name: String,
     pub provider_model: String,
     pub available_models: Vec<String>,
+    pub all_sessions: Vec<String>,
     pub mcp_servers: Vec<String>,
     pub skills: Vec<String>,
     pub server_version: Option<String>,
@@ -130,7 +133,9 @@ pub struct GuiModel {
     pub upstream_provider: Option<String>,
     pub is_processing: bool,
     pub messages: Vec<ChatEntry>,
+    pub queued_messages: Vec<String>,
     pub streaming_text: String,
+    pub active_tool: Option<String>,
     pub activity_log: Vec<String>,
     pub composer: String,
     pub soft_interrupt: String,
@@ -150,6 +155,7 @@ impl Default for GuiModel {
             provider_name: "unknown".to_string(),
             provider_model: "unknown".to_string(),
             available_models: Vec::new(),
+            all_sessions: Vec::new(),
             mcp_servers: Vec::new(),
             skills: Vec::new(),
             server_version: None,
@@ -167,7 +173,9 @@ impl Default for GuiModel {
             upstream_provider: None,
             is_processing: false,
             messages: Vec::new(),
+            queued_messages: Vec::new(),
             streaming_text: String::new(),
+            active_tool: None,
             activity_log: vec!["GUI initialized".to_string()],
             composer: String::new(),
             soft_interrupt: String::new(),
@@ -197,6 +205,19 @@ impl GuiModel {
         });
     }
 
+    pub fn queue_message(&mut self, content: String) {
+        let preview = shorten(&content, 100);
+        self.queued_messages.push(content);
+        self.push_log(format!("Queued: {}", preview));
+    }
+
+    pub fn dequeue_message(&mut self) -> Option<String> {
+        if self.queued_messages.is_empty() {
+            return None;
+        }
+        Some(self.queued_messages.remove(0))
+    }
+
     fn finalize_streaming_assistant(&mut self) {
         if self.streaming_text.trim().is_empty() {
             self.streaming_text.clear();
@@ -218,6 +239,7 @@ impl GuiModel {
                 self.connected = false;
                 self.connection_reason = Some(reason.clone());
                 self.is_processing = false;
+                self.active_tool = None;
                 self.push_log(format!("Disconnected: {}", reason));
             }
             BackendEvent::Status(message) => {
@@ -236,6 +258,7 @@ impl GuiModel {
                 mcp_servers,
                 skills,
                 total_tokens,
+                all_sessions,
                 client_count,
                 is_canary,
                 server_version,
@@ -248,6 +271,7 @@ impl GuiModel {
                 self.provider_name = provider_name.unwrap_or_else(|| "unknown".to_string());
                 self.provider_model = provider_model.unwrap_or_else(|| "unknown".to_string());
                 self.available_models = available_models;
+                self.all_sessions = all_sessions;
                 self.mcp_servers = mcp_servers;
                 self.skills = skills;
                 self.client_count = client_count;
@@ -267,9 +291,11 @@ impl GuiModel {
                 self.streaming_text.push_str(&delta);
             }
             BackendEvent::ToolStart { id, name } => {
+                self.active_tool = Some(name.clone());
                 self.push_log(format!("Tool start [{}]: {}", id, name));
             }
             BackendEvent::ToolExec { id, name } => {
+                self.active_tool = Some(name.clone());
                 self.push_log(format!("Tool exec  [{}]: {}", id, name));
             }
             BackendEvent::ToolDone {
@@ -278,6 +304,7 @@ impl GuiModel {
                 output,
                 error,
             } => {
+                self.active_tool = None;
                 if let Some(error) = error {
                     self.push_log(format!("Tool done  [{}]: {} (error: {})", id, name, error));
                 } else {
@@ -368,6 +395,7 @@ impl GuiModel {
             }
             BackendEvent::Done => {
                 self.is_processing = false;
+                self.active_tool = None;
                 self.finalize_streaming_assistant();
                 self.total_input_tokens = self
                     .total_input_tokens
@@ -378,6 +406,7 @@ impl GuiModel {
             }
             BackendEvent::Error(message) => {
                 self.is_processing = false;
+                self.active_tool = None;
                 self.last_error = Some(message.clone());
                 self.finalize_streaming_assistant();
                 self.push_message("error", message.clone());

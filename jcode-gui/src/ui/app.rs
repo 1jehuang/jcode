@@ -12,14 +12,13 @@ use crate::model::{BackendCommand, GuiModel, RuntimeFeature};
 const GUI_CSS: &str = r#"
 :root {
   --bg: #000000;
-  --bg-grad: #000000;
-  --surface: #040404;
-  --surface-2: #080808;
-  --line: #3a3a3a;
-  --line-strong: #575757;
+  --surface: #050505;
+  --surface-2: #0a0a0a;
+  --line: #2f2f2f;
+  --line-strong: #535353;
   --text: #f3f3f3;
-  --muted: #8a8a8a;
-  --accent: #22c55e;
+  --muted: #979797;
+  --accent: #4badff;
   --ok: #22c55e;
   --warn: #f59e0b;
   --err: #ef4444;
@@ -32,41 +31,40 @@ body {
   font-family: "Iosevka Aile", "JetBrains Mono", ui-monospace, monospace;
 }
 .shell {
+  width: 100%;
+  min-height: 100vh;
   display: flex;
   justify-content: center;
-  width: 100%;
-  height: 100vh;
-  padding: 0 clamp(16px, 10vw, 240px);
-  background: #000000;
+  background: radial-gradient(1200px 600px at 50% -180px, #0e0e0e 0%, #000 55%);
 }
 .main-col {
-  width: min(760px, 100%);
+  width: min(940px, 100%);
+  min-height: 100vh;
   display: flex;
   flex-direction: column;
-  min-height: 0;
   border-left: 1px solid var(--line-strong);
   border-right: 1px solid var(--line-strong);
-  background: #000000;
+  background: #000;
 }
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 12px 14px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--line-strong);
-  background: #030303;
+  background: #020202;
 }
 .top-left {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 .brand {
-  font-size: 17px;
+  font-size: 14px;
   font-weight: 700;
-  letter-spacing: 0.4px;
+  letter-spacing: 0.35px;
 }
 .row {
   display: flex;
@@ -75,15 +73,14 @@ body {
   flex-wrap: wrap;
 }
 .row.tight { gap: 6px; }
-.composer .row { justify-content: center; }
 .banner {
   margin: 10px 12px 0;
-  border: 1px solid var(--line-strong);
+  border: 1px solid color-mix(in srgb, var(--err) 70%, var(--line));
   border-radius: 10px;
   padding: 8px 10px;
   font-size: 12px;
+  color: #ffd1d1;
 }
-.banner.err { border-color: color-mix(in srgb, var(--err) 70%, var(--line)); color: #ffd1d1; }
 .chat-panel {
   flex: 1;
   min-height: 0;
@@ -96,43 +93,53 @@ body {
   overflow: auto;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  padding: 16px 14px;
+  gap: 10px;
+  padding: 18px 8px;
+}
+.msg-row {
+  width: 100%;
+  display: flex;
+  justify-content: center;
 }
 .msg {
-  width: min(700px, 100%);
+  width: min(760px, calc(100% - 6px));
   max-width: 100%;
-  border: 1px solid var(--line-strong);
-  border-radius: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
   padding: 10px 12px;
-  background: #080808;
-  align-self: center;
+  background: #030303;
 }
 .msg.role-user {
-  align-self: center;
-  border-color: color-mix(in srgb, var(--accent) 52%, var(--line));
-  background: #0b120d;
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+  border-right-width: 2px;
+  background: #031018;
 }
 .msg.role-assistant {
-  border-color: color-mix(in srgb, #3e3e3e 60%, var(--line));
+  border-color: color-mix(in srgb, #7f849c 42%, var(--line));
 }
 .msg.role-tool {
-  border-color: color-mix(in srgb, #8c6c2f 58%, var(--line));
+  border-color: color-mix(in srgb, #78c16f 55%, var(--line));
+  background: #041106;
+}
+.msg.role-notification {
+  border-color: color-mix(in srgb, #fbbf24 55%, var(--line));
+  background: #140e03;
 }
 .msg.role-error {
-  border-color: color-mix(in srgb, var(--err) 70%, var(--line));
+  border-color: color-mix(in srgb, var(--err) 75%, var(--line));
 }
 .msg-head {
   font-size: 11px;
   color: var(--muted);
   margin-bottom: 6px;
   text-align: center;
+  text-transform: lowercase;
+  letter-spacing: 0.3px;
 }
 .msg-body {
   font-size: 13px;
+  line-height: 1.5;
   white-space: pre-wrap;
-  line-height: 1.42;
   text-align: center;
 }
 .msg-meta {
@@ -142,22 +149,49 @@ body {
   text-align: center;
 }
 .stream { border-style: dashed; }
+
 .composer {
   border-top: 1px solid var(--line-strong);
-  padding: 10px 12px 12px;
-  background: #030303;
+  background: #020202;
+  padding: 10px;
   display: grid;
   gap: 8px;
 }
+.queued {
+  width: min(760px, 100%);
+  margin: 0 auto;
+  display: grid;
+  gap: 6px;
+}
+.queue-item {
+  border: 1px solid color-mix(in srgb, #fbbf24 52%, var(--line));
+  border-radius: 10px;
+  background: #0b0a06;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #ececec;
+  padding: 6px 9px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.queue-n {
+  color: #f5d06a;
+}
+.queue-more {
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+}
 .composer-input {
-  width: min(700px, 100%);
+  width: min(760px, 100%);
   margin: 0 auto;
   text-align: center;
 }
 .status-ribbon {
-  border-top: 1px dashed color-mix(in srgb, var(--line) 80%, transparent);
-  width: min(700px, 100%);
+  width: min(760px, 100%);
   margin: 2px auto 0;
+  border-top: 1px dashed color-mix(in srgb, var(--line) 82%, transparent);
   padding-top: 7px;
   display: flex;
   justify-content: space-between;
@@ -165,7 +199,8 @@ body {
   gap: 8px;
   flex-wrap: wrap;
 }
-.status-left, .status-right {
+.status-left,
+.status-right {
   display: flex;
   gap: 6px;
   align-items: center;
@@ -175,12 +210,13 @@ body {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  border: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
 }
 .spinner.run {
-  border-color: color-mix(in srgb, var(--accent) 80%, white);
-  background: color-mix(in srgb, var(--accent) 80%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 78%, white);
+  background: color-mix(in srgb, var(--accent) 60%, transparent);
 }
+
 button {
   border: 1px solid var(--line-strong);
   background: #0a0a0a;
@@ -192,22 +228,36 @@ button {
   font-size: 12px;
 }
 button:hover { border-color: var(--accent); }
-button.primary { background: #0f2013; border-color: #1e3a23; }
+button.primary { background: #0b1822; border-color: #25425e; }
 button.warn { border-color: var(--warn); color: #ffe6bf; }
 button.danger { border-color: var(--err); color: #ffd1d1; }
 button.on { border-color: var(--ok); color: #c8f7d8; }
 button.ghost { background: #050505; }
-textarea, input {
+button.hamburger {
+  width: 32px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 15px;
+}
+
+textarea,
+input {
   width: 100%;
   border: 1px solid var(--line-strong);
-  border-radius: 9px;
+  border-radius: 10px;
   background: #050505;
   color: var(--text);
   padding: 9px 10px;
   font: inherit;
   font-size: 12px;
 }
-textarea { min-height: 74px; resize: vertical; }
+textarea {
+  min-height: 72px;
+  resize: vertical;
+}
 .badge {
   border: 1px solid var(--line-strong);
   border-radius: 999px;
@@ -217,8 +267,9 @@ textarea { min-height: 74px; resize: vertical; }
 }
 .badge.ok { border-color: var(--ok); color: #c8f7d8; }
 .badge.err { border-color: var(--err); color: #ffd1d1; }
-.badge.active { border-color: var(--accent); color: #cbf7da; }
+.badge.active { border-color: var(--accent); color: #d2e9ff; }
 .small { font-size: 11px; color: var(--muted); }
+
 .overlay {
   position: fixed;
   inset: 0;
@@ -226,6 +277,62 @@ textarea { min-height: 74px; resize: vertical; }
   backdrop-filter: blur(1.5px);
   z-index: 30;
 }
+
+.sessions {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: min(380px, 96vw);
+  border-right: 1px solid var(--line-strong);
+  background: #020202;
+  z-index: 31;
+  display: flex;
+  flex-direction: column;
+}
+.sessions-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line-strong);
+  padding: 12px;
+}
+.sessions-body {
+  padding: 12px;
+  overflow: auto;
+  display: grid;
+  gap: 12px;
+}
+.session-list {
+  max-height: 280px;
+  overflow: auto;
+  display: grid;
+  gap: 6px;
+  padding-right: 2px;
+}
+.session-btn {
+  width: 100%;
+  text-align: left;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: #060606;
+  padding: 7px 9px;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-btn.active {
+  border-color: color-mix(in srgb, var(--accent) 72%, var(--line));
+  background: #071420;
+  color: #d1e8ff;
+}
+.tagline {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
 .settings {
   position: fixed;
   top: 0;
@@ -271,7 +378,10 @@ textarea { min-height: 74px; resize: vertical; }
   gap: 2px;
   font-size: 12px;
 }
-.kv .k { font-size: 11px; color: var(--muted); }
+.kv .k {
+  font-size: 11px;
+  color: var(--muted);
+}
 .loglist {
   max-height: 220px;
   overflow: auto;
@@ -285,24 +395,23 @@ textarea { min-height: 74px; resize: vertical; }
   border-bottom: 1px dashed #252525;
   padding: 4px 0;
 }
+
 @media (max-width: 900px) {
-  .shell {
-    padding: 0;
-  }
   .main-col {
     width: 100%;
     border-left: none;
     border-right: none;
   }
   .topbar { padding: 10px; }
-  .messages { padding: 12px 10px; }
-  .composer { padding: 10px; }
+  .messages { padding: 12px 6px; }
+  .composer { padding: 9px; }
 }
 "#;
 
 pub(crate) fn app() -> Element {
     let mut model = use_signal(GuiModel::default);
     let mut settings_open = use_signal(|| false);
+    let mut sessions_open = use_signal(|| false);
     let backend = use_hook(backend_impl::BackendBridge::spawn);
 
     {
@@ -312,7 +421,29 @@ pub(crate) fn app() -> Element {
             let backend = backend.clone();
             async move {
                 while let Some(event) = backend.next_event().await {
-                    model.write().apply_backend_event(event);
+                    let next_queued = {
+                        let mut state = model.write();
+                        state.apply_backend_event(event);
+
+                        if !state.is_processing {
+                            if let Some(next) = state.dequeue_message() {
+                                state.is_processing = true;
+                                state.push_log(format!(
+                                    "Sending queued message: {}",
+                                    queue_preview(&next)
+                                ));
+                                Some(next)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+
+                    if let Some(next) = next_queued {
+                        backend.send(BackendCommand::SendMessage(next));
+                    }
                 }
             }
         });
@@ -320,6 +451,22 @@ pub(crate) fn app() -> Element {
 
     let snapshot = model.read().clone();
     let show_settings = *settings_open.read();
+    let show_sessions = *sessions_open.read();
+    let queued_visible = snapshot
+        .queued_messages
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>();
+    let queued_overflow = snapshot.queued_messages.len().saturating_sub(3);
+    let ambient_sessions = snapshot
+        .all_sessions
+        .iter()
+        .filter(|session| is_ambient_session(session))
+        .take(24)
+        .cloned()
+        .collect::<Vec<_>>();
+    let status_line = status_line_text(&snapshot);
 
     rsx! {
         document::Title { "jcode" }
@@ -329,6 +476,14 @@ pub(crate) fn app() -> Element {
             div { class: "main-col",
                 header { class: "topbar",
                     div { class: "top-left",
+                        button {
+                            class: "ghost hamburger",
+                            onclick: move |_| {
+                                sessions_open.set(true);
+                                settings_open.set(false);
+                            },
+                            "☰"
+                        }
                         div { class: "brand", "jcode" }
                         div { class: "row tight",
                             if snapshot.connected {
@@ -352,7 +507,10 @@ pub(crate) fn app() -> Element {
                     div { class: "row tight",
                         button {
                             class: "ghost",
-                            onclick: move |_| settings_open.set(true),
+                            onclick: move |_| {
+                                settings_open.set(true);
+                                sessions_open.set(false);
+                            },
                             "Settings"
                         }
                     }
@@ -360,36 +518,57 @@ pub(crate) fn app() -> Element {
 
                 if !snapshot.connected {
                     if let Some(reason) = snapshot.connection_reason.clone() {
-                        div { class: "banner err", "{reason}" }
+                        div { class: "banner", "{reason}" }
                     }
                 }
 
                 main { class: "chat-panel",
                     div { class: "messages",
                         for (idx, message) in snapshot.messages.iter().enumerate() {
-                            article {
-                                key: "{idx}",
-                                class: "msg role-{message.role}",
-                                if message.role != "assistant" && message.role != "user" {
-                                    div { class: "msg-head", "{message.role}" }
-                                }
-                                div { class: "msg-body", "{message.content}" }
-                                if !message.tool_calls.is_empty() {
-                                    div { class: "msg-meta", { format!("tools: {}", message.tool_calls.join(", ")) } }
+                            div {
+                                key: "row-{idx}",
+                                class: "msg-row",
+                                article {
+                                    class: "msg role-{message.role}",
+                                    if message.role != "assistant" && message.role != "user" {
+                                        div { class: "msg-head", "{message.role}" }
+                                    }
+                                    div { class: "msg-body", "{message.content}" }
+                                    if !message.tool_calls.is_empty() {
+                                        div { class: "msg-meta", { format!("tools: {}", message.tool_calls.join(", ")) } }
+                                    }
                                 }
                             }
                         }
 
                         if !snapshot.streaming_text.is_empty() {
-                            article {
-                                class: "msg role-assistant stream",
-                                div { class: "msg-head", "assistant (streaming)" }
-                                div { class: "msg-body", "{snapshot.streaming_text}" }
+                            div { class: "msg-row",
+                                article {
+                                    class: "msg role-assistant stream",
+                                    div { class: "msg-head", "assistant (streaming)" }
+                                    div { class: "msg-body", "{snapshot.streaming_text}" }
+                                }
                             }
                         }
                     }
 
                     div { class: "composer",
+                        if !queued_visible.is_empty() {
+                            div { class: "queued",
+                                for (idx, item) in queued_visible.iter().enumerate() {
+                                    div {
+                                        key: "q-{idx}",
+                                        class: "queue-item",
+                                        span { class: "queue-n", "{idx + 1}. " }
+                                        "{queue_preview(item)}"
+                                    }
+                                }
+                                if queued_overflow > 0 {
+                                    div { class: "queue-more", "+{queued_overflow} more queued" }
+                                }
+                            }
+                        }
+
                         textarea {
                             class: "composer-input",
                             value: snapshot.composer.clone(),
@@ -404,34 +583,42 @@ pub(crate) fn app() -> Element {
                                 onclick: {
                                     let backend = backend.clone();
                                     move |_| {
-                                        let value = {
+                                        let send_now = {
                                             let mut state = model.write();
                                             let value = state.composer.trim().to_string();
                                             state.composer.clear();
-                                            value
+
+                                            if value.is_empty() {
+                                                None
+                                            } else if state.is_processing {
+                                                state.queue_message(value);
+                                                None
+                                            } else {
+                                                Some(value)
+                                            }
                                         };
-                                        if !value.is_empty() {
+
+                                        if let Some(value) = send_now {
                                             backend.send(BackendCommand::SendMessage(value));
                                         }
                                     }
                                 },
-                                "Send"
+                                if snapshot.is_processing { "Queue" } else { "Send" }
                             }
                             button {
                                 class: "ghost",
-                                onclick: move |_| settings_open.set(true),
-                                "Open settings"
+                                onclick: move |_| {
+                                    sessions_open.set(true);
+                                    settings_open.set(false);
+                                },
+                                "Sessions"
                             }
                         }
 
                         div { class: "status-ribbon",
                             div { class: "status-left",
                                 div { class: if snapshot.is_processing { "spinner run" } else { "spinner" } }
-                                if snapshot.is_processing {
-                                    span { class: "small", "Thinking / streaming..." }
-                                } else {
-                                    span { class: "small", "Idle" }
-                                }
+                                span { class: "small", "{status_line}" }
                                 if let Some(session_id) = snapshot.session_id.clone() {
                                     span { class: "badge", "{session_id}" }
                                 }
@@ -439,6 +626,134 @@ pub(crate) fn app() -> Element {
                             div { class: "status-right",
                                 span { class: "badge", "turn in {snapshot.turn_input_tokens} / out {snapshot.turn_output_tokens}" }
                                 span { class: "badge", "total in {snapshot.total_input_tokens} / out {snapshot.total_output_tokens}" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if show_sessions {
+                div {
+                    class: "overlay",
+                    onclick: move |_| sessions_open.set(false),
+                }
+                aside { class: "sessions",
+                    div { class: "sessions-head",
+                        div { "Sessions" }
+                        div { class: "row tight",
+                            button {
+                                class: "ghost",
+                                onclick: {
+                                    let backend = backend.clone();
+                                    move |_| backend.send(BackendCommand::RefreshHistory)
+                                },
+                                "Refresh"
+                            }
+                            button {
+                                class: "ghost",
+                                onclick: move |_| sessions_open.set(false),
+                                "Close"
+                            }
+                        }
+                    }
+
+                    div { class: "sessions-body",
+                        div { class: "section",
+                            div { class: "section-title", "Current Session" }
+                            div { class: "row",
+                                if let Some(session_id) = snapshot.session_id.clone() {
+                                    span { class: "badge active", "{session_id}" }
+                                } else {
+                                    span { class: "badge", "none" }
+                                }
+                                if snapshot.connected {
+                                    span { class: "badge ok", "connected" }
+                                } else {
+                                    span { class: "badge err", "offline" }
+                                }
+                            }
+
+                            div { class: "kv",
+                                div { class: "k", "resume by id" }
+                                input {
+                                    value: snapshot.resume_session_input.clone(),
+                                    oninput: move |evt| {
+                                        model.write().resume_session_input = evt.value();
+                                    }
+                                }
+                                button {
+                                    onclick: {
+                                        let backend = backend.clone();
+                                        move |_| {
+                                            let value = {
+                                                let mut state = model.write();
+                                                let value = state.resume_session_input.trim().to_string();
+                                                state.resume_session_input.clear();
+                                                value
+                                            };
+                                            if !value.is_empty() {
+                                                backend.send(BackendCommand::ResumeSession(value));
+                                                sessions_open.set(false);
+                                            }
+                                        }
+                                    },
+                                    "Resume"
+                                }
+                            }
+                        }
+
+                        div { class: "section",
+                            div { class: "section-title", "All Sessions" }
+                            if snapshot.all_sessions.is_empty() {
+                                div { class: "small", "No sessions returned yet. Click refresh." }
+                            } else {
+                                div { class: "session-list",
+                                    for session_id in snapshot.all_sessions.iter() {
+                                        button {
+                                            key: "s-{session_id}",
+                                            class: if snapshot.session_id.as_deref() == Some(session_id.as_str()) {
+                                                "session-btn active"
+                                            } else {
+                                                "session-btn"
+                                            },
+                                            onclick: {
+                                                let backend = backend.clone();
+                                                let session_id = session_id.clone();
+                                                move |_| {
+                                                    backend.send(BackendCommand::ResumeSession(session_id.clone()));
+                                                    sessions_open.set(false);
+                                                }
+                                            },
+                                            "{session_id}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        div { class: "section",
+                            div { class: "section-title", "Ambient Sessions" }
+                            div { class: "tagline", "Ambient mode typically runs as normal sessions; this view filters session IDs for ambient-like names so you can jump between them quickly." }
+                            if ambient_sessions.is_empty() {
+                                div { class: "small", "No ambient-like session IDs found yet." }
+                            } else {
+                                div { class: "session-list",
+                                    for session_id in ambient_sessions.iter() {
+                                        button {
+                                            key: "a-{session_id}",
+                                            class: "session-btn",
+                                            onclick: {
+                                                let backend = backend.clone();
+                                                let session_id = session_id.clone();
+                                                move |_| {
+                                                    backend.send(BackendCommand::ResumeSession(session_id.clone()));
+                                                    sessions_open.set(false);
+                                                }
+                                            },
+                                            "{session_id}"
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -462,27 +777,7 @@ pub(crate) fn app() -> Element {
 
                     div { class: "settings-body",
                         div { class: "section",
-                            div { class: "section-title", "Session" }
-                            div { class: "row",
-                                if snapshot.connected {
-                                    span { class: "badge ok", "connected" }
-                                } else {
-                                    span { class: "badge err", "disconnected" }
-                                }
-                                if let Some(session_id) = snapshot.session_id.clone() {
-                                    span { class: "badge", "{session_id}" }
-                                }
-                                if let Some(name) = snapshot.server_name.clone() {
-                                    span { class: "badge", "{name}" }
-                                }
-                                if snapshot.server_has_update.unwrap_or(false) {
-                                    span { class: "badge active", "update available" }
-                                }
-                            }
-                            div { class: "kv",
-                                div { class: "k", "session tokens" }
-                                div { "in {snapshot.total_input_tokens} / out {snapshot.total_output_tokens}" }
-                            }
+                            div { class: "section-title", "Session Controls" }
                             div { class: "row",
                                 button {
                                     class: "warn",
@@ -570,6 +865,7 @@ pub(crate) fn app() -> Element {
                                     "Model +"
                                 }
                             }
+
                             div { class: "kv",
                                 div { class: "k", "set model" }
                                 input {
@@ -601,7 +897,7 @@ pub(crate) fn app() -> Element {
                                 div { class: "row",
                                     for model_name in snapshot.available_models.iter().take(12) {
                                         button {
-                                            key: "{model_name}",
+                                            key: "model-{model_name}",
                                             onclick: {
                                                 let backend = backend.clone();
                                                 let model_name = model_name.clone();
@@ -615,34 +911,7 @@ pub(crate) fn app() -> Element {
                         }
 
                         div { class: "section",
-                            div { class: "section-title", "Session Resume / Interrupt" }
-                            div { class: "kv",
-                                div { class: "k", "resume session id" }
-                                input {
-                                    value: snapshot.resume_session_input.clone(),
-                                    oninput: move |evt| {
-                                        model.write().resume_session_input = evt.value();
-                                    }
-                                }
-                                button {
-                                    onclick: {
-                                        let backend = backend.clone();
-                                        move |_| {
-                                            let value = {
-                                                let mut state = model.write();
-                                                let value = state.resume_session_input.trim().to_string();
-                                                state.resume_session_input.clear();
-                                                value
-                                            };
-                                            if !value.is_empty() {
-                                                backend.send(BackendCommand::ResumeSession(value));
-                                            }
-                                        }
-                                    },
-                                    "Resume"
-                                }
-                            }
-
+                            div { class: "section-title", "Interrupt" }
                             div { class: "kv",
                                 div { class: "k", "soft interrupt" }
                                 input {
@@ -743,7 +1012,7 @@ pub(crate) fn app() -> Element {
                                 div { class: "small", "last error: {error}" }
                             }
                             div { class: "loglist",
-                                for (idx, line) in snapshot.activity_log.iter().enumerate().rev().take(100) {
+                                for (idx, line) in snapshot.activity_log.iter().enumerate().rev().take(120) {
                                     div {
                                         key: "log-{idx}",
                                         class: "logline",
@@ -757,4 +1026,47 @@ pub(crate) fn app() -> Element {
             }
         }
     }
+}
+
+fn queue_preview(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= 120 {
+        return trimmed.to_string();
+    }
+
+    let mut out = String::new();
+    for (idx, ch) in trimmed.chars().enumerate() {
+        if idx >= 120 {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push_str("...");
+    out
+}
+
+fn status_line_text(snapshot: &GuiModel) -> String {
+    let mut base = if !snapshot.connected {
+        "Disconnected".to_string()
+    } else if snapshot.is_processing {
+        if let Some(tool) = snapshot.active_tool.as_deref() {
+            format!("Running tool: {}", tool)
+        } else if !snapshot.streaming_text.trim().is_empty() {
+            "Streaming...".to_string()
+        } else {
+            "Thinking...".to_string()
+        }
+    } else {
+        "Ready".to_string()
+    };
+
+    if !snapshot.queued_messages.is_empty() {
+        base.push_str(&format!(" · +{} queued", snapshot.queued_messages.len()));
+    }
+    base
+}
+
+fn is_ambient_session(session_id: &str) -> bool {
+    let value = session_id.to_ascii_lowercase();
+    value.contains("ambient") || value.contains("amb-") || value.contains("sched")
 }
