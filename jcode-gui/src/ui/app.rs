@@ -15,7 +15,8 @@ const GUI_CSS: &str = r#"
   --bg-grad: #000000;
   --surface: #040404;
   --surface-2: #080808;
-  --line: #1b1b1b;
+  --line: #3a3a3a;
+  --line-strong: #575757;
   --text: #f3f3f3;
   --muted: #8a8a8a;
   --accent: #22c55e;
@@ -35,16 +36,16 @@ body {
   justify-content: center;
   width: 100%;
   height: 100vh;
-  padding: 0 14px;
+  padding: 0 clamp(16px, 10vw, 240px);
   background: #000000;
 }
 .main-col {
-  width: min(980px, 100%);
+  width: min(760px, 100%);
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-left: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
-  border-right: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-left: 1px solid var(--line-strong);
+  border-right: 1px solid var(--line-strong);
   background: #000000;
 }
 .topbar {
@@ -53,7 +54,7 @@ body {
   justify-content: space-between;
   gap: 10px;
   padding: 12px 14px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--line-strong);
   background: #030303;
 }
 .top-left {
@@ -74,9 +75,10 @@ body {
   flex-wrap: wrap;
 }
 .row.tight { gap: 6px; }
+.composer .row { justify-content: center; }
 .banner {
   margin: 10px 12px 0;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: 10px;
   padding: 8px 10px;
   font-size: 12px;
@@ -94,19 +96,21 @@ body {
   overflow: auto;
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 12px;
   padding: 16px 14px;
 }
 .msg {
-  max-width: min(760px, 100%);
-  border: 1px solid var(--line);
+  width: min(700px, 100%);
+  max-width: 100%;
+  border: 1px solid var(--line-strong);
   border-radius: 14px;
   padding: 10px 12px;
   background: #080808;
-  align-self: flex-start;
+  align-self: center;
 }
 .msg.role-user {
-  align-self: flex-end;
+  align-self: center;
   border-color: color-mix(in srgb, var(--accent) 52%, var(--line));
   background: #0b120d;
 }
@@ -123,28 +127,37 @@ body {
   font-size: 11px;
   color: var(--muted);
   margin-bottom: 6px;
+  text-align: center;
 }
 .msg-body {
   font-size: 13px;
   white-space: pre-wrap;
   line-height: 1.42;
+  text-align: center;
 }
 .msg-meta {
   font-size: 11px;
   color: var(--muted);
   margin-top: 7px;
+  text-align: center;
 }
 .stream { border-style: dashed; }
 .composer {
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--line-strong);
   padding: 10px 12px 12px;
   background: #030303;
   display: grid;
   gap: 8px;
 }
+.composer-input {
+  width: min(700px, 100%);
+  margin: 0 auto;
+  text-align: center;
+}
 .status-ribbon {
   border-top: 1px dashed color-mix(in srgb, var(--line) 80%, transparent);
-  margin-top: 2px;
+  width: min(700px, 100%);
+  margin: 2px auto 0;
   padding-top: 7px;
   display: flex;
   justify-content: space-between;
@@ -169,7 +182,7 @@ body {
   background: color-mix(in srgb, var(--accent) 80%, transparent);
 }
 button {
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   background: #0a0a0a;
   color: var(--text);
   padding: 7px 10px;
@@ -186,7 +199,7 @@ button.on { border-color: var(--ok); color: #c8f7d8; }
 button.ghost { background: #050505; }
 textarea, input {
   width: 100%;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: 9px;
   background: #050505;
   color: var(--text);
@@ -196,7 +209,7 @@ textarea, input {
 }
 textarea { min-height: 74px; resize: vertical; }
 .badge {
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: 999px;
   padding: 2px 8px;
   font-size: 11px;
@@ -219,7 +232,7 @@ textarea { min-height: 74px; resize: vertical; }
   right: 0;
   bottom: 0;
   width: min(440px, 96vw);
-  border-left: 1px solid var(--line);
+  border-left: 1px solid var(--line-strong);
   background: #020202;
   z-index: 31;
   display: flex;
@@ -229,7 +242,7 @@ textarea { min-height: 74px; resize: vertical; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--line-strong);
   padding: 12px;
 }
 .settings-body {
@@ -239,7 +252,7 @@ textarea { min-height: 74px; resize: vertical; }
   gap: 12px;
 }
 .section {
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: 10px;
   background: #060606;
   padding: 10px;
@@ -378,6 +391,7 @@ pub(crate) fn app() -> Element {
 
                     div { class: "composer",
                         textarea {
+                            class: "composer-input",
                             value: snapshot.composer.clone(),
                             oninput: move |evt| {
                                 model.write().composer = evt.value();
