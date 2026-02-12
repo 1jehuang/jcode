@@ -3822,7 +3822,7 @@ impl App {
                                 continue 'outer;
                             }
                             Some(server_event) => {
-                                if let crate::protocol::ServerEvent::ClientDebugRequest {
+                                let at_safe_point = if let crate::protocol::ServerEvent::ClientDebugRequest {
                                     id,
                                     command,
                                 } = server_event
@@ -3831,28 +3831,31 @@ impl App {
                                         self.handle_debug_command_remote(&command, &mut remote).await;
                                     let _ = remote.send_client_debug_response(id, output).await;
                                     // Fall through to process queued messages (don't continue)
+                                    false
                                 } else {
-                                    let _at_safe_point = self.handle_server_event(server_event, &mut remote);
-                                }
+                                    self.handle_server_event(server_event, &mut remote)
+                                };
 
                                 // Process pending interleave or queued messages
-                                // If processing: only interleave via soft interrupt
+                                // If processing: only send interleave via soft interrupt at safe points
                                 // If not processing: send interleave or queued messages directly
                                 if self.is_processing {
-                                    // Use soft interrupt - no cancel, message injected at next safe point
-                                    if let Some(interleave_msg) = self.interleave_message.take() {
-                                        if !interleave_msg.trim().is_empty() {
-                                            // Store as pending - will be added to display_messages when injected
-                                            // This keeps it in the queue preview area until actually sent
-                                            let msg_clone = interleave_msg.clone();
-                                            // Send soft interrupt to server
-                                            if let Err(e) = remote.soft_interrupt(interleave_msg, false).await {
-                                                self.push_display_message(DisplayMessage::error(format!(
-                                                    "Failed to queue soft interrupt: {}", e
-                                                )));
-                                            } else {
-                                                // Only mark as pending if send succeeded
-                                                self.pending_soft_interrupt = Some(msg_clone);
+                                    if at_safe_point && self.pending_soft_interrupt.is_none() {
+                                        // Use soft interrupt - no cancel, message injected at next safe point
+                                        if let Some(interleave_msg) = self.interleave_message.take() {
+                                            if !interleave_msg.trim().is_empty() {
+                                                // Store as pending - will be added to display_messages when injected
+                                                // This keeps it in the queue preview area until actually sent
+                                                let msg_clone = interleave_msg.clone();
+                                                // Send soft interrupt to server
+                                                if let Err(e) = remote.soft_interrupt(interleave_msg, false).await {
+                                                    self.push_display_message(DisplayMessage::error(format!(
+                                                        "Failed to queue soft interrupt: {}", e
+                                                    )));
+                                                } else {
+                                                    // Only mark as pending if send succeeded
+                                                    self.pending_soft_interrupt = Some(msg_clone);
+                                                }
                                             }
                                         }
                                     }
@@ -4519,14 +4522,8 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Up => {
-                    // Ctrl+Up: retrieve last queued message for editing
-                    if self.input.is_empty() && !self.queued_messages.is_empty() {
-                        if let Some(msg) = self.queued_messages.pop() {
-                            self.input = msg;
-                            self.cursor_pos = self.input.len();
-                            self.set_status_notice("Retrieved queued message for editing");
-                        }
-                    }
+                    // Ctrl+Up: retrieve newest pending unsent message for editing
+                    self.retrieve_pending_message_for_edit();
                     return Ok(());
                 }
                 _ => {}
@@ -4566,24 +4563,9 @@ impl App {
                         self.queued_messages.push(expanded);
                     }
                     SendAction::Interleave => {
-                        // Show in UI immediately for feedback
-                        self.push_display_message(DisplayMessage {
-                            role: "user".to_string(),
-                            content: format!("⏳ {}", raw_input),
-                            tool_calls: vec![],
-                            duration_secs: None,
-                            title: Some("(pending injection)".to_string()),
-                            tool_data: None,
-                        });
-                        // Send soft interrupt immediately
-                        if let Err(e) = remote.soft_interrupt(expanded, false).await {
-                            self.push_display_message(DisplayMessage::error(format!(
-                                "Failed to queue soft interrupt: {}",
-                                e
-                            )));
-                        } else {
-                            self.set_status_notice("⏭ Queued for injection");
-                        }
+                        // Keep interleave in pending queue UI until we reach a safe point.
+                        self.interleave_message = Some(expanded);
+                        self.set_status_notice("⏭ Interleave queued");
                     }
                 }
             }
@@ -4868,24 +4850,9 @@ impl App {
                             self.queued_messages.push(expanded);
                         }
                         SendAction::Interleave => {
-                            // Show in UI immediately for feedback
-                            self.push_display_message(DisplayMessage {
-                                role: "user".to_string(),
-                                content: format!("⏳ {}", raw_input),
-                                tool_calls: vec![],
-                                duration_secs: None,
-                                title: Some("(pending injection)".to_string()),
-                                tool_data: None,
-                            });
-                            // Send soft interrupt immediately
-                            if let Err(e) = remote.soft_interrupt(expanded, false).await {
-                                self.push_display_message(DisplayMessage::error(format!(
-                                    "Failed to queue soft interrupt: {}",
-                                    e
-                                )));
-                            } else {
-                                self.set_status_notice("⏭ Queued for injection");
-                            }
+                            // Keep interleave in pending queue UI until we reach a safe point.
+                            self.interleave_message = Some(expanded);
+                            self.set_status_notice("⏭ Interleave queued");
                         }
                     }
                 }
@@ -5149,14 +5116,8 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Up => {
-                    // Ctrl+Up: retrieve last queued message for editing
-                    if self.input.is_empty() && !self.queued_messages.is_empty() {
-                        if let Some(msg) = self.queued_messages.pop() {
-                            self.input = msg;
-                            self.cursor_pos = self.input.len();
-                            self.set_status_notice("Retrieved queued message for editing");
-                        }
-                    }
+                    // Ctrl+Up: retrieve newest pending unsent message for editing
+                    self.retrieve_pending_message_for_edit();
                     return Ok(());
                 }
                 _ => {}
@@ -5308,6 +5269,27 @@ impl App {
         self.pasted_contents.clear();
         self.cursor_pos = 0;
         self.queued_messages.push(expanded);
+    }
+
+    /// Retrieve the newest pending unsent message into the input for editing.
+    /// Priority: interleave buffer first (if still unsent), then queued messages.
+    fn retrieve_pending_message_for_edit(&mut self) {
+        if !self.input.is_empty() {
+            return;
+        }
+        if let Some(msg) = self.interleave_message.take() {
+            if !msg.is_empty() {
+                self.input = msg;
+                self.cursor_pos = self.input.len();
+                self.set_status_notice("Retrieved pending interleave for editing");
+                return;
+            }
+        }
+        if let Some(msg) = self.queued_messages.pop() {
+            self.input = msg;
+            self.cursor_pos = self.input.len();
+            self.set_status_notice("Retrieved queued message for editing");
+        }
     }
 
     fn send_action(&self, shift: bool) -> SendAction {
@@ -5486,7 +5468,7 @@ impl App {
                      • `{}`/`{}` - Scroll up/down (see `/config`)\n\
                      • `{}`/`{}` - Page up/down (see `/config`)\n\
                      • `Ctrl+Tab` / `Ctrl+T` - Toggle queue mode (wait vs immediate send)\n\
-                     • `Ctrl+Up` - Retrieve queued message for editing\n\
+                     • `Ctrl+Up` - Retrieve pending message for editing\n\
                      • `Ctrl+U` - Clear input line\n\
                      {}\n\
                      {}",
@@ -10834,6 +10816,35 @@ mod tests {
         assert_eq!(app.queued_count(), 0);
         assert_eq!(app.input(), "hello");
         assert_eq!(app.cursor_pos(), 5); // Cursor at end
+    }
+
+    #[test]
+    fn test_ctrl_up_prefers_pending_interleave_for_editing() {
+        let mut app = create_test_app();
+        app.is_processing = true;
+        app.queue_mode = false; // Enter=interleave, Shift+Enter=queue
+
+        for c in "urgent".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+
+        for c in "later".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        app.handle_key(KeyCode::Enter, KeyModifiers::SHIFT).unwrap();
+
+        assert_eq!(app.interleave_message.as_deref(), Some("urgent"));
+        assert_eq!(app.queued_count(), 1);
+
+        app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+
+        assert_eq!(app.input(), "urgent");
+        assert_eq!(app.interleave_message.as_deref(), None);
+        assert_eq!(app.queued_count(), 1);
     }
 
     #[test]
