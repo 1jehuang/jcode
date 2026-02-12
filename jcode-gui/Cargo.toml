@@ -1,0 +1,23 @@
+[package]
+name = "jcode-gui"
+version = "0.1.0"
+edition = "2021"
+description = "Dioxus GUI client for jcode"
+
+[features]
+default = ["desktop"]
+desktop = ["dioxus/desktop"]
+web = ["dioxus/web"]
+mobile = ["dioxus/mobile"]
+
+[dependencies]
+dioxus = { version = "0.7.3", default-features = false, features = ["macro", "hooks", "signals", "html", "launch", "document", "asset", "router"] }
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+anyhow = "1"
+jcode = { path = ".." }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "net", "time"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"

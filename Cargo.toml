@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "A Rust coding agent using Claude Max or ChatGPT Pro subscriptions"
 edition = "2021"
 
+[workspace]
+members = ["jcode-gui"]
+default-members = ["."]
+
 [lib]
 name = "jcode"
 path = "src/lib.rs"
