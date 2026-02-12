@@ -1,13 +1,19 @@
 use dioxus::prelude::*;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), unix))]
 mod backend;
+#[cfg(all(not(target_arch = "wasm32"), not(unix)))]
+mod backend_desktop_stub;
 #[cfg(target_arch = "wasm32")]
 mod backend_web;
 mod model;
 
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+use backend as backend_impl;
+#[cfg(all(not(target_arch = "wasm32"), not(unix)))]
+use backend_desktop_stub as backend_impl;
 #[cfg(target_arch = "wasm32")]
-use backend_web as backend;
+use backend_web as backend_impl;
 
 use model::{BackendCommand, GuiModel, RuntimeFeature};
 
@@ -77,7 +83,7 @@ fn main() {
 
 fn app() -> Element {
     let mut model = use_signal(GuiModel::default);
-    let backend = use_hook(backend::BackendBridge::spawn);
+    let backend = use_hook(backend_impl::BackendBridge::spawn);
 
     {
         let backend = backend.clone();

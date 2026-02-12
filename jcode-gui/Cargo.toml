@@ -15,7 +15,7 @@ dioxus = { version = "0.7.3", default-features = false, features = ["macro", "ho
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(all(not(target_arch = "wasm32"), unix))'.dependencies]
 anyhow = "1"
 jcode = { path = ".." }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "net", "time"] }
