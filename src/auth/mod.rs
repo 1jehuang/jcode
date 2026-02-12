@@ -12,8 +12,12 @@ pub struct AuthStatus {
     pub anthropic: ProviderAuth,
     /// OpenRouter provider - via API key
     pub openrouter: AuthState,
-    /// OpenAI provider - via API key
+    /// OpenAI provider - via OAuth or API key
     pub openai: AuthState,
+    /// OpenAI has OAuth credentials
+    pub openai_has_oauth: bool,
+    /// OpenAI has API key available
+    pub openai_has_api_key: bool,
     /// Cursor CLI provider status
     pub cursor: CliProviderAuth,
     /// GitHub Copilot CLI provider status
@@ -259,6 +263,7 @@ impl AuthStatus {
             Ok(creds) => {
                 // Check if we have OAuth tokens (not just API key fallback)
                 if !creds.refresh_token.is_empty() {
+                    status.openai_has_oauth = true;
                     // Has OAuth - check expiry if available
                     if let Some(expires_at) = creds.expires_at {
                         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -273,15 +278,21 @@ impl AuthStatus {
                     }
                 } else if !creds.access_token.is_empty() {
                     // API key fallback
+                    status.openai_has_api_key = true;
                     status.openai = AuthState::Available;
                 }
             }
-            Err(_) => {
-                // Fall back to env var
-                if std::env::var("OPENAI_API_KEY").is_ok() {
-                    status.openai = AuthState::Available;
-                }
-            }
+            Err(_) => {}
+        }
+
+        // Fall back to env var (or combine with OAuth)
+        if std::env::var("OPENAI_API_KEY")
+            .ok()
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            status.openai_has_api_key = true;
+            status.openai = AuthState::Available;
         }
 
         status.cursor = detect_cursor_auth();
