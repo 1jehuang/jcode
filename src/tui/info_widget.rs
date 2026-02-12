@@ -921,6 +921,10 @@ pub fn calculate_placements(
         if !available.contains(&prev.kind) {
             continue;
         }
+        // Never keep border-only placements from older frames.
+        if prev.rect.height <= 2 {
+            continue;
+        }
         // When overview is available, prefer reflowing mergeable widgets into one panel
         // rather than sticking to old scattered placements.
         if overview_requested && is_overview_mergeable(prev.kind) {
@@ -1037,6 +1041,10 @@ pub fn calculate_placements(
 
             // Calculate actual widget height based on content
             let widget_height = calculate_widget_height(kind, data, width, height);
+            // Skip widgets that would render as an empty border.
+            if widget_height <= 2 {
+                continue;
+            }
 
             // Place widget at top of rect
             let y = messages_area.y + top;
@@ -1109,6 +1117,9 @@ fn calculate_widget_height(
             overview.memory_info = None;
             let inner_h = max_height.saturating_sub(border_height);
             let layout = compute_page_layout(&overview, inner_width, inner_h);
+            if layout.max_page_height == 0 {
+                return 0;
+            }
             layout.max_page_height
         }
         WidgetKind::Diagrams => {
@@ -1127,7 +1138,12 @@ fn calculate_widget_height(
             2 + items + if data.todos.len() > 5 { 1 } else { 0 }
         }
         WidgetKind::ContextUsage => {
-            if data.context_info.is_none() {
+            if data
+                .context_info
+                .as_ref()
+                .map(|c| c.total_chars == 0)
+                .unwrap_or(true)
+            {
                 return 0;
             }
             1 // Just the bar
@@ -1157,6 +1173,13 @@ fn calculate_widget_height(
             let Some(info) = &data.swarm_info else {
                 return 0;
             };
+            if info.subagent_status.is_none()
+                && info.session_count <= 1
+                && info.client_count.is_none()
+                && info.members.is_empty()
+            {
+                return 0;
+            }
             let mut h = 1u16; // Stats line
             if info.subagent_status.is_some() {
                 h += 1;
@@ -1165,7 +1188,12 @@ fn calculate_widget_height(
             h
         }
         WidgetKind::BackgroundTasks => {
-            if data.background_info.is_none() {
+            if data
+                .background_info
+                .as_ref()
+                .map(|b| b.running_count == 0 && !b.memory_agent_active)
+                .unwrap_or(true)
+            {
                 return 0;
             }
             1 // Single line
@@ -3232,7 +3260,8 @@ fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
 mod tests {
     use super::{
         calculate_placements, render_memory_topology_lines, render_memory_widget, truncate_smart,
-        GraphEdge, GraphNode, InfoWidgetData, Margins, MemoryInfo, WidgetKind,
+        BackgroundInfo, GraphEdge, GraphNode, InfoWidgetData, Margins, MemoryInfo, SwarmInfo,
+        UsageInfo, UsageProvider, WidgetKind,
     };
     use ratatui::layout::Rect;
 
@@ -3449,6 +3478,74 @@ mod tests {
             "sticky width {} exceeded current margin {}",
             p.rect.width,
             min_margin
+        );
+    }
+
+    #[test]
+    fn placements_never_include_border_only_widgets() {
+        {
+            let mut guard = super::get_or_init_state();
+            if let Some(state) = guard.as_mut() {
+                state.enabled = true;
+                state.placements.clear();
+                state.widget_states.clear();
+            }
+        }
+
+        let data = InfoWidgetData {
+            model: Some("gpt-test".to_string()),
+            session_count: Some(2),
+            context_info: Some(crate::prompt::ContextInfo {
+                system_prompt_chars: 24_000,
+                total_chars: 40_000,
+                ..Default::default()
+            }),
+            todos: vec![crate::todo::TodoItem {
+                content: "ship patch".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                id: "todo-1".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            }],
+            queue_mode: Some(true),
+            memory_info: Some(MemoryInfo {
+                total_count: 1,
+                ..Default::default()
+            }),
+            swarm_info: Some(SwarmInfo {
+                session_count: 2,
+                ..Default::default()
+            }),
+            background_info: Some(BackgroundInfo {
+                running_count: 1,
+                running_tasks: vec!["bash".to_string()],
+                ..Default::default()
+            }),
+            usage_info: Some(UsageInfo {
+                provider: UsageProvider::Anthropic,
+                five_hour: 0.35,
+                seven_day: 0.62,
+                available: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let placements = calculate_placements(
+            Rect::new(0, 0, 100, 10),
+            &Margins {
+                right_widths: vec![40; 10],
+                left_widths: Vec::new(),
+                centered: false,
+            },
+            &data,
+        );
+
+        assert!(
+            placements.iter().all(|p| p.rect.height > 2),
+            "found border-only widget placement: {:?}",
+            placements
         );
     }
 }
