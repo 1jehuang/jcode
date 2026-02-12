@@ -3183,12 +3183,7 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
         String::new()
     };
 
-    let line = if let Some(notice) = app.status_notice() {
-        Line::from(vec![Span::styled(
-            notice,
-            Style::default().fg(ACCENT_COLOR),
-        )])
-    } else if let Some(build_progress) = crate::build::read_build_progress() {
+    let mut line = if let Some(build_progress) = crate::build::read_build_progress() {
         // Show build progress when compiling
         let spinner_idx = (elapsed * 12.5) as usize % SPINNER_FRAMES.len();
         let spinner = SPINNER_FRAMES[spinner_idx];
@@ -3418,6 +3413,15 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
         }
     };
 
+    if let Some(notice) = app.status_notice() {
+        if !line.spans.is_empty() {
+            line.spans
+                .push(Span::styled(" · ", Style::default().fg(DIM_COLOR)));
+        }
+        line.spans
+            .push(Span::styled(notice, Style::default().fg(ACCENT_COLOR)));
+    }
+
     let aligned_line = if app.centered_mode() {
         line.alignment(ratatui::layout::Alignment::Center)
     } else {
@@ -3573,12 +3577,19 @@ fn draw_send_mode_indicator(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 }
 
 fn pending_prompt_count(app: &dyn TuiState) -> usize {
+    let pending_soft_interrupt = app.is_processing()
+        && app
+            .pending_soft_interrupt()
+            .map(|msg| !msg.is_empty())
+            .unwrap_or(false);
     let interleave = app.is_processing()
         && app
             .interleave_message()
             .map(|msg| !msg.is_empty())
             .unwrap_or(false);
-    app.queued_messages().len() + if interleave { 1 } else { 0 }
+    app.queued_messages().len()
+        + if pending_soft_interrupt { 1 } else { 0 }
+        + if interleave { 1 } else { 0 }
 }
 
 fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
