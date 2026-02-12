@@ -36,7 +36,7 @@ mod tui;
 mod usage;
 mod util;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use provider::Provider;
 use std::io::{self, IsTerminal, Write};
@@ -196,6 +196,9 @@ enum ProviderChoice {
     Claude,
     ClaudeSubprocess,
     Openai,
+    Cursor,
+    Copilot,
+    Antigravity,
     Auto,
 }
 
@@ -204,7 +207,7 @@ enum ProviderChoice {
 #[command(version = env!("JCODE_VERSION"))]
 #[command(about = "J-Code: A coding agent using Claude Max or ChatGPT Pro subscriptions")]
 struct Args {
-    /// Provider to use (claude, openai, or auto-detect)
+    /// Provider to use (claude, openai, cursor, copilot, antigravity, or auto-detect)
     #[arg(short, long, default_value = "auto", global = true)]
     provider: ProviderChoice,
 
@@ -655,6 +658,21 @@ async fn init_provider_and_registry(
             std::env::set_var("JCODE_ACTIVE_PROVIDER", "openai");
             Arc::new(provider::MultiProvider::with_preference(true))
         }
+        ProviderChoice::Cursor => {
+            eprintln!("Using Cursor CLI provider (experimental)");
+            std::env::set_var("JCODE_ACTIVE_PROVIDER", "cursor");
+            Arc::new(provider::cursor::CursorCliProvider::new())
+        }
+        ProviderChoice::Copilot => {
+            eprintln!("Using GitHub Copilot CLI provider (experimental)");
+            std::env::set_var("JCODE_ACTIVE_PROVIDER", "copilot");
+            Arc::new(provider::copilot::CopilotCliProvider::new())
+        }
+        ProviderChoice::Antigravity => {
+            eprintln!("Using Antigravity CLI provider (experimental)");
+            std::env::set_var("JCODE_ACTIVE_PROVIDER", "antigravity");
+            Arc::new(provider::antigravity::AntigravityCliProvider::new())
+        }
         ProviderChoice::Auto => {
             // Check if we have any credentials (in parallel)
             let (has_claude, has_openai) = tokio::join!(
@@ -676,7 +694,10 @@ async fn init_provider_and_registry(
                 eprintln!("Choose a provider:");
                 eprintln!("  1. Claude (Claude Max subscription)");
                 eprintln!("  2. OpenAI (ChatGPT Pro subscription)");
-                eprint!("\nEnter 1 or 2: ");
+                eprintln!("  3. Cursor");
+                eprintln!("  4. GitHub Copilot");
+                eprintln!("  5. Antigravity");
+                eprint!("\nEnter 1-5: ");
                 io::stdout().flush()?;
 
                 let mut input = String::new();
@@ -692,6 +713,21 @@ async fn init_provider_and_registry(
                         login_openai_flow().await?;
                         eprintln!();
                         Arc::new(provider::MultiProvider::with_preference(true))
+                    }
+                    "3" => {
+                        login_cursor_flow()?;
+                        eprintln!();
+                        Arc::new(provider::cursor::CursorCliProvider::new())
+                    }
+                    "4" => {
+                        login_copilot_flow()?;
+                        eprintln!();
+                        Arc::new(provider::copilot::CopilotCliProvider::new())
+                    }
+                    "5" => {
+                        login_antigravity_flow()?;
+                        eprintln!();
+                        Arc::new(provider::antigravity::AntigravityCliProvider::new())
                     }
                     _ => {
                         anyhow::bail!("Invalid choice. Run 'jcode login' to try again.");
@@ -1655,11 +1691,23 @@ async fn run_login(choice: &ProviderChoice) -> Result<()> {
         ProviderChoice::Openai => {
             login_openai_flow().await?;
         }
+        ProviderChoice::Cursor => {
+            login_cursor_flow()?;
+        }
+        ProviderChoice::Copilot => {
+            login_copilot_flow()?;
+        }
+        ProviderChoice::Antigravity => {
+            login_antigravity_flow()?;
+        }
         ProviderChoice::Auto => {
             eprintln!("Choose a provider to log in:");
             eprintln!("  1. Claude (Claude Max)");
             eprintln!("  2. OpenAI (ChatGPT Pro)");
-            eprint!("\nEnter 1 or 2: ");
+            eprintln!("  3. Cursor");
+            eprintln!("  4. GitHub Copilot");
+            eprintln!("  5. Antigravity");
+            eprint!("\nEnter 1-5: ");
             io::stdout().flush()?;
 
             let mut input = String::new();
@@ -1667,7 +1715,12 @@ async fn run_login(choice: &ProviderChoice) -> Result<()> {
             match input.trim() {
                 "1" => login_claude_flow().await?,
                 "2" => login_openai_flow().await?,
-                _ => anyhow::bail!("Invalid choice. Use --provider claude or --provider openai"),
+                "3" => login_cursor_flow()?,
+                "4" => login_copilot_flow()?,
+                "5" => login_antigravity_flow()?,
+                _ => anyhow::bail!(
+                    "Invalid choice. Use --provider claude|openai|cursor|copilot|antigravity"
+                ),
             }
         }
     }
@@ -1688,6 +1741,53 @@ async fn login_openai_flow() -> Result<()> {
     let tokens = auth::oauth::login_openai().await?;
     auth::oauth::save_openai_tokens(&tokens)?;
     eprintln!("Successfully logged in to OpenAI!");
+    Ok(())
+}
+
+fn login_cursor_flow() -> Result<()> {
+    eprintln!("Starting Cursor login...");
+    run_external_login_command("cursor-agent", &["login"])
+        .context("Cursor login failed. Install Cursor Agent and run `cursor-agent login`.")?;
+    eprintln!("Cursor login command completed.");
+    Ok(())
+}
+
+fn login_copilot_flow() -> Result<()> {
+    eprintln!("Starting GitHub Copilot login...");
+    run_external_login_command("copilot", &["auth", "login"]).context(
+        "Copilot login failed. Install GitHub Copilot CLI and run `copilot auth login`.",
+    )?;
+    eprintln!("Copilot login command completed.");
+    Ok(())
+}
+
+fn login_antigravity_flow() -> Result<()> {
+    eprintln!("Starting Antigravity login...");
+    let binary =
+        std::env::var("JCODE_ANTIGRAVITY_CLI_PATH").unwrap_or_else(|_| "antigravity".to_string());
+    run_external_login_command(&binary, &["login"]).with_context(|| {
+        format!(
+            "Antigravity login failed. Check `{}` is installed and run `{} login`.",
+            binary, binary
+        )
+    })?;
+    eprintln!("Antigravity login command completed.");
+    Ok(())
+}
+
+fn run_external_login_command(program: &str, args: &[&str]) -> Result<()> {
+    let status = ProcessCommand::new(program)
+        .args(args)
+        .status()
+        .with_context(|| format!("Failed to start command: {} {}", program, args.join(" ")))?;
+    if !status.success() {
+        anyhow::bail!(
+            "Command exited with non-zero status: {} {} ({})",
+            program,
+            args.join(" "),
+            status
+        );
+    }
     Ok(())
 }
 

@@ -304,6 +304,7 @@ impl TuiCore {
         self.subagent_status = None;
         self.last_stream_activity = None;
         self.streaming_md_renderer.reset();
+        crate::tui::mermaid::clear_streaming_preview_diagram();
     }
 
     /// Update last activity timestamp

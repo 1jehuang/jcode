@@ -160,6 +160,19 @@ pub struct Session {
 /// Max number of environment snapshots to retain per session
 const MAX_ENV_SNAPSHOTS: usize = 8;
 
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            let trimmed = v.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
+fn default_is_test_session() -> bool {
+    env_flag_enabled("JCODE_TEST_SESSION")
+}
+
 /// Minimal git state for reproducibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitState {
@@ -198,6 +211,7 @@ impl Session {
         title: Option<String>,
     ) -> Self {
         let now = Utc::now();
+        let is_debug = default_is_test_session();
         // Try to extract short name from ID if it's a memorable ID
         let short_name = extract_session_name(&session_id).map(|s| s.to_string());
         Self {
@@ -218,7 +232,7 @@ impl Session {
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
-            is_debug: false,
+            is_debug,
             env_snapshots: Vec::new(),
         }
     }
@@ -226,6 +240,7 @@ impl Session {
     pub fn create(parent_id: Option<String>, title: Option<String>) -> Self {
         let now = Utc::now();
         let (id, short_name) = new_memorable_session_id();
+        let is_debug = default_is_test_session();
         Self {
             id,
             parent_id,
@@ -244,7 +259,7 @@ impl Session {
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
-            is_debug: false,
+            is_debug,
             env_snapshots: Vec::new(),
         }
     }
@@ -586,6 +601,7 @@ pub fn recover_crashed_sessions() -> Result<Vec<String>> {
         new_session.working_dir = old.working_dir.clone();
         new_session.model = old.model.clone();
         new_session.is_canary = old.is_canary;
+        new_session.is_debug = old.is_debug;
         new_session.testing_build = old.testing_build.clone();
         new_session.provider_session_id = None;
         new_session.status = SessionStatus::Closed;
