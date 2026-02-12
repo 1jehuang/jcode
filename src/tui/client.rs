@@ -661,6 +661,8 @@ impl ClientApp {
                         tool_data: None,
                     });
                 }
+                self.streaming_md_renderer.borrow_mut().reset();
+                crate::tui::mermaid::clear_streaming_preview_diagram();
                 // Accumulate turn tokens into session totals
                 self.total_input_tokens += self.streaming_input_tokens;
                 self.total_output_tokens += self.streaming_output_tokens;
@@ -758,6 +760,7 @@ impl ClientApp {
                 if session_changed {
                     self.clear_display_messages();
                     self.streaming_text.clear();
+                    self.streaming_md_renderer.borrow_mut().reset();
                     self.streaming_tool_calls.clear();
                     self.streaming_input_tokens = 0;
                     self.streaming_output_tokens = 0;
@@ -776,6 +779,7 @@ impl ClientApp {
                     self.current_tool_name = None;
                     self.current_tool_input.clear();
                     self.has_loaded_history = false;
+                    crate::tui::mermaid::clear_streaming_preview_diagram();
                 }
 
                 if session_changed || !self.has_loaded_history {

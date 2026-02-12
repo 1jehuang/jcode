@@ -78,6 +78,10 @@ pub struct CompactionManager {
     /// Token budget
     token_budget: usize,
 
+    /// Provider-reported input token usage from the latest request.
+    /// Used to trigger compaction with real token counts instead of only heuristics.
+    observed_input_tokens: Option<u64>,
+
     /// Full conversation history for RAG (never compacted)
     full_history: Vec<Message>,
 
@@ -94,6 +98,7 @@ impl CompactionManager {
             pending_cutoff: 0,
             total_turns: 0,
             token_budget: DEFAULT_TOKEN_BUDGET,
+            observed_input_tokens: None,
             full_history: Vec::new(),
             last_compaction: None,
         }
@@ -143,9 +148,25 @@ impl CompactionManager {
         total_chars / CHARS_PER_TOKEN
     }
 
+    /// Store provider-reported input token usage for compaction decisions.
+    pub fn update_observed_input_tokens(&mut self, tokens: u64) {
+        self.observed_input_tokens = Some(tokens);
+    }
+
+    /// Best-effort current token count for compaction decisions.
+    /// Uses whichever is larger: char-based estimate or provider-reported usage.
+    pub fn effective_token_count(&self) -> usize {
+        let estimate = self.token_estimate();
+        let observed = self
+            .observed_input_tokens
+            .and_then(|tokens| usize::try_from(tokens).ok())
+            .unwrap_or(0);
+        estimate.max(observed)
+    }
+
     /// Get current context usage as percentage
     pub fn context_usage(&self) -> f32 {
-        self.token_estimate() as f32 / self.token_budget as f32
+        self.effective_token_count() as f32 / self.token_budget as f32
     }
 
     /// Check if we should start compaction
@@ -325,7 +346,7 @@ impl CompactionManager {
         // Get result
         match futures::executor::block_on(task) {
             Ok(Ok(result)) => {
-                let pre_tokens = self.token_estimate() as u64;
+                let pre_tokens = self.effective_token_count() as u64;
                 // Create new summary
                 let summary = Summary {
                     text: result.summary,
@@ -342,6 +363,7 @@ impl CompactionManager {
                     trigger: "background".to_string(),
                     pre_tokens: Some(pre_tokens),
                 });
+                self.observed_input_tokens = None;
 
                 self.pending_cutoff = 0;
             }
@@ -442,6 +464,8 @@ impl CompactionManager {
             has_summary: self.active_summary.is_some(),
             is_compacting: self.is_compacting(),
             token_estimate: self.token_estimate(),
+            effective_tokens: self.effective_token_count(),
+            observed_input_tokens: self.observed_input_tokens,
             context_usage: self.context_usage(),
         }
     }
@@ -511,6 +535,8 @@ pub struct CompactionStats {
     pub has_summary: bool,
     pub is_compacting: bool,
     pub token_estimate: usize,
+    pub effective_tokens: usize,
+    pub observed_input_tokens: Option<u64>,
     pub context_usage: f32,
 }
 
@@ -662,6 +688,29 @@ mod tests {
                 &format!("Message {} with some content", i),
             ));
         }
+
+        assert!(manager.should_compact());
+    }
+
+    #[test]
+    fn test_context_usage_prefers_observed_tokens() {
+        let mut manager = CompactionManager::new().with_budget(1_000);
+        manager.add_message(make_text_message(Role::User, "short message"));
+        manager.update_observed_input_tokens(900);
+
+        assert!(manager.context_usage() >= 0.90);
+        assert!(manager.effective_token_count() >= 900);
+    }
+
+    #[test]
+    fn test_should_compact_uses_observed_tokens() {
+        let mut manager = CompactionManager::new().with_budget(1_000);
+
+        // Keep messages short so estimate stays low; compaction should still trigger from observed usage.
+        for _ in 0..12 {
+            manager.add_message(make_text_message(Role::User, "x"));
+        }
+        manager.update_observed_input_tokens(850);
 
         assert!(manager.should_compact());
     }

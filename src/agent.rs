@@ -151,6 +151,9 @@ impl Agent {
         let compaction = self.registry.compaction();
         let mut manager = compaction.try_write().expect("compaction lock");
         manager.reset();
+        let budget = crate::provider::context_limit_for_model(&self.provider.model())
+            .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT);
+        manager.set_budget(budget);
         for msg in &self.session.messages {
             manager.add_message(msg.to_message());
         }
@@ -203,6 +206,53 @@ impl Agent {
                 .collect::<Vec<_>>()
         ));
         (messages, None)
+    }
+
+    fn effective_context_tokens_from_usage(
+        &self,
+        input_tokens: u64,
+        cache_read_input_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
+    ) -> u64 {
+        if input_tokens == 0 {
+            return 0;
+        }
+        let cache_read = cache_read_input_tokens.unwrap_or(0);
+        let cache_creation = cache_creation_input_tokens.unwrap_or(0);
+        let provider_name = self.provider.name().to_lowercase();
+
+        let split_cache_accounting = provider_name.contains("anthropic")
+            || provider_name.contains("claude")
+            || cache_creation > 0
+            || cache_read > input_tokens;
+
+        if split_cache_accounting {
+            input_tokens
+                .saturating_add(cache_read)
+                .saturating_add(cache_creation)
+        } else {
+            input_tokens
+        }
+    }
+
+    fn update_compaction_usage_from_stream(
+        &mut self,
+        input_tokens: u64,
+        cache_read_input_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
+    ) {
+        if !self.provider.supports_compaction() || input_tokens == 0 {
+            return;
+        }
+        let observed = self.effective_context_tokens_from_usage(
+            input_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+        );
+        let compaction = self.registry.compaction();
+        if let Ok(mut manager) = compaction.try_write() {
+            manager.update_observed_input_tokens(observed);
+        };
     }
 
     fn repair_missing_tool_outputs(&mut self) -> usize {
@@ -754,10 +804,21 @@ impl Agent {
 
     /// Clear conversation history
     pub fn clear(&mut self) {
-        self.session = Session::create(None, None);
+        let preserve_canary = self.session.is_canary;
+        let preserve_testing_build = self.session.testing_build.clone();
+        let preserve_debug = self.session.is_debug;
+        let preserve_working_dir = self.session.working_dir.clone();
+
+        let mut new_session = Session::create(None, None);
+        new_session.model = Some(self.provider.model());
+        new_session.is_canary = preserve_canary;
+        new_session.testing_build = preserve_testing_build;
+        new_session.is_debug = preserve_debug;
+        new_session.working_dir = preserve_working_dir;
+
+        self.session = new_session;
         self.active_skill = None;
         self.provider_session_id = None;
-        self.session.model = Some(self.provider.model());
         self.seed_compaction_from_session();
     }
 
@@ -883,6 +944,10 @@ impl Agent {
 
     pub fn is_canary(&self) -> bool {
         self.session.is_canary
+    }
+
+    pub fn is_debug(&self) -> bool {
+        self.session.is_debug
     }
 
     pub fn set_canary(&mut self, build_hash: &str) {
@@ -1436,6 +1501,13 @@ impl Agent {
                         if cache_creation_input_tokens.is_some() {
                             usage_cache_creation = cache_creation_input_tokens;
                         }
+                        if let Some(input) = usage_input {
+                            self.update_compaction_usage_from_stream(
+                                input,
+                                usage_cache_read,
+                                usage_cache_creation,
+                            );
+                        }
                         if trace {
                             eprintln!(
                                 "[trace] token_usage input={} output={} cache_read={} cache_write={}",
@@ -1987,6 +2059,13 @@ impl Agent {
                         if cache_creation_input_tokens.is_some() {
                             usage_cache_creation = cache_creation_input_tokens;
                         }
+                        if let Some(input) = usage_input {
+                            self.update_compaction_usage_from_stream(
+                                input,
+                                usage_cache_read,
+                                usage_cache_creation,
+                            );
+                        }
                     }
                     StreamEvent::MessageEnd { .. } => {}
                     StreamEvent::SessionId(sid) => {
@@ -2455,6 +2534,13 @@ impl Agent {
                         }
                         if cache_creation_input_tokens.is_some() {
                             usage_cache_creation = cache_creation_input_tokens;
+                        }
+                        if let Some(input) = usage_input {
+                            self.update_compaction_usage_from_stream(
+                                input,
+                                usage_cache_read,
+                                usage_cache_creation,
+                            );
                         }
                     }
                     StreamEvent::MessageEnd { .. } => {}

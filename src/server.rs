@@ -1600,6 +1600,11 @@ async fn handle_client(
 
             Request::Clear { id } => {
                 // Clear this client's session (create new agent)
+                let preserve_debug = {
+                    let agent_guard = agent.lock().await;
+                    agent_guard.is_debug()
+                };
+
                 let mut new_agent = Agent::new(Arc::clone(&provider), registry.clone());
                 let new_id = new_agent.session_id().to_string();
 
@@ -1607,6 +1612,9 @@ async fn handle_client(
                 if client_selfdev {
                     new_agent.set_canary("self-dev");
                     // selfdev tools should already be registered from initial connection
+                }
+                if preserve_debug {
+                    new_agent.set_debug(true);
                 }
 
                 // Replace the agent in place
@@ -4925,9 +4933,12 @@ async fn execute_debug_command(
             "claude" | "anthropic" => "claude-opus-4-5-20251101",
             "openai" | "codex" => "gpt-5.2-codex",
             "openrouter" => "anthropic/claude-sonnet-4",
+            "cursor" => "gpt-5",
+            "copilot" => "claude-sonnet-4",
+            "antigravity" => "default",
             _ => {
                 return Err(anyhow::anyhow!(
-                    "Unknown provider '{}'. Use: claude, openai, openrouter",
+                    "Unknown provider '{}'. Use: claude, openai, openrouter, cursor, copilot, antigravity",
                     provider
                 ))
             }
@@ -7077,7 +7088,7 @@ SERVER COMMANDS (server: prefix or no prefix):
   create_session:<path>    - Create session with working dir
   destroy_session:<id>     - Destroy a session
   set_model:<model>        - Switch model (may change provider)
-  set_provider:<name>      - Switch provider (claude/openai/openrouter)
+  set_provider:<name>      - Switch provider (claude/openai/openrouter/cursor/copilot/antigravity)
   trigger_extraction       - Force end-of-session memory extraction
   available_models         - List all available models
   reload                   - Trigger server reload with current binary
@@ -7878,6 +7889,9 @@ fn provider_cli_arg(provider_name: &str) -> Option<String> {
     match lowered.as_str() {
         "openai" => Some("openai".to_string()),
         "claude" => Some("claude".to_string()),
+        "cursor" => Some("cursor".to_string()),
+        "copilot" => Some("copilot".to_string()),
+        "antigravity" => Some("antigravity".to_string()),
         _ => None,
     }
 }

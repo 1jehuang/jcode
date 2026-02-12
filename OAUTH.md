@@ -99,3 +99,32 @@ Otherwise it uses:
 - 401/403: re-run `jcode login --provider openai`.
 - Callback issues: make sure port 9876 is free and the browser can reach
   `http://localhost:9876/callback`.
+
+## Experimental CLI Providers
+
+J-Code also supports experimental CLI-backed providers:
+- `--provider cursor`
+- `--provider copilot`
+- `--provider antigravity`
+
+These use each provider's local CLI session/auth and shell out in print mode.
+
+### Cursor
+- Login: `jcode login --provider cursor` (runs `cursor-agent login`)
+- Env vars:
+  - `JCODE_CURSOR_CLI_PATH` (default: `cursor-agent`)
+  - `JCODE_CURSOR_MODEL` (default: `gpt-5`)
+
+### GitHub Copilot
+- Login: `jcode login --provider copilot` (runs `copilot auth login`)
+- Env vars:
+  - `JCODE_COPILOT_CLI_PATH` (default: `copilot`)
+  - `JCODE_COPILOT_MODEL` (default: `claude-sonnet-4`)
+
+### Antigravity
+- Login: `jcode login --provider antigravity` (runs `<cli> login`)
+- Env vars:
+  - `JCODE_ANTIGRAVITY_CLI_PATH` (default: `antigravity`)
+  - `JCODE_ANTIGRAVITY_MODEL` (default: `default`)
+  - `JCODE_ANTIGRAVITY_PROMPT_FLAG` (default: `-p`)
+  - `JCODE_ANTIGRAVITY_MODEL_FLAG` (default: `--model`)

@@ -1,5 +1,9 @@
 pub mod anthropic;
+pub mod antigravity;
 pub mod claude;
+pub mod cli_common;
+pub mod copilot;
+pub mod cursor;
 pub mod openai;
 pub mod openrouter;
 

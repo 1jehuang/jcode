@@ -72,6 +72,11 @@ static LAST_RENDER: LazyLock<Mutex<HashMap<u64, LastRenderState>>> =
 static ACTIVE_DIAGRAMS: LazyLock<Mutex<Vec<ActiveDiagram>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
+/// Ephemeral diagram preview for in-flight streaming markdown.
+/// This should never persist once a streaming segment is committed.
+static STREAMING_PREVIEW_DIAGRAM: LazyLock<Mutex<Option<ActiveDiagram>>> =
+    LazyLock::new(|| Mutex::new(None));
+
 /// Prevent unbounded growth when a long session contains many unique diagrams.
 const ACTIVE_DIAGRAMS_MAX: usize = 128;
 
@@ -612,22 +617,59 @@ pub fn register_active_diagram(hash: u64, width: u32, height: u32, label: Option
     }
 }
 
+/// Register or replace the current streaming preview diagram.
+pub fn set_streaming_preview_diagram(hash: u64, width: u32, height: u32, label: Option<String>) {
+    if let Ok(mut preview) = STREAMING_PREVIEW_DIAGRAM.lock() {
+        *preview = Some(ActiveDiagram {
+            hash,
+            width,
+            height,
+            label,
+        });
+    }
+}
+
+/// Clear the current streaming preview diagram.
+pub fn clear_streaming_preview_diagram() {
+    if let Ok(mut preview) = STREAMING_PREVIEW_DIAGRAM.lock() {
+        *preview = None;
+    }
+}
+
 /// Get active diagrams for info widget display
 pub fn get_active_diagrams() -> Vec<super::info_widget::DiagramInfo> {
-    if let Ok(diagrams) = ACTIVE_DIAGRAMS.lock() {
-        diagrams
-            .iter()
-            .rev()
-            .map(|d| super::info_widget::DiagramInfo {
-                hash: d.hash,
-                width: d.width,
-                height: d.height,
-                label: d.label.clone(),
-            })
-            .collect()
-    } else {
-        Vec::new()
+    let preview = STREAMING_PREVIEW_DIAGRAM
+        .lock()
+        .ok()
+        .and_then(|preview| preview.clone());
+    let preview_hash = preview.as_ref().map(|d| d.hash);
+
+    let mut out = Vec::new();
+    if let Some(d) = preview {
+        out.push(super::info_widget::DiagramInfo {
+            hash: d.hash,
+            width: d.width,
+            height: d.height,
+            label: d.label,
+        });
     }
+
+    if let Ok(diagrams) = ACTIVE_DIAGRAMS.lock() {
+        out.extend(
+            diagrams
+                .iter()
+                .rev()
+                .filter(|d| Some(d.hash) != preview_hash)
+                .map(|d| super::info_widget::DiagramInfo {
+                    hash: d.hash,
+                    width: d.width,
+                    height: d.height,
+                    label: d.label.clone(),
+                }),
+        );
+    }
+
+    out
 }
 
 /// Snapshot active diagrams (internal order) for temporary overrides in tests/debug
@@ -667,6 +709,7 @@ pub fn clear_active_diagrams() {
     if let Ok(mut diagrams) = ACTIVE_DIAGRAMS.lock() {
         diagrams.clear();
     }
+    clear_streaming_preview_diagram();
 }
 
 pub fn clear_cache() -> Result<(), String> {
@@ -694,6 +737,7 @@ pub fn clear_cache() -> Result<(), String> {
     if let Ok(mut diagrams) = ACTIVE_DIAGRAMS.lock() {
         diagrams.clear();
     }
+    clear_streaming_preview_diagram();
 
     // Remove cached files on disk
     let entries = fs::read_dir(&cache_dir).map_err(|e| e.to_string())?;
@@ -2513,6 +2557,24 @@ mod tests {
             snapshot.last().map(|d| d.hash),
             Some((ACTIVE_DIAGRAMS_MAX + 4) as u64)
         );
+        clear_active_diagrams();
+    }
+
+    #[test]
+    fn test_streaming_preview_is_ephemeral_and_prioritized() {
+        clear_active_diagrams();
+        register_active_diagram(0x1, 100, 80, None);
+
+        set_streaming_preview_diagram(0x2, 140, 90, Some("streaming".to_string()));
+        let with_preview = get_active_diagrams();
+        assert_eq!(with_preview.first().map(|d| d.hash), Some(0x2));
+        assert_eq!(with_preview.get(1).map(|d| d.hash), Some(0x1));
+
+        clear_streaming_preview_diagram();
+        let without_preview = get_active_diagrams();
+        assert_eq!(without_preview.len(), 1);
+        assert_eq!(without_preview[0].hash, 0x1);
+
         clear_active_diagrams();
     }
 
