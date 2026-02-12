@@ -176,6 +176,15 @@ pub struct McpServerConfig {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    /// Whether this server can be shared across sessions (default: true).
+    /// Stateless API wrappers (Todoist, Canvas) should be shared.
+    /// Stateful servers (Playwright browser) should not be shared.
+    #[serde(default = "default_shared")]
+    pub shared: bool,
+}
+
+fn default_shared() -> bool {
+    true
 }
 
 /// Full MCP configuration file
@@ -294,9 +303,19 @@ impl McpConfig {
                                 .collect()
                         })
                         .unwrap_or_default();
-                    config
-                        .servers
-                        .insert(name.clone(), McpServerConfig { command, args, env });
+                    let shared = server
+                        .get("shared")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    config.servers.insert(
+                        name.clone(),
+                        McpServerConfig {
+                            command,
+                            args,
+                            env,
+                            shared,
+                        },
+                    );
                 }
             }
         }
