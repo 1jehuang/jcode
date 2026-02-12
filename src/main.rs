@@ -1746,17 +1746,27 @@ async fn login_openai_flow() -> Result<()> {
 
 fn login_cursor_flow() -> Result<()> {
     eprintln!("Starting Cursor login...");
-    run_external_login_command("cursor-agent", &["login"])
-        .context("Cursor login failed. Install Cursor Agent and run `cursor-agent login`.")?;
+    let binary =
+        std::env::var("JCODE_CURSOR_CLI_PATH").unwrap_or_else(|_| "cursor-agent".to_string());
+    run_external_login_command(&binary, &["login"]).with_context(|| {
+        format!(
+            "Cursor login failed. Install Cursor Agent and run `{} login`.",
+            binary
+        )
+    })?;
     eprintln!("Cursor login command completed.");
     Ok(())
 }
 
 fn login_copilot_flow() -> Result<()> {
     eprintln!("Starting GitHub Copilot login...");
-    run_external_login_command("copilot", &["auth", "login"]).context(
-        "Copilot login failed. Install GitHub Copilot CLI and run `copilot auth login`.",
-    )?;
+    let (program, args, rendered) = provider::copilot::copilot_login_command();
+    run_external_login_command_owned(&program, &args).with_context(|| {
+        format!(
+            "Copilot login failed. Install Copilot CLI (https://gh.io/copilot-cli) and run `{}`.",
+            rendered
+        )
+    })?;
     eprintln!("Copilot login command completed.");
     Ok(())
 }
@@ -1776,6 +1786,22 @@ fn login_antigravity_flow() -> Result<()> {
 }
 
 fn run_external_login_command(program: &str, args: &[&str]) -> Result<()> {
+    let status = ProcessCommand::new(program)
+        .args(args)
+        .status()
+        .with_context(|| format!("Failed to start command: {} {}", program, args.join(" ")))?;
+    if !status.success() {
+        anyhow::bail!(
+            "Command exited with non-zero status: {} {} ({})",
+            program,
+            args.join(" "),
+            status
+        );
+    }
+    Ok(())
+}
+
+fn run_external_login_command_owned(program: &str, args: &[String]) -> Result<()> {
     let status = ProcessCommand::new(program)
         .args(args)
         .status()
