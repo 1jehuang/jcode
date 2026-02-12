@@ -277,41 +277,42 @@ impl PermissionsApp {
 
         lines.push(Line::raw(""));
 
+        lines.push(Line::from(vec![
+            Span::styled(" ID: ", label_style),
+            Span::styled(
+                req.id.clone(),
+                Style::default().fg(Color::Rgb(100, 100, 110)),
+            ),
+        ]));
+
+        lines.push(Line::from(vec![
+            Span::styled(" Created: ", label_style),
+            Span::styled(
+                req.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                Style::default().fg(Color::Rgb(100, 100, 110)),
+            ),
+        ]));
+
+        if req.wait {
+            lines.push(Line::from(vec![
+                Span::styled(" ⏳ ", Style::default().fg(Color::Rgb(255, 200, 100))),
+                Span::styled(
+                    "Agent is waiting for this decision",
+                    Style::default().fg(Color::Rgb(255, 200, 100)),
+                ),
+            ]));
+        }
+
         if let Some(ref ctx) = req.context {
+            lines.push(Line::raw(""));
             lines.push(Line::from(vec![Span::styled(" Context: ", label_style)]));
             let ctx_str = serde_json::to_string_pretty(ctx).unwrap_or_else(|_| format!("{}", ctx));
-            for ctx_line in ctx_str.lines().take(area.height.saturating_sub(4) as usize) {
+            for ctx_line in ctx_str.lines().take(area.height.saturating_sub(8) as usize) {
                 lines.push(Line::from(vec![
                     Span::raw("   "),
                     Span::styled(
                         truncate(ctx_line, area.width.saturating_sub(5) as usize),
                         Style::default().fg(Color::Rgb(140, 140, 150)),
-                    ),
-                ]));
-            }
-        } else {
-            lines.push(Line::from(vec![
-                Span::styled(" ID: ", label_style),
-                Span::styled(
-                    req.id.clone(),
-                    Style::default().fg(Color::Rgb(100, 100, 110)),
-                ),
-            ]));
-
-            lines.push(Line::from(vec![
-                Span::styled(" Created: ", label_style),
-                Span::styled(
-                    req.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-                    Style::default().fg(Color::Rgb(100, 100, 110)),
-                ),
-            ]));
-
-            if req.wait {
-                lines.push(Line::from(vec![
-                    Span::styled(" ⏳ ", Style::default().fg(Color::Rgb(255, 200, 100))),
-                    Span::styled(
-                        "Agent is waiting for this decision",
-                        Style::default().fg(Color::Rgb(255, 200, 100)),
                     ),
                 ]));
             }
@@ -561,11 +562,28 @@ fn truncate(s: &str, max_len: usize) -> String {
 }
 
 pub fn run_permissions() -> Result<()> {
-    let requests = load_pending_requests()?;
+    let system = safety::SafetySystem::new();
+    let expired = system.expire_dead_session_requests("permissions_tui_gc")?;
+    let requests = system.pending_requests();
 
     if requests.is_empty() {
+        if !expired.is_empty() {
+            println!(
+                "Expired {} stale permission request{} (requester session inactive).",
+                expired.len(),
+                if expired.len() == 1 { "" } else { "s" }
+            );
+        }
         println!("No pending permission requests.");
         return Ok(());
+    }
+
+    if !expired.is_empty() {
+        println!(
+            "Expired {} stale permission request{} (requester session inactive).",
+            expired.len(),
+            if expired.len() == 1 { "" } else { "s" }
+        );
     }
 
     println!(
@@ -576,15 +594,4 @@ pub fn run_permissions() -> Result<()> {
 
     let app = PermissionsApp::new(requests);
     app.run()
-}
-
-fn load_pending_requests() -> Result<Vec<PermissionRequest>> {
-    let path = crate::storage::jcode_dir()?
-        .join("safety")
-        .join("queue.json");
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let requests: Vec<PermissionRequest> = crate::storage::read_json(&path)?;
-    Ok(requests)
 }

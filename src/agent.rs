@@ -476,6 +476,12 @@ impl Agent {
         &self.session.id
     }
 
+    /// Mark this agent session as closed and persist it.
+    pub fn mark_closed(&mut self) {
+        self.session.mark_closed();
+        let _ = self.session.save();
+    }
+
     /// Get the last token usage from the most recent API request
     pub fn last_usage(&self) -> &TokenUsage {
         &self.last_usage
