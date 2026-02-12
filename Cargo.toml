@@ -96,7 +96,7 @@ mail-parser = "0.9"
 pdf-extract = "0.8"
 
 # Mermaid diagram rendering (stable v0.2.0 tag)
-mermaid-rs-renderer = { git = "ssh://git@github.com/1jehuang/mermaid-rs-renderer.git", tag = "v0.2.0" }
+mermaid-rs-renderer = { git = "https://github.com/1jehuang/mermaid-rs-renderer.git", tag = "v0.2.0" }
 
 [dev-dependencies]
 async-stream = "0.3"
