@@ -3,6 +3,7 @@
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::prelude::*;
 use serde::Serialize;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{LazyLock, Mutex};
@@ -52,6 +53,13 @@ static MARKDOWN_DEBUG: LazyLock<Mutex<MarkdownDebugState>> =
 static DIAGRAM_MODE_OVERRIDE: LazyLock<Mutex<Option<DiagramDisplayMode>>> =
     LazyLock::new(|| Mutex::new(None));
 
+thread_local! {
+    /// Whether markdown rendering is running in streaming mode.
+    /// In this mode mermaid diagrams update an ephemeral side-panel preview
+    /// instead of being persisted in ACTIVE_DIAGRAMS history.
+    static STREAMING_RENDER_CONTEXT: Cell<bool> = const { Cell::new(false) };
+}
+
 pub fn set_diagram_mode_override(mode: Option<DiagramDisplayMode>) {
     if let Ok(mut override_mode) = DIAGRAM_MODE_OVERRIDE.lock() {
         *override_mode = mode;
@@ -69,6 +77,27 @@ fn effective_diagram_mode() -> DiagramDisplayMode {
         }
     }
     config().display.diagram_mode
+}
+
+fn with_streaming_render_context<T>(f: impl FnOnce() -> T) -> T {
+    STREAMING_RENDER_CONTEXT.with(|ctx| {
+        let prev = ctx.replace(true);
+        struct ResetGuard<'a> {
+            cell: &'a Cell<bool>,
+            prev: bool,
+        }
+        impl Drop for ResetGuard<'_> {
+            fn drop(&mut self) {
+                self.cell.set(self.prev);
+            }
+        }
+        let _guard = ResetGuard { cell: ctx, prev };
+        f()
+    })
+}
+
+fn streaming_render_context_enabled() -> bool {
+    STREAMING_RENDER_CONTEXT.with(|ctx| ctx.get())
 }
 
 struct HighlightCache {
@@ -139,6 +168,10 @@ impl IncrementalMarkdownRenderer {
     /// 2. Finding safe re-render points (after complete blocks)
     /// 3. Only re-rendering from the last safe point
     pub fn update(&mut self, full_text: &str) -> Vec<Line<'static>> {
+        with_streaming_render_context(|| self.update_internal(full_text))
+    }
+
+    fn update_internal(&mut self, full_text: &str) -> Vec<Line<'static>> {
         // Fast path: text unchanged
         if full_text == self.rendered_text {
             return self.rendered_lines.clone();
@@ -190,6 +223,7 @@ impl IncrementalMarkdownRenderer {
         let mut checkpoint = None;
         let mut line_start = 0usize;
         let mut fence_state: Option<(char, usize)> = None;
+        let mut display_math_open = false;
 
         while line_start <= text.len() {
             let relative_end = text[line_start..].find('\n');
@@ -212,10 +246,25 @@ impl IncrementalMarkdownRenderer {
                     }
                 }
                 None => {
-                    if let Some((fence_char, fence_len)) = parse_opening_fence(line) {
+                    if display_math_open {
+                        let dd_count = count_unescaped_double_dollar(line);
+                        if dd_count % 2 == 1 {
+                            display_math_open = false;
+                            checkpoint = Some(line_end_including_newline);
+                        }
+                    } else if let Some((fence_char, fence_len)) = parse_opening_fence(line) {
                         fence_state = Some((fence_char, fence_len));
-                    } else if line.trim().is_empty() {
-                        checkpoint = Some(line_end_including_newline);
+                    } else {
+                        let dd_count = count_unescaped_double_dollar(line);
+                        if dd_count > 0 {
+                            if dd_count % 2 == 1 {
+                                display_math_open = true;
+                            } else {
+                                checkpoint = Some(line_end_including_newline);
+                            }
+                        } else if line.trim().is_empty() {
+                            checkpoint = Some(line_end_including_newline);
+                        }
                     }
                 }
             }
@@ -268,6 +317,9 @@ impl IncrementalMarkdownRenderer {
 // Colors matching ui.rs palette
 const CODE_BG: Color = Color::Rgb(45, 45, 45);
 const CODE_FG: Color = Color::Rgb(180, 180, 180);
+const MATH_FG: Color = Color::Rgb(130, 210, 235);
+const LINK_FG: Color = Color::Rgb(120, 180, 240);
+const HTML_FG: Color = Color::Rgb(140, 140, 150);
 const TEXT_COLOR: Color = Color::Rgb(200, 200, 195); // Soft warm white for AI text
 const BOLD_COLOR: Color = Color::Rgb(240, 240, 235); // Slightly brighter for bold
                                                      // Heading colors - warm gold/amber gradient by level
@@ -276,6 +328,13 @@ const HEADING_H2_COLOR: Color = Color::Rgb(240, 190, 90); // Gold for ## H2
 const HEADING_H3_COLOR: Color = Color::Rgb(220, 170, 80); // Amber for ### H3
 const HEADING_COLOR: Color = Color::Rgb(200, 155, 75); // Darker amber for #### and below
 const DIM_COLOR: Color = Color::Rgb(100, 100, 100);
+const RULE_LEN: usize = 24;
+
+#[derive(Debug, Clone, Copy)]
+struct ListRenderState {
+    ordered: bool,
+    next_index: u64,
+}
 
 fn diagram_side_only() -> bool {
     matches!(effective_diagram_mode(), DiagramDisplayMode::Pinned)
@@ -286,6 +345,42 @@ fn mermaid_sidebar_placeholder(text: &str) -> Line<'static> {
         text.to_string(),
         Style::default().fg(DIM_COLOR),
     ))
+}
+
+fn apply_inline_decorations(mut style: Style, strike: bool, in_link: bool) -> Style {
+    if strike {
+        style = style.crossed_out();
+    }
+    if in_link {
+        style = style.fg(LINK_FG).underlined();
+    }
+    style
+}
+
+fn ensure_blockquote_prefix(current_spans: &mut Vec<Span<'static>>, blockquote_depth: usize) {
+    if blockquote_depth == 0 || !current_spans.is_empty() {
+        return;
+    }
+    let prefix = "│ ".repeat(blockquote_depth);
+    current_spans.push(Span::styled(prefix, Style::default().fg(DIM_COLOR)));
+}
+
+fn with_blockquote_prefix(line: Line<'static>, blockquote_depth: usize) -> Line<'static> {
+    if blockquote_depth == 0 {
+        return line;
+    }
+    let mut spans = vec![Span::styled(
+        "│ ".repeat(blockquote_depth),
+        Style::default().fg(DIM_COLOR),
+    )];
+    spans.extend(line.spans);
+    Line::from(spans)
+}
+
+fn flush_current_line(lines: &mut Vec<Line<'static>>, current_spans: &mut Vec<Span<'static>>) {
+    if !current_spans.is_empty() {
+        lines.push(Line::from(std::mem::take(current_spans)));
+    }
 }
 
 fn parse_opening_fence(line: &str) -> Option<(char, usize)> {
@@ -321,6 +416,51 @@ fn is_closing_fence(line: &str, fence_char: char, min_len: usize) -> bool {
 
     trimmed[fence_len..].trim().is_empty()
 }
+
+fn count_unescaped_double_dollar(line: &str) -> usize {
+    let bytes = line.as_bytes();
+    let mut count = 0usize;
+    let mut ix = 0usize;
+
+    while ix + 1 < bytes.len() {
+        if bytes[ix] == b'\\' {
+            ix += 2;
+            continue;
+        }
+        if bytes[ix] == b'$' && bytes[ix + 1] == b'$' {
+            count += 1;
+            ix += 2;
+            continue;
+        }
+        ix += 1;
+    }
+
+    count
+}
+
+fn math_inline_span(math: &str) -> Span<'static> {
+    Span::styled(format!("${}$", math), Style::default().fg(MATH_FG))
+}
+
+fn math_display_lines(math: &str) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    let dim = Style::default().fg(DIM_COLOR);
+    out.push(Line::from(Span::styled("┌─ math ", dim)));
+    for line in math.lines() {
+        out.push(Line::from(vec![
+            Span::styled("│ ", dim),
+            Span::styled(line.to_string(), Style::default().fg(MATH_FG)),
+        ]));
+    }
+    if math.is_empty() {
+        out.push(Line::from(vec![
+            Span::styled("│ ", dim),
+            Span::styled("", Style::default().fg(MATH_FG)),
+        ]));
+    }
+    out.push(Line::from(Span::styled("└─", dim)));
+    out
+}
 const TABLE_COLOR: Color = Color::Rgb(150, 150, 150); // Table borders/separators
 
 /// Render markdown text to styled ratatui Lines
@@ -345,14 +485,23 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current_spans: Vec<Span<'static>> = Vec::new();
     let side_only = diagram_side_only();
+    let streaming_mode = streaming_render_context_enabled();
 
     // Style stack for nested formatting
     let mut bold = false;
     let mut italic = false;
+    let mut strike = false;
     let mut in_code_block = false;
     let mut code_block_lang: Option<String> = None;
     let mut code_block_content = String::new();
     let mut heading_level: Option<u8> = None;
+    let mut blockquote_depth = 0usize;
+    let mut list_stack: Vec<ListRenderState> = Vec::new();
+    let mut link_targets: Vec<String> = Vec::new();
+    let mut in_image = false;
+    let mut image_url: Option<String> = None;
+    let mut image_alt = String::new();
+    let mut in_definition_item = false;
 
     // Table state
     let mut in_table = false;
@@ -364,6 +513,13 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
     // Enable table parsing
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_MATH);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_FOOTNOTES);
+    options.insert(Options::ENABLE_GFM);
+    options.insert(Options::ENABLE_DEFINITION_LIST);
+    options.insert(Options::ENABLE_SMART_PUNCTUATION);
     let parser = Parser::new_ext(text, options);
 
     // Debug counters
@@ -378,9 +534,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 dbg_headings += 1;
-                if !current_spans.is_empty() {
-                    lines.push(Line::from(std::mem::take(&mut current_spans)));
-                }
+                flush_current_line(&mut lines, &mut current_spans);
                 heading_level = Some(level as u8);
             }
             Event::End(TagEnd::Heading(_)) => {
@@ -410,12 +564,114 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
             Event::Start(Tag::Emphasis) => italic = true,
             Event::End(TagEnd::Emphasis) => italic = false,
 
+            Event::Start(Tag::Strikethrough) => strike = true,
+            Event::End(TagEnd::Strikethrough) => strike = false,
+
+            Event::Start(Tag::BlockQuote(_)) => {
+                dbg_blockquotes += 1;
+                flush_current_line(&mut lines, &mut current_spans);
+                blockquote_depth += 1;
+            }
+            Event::End(TagEnd::BlockQuote(_)) => {
+                flush_current_line(&mut lines, &mut current_spans);
+                blockquote_depth = blockquote_depth.saturating_sub(1);
+                lines.push(Line::default());
+            }
+
+            Event::Start(Tag::List(start)) => {
+                let state = ListRenderState {
+                    ordered: start.is_some(),
+                    next_index: start.unwrap_or(1),
+                };
+                list_stack.push(state);
+            }
+            Event::End(TagEnd::List(_)) => {
+                list_stack.pop();
+                flush_current_line(&mut lines, &mut current_spans);
+            }
+
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                link_targets.push(dest_url.to_string());
+            }
+            Event::End(TagEnd::Link) => {
+                if let Some(url) = link_targets.pop() {
+                    if !url.is_empty() {
+                        current_spans.push(Span::styled(
+                            format!(" ({})", url),
+                            Style::default().fg(DIM_COLOR),
+                        ));
+                    }
+                }
+            }
+
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                in_image = true;
+                image_url = Some(dest_url.to_string());
+                image_alt.clear();
+            }
+            Event::End(TagEnd::Image) => {
+                let alt = if image_alt.trim().is_empty() {
+                    "image".to_string()
+                } else {
+                    image_alt.trim().to_string()
+                };
+                let label = if let Some(url) = image_url.take() {
+                    format!("[image: {}] ({})", alt, url)
+                } else {
+                    format!("[image: {}]", alt)
+                };
+                if in_table {
+                    current_cell.push_str(&label);
+                } else {
+                    ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                    current_spans.push(Span::styled(label, Style::default().fg(DIM_COLOR)));
+                }
+                in_image = false;
+                image_alt.clear();
+            }
+
+            Event::Start(Tag::FootnoteDefinition(label)) => {
+                flush_current_line(&mut lines, &mut current_spans);
+                ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                current_spans.push(Span::styled(
+                    format!("[^{}]: ", label),
+                    Style::default().fg(DIM_COLOR),
+                ));
+            }
+            Event::End(TagEnd::FootnoteDefinition) => {
+                flush_current_line(&mut lines, &mut current_spans);
+            }
+
+            Event::Start(Tag::DefinitionList) => {
+                flush_current_line(&mut lines, &mut current_spans);
+            }
+            Event::End(TagEnd::DefinitionList) => {
+                flush_current_line(&mut lines, &mut current_spans);
+                lines.push(Line::default());
+            }
+            Event::Start(Tag::DefinitionListTitle) => {
+                flush_current_line(&mut lines, &mut current_spans);
+                ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                current_spans.push(Span::styled("• ", Style::default().fg(DIM_COLOR)));
+            }
+            Event::End(TagEnd::DefinitionListTitle) => {
+                flush_current_line(&mut lines, &mut current_spans);
+            }
+            Event::Start(Tag::DefinitionListDefinition) => {
+                flush_current_line(&mut lines, &mut current_spans);
+                ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                current_spans.push(Span::styled("  -> ", Style::default().fg(DIM_COLOR)));
+                in_definition_item = true;
+            }
+            Event::End(TagEnd::DefinitionListDefinition) => {
+                flush_current_line(&mut lines, &mut current_spans);
+                in_definition_item = false;
+            }
+
             Event::Start(Tag::CodeBlock(kind)) => {
                 dbg_code_blocks += 1;
                 // Flush current line before code block
-                if !current_spans.is_empty() {
-                    lines.push(Line::from(std::mem::take(&mut current_spans)));
-                }
+                flush_current_line(&mut lines, &mut current_spans);
                 in_code_block = true;
                 code_block_lang = match kind {
                     CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.to_string()),
@@ -433,9 +689,25 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
 
                 if is_mermaid {
                     dbg_mermaid_blocks += 1;
-                    // Render mermaid diagram (registers active diagram for sidebar)
+                    // Render mermaid diagram.
+                    // In streaming mode this updates only the ephemeral preview entry.
                     let terminal_width = max_width.and_then(|w| u16::try_from(w).ok());
-                    let result = mermaid::render_mermaid_sized(&code_block_content, terminal_width);
+                    let result = if streaming_mode {
+                        mermaid::render_mermaid_untracked(&code_block_content, terminal_width)
+                    } else {
+                        mermaid::render_mermaid_sized(&code_block_content, terminal_width)
+                    };
+                    if streaming_mode {
+                        if let mermaid::RenderResult::Image {
+                            hash,
+                            width,
+                            height,
+                            ..
+                        } = &result
+                        {
+                            mermaid::set_streaming_preview_diagram(*hash, *width, *height, None);
+                        }
+                    }
                     match result {
                         mermaid::RenderResult::Image { .. } if side_only => {
                             lines.push(mermaid_sidebar_placeholder("↗ mermaid diagram (sidebar)"));
@@ -512,27 +784,74 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
             }
 
             Event::Code(code) => {
+                if in_image {
+                    image_alt.push_str(&code);
+                    continue;
+                }
                 // Inline code - handle differently in tables vs regular text
                 if in_table {
                     current_cell.push_str(&code);
                 } else {
+                    ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
                     current_spans.push(Span::styled(
                         code.to_string(),
-                        Style::default().fg(CODE_FG).bg(CODE_BG),
+                        apply_inline_decorations(
+                            Style::default().fg(CODE_FG).bg(CODE_BG),
+                            strike,
+                            !link_targets.is_empty(),
+                        ),
                     ));
+                }
+            }
+
+            Event::InlineMath(math) => {
+                if in_image {
+                    image_alt.push('$');
+                    image_alt.push_str(&math);
+                    image_alt.push('$');
+                    continue;
+                }
+                if in_table {
+                    current_cell.push('$');
+                    current_cell.push_str(&math);
+                    current_cell.push('$');
+                } else {
+                    ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                    current_spans.push(math_inline_span(&math));
+                }
+            }
+
+            Event::DisplayMath(math) => {
+                if in_image {
+                    image_alt.push_str("$$");
+                    image_alt.push_str(&math);
+                    image_alt.push_str("$$");
+                    continue;
+                }
+                flush_current_line(&mut lines, &mut current_spans);
+                if in_table {
+                    current_cell.push_str("$$");
+                    current_cell.push_str(&math);
+                    current_cell.push_str("$$");
+                } else {
+                    for line in math_display_lines(&math) {
+                        lines.push(with_blockquote_prefix(line, blockquote_depth));
+                    }
                 }
             }
 
             Event::Text(text) => {
                 if in_code_block {
                     code_block_content.push_str(&text);
+                } else if in_image {
+                    image_alt.push_str(&text);
                 } else if in_table {
                     current_cell.push_str(&text);
                 } else {
                     // Check for "Thought for X.Xs" pattern and render dimmed
                     let is_thinking_duration =
                         text.starts_with("Thought for ") && text.ends_with('s');
-                    let style = if is_thinking_duration {
+                    let mut style = if is_thinking_duration {
                         Style::default().fg(DIM_COLOR).italic()
                     } else {
                         match (bold, italic) {
@@ -542,47 +861,121 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                             (false, false) => Style::default().fg(TEXT_COLOR),
                         }
                     };
+                    style = apply_inline_decorations(style, strike, !link_targets.is_empty());
+                    ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
                     current_spans.push(Span::styled(text.to_string(), style));
                 }
             }
 
             Event::SoftBreak => {
-                if !in_code_block {
+                if in_image {
+                    image_alt.push(' ');
+                } else if !in_code_block {
                     current_spans.push(Span::raw(" "));
                 }
             }
             Event::HardBreak => {
-                if !in_code_block {
-                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+                if in_image {
+                    image_alt.push(' ');
+                } else if !in_code_block {
+                    flush_current_line(&mut lines, &mut current_spans);
                 }
             }
 
-            Event::Start(Tag::Paragraph) => {}
-            Event::End(TagEnd::Paragraph) => {
-                if !current_spans.is_empty() {
-                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+            Event::Rule => {
+                flush_current_line(&mut lines, &mut current_spans);
+                let rule = Span::styled("─".repeat(RULE_LEN), Style::default().fg(DIM_COLOR));
+                lines.push(with_blockquote_prefix(Line::from(rule), blockquote_depth));
+            }
+
+            Event::Html(html) => {
+                flush_current_line(&mut lines, &mut current_spans);
+                for raw in html.lines() {
+                    let span = Span::styled(raw.to_string(), Style::default().fg(HTML_FG).italic());
+                    lines.push(with_blockquote_prefix(Line::from(span), blockquote_depth));
                 }
+            }
+
+            Event::InlineHtml(html) => {
+                if in_image {
+                    image_alt.push_str(&html);
+                } else if in_table {
+                    current_cell.push_str(&html);
+                } else {
+                    ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                    current_spans.push(Span::styled(
+                        html.to_string(),
+                        Style::default().fg(HTML_FG).italic(),
+                    ));
+                }
+            }
+
+            Event::FootnoteReference(label) => {
+                if in_image {
+                    image_alt.push_str(&format!("[^{}]", label));
+                } else if in_table {
+                    current_cell.push_str(&format!("[^{}]", label));
+                } else {
+                    ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                    current_spans.push(Span::styled(
+                        format!("[^{}]", label),
+                        Style::default().fg(DIM_COLOR),
+                    ));
+                }
+            }
+
+            Event::TaskListMarker(checked) => {
+                if in_table {
+                    current_cell.push_str(if checked { "[x] " } else { "[ ] " });
+                } else {
+                    ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                    current_spans.push(Span::styled(
+                        if checked { "[x] " } else { "[ ] " },
+                        Style::default().fg(DIM_COLOR),
+                    ));
+                }
+            }
+
+            Event::Start(Tag::Paragraph) => {
+                ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                if in_definition_item && current_spans.is_empty() {
+                    current_spans.push(Span::styled("  ", Style::default().fg(DIM_COLOR)));
+                }
+            }
+            Event::End(TagEnd::Paragraph) => {
+                flush_current_line(&mut lines, &mut current_spans);
                 // Add blank line after paragraph for visual separation
                 lines.push(Line::default());
             }
 
             Event::Start(Tag::Item) => {
                 dbg_list_items += 1;
-                current_spans.push(Span::styled("• ", Style::default().fg(DIM_COLOR)));
+                flush_current_line(&mut lines, &mut current_spans);
+                ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                let depth = list_stack.len().saturating_sub(1);
+                let indent = "  ".repeat(depth);
+                let marker = if let Some(state) = list_stack.last_mut() {
+                    if state.ordered {
+                        let idx = state.next_index;
+                        state.next_index = state.next_index.saturating_add(1);
+                        format!("{}{}. ", indent, idx)
+                    } else {
+                        format!("{}• ", indent)
+                    }
+                } else {
+                    "• ".to_string()
+                };
+                current_spans.push(Span::styled(marker, Style::default().fg(DIM_COLOR)));
             }
             Event::End(TagEnd::Item) => {
-                if !current_spans.is_empty() {
-                    lines.push(Line::from(std::mem::take(&mut current_spans)));
-                }
+                flush_current_line(&mut lines, &mut current_spans);
             }
 
             // Table handling
             Event::Start(Tag::Table(_)) => {
                 dbg_tables += 1;
                 // Flush any pending content
-                if !current_spans.is_empty() {
-                    lines.push(Line::from(std::mem::take(&mut current_spans)));
-                }
+                flush_current_line(&mut lines, &mut current_spans);
                 in_table = true;
                 table_rows.clear();
             }
@@ -623,6 +1016,13 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
             Event::End(TagEnd::TableCell) => {
                 table_row.push(current_cell.trim().to_string());
                 current_cell.clear();
+            }
+
+            Event::Start(Tag::MetadataBlock(_)) => {
+                flush_current_line(&mut lines, &mut current_spans);
+            }
+            Event::End(TagEnd::MetadataBlock(_)) => {
+                flush_current_line(&mut lines, &mut current_spans);
             }
 
             _ => {}
@@ -977,11 +1377,19 @@ pub fn render_markdown_lazy(
     // Style stack for nested formatting
     let mut bold = false;
     let mut italic = false;
+    let mut strike = false;
     let mut in_code_block = false;
     let mut code_block_lang: Option<String> = None;
     let mut code_block_content = String::new();
     let mut code_block_start_line: usize = 0;
     let mut heading_level: Option<u8> = None;
+    let mut blockquote_depth = 0usize;
+    let mut list_stack: Vec<ListRenderState> = Vec::new();
+    let mut link_targets: Vec<String> = Vec::new();
+    let mut in_image = false;
+    let mut image_url: Option<String> = None;
+    let mut image_alt = String::new();
+    let mut in_definition_item = false;
 
     // Table state
     let mut in_table = false;
@@ -993,14 +1401,19 @@ pub fn render_markdown_lazy(
     // Enable table parsing
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_MATH);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_FOOTNOTES);
+    options.insert(Options::ENABLE_GFM);
+    options.insert(Options::ENABLE_DEFINITION_LIST);
+    options.insert(Options::ENABLE_SMART_PUNCTUATION);
     let parser = Parser::new_ext(text, options);
 
     for event in parser {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
-                if !current_spans.is_empty() {
-                    lines.push(Line::from(std::mem::take(&mut current_spans)));
-                }
+                flush_current_line(&mut lines, &mut current_spans);
                 heading_level = Some(level as u8);
             }
             Event::End(TagEnd::Heading(_)) => {
@@ -1029,10 +1442,111 @@ pub fn render_markdown_lazy(
             Event::Start(Tag::Emphasis) => italic = true,
             Event::End(TagEnd::Emphasis) => italic = false,
 
-            Event::Start(Tag::CodeBlock(kind)) => {
-                if !current_spans.is_empty() {
-                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+            Event::Start(Tag::Strikethrough) => strike = true,
+            Event::End(TagEnd::Strikethrough) => strike = false,
+
+            Event::Start(Tag::BlockQuote(_)) => {
+                flush_current_line(&mut lines, &mut current_spans);
+                blockquote_depth += 1;
+            }
+            Event::End(TagEnd::BlockQuote(_)) => {
+                flush_current_line(&mut lines, &mut current_spans);
+                blockquote_depth = blockquote_depth.saturating_sub(1);
+                lines.push(Line::default());
+            }
+
+            Event::Start(Tag::List(start)) => {
+                let state = ListRenderState {
+                    ordered: start.is_some(),
+                    next_index: start.unwrap_or(1),
+                };
+                list_stack.push(state);
+            }
+            Event::End(TagEnd::List(_)) => {
+                list_stack.pop();
+                flush_current_line(&mut lines, &mut current_spans);
+            }
+
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                link_targets.push(dest_url.to_string());
+            }
+            Event::End(TagEnd::Link) => {
+                if let Some(url) = link_targets.pop() {
+                    if !url.is_empty() {
+                        current_spans.push(Span::styled(
+                            format!(" ({})", url),
+                            Style::default().fg(DIM_COLOR),
+                        ));
+                    }
                 }
+            }
+
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                in_image = true;
+                image_url = Some(dest_url.to_string());
+                image_alt.clear();
+            }
+            Event::End(TagEnd::Image) => {
+                let alt = if image_alt.trim().is_empty() {
+                    "image".to_string()
+                } else {
+                    image_alt.trim().to_string()
+                };
+                let label = if let Some(url) = image_url.take() {
+                    format!("[image: {}] ({})", alt, url)
+                } else {
+                    format!("[image: {}]", alt)
+                };
+                if in_table {
+                    current_cell.push_str(&label);
+                } else {
+                    ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                    current_spans.push(Span::styled(label, Style::default().fg(DIM_COLOR)));
+                }
+                in_image = false;
+                image_alt.clear();
+            }
+
+            Event::Start(Tag::FootnoteDefinition(label)) => {
+                flush_current_line(&mut lines, &mut current_spans);
+                ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                current_spans.push(Span::styled(
+                    format!("[^{}]: ", label),
+                    Style::default().fg(DIM_COLOR),
+                ));
+            }
+            Event::End(TagEnd::FootnoteDefinition) => {
+                flush_current_line(&mut lines, &mut current_spans);
+            }
+
+            Event::Start(Tag::DefinitionList) => {
+                flush_current_line(&mut lines, &mut current_spans);
+            }
+            Event::End(TagEnd::DefinitionList) => {
+                flush_current_line(&mut lines, &mut current_spans);
+                lines.push(Line::default());
+            }
+            Event::Start(Tag::DefinitionListTitle) => {
+                flush_current_line(&mut lines, &mut current_spans);
+                ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                current_spans.push(Span::styled("• ", Style::default().fg(DIM_COLOR)));
+            }
+            Event::End(TagEnd::DefinitionListTitle) => {
+                flush_current_line(&mut lines, &mut current_spans);
+            }
+            Event::Start(Tag::DefinitionListDefinition) => {
+                flush_current_line(&mut lines, &mut current_spans);
+                ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                current_spans.push(Span::styled("  -> ", Style::default().fg(DIM_COLOR)));
+                in_definition_item = true;
+            }
+            Event::End(TagEnd::DefinitionListDefinition) => {
+                flush_current_line(&mut lines, &mut current_spans);
+                in_definition_item = false;
+            }
+
+            Event::Start(Tag::CodeBlock(kind)) => {
+                flush_current_line(&mut lines, &mut current_spans);
                 in_code_block = true;
                 code_block_start_line = lines.len();
                 code_block_lang = match kind {
@@ -1158,26 +1672,73 @@ pub fn render_markdown_lazy(
             }
 
             Event::Code(code) => {
+                if in_image {
+                    image_alt.push_str(&code);
+                    continue;
+                }
                 // Inline code - handle differently in tables vs regular text
                 if in_table {
                     current_cell.push_str(&code);
                 } else {
+                    ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
                     current_spans.push(Span::styled(
                         code.to_string(),
-                        Style::default().fg(CODE_FG).bg(CODE_BG),
+                        apply_inline_decorations(
+                            Style::default().fg(CODE_FG).bg(CODE_BG),
+                            strike,
+                            !link_targets.is_empty(),
+                        ),
                     ));
+                }
+            }
+
+            Event::InlineMath(math) => {
+                if in_image {
+                    image_alt.push('$');
+                    image_alt.push_str(&math);
+                    image_alt.push('$');
+                    continue;
+                }
+                if in_table {
+                    current_cell.push('$');
+                    current_cell.push_str(&math);
+                    current_cell.push('$');
+                } else {
+                    ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                    current_spans.push(math_inline_span(&math));
+                }
+            }
+
+            Event::DisplayMath(math) => {
+                if in_image {
+                    image_alt.push_str("$$");
+                    image_alt.push_str(&math);
+                    image_alt.push_str("$$");
+                    continue;
+                }
+                flush_current_line(&mut lines, &mut current_spans);
+                if in_table {
+                    current_cell.push_str("$$");
+                    current_cell.push_str(&math);
+                    current_cell.push_str("$$");
+                } else {
+                    for line in math_display_lines(&math) {
+                        lines.push(with_blockquote_prefix(line, blockquote_depth));
+                    }
                 }
             }
 
             Event::Text(text) => {
                 if in_code_block {
                     code_block_content.push_str(&text);
+                } else if in_image {
+                    image_alt.push_str(&text);
                 } else if in_table {
                     current_cell.push_str(&text);
                 } else {
                     let is_thinking_duration =
                         text.starts_with("Thought for ") && text.ends_with('s');
-                    let style = if is_thinking_duration {
+                    let mut style = if is_thinking_duration {
                         Style::default().fg(DIM_COLOR).italic()
                     } else {
                         match (bold, italic) {
@@ -1187,42 +1748,116 @@ pub fn render_markdown_lazy(
                             (false, false) => Style::default().fg(TEXT_COLOR),
                         }
                     };
+                    style = apply_inline_decorations(style, strike, !link_targets.is_empty());
+                    ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
                     current_spans.push(Span::styled(text.to_string(), style));
                 }
             }
 
             Event::SoftBreak => {
-                if !in_code_block {
+                if in_image {
+                    image_alt.push(' ');
+                } else if !in_code_block {
                     current_spans.push(Span::raw(" "));
                 }
             }
             Event::HardBreak => {
-                if !in_code_block {
-                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+                if in_image {
+                    image_alt.push(' ');
+                } else if !in_code_block {
+                    flush_current_line(&mut lines, &mut current_spans);
                 }
             }
 
-            Event::Start(Tag::Paragraph) => {}
-            Event::End(TagEnd::Paragraph) => {
-                if !current_spans.is_empty() {
-                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+            Event::Rule => {
+                flush_current_line(&mut lines, &mut current_spans);
+                let rule = Span::styled("─".repeat(RULE_LEN), Style::default().fg(DIM_COLOR));
+                lines.push(with_blockquote_prefix(Line::from(rule), blockquote_depth));
+            }
+
+            Event::Html(html) => {
+                flush_current_line(&mut lines, &mut current_spans);
+                for raw in html.lines() {
+                    let span = Span::styled(raw.to_string(), Style::default().fg(HTML_FG).italic());
+                    lines.push(with_blockquote_prefix(Line::from(span), blockquote_depth));
                 }
+            }
+
+            Event::InlineHtml(html) => {
+                if in_image {
+                    image_alt.push_str(&html);
+                } else if in_table {
+                    current_cell.push_str(&html);
+                } else {
+                    ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                    current_spans.push(Span::styled(
+                        html.to_string(),
+                        Style::default().fg(HTML_FG).italic(),
+                    ));
+                }
+            }
+
+            Event::FootnoteReference(label) => {
+                if in_image {
+                    image_alt.push_str(&format!("[^{}]", label));
+                } else if in_table {
+                    current_cell.push_str(&format!("[^{}]", label));
+                } else {
+                    ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                    current_spans.push(Span::styled(
+                        format!("[^{}]", label),
+                        Style::default().fg(DIM_COLOR),
+                    ));
+                }
+            }
+
+            Event::TaskListMarker(checked) => {
+                if in_table {
+                    current_cell.push_str(if checked { "[x] " } else { "[ ] " });
+                } else {
+                    ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                    current_spans.push(Span::styled(
+                        if checked { "[x] " } else { "[ ] " },
+                        Style::default().fg(DIM_COLOR),
+                    ));
+                }
+            }
+
+            Event::Start(Tag::Paragraph) => {
+                ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                if in_definition_item && current_spans.is_empty() {
+                    current_spans.push(Span::styled("  ", Style::default().fg(DIM_COLOR)));
+                }
+            }
+            Event::End(TagEnd::Paragraph) => {
+                flush_current_line(&mut lines, &mut current_spans);
                 lines.push(Line::default());
             }
 
             Event::Start(Tag::Item) => {
-                current_spans.push(Span::styled("• ", Style::default().fg(DIM_COLOR)));
+                flush_current_line(&mut lines, &mut current_spans);
+                ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                let depth = list_stack.len().saturating_sub(1);
+                let indent = "  ".repeat(depth);
+                let marker = if let Some(state) = list_stack.last_mut() {
+                    if state.ordered {
+                        let idx = state.next_index;
+                        state.next_index = state.next_index.saturating_add(1);
+                        format!("{}{}. ", indent, idx)
+                    } else {
+                        format!("{}• ", indent)
+                    }
+                } else {
+                    "• ".to_string()
+                };
+                current_spans.push(Span::styled(marker, Style::default().fg(DIM_COLOR)));
             }
             Event::End(TagEnd::Item) => {
-                if !current_spans.is_empty() {
-                    lines.push(Line::from(std::mem::take(&mut current_spans)));
-                }
+                flush_current_line(&mut lines, &mut current_spans);
             }
 
             Event::Start(Tag::Table(_)) => {
-                if !current_spans.is_empty() {
-                    lines.push(Line::from(std::mem::take(&mut current_spans)));
-                }
+                flush_current_line(&mut lines, &mut current_spans);
                 in_table = true;
                 table_rows.clear();
             }
@@ -1262,6 +1897,13 @@ pub fn render_markdown_lazy(
             Event::End(TagEnd::TableCell) => {
                 table_row.push(current_cell.trim().to_string());
                 current_cell.clear();
+            }
+
+            Event::Start(Tag::MetadataBlock(_)) => {
+                flush_current_line(&mut lines, &mut current_spans);
+            }
+            Event::End(TagEnd::MetadataBlock(_)) => {
+                flush_current_line(&mut lines, &mut current_spans);
             }
 
             _ => {}
@@ -1532,6 +2174,65 @@ mod tests {
     }
 
     #[test]
+    fn test_inline_math_render() {
+        let lines = render_markdown("Area is $a^2$.");
+        let rendered = lines_to_string(&lines);
+        assert!(rendered.contains("$a^2$"));
+    }
+
+    #[test]
+    fn test_display_math_render() {
+        let lines = render_markdown("$$\nE = mc^2\n$$");
+        let rendered = lines_to_string(&lines);
+        assert!(rendered.contains("┌─ math"));
+        assert!(rendered.contains("E = mc^2"));
+        assert!(rendered.contains("└─"));
+    }
+
+    #[test]
+    fn test_link_strike_and_image_render() {
+        let md = "This is ~~old~~ and [docs](https://example.com).\n\n![chart](https://img.example/chart.png)";
+        let lines = render_markdown(md);
+        let rendered = lines_to_string(&lines);
+        assert!(rendered.contains("old"));
+        assert!(rendered.contains("docs (https://example.com)"));
+        assert!(rendered.contains("[image: chart] (https://img.example/chart.png)"));
+    }
+
+    #[test]
+    fn test_ordered_and_task_list_render() {
+        let md = "1. first\n2. second\n\n- [x] done\n- [ ] todo";
+        let lines = render_markdown(md);
+        let rendered = lines_to_string(&lines);
+        assert!(rendered.contains("1. first"));
+        assert!(rendered.contains("2. second"));
+        assert!(rendered.contains("[x] done"));
+        assert!(rendered.contains("[ ] todo"));
+    }
+
+    #[test]
+    fn test_blockquote_footnote_and_definition_list_render() {
+        let md = "> quote line\n\nRef[^a]\n\n[^a]: footnote body\n\nTerm\n  : definition text";
+        let lines = render_markdown(md);
+        let rendered = lines_to_string(&lines);
+        assert!(rendered.contains("│ quote line"));
+        assert!(rendered.contains("[^a]"));
+        assert!(rendered.contains("[^a]: footnote body"));
+        assert!(rendered.contains("Term"));
+        assert!(rendered.contains("definition text"));
+    }
+
+    #[test]
+    fn test_rule_and_inline_html_render() {
+        let md = "before\n\n---\n\ninline <span>html</span> tag";
+        let lines = render_markdown(md);
+        let rendered = lines_to_string(&lines);
+        assert!(rendered.contains("────────────────"));
+        assert!(rendered.contains("<span>"));
+        assert!(rendered.contains("</span>"));
+    }
+
+    #[test]
     fn test_incremental_renderer_basic() {
         let mut renderer = IncrementalMarkdownRenderer::new(Some(80));
 
@@ -1560,6 +2261,35 @@ mod tests {
 
         // Should have rendered both paragraphs
         assert!(lines.len() >= 2);
+    }
+
+    #[test]
+    fn test_incremental_renderer_streaming_inline_math() {
+        let mut renderer = IncrementalMarkdownRenderer::new(Some(80));
+        let _ = renderer.update("Compute $x");
+        let lines = renderer.update("Compute $x$");
+        let rendered = lines_to_string(&lines);
+        assert!(rendered.contains("$x$"));
+    }
+
+    #[test]
+    fn test_incremental_renderer_streaming_display_math() {
+        let mut renderer = IncrementalMarkdownRenderer::new(Some(80));
+        let _ = renderer.update("Intro\n\n$$\nA + B");
+        let lines = renderer.update("Intro\n\n$$\nA + B\n$$\n");
+        let rendered = lines_to_string(&lines);
+
+        assert!(
+            rendered.contains("┌─ math"),
+            "expected display math block after closing delimiter: {}",
+            rendered
+        );
+        assert!(rendered.contains("│ A + B"), "expected math body");
+        assert!(
+            !rendered.contains("$$"),
+            "expected raw $$ delimiters to be consumed: {}",
+            rendered
+        );
     }
 
     #[test]
