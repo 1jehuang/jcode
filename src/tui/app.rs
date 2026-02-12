@@ -2812,22 +2812,25 @@ impl App {
 
     /// Restart this client into the current stable binary.
     fn spawn_stable_release(&mut self, resume_session_id: String) {
-        let stable_binary = match crate::build::stable_binary_path() {
-            Ok(path) if path.exists() => path,
-            Ok(path) => {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Stable binary not found at {}. Run `cargo build --release && scripts/install_release.sh` first.",
-                    path.display()
-                )));
+        let stable_binary = crate::build::stable_binary_path()
+            .ok()
+            .filter(|p| p.exists())
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .map(|home| home.join(".local").join("bin").join("jcode"))
+                    .filter(|p| p.exists())
+            })
+            .or_else(|| crate::build::jcode_path_in_path().filter(|p| p.exists()));
+
+        let stable_binary = match stable_binary {
+            Some(path) => path,
+            None => {
+                self.push_display_message(DisplayMessage::error(
+                    "Stable binary not found. Run `cargo build --release && scripts/install_release.sh` first."
+                        .to_string(),
+                ));
                 self.set_status_notice("Stable binary not found");
-                return;
-            }
-            Err(e) => {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Failed to resolve stable binary path: {}",
-                    e
-                )));
-                self.set_status_notice("Stable binary unavailable");
                 return;
             }
         };
