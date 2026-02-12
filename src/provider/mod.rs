@@ -177,6 +177,8 @@ pub const ALL_CLAUDE_MODELS: &[&str] = &["claude-opus-4-6", "claude-opus-4-5-202
 
 pub const ALL_OPENAI_MODELS: &[&str] = &[
     "codex-mini-latest",
+    "gpt-5.3-codex",
+    "gpt-5.3-codex-spark",
     "gpt-5.2-chat-latest",
     "gpt-5.2-codex",
     "gpt-5.2-pro",
@@ -201,6 +203,10 @@ pub const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
 /// Return the context window size in tokens for a given model, if known.
 pub fn context_limit_for_model(model: &str) -> Option<usize> {
     let model = model.to_lowercase();
+
+    if model.starts_with("gpt-5.3-codex") {
+        return Some(400_000);
+    }
 
     if model.starts_with("gpt-5.2-chat")
         || model.starts_with("gpt-5.1-chat")
