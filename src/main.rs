@@ -191,7 +191,7 @@ fn spawn_session_signal_watchers() {
 #[cfg(not(unix))]
 fn spawn_session_signal_watchers() {}
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, PartialEq, Eq, ValueEnum)]
 enum ProviderChoice {
     Claude,
     ClaudeSubprocess,
@@ -200,6 +200,20 @@ enum ProviderChoice {
     Copilot,
     Antigravity,
     Auto,
+}
+
+impl ProviderChoice {
+    fn as_arg_value(&self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::ClaudeSubprocess => "claude-subprocess",
+            Self::Openai => "openai",
+            Self::Cursor => "cursor",
+            Self::Copilot => "copilot",
+            Self::Antigravity => "antigravity",
+            Self::Auto => "auto",
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -599,6 +613,21 @@ async fn run_main(mut args: Args) -> Result<()> {
                     false
                 };
 
+                if server_running && (args.provider != ProviderChoice::Auto || args.model.is_some())
+                {
+                    eprintln!(
+                        "Server already running; provider/model flags only apply when starting a new server."
+                    );
+                    eprintln!(
+                        "Current server settings control `/model`. Restart server to apply: --provider {}{}",
+                        args.provider.as_arg_value(),
+                        args.model
+                            .as_ref()
+                            .map(|m| format!(" --model {}", m))
+                            .unwrap_or_default()
+                    );
+                }
+
                 if !server_running {
                     // Clean up any stale sockets
                     let _ = std::fs::remove_file(server::socket_path());
@@ -607,7 +636,12 @@ async fn run_main(mut args: Args) -> Result<()> {
                     // Start server in background
                     eprintln!("Starting server...");
                     let exe = std::env::current_exe()?;
-                    let mut child = std::process::Command::new(&exe)
+                    let mut cmd = std::process::Command::new(&exe);
+                    cmd.arg("--provider").arg(args.provider.as_arg_value());
+                    if let Some(model) = args.model.as_deref() {
+                        cmd.arg("--model").arg(model);
+                    }
+                    let mut child = cmd
                         .arg("serve")
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
@@ -2644,6 +2678,20 @@ mod tests {
                 panic!("Session ID should be set");
             }
         }
+    }
+
+    #[test]
+    fn test_provider_choice_arg_values() {
+        assert_eq!(ProviderChoice::Claude.as_arg_value(), "claude");
+        assert_eq!(
+            ProviderChoice::ClaudeSubprocess.as_arg_value(),
+            "claude-subprocess"
+        );
+        assert_eq!(ProviderChoice::Openai.as_arg_value(), "openai");
+        assert_eq!(ProviderChoice::Cursor.as_arg_value(), "cursor");
+        assert_eq!(ProviderChoice::Copilot.as_arg_value(), "copilot");
+        assert_eq!(ProviderChoice::Antigravity.as_arg_value(), "antigravity");
+        assert_eq!(ProviderChoice::Auto.as_arg_value(), "auto");
     }
 }
 
