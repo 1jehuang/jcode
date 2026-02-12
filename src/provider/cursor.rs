@@ -9,7 +9,13 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 const DEFAULT_MODEL: &str = "gpt-5";
-const AVAILABLE_MODELS: &[&str] = &["gpt-5", "sonnet-4", "sonnet-4-thinking"];
+const AVAILABLE_MODELS: &[&str] = &[
+    "composer-1",
+    "composer-1.5",
+    "gpt-5",
+    "sonnet-4",
+    "sonnet-4-thinking",
+];
 
 pub struct CursorCliProvider {
     cli_path: String,
@@ -108,5 +114,29 @@ impl Provider for CursorCliProvider {
             cli_path: self.cli_path.clone(),
             model: Arc::new(RwLock::new(self.model())),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn available_models_include_composer_models() {
+        let provider = CursorCliProvider::new();
+        let models = provider.available_models();
+        assert!(models.contains(&"composer-1"));
+        assert!(models.contains(&"composer-1.5"));
+    }
+
+    #[test]
+    fn set_model_accepts_composer_models() {
+        let provider = CursorCliProvider::new();
+
+        provider.set_model("composer-1").unwrap();
+        assert_eq!(provider.model(), "composer-1");
+
+        provider.set_model("composer-1.5").unwrap();
+        assert_eq!(provider.model(), "composer-1.5");
     }
 }
