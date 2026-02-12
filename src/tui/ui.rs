@@ -1158,6 +1158,51 @@ fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
+    if divisor == 0 {
+        return value;
+    }
+    value.saturating_add(divisor - 1) / divisor
+}
+
+fn estimate_pinned_diagram_pane_width_with_font(
+    diagram: &info_widget::DiagramInfo,
+    pane_height: u16,
+    min_width: u16,
+    font_size: Option<(u16, u16)>,
+) -> u16 {
+    const PANE_BORDER_WIDTH: u32 = 2;
+    let inner_height = pane_height.saturating_sub(PANE_BORDER_WIDTH as u16).max(1) as u32;
+    let (cell_w, cell_h) = font_size.unwrap_or((8, 16));
+    let cell_w = cell_w.max(1) as u32;
+    let cell_h = cell_h.max(1) as u32;
+
+    let image_w_cells = div_ceil_u32(diagram.width.max(1), cell_w);
+    let image_h_cells = div_ceil_u32(diagram.height.max(1), cell_h);
+    let fit_w_cells = if image_h_cells > inner_height {
+        div_ceil_u32(image_w_cells.saturating_mul(inner_height), image_h_cells)
+    } else {
+        image_w_cells
+    }
+    .max(1);
+
+    let pane_width = fit_w_cells.saturating_add(PANE_BORDER_WIDTH);
+    pane_width.max(min_width as u32).min(u16::MAX as u32) as u16
+}
+
+fn estimate_pinned_diagram_pane_width(
+    diagram: &info_widget::DiagramInfo,
+    pane_height: u16,
+    min_width: u16,
+) -> u16 {
+    estimate_pinned_diagram_pane_width_with_font(
+        diagram,
+        pane_height,
+        min_width,
+        super::mermaid::get_font_size(),
+    )
+}
+
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let area = frame.area().intersection(*frame.buffer_mut().area());
     if area.width == 0 || area.height == 0 {
@@ -1223,18 +1268,30 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         };
     let diagram_focus = app.diagram_focus();
     let (diagram_scroll_x, diagram_scroll_y) = app.diagram_scroll();
+    let message_height_budget = area
+        .height
+        .saturating_sub(1 + queued_height + picker_height + input_height)
+        .max(3);
 
     let mut diagram_width = 0u16;
     let mut messages_width = area.width;
     let mut has_pinned_area = false;
-    if pinned_diagram.is_some() {
-        const MIN_DIAGRAM_WIDTH: u16 = 30;
+    if let Some(diagram) = pinned_diagram.as_ref() {
+        const MIN_DIAGRAM_WIDTH: u16 = 24;
         const MIN_MESSAGES_WIDTH: u16 = 20;
         let max_diagram = area.width.saturating_sub(MIN_MESSAGES_WIDTH);
         if max_diagram >= MIN_DIAGRAM_WIDTH {
             let ratio = app.diagram_pane_ratio().clamp(25, 70) as u32;
-            diagram_width = ((area.width as u32 * ratio) / 100) as u16;
-            diagram_width = diagram_width.max(MIN_DIAGRAM_WIDTH).min(max_diagram);
+            let ratio_cap = ((area.width as u32 * ratio) / 100) as u16;
+            let needed = estimate_pinned_diagram_pane_width(
+                diagram,
+                message_height_budget,
+                MIN_DIAGRAM_WIDTH,
+            );
+            diagram_width = needed
+                .min(ratio_cap)
+                .max(MIN_DIAGRAM_WIDTH)
+                .min(max_diagram);
             messages_width = area.width.saturating_sub(diagram_width);
             has_pinned_area = diagram_width > 0 && messages_width > 0;
             if messages_width > 0 && messages_width != area.width {
@@ -4532,5 +4589,29 @@ mod tests {
         // right-aligned: used=5 => left=15, right=0
         assert_eq!(margins.left_widths[2], 15);
         assert_eq!(margins.right_widths[2], 0);
+    }
+
+    #[test]
+    fn test_estimate_pinned_diagram_pane_width_scales_to_height() {
+        let diagram = info_widget::DiagramInfo {
+            hash: 1,
+            width: 800,
+            height: 600,
+            label: None,
+        };
+        let width = estimate_pinned_diagram_pane_width_with_font(&diagram, 20, 24, Some((8, 16)));
+        assert_eq!(width, 50);
+    }
+
+    #[test]
+    fn test_estimate_pinned_diagram_pane_width_respects_minimum() {
+        let diagram = info_widget::DiagramInfo {
+            hash: 2,
+            width: 120,
+            height: 120,
+            label: None,
+        };
+        let width = estimate_pinned_diagram_pane_width_with_font(&diagram, 10, 24, Some((8, 16)));
+        assert_eq!(width, 24);
     }
 }
