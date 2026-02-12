@@ -1192,8 +1192,11 @@ async fn test_ambient_request_permission_tool() -> Result<()> {
     registry.register_ambient_tools().await;
 
     let mut agent = Agent::new(provider, registry);
+    let ambient_session_id = agent.session_id().to_string();
+    jcode::tool::ambient::register_ambient_session(ambient_session_id.clone());
 
     let response = agent.run_once_capture("Request permission").await?;
+    jcode::tool::ambient::unregister_ambient_session(&ambient_session_id);
     assert_eq!(response, "Permission requested.");
 
     Ok(())

@@ -847,6 +847,7 @@ impl App {
     /// Configure ambient mode: override system prompt and queue an initial message.
     pub fn set_ambient_mode(&mut self, system_prompt: String, initial_message: String) {
         self.ambient_system_prompt = Some(system_prompt);
+        crate::tool::ambient::register_ambient_session(self.session.id.clone());
         self.queued_messages.push(initial_message);
         self.pending_turn = true;
     }
