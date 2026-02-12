@@ -289,6 +289,27 @@ impl AmbientRunnerHandle {
                 continue;
             }
 
+            // Drop stale permission requests whose originating session is no longer active.
+            match self
+                .inner
+                .safety
+                .expire_dead_session_requests("ambient_runner_gc")
+            {
+                Ok(expired) if !expired.is_empty() => {
+                    logging::info(&format!(
+                        "Ambient runner: expired {} stale permission request(s)",
+                        expired.len()
+                    ));
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    logging::warn(&format!(
+                        "Ambient runner: failed to expire stale permission requests: {}",
+                        e
+                    ));
+                }
+            }
+
             // Load manager to check should_run and update queue info
             let should_run = match AmbientManager::new() {
                 Ok(mgr) => {
@@ -547,6 +568,7 @@ impl AmbientRunnerHandle {
         // Check if end_ambient_cycle was called
         if let Some(result) = ambient_tools::take_cycle_result() {
             let conversation = agent.export_conversation_markdown();
+            agent.mark_closed();
             return Ok(AmbientCycleResult {
                 started_at,
                 ended_at: Utc::now(),
@@ -572,6 +594,7 @@ impl AmbientRunnerHandle {
         // Check again
         if let Some(result) = ambient_tools::take_cycle_result() {
             let conversation = agent.export_conversation_markdown();
+            agent.mark_closed();
             return Ok(AmbientCycleResult {
                 started_at,
                 ended_at: Utc::now(),
@@ -582,7 +605,7 @@ impl AmbientRunnerHandle {
 
         // Forced end
         logging::warn("Ambient cycle: forced end after 2 attempts without end_ambient_cycle");
-        Ok(AmbientCycleResult {
+        let forced = AmbientCycleResult {
             summary: "Cycle ended without calling end_ambient_cycle (forced end after 2 attempts)"
                 .to_string(),
             memories_modified: 0,
@@ -593,7 +616,9 @@ impl AmbientRunnerHandle {
             ended_at: Utc::now(),
             status: CycleStatus::Incomplete,
             conversation: Some(agent.export_conversation_markdown()),
-        })
+        };
+        agent.mark_closed();
+        Ok(forced)
     }
 
     /// Run a visible ambient cycle by spawning a full TUI in a kitty window.

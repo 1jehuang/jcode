@@ -316,6 +316,8 @@ struct RequestPermissionInput {
     urgency: Option<String>,
     #[serde(default = "default_false")]
     wait: bool,
+    #[serde(default)]
+    context: Option<Value>,
 }
 
 fn default_false() -> bool {
@@ -331,7 +333,8 @@ impl Tool for RequestPermissionTool {
     fn description(&self) -> &str {
         "Request user permission for a Tier 2 action (e.g., code changes, PRs, pushes). \
          The request is queued for user review. If wait=true, the tool blocks until a \
-         decision is made (with timeout)."
+         decision is made (with timeout). Include rich context so reviewers can make \
+         an informed decision."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -359,12 +362,16 @@ impl Tool for RequestPermissionTool {
                 "wait": {
                     "type": "boolean",
                     "description": "If true, block until user decides (with timeout). If false, queue and continue."
+                },
+                "context": {
+                    "type": "object",
+                    "description": "Additional review details (planned files, commands, impact, rollback plan, etc.)."
                 }
             }
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: RequestPermissionInput = serde_json::from_value(input)?;
 
         let urgency = match params.urgency.as_deref() {
@@ -374,6 +381,20 @@ impl Tool for RequestPermissionTool {
         };
 
         let request_id = safety::new_request_id();
+        let now = Utc::now();
+        let mut request_context = json!({
+            "session_id": ctx.session_id,
+            "message_id": ctx.message_id,
+            "tool_call_id": ctx.tool_call_id,
+            "working_dir": ctx.working_dir.as_ref().map(|p| p.display().to_string()),
+            "requested_at": now.to_rfc3339(),
+        });
+        if let Some(user_context) = params.context {
+            if let Some(obj) = request_context.as_object_mut() {
+                obj.insert("details".to_string(), user_context);
+            }
+        }
+
         let request = PermissionRequest {
             id: request_id.clone(),
             action: params.action.clone(),
@@ -381,8 +402,8 @@ impl Tool for RequestPermissionTool {
             rationale: params.rationale.clone(),
             urgency,
             wait: params.wait,
-            created_at: Utc::now(),
-            context: None,
+            created_at: now,
+            context: Some(request_context),
         };
 
         let system = get_safety_system();

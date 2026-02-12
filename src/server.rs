@@ -6790,6 +6790,9 @@ async fn handle_debug_client(
                             }
                         } else if cmd == "ambient:permissions" {
                             if let Some(ref runner) = ambient_runner {
+                                let _ = runner
+                                    .safety()
+                                    .expire_dead_session_requests("debug_socket_gc");
                                 let pending = runner.safety().pending_requests();
                                 let items: Vec<serde_json::Value> = pending
                                     .iter()
