@@ -39,14 +39,63 @@ body {
   font-family: "Iosevka Aile", "JetBrains Mono", ui-monospace, monospace;
 }
 .shell {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: 260px 1fr;
   height: 100vh;
-  max-width: 980px;
+  max-width: 1200px;
   margin: 0 auto;
   border-left: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
   border-right: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
   background: color-mix(in srgb, #0f1c30 88%, black);
+}
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, #122338 88%, black);
+}
+.side-head {
+  border-bottom: 1px solid var(--line);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+.side-section {
+  padding: 10px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  display: grid;
+  gap: 8px;
+}
+.side-title {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.side-list {
+  display: grid;
+  gap: 6px;
+  max-height: 44vh;
+  overflow: auto;
+}
+.side-item {
+  border: 1px solid color-mix(in srgb, var(--line) 85%, transparent);
+  border-radius: 8px;
+  padding: 7px 8px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #c8d7e7;
+  background: color-mix(in srgb, #15263c 85%, black);
+}
+.side-meta {
+  font-size: 10px;
+  color: var(--muted);
+}
+.main-col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 .topbar {
   display: flex;
@@ -64,7 +113,7 @@ body {
   min-width: 0;
 }
 .brand {
-  font-size: 16px;
+  font-size: 17px;
   font-weight: 700;
   letter-spacing: 0.4px;
 }
@@ -142,6 +191,32 @@ body {
   background: color-mix(in srgb, var(--surface) 83%, black);
   display: grid;
   gap: 8px;
+}
+.status-ribbon {
+  border-top: 1px dashed color-mix(in srgb, var(--line) 80%, transparent);
+  margin-top: 2px;
+  padding-top: 7px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.status-left, .status-right {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.spinner {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+}
+.spinner.run {
+  border-color: color-mix(in srgb, var(--accent) 80%, white);
+  background: color-mix(in srgb, var(--accent) 80%, transparent);
 }
 button {
   border: 1px solid var(--line);
@@ -250,9 +325,11 @@ textarea { min-height: 74px; resize: vertical; }
 @media (max-width: 900px) {
   .shell {
     max-width: 100%;
+    grid-template-columns: 1fr;
     border-left: none;
     border-right: none;
   }
+  .sidebar { display: none; }
   .topbar { padding: 10px; }
   .messages { padding: 12px 10px; }
   .composer { padding: 10px; }
@@ -297,103 +374,178 @@ fn app() -> Element {
         style { "{GUI_CSS}" }
 
         div { class: "shell",
-            header { class: "topbar",
-                div { class: "top-left",
+            aside { class: "sidebar",
+                div { class: "side-head",
                     div { class: "brand", "jcode" }
+                    button {
+                        class: "primary",
+                        onclick: {
+                            let backend = backend.clone();
+                            move |_| backend.send(BackendCommand::Clear)
+                        },
+                        "New chat"
+                    }
                     div { class: "row tight",
                         if snapshot.connected {
                             span { class: "badge ok", "connected" }
                         } else {
                             span { class: "badge err", "disconnected" }
                         }
-                        if let Some(session_id) = snapshot.session_id.clone() {
-                            span { class: "badge", "{session_id}" }
+                        if snapshot.is_processing {
+                            span { class: "badge active", "processing" }
+                        } else {
+                            span { class: "badge", "idle" }
                         }
-                        span { class: "badge", "{snapshot.provider_name}" }
-                        span { class: "badge active", "{snapshot.provider_model}" }
                     }
                 }
 
-                div { class: "row tight",
-                    span { class: "badge", "turn in {snapshot.turn_input_tokens} / out {snapshot.turn_output_tokens}" }
-                    button {
-                        class: "ghost warn",
-                        onclick: {
-                            let backend = backend.clone();
-                            move |_| backend.send(BackendCommand::Cancel)
-                        },
-                        "Stop"
-                    }
-                    button {
-                        class: "ghost",
-                        onclick: move |_| settings_open.set(true),
-                        "Settings"
+                div { class: "side-section",
+                    div { class: "side-title", "Current Session" }
+                    if let Some(session_id) = snapshot.session_id.clone() {
+                        div { class: "side-item",
+                            "{session_id}"
+                            div { class: "side-meta", "{snapshot.provider_name} • {snapshot.provider_model}" }
+                        }
+                    } else {
+                        div { class: "small", "no active session id yet" }
                     }
                 }
-            }
 
-            if !snapshot.connected {
-                if let Some(reason) = snapshot.connection_reason.clone() {
-                    div { class: "banner err", "{reason}" }
-                }
-            }
-
-            main { class: "chat-panel",
-                div { class: "messages",
-                    for (idx, message) in snapshot.messages.iter().enumerate() {
-                        article {
-                            key: "{idx}",
-                            class: "msg role-{message.role}",
-                            if message.role != "assistant" && message.role != "user" {
-                                div { class: "msg-head", "{message.role}" }
-                            }
-                            div { class: "msg-body", "{message.content}" }
-                            if !message.tool_calls.is_empty() {
-                                div { class: "msg-meta", { format!("tools: {}", message.tool_calls.join(", ")) } }
+                div { class: "side-section",
+                    div { class: "side-title", "Recent Prompts" }
+                    div { class: "side-list",
+                        for (idx, message) in snapshot.messages.iter().enumerate().rev().filter(|(_, msg)| msg.role == "user").take(12) {
+                            div {
+                                key: "recent-{idx}",
+                                class: "side-item",
+                                "{preview_line(&message.content, 120)}"
+                                div { class: "side-meta", "prompt #{idx}" }
                             }
                         }
                     }
-
-                    if !snapshot.streaming_text.is_empty() {
-                        article {
-                            class: "msg role-assistant stream",
-                            div { class: "msg-head", "assistant (streaming)" }
-                            div { class: "msg-body", "{snapshot.streaming_text}" }
-                        }
+                    if !snapshot.messages.iter().any(|msg| msg.role == "user") {
+                        div { class: "small", "No prompts yet. Start by sending a message." }
                     }
                 }
 
-                div { class: "composer",
-                    textarea {
-                        value: snapshot.composer.clone(),
-                        oninput: move |evt| {
-                            model.write().composer = evt.value();
+                div { class: "side-section",
+                    div { class: "side-title", "Hints" }
+                    div { class: "small", "Shift+Enter adds a newline" }
+                    div { class: "small", "Use Settings for model/session controls" }
+                    div { class: "small", "Stop button cancels current run" }
+                }
+            }
+
+            div { class: "main-col",
+                header { class: "topbar",
+                    div { class: "top-left",
+                        div { class: "row tight",
+                            span { class: "badge", "{snapshot.provider_name}" }
+                            span { class: "badge active", "{snapshot.provider_model}" }
+                            if snapshot.server_has_update.unwrap_or(false) {
+                                span { class: "badge active", "update available" }
+                            }
                         }
                     }
 
-                    div { class: "row",
+                    div { class: "row tight",
                         button {
-                            class: "primary",
+                            class: "ghost warn",
                             onclick: {
                                 let backend = backend.clone();
-                                move |_| {
-                                    let value = {
-                                        let mut state = model.write();
-                                        let value = state.composer.trim().to_string();
-                                        state.composer.clear();
-                                        value
-                                    };
-                                    if !value.is_empty() {
-                                        backend.send(BackendCommand::SendMessage(value));
-                                    }
-                                }
+                                move |_| backend.send(BackendCommand::Cancel)
                             },
-                            "Send"
+                            "Stop"
                         }
                         button {
                             class: "ghost",
                             onclick: move |_| settings_open.set(true),
-                            "Open settings"
+                            "Settings"
+                        }
+                    }
+                }
+
+                if !snapshot.connected {
+                    if let Some(reason) = snapshot.connection_reason.clone() {
+                        div { class: "banner err", "{reason}" }
+                    }
+                }
+
+                main { class: "chat-panel",
+                    div { class: "messages",
+                        for (idx, message) in snapshot.messages.iter().enumerate() {
+                            article {
+                                key: "{idx}",
+                                class: "msg role-{message.role}",
+                                if message.role != "assistant" && message.role != "user" {
+                                    div { class: "msg-head", "{message.role}" }
+                                }
+                                div { class: "msg-body", "{message.content}" }
+                                if !message.tool_calls.is_empty() {
+                                    div { class: "msg-meta", { format!("tools: {}", message.tool_calls.join(", ")) } }
+                                }
+                            }
+                        }
+
+                        if !snapshot.streaming_text.is_empty() {
+                            article {
+                                class: "msg role-assistant stream",
+                                div { class: "msg-head", "assistant (streaming)" }
+                                div { class: "msg-body", "{snapshot.streaming_text}" }
+                            }
+                        }
+                    }
+
+                    div { class: "composer",
+                        textarea {
+                            value: snapshot.composer.clone(),
+                            oninput: move |evt| {
+                                model.write().composer = evt.value();
+                            }
+                        }
+
+                        div { class: "row",
+                            button {
+                                class: "primary",
+                                onclick: {
+                                    let backend = backend.clone();
+                                    move |_| {
+                                        let value = {
+                                            let mut state = model.write();
+                                            let value = state.composer.trim().to_string();
+                                            state.composer.clear();
+                                            value
+                                        };
+                                        if !value.is_empty() {
+                                            backend.send(BackendCommand::SendMessage(value));
+                                        }
+                                    }
+                                },
+                                "Send"
+                            }
+                            button {
+                                class: "ghost",
+                                onclick: move |_| settings_open.set(true),
+                                "Open settings"
+                            }
+                        }
+
+                        div { class: "status-ribbon",
+                            div { class: "status-left",
+                                div { class: if snapshot.is_processing { "spinner run" } else { "spinner" } }
+                                if snapshot.is_processing {
+                                    span { class: "small", "Thinking / streaming..." }
+                                } else {
+                                    span { class: "small", "Idle" }
+                                }
+                                if let Some(session_id) = snapshot.session_id.clone() {
+                                    span { class: "badge", "{session_id}" }
+                                }
+                            }
+                            div { class: "status-right",
+                                span { class: "badge", "turn in {snapshot.turn_input_tokens} / out {snapshot.turn_output_tokens}" }
+                                span { class: "badge", "total in {snapshot.total_input_tokens} / out {snapshot.total_output_tokens}" }
+                            }
                         }
                     }
                 }
@@ -711,4 +863,23 @@ fn app() -> Element {
             }
         }
     }
+}
+
+fn preview_line(value: &str, max_chars: usize) -> String {
+    let single_line = value.replace('\n', " ");
+    let trimmed = single_line.trim();
+
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+
+    let mut out = String::with_capacity(max_chars + 3);
+    for (idx, ch) in trimmed.chars().enumerate() {
+        if idx >= max_chars {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push_str("...");
+    out
 }
