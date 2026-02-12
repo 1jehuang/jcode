@@ -3672,7 +3672,16 @@ fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usi
         })
         .collect();
 
-    let paragraph = Paragraph::new(lines);
+    let paragraph = if app.centered_mode() {
+        Paragraph::new(
+            lines
+                .iter()
+                .map(|line| line.clone().alignment(Alignment::Center))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        Paragraph::new(lines)
+    };
     frame.render_widget(paragraph, area);
 }
 
