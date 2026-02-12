@@ -440,58 +440,12 @@ impl Provider for AnthropicProvider {
 
         // Clone what we need for the async task
         let client = self.client.clone();
+        let credentials = Arc::clone(&self.credentials);
 
-        // Spawn task to handle streaming with retry logic
+        // Spawn task to handle streaming with retry logic.
+        // This includes forced OAuth refresh on auth failures.
         tokio::spawn(async move {
-            let mut last_error = None;
-
-            for attempt in 0..MAX_RETRIES {
-                if attempt > 0 {
-                    // Exponential backoff: 1s, 2s, 4s
-                    let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
-                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                    crate::logging::info(&format!(
-                        "Retrying Anthropic API request (attempt {}/{})",
-                        attempt + 1,
-                        MAX_RETRIES
-                    ));
-                }
-
-                match stream_response(
-                    client.clone(),
-                    token.clone(),
-                    is_oauth,
-                    request.clone(),
-                    tx.clone(),
-                )
-                .await
-                {
-                    Ok(()) => return, // Success
-                    Err(e) => {
-                        let error_str = e.to_string().to_lowercase();
-                        // Check if this is a transient/retryable error
-                        if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
-                            crate::logging::info(&format!("Transient error, will retry: {}", e));
-                            last_error = Some(e);
-                            continue;
-                        }
-                        // Non-retryable or final attempt
-                        let _ = tx.send(Err(e)).await;
-                        return;
-                    }
-                }
-            }
-
-            // All retries exhausted
-            if let Some(e) = last_error {
-                let _ = tx
-                    .send(Err(anyhow::anyhow!(
-                        "Failed after {} retries: {}",
-                        MAX_RETRIES,
-                        e
-                    )))
-                    .await;
-            }
+            run_stream_with_retries(client, token, is_oauth, request, tx, credentials).await;
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))
@@ -564,58 +518,153 @@ impl Provider for AnthropicProvider {
 
         // Clone what we need for the async task
         let client = self.client.clone();
+        let credentials = Arc::clone(&self.credentials);
 
         // Spawn task to handle streaming with retry logic
         tokio::spawn(async move {
-            let mut last_error = None;
-
-            for attempt in 0..MAX_RETRIES {
-                if attempt > 0 {
-                    let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
-                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                    crate::logging::info(&format!(
-                        "Retrying Anthropic API request (attempt {}/{})",
-                        attempt + 1,
-                        MAX_RETRIES
-                    ));
-                }
-
-                match stream_response(
-                    client.clone(),
-                    token.clone(),
-                    is_oauth,
-                    request.clone(),
-                    tx.clone(),
-                )
-                .await
-                {
-                    Ok(()) => return,
-                    Err(e) => {
-                        let error_str = e.to_string().to_lowercase();
-                        if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
-                            crate::logging::info(&format!("Transient error, will retry: {}", e));
-                            last_error = Some(e);
-                            continue;
-                        }
-                        let _ = tx.send(Err(e)).await;
-                        return;
-                    }
-                }
-            }
-
-            if let Some(e) = last_error {
-                let _ = tx
-                    .send(Err(anyhow::anyhow!(
-                        "Failed after {} retries: {}",
-                        MAX_RETRIES,
-                        e
-                    )))
-                    .await;
-            }
+            run_stream_with_retries(client, token, is_oauth, request, tx, credentials).await;
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
+}
+
+async fn run_stream_with_retries(
+    client: Client,
+    initial_token: String,
+    is_oauth: bool,
+    request: ApiRequest,
+    tx: mpsc::Sender<Result<StreamEvent>>,
+    credentials: Arc<RwLock<Option<CachedCredentials>>>,
+) {
+    let mut token = initial_token;
+    let mut last_error = None;
+    let mut attempted_forced_refresh = false;
+
+    for attempt in 0..MAX_RETRIES {
+        if attempt > 0 {
+            // Exponential backoff: 1s, 2s, 4s
+            let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            crate::logging::info(&format!(
+                "Retrying Anthropic API request (attempt {}/{})",
+                attempt + 1,
+                MAX_RETRIES
+            ));
+        }
+
+        match stream_response(
+            client.clone(),
+            token.clone(),
+            is_oauth,
+            request.clone(),
+            tx.clone(),
+        )
+        .await
+        {
+            Ok(()) => return, // Success
+            Err(e) => {
+                let error_str = e.to_string().to_lowercase();
+
+                // OAuth auth failures: force refresh and retry once immediately.
+                if is_oauth && is_oauth_auth_error(&error_str) && !attempted_forced_refresh {
+                    attempted_forced_refresh = true;
+                    crate::logging::info(
+                        "Anthropic OAuth authentication failed, forcing token refresh...",
+                    );
+                    match force_refresh_oauth_token(Arc::clone(&credentials)).await {
+                        Ok(refreshed_token) => {
+                            crate::logging::info(
+                                "Forced OAuth token refresh succeeded, retrying request.",
+                            );
+                            token = refreshed_token;
+                            last_error = Some(e);
+                            continue;
+                        }
+                        Err(refresh_err) => {
+                            let _ = tx
+                                .send(Err(anyhow::anyhow!(
+                                    "{}\n\nAutomatic Claude OAuth refresh failed: {}\nRun `jcode login --provider claude` (preferred) or `claude`, then retry.",
+                                    e,
+                                    refresh_err
+                                )))
+                                .await;
+                            return;
+                        }
+                    }
+                }
+
+                // Check if this is a transient/retryable error
+                if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                    crate::logging::info(&format!("Transient error, will retry: {}", e));
+                    last_error = Some(e);
+                    continue;
+                }
+
+                // Non-retryable or final attempt
+                if is_oauth && is_oauth_auth_error(&error_str) {
+                    let _ = tx
+                        .send(Err(anyhow::anyhow!(
+                            "{}\n\nClaude OAuth authentication failed. Run `jcode login --provider claude` (preferred) or `claude`, then retry.",
+                            e
+                        )))
+                        .await;
+                } else {
+                    let _ = tx.send(Err(e)).await;
+                }
+                return;
+            }
+        }
+    }
+
+    // All retries exhausted
+    if let Some(e) = last_error {
+        let _ = tx
+            .send(Err(anyhow::anyhow!(
+                "Failed after {} retries: {}",
+                MAX_RETRIES,
+                e
+            )))
+            .await;
+    }
+}
+
+async fn force_refresh_oauth_token(
+    credentials: Arc<RwLock<Option<CachedCredentials>>>,
+) -> Result<String> {
+    let refresh_from_cache = {
+        let cached = credentials.read().await;
+        cached
+            .as_ref()
+            .map(|c| c.refresh_token.clone())
+            .filter(|t| !t.is_empty())
+    };
+
+    let refresh_token = if let Some(token) = refresh_from_cache {
+        token
+    } else {
+        let loaded = auth::claude::load_credentials()
+            .context("Failed to load Claude credentials for forced refresh")?;
+        if loaded.refresh_token.is_empty() {
+            anyhow::bail!("No refresh token available in Claude credentials");
+        }
+        loaded.refresh_token
+    };
+
+    let refreshed = oauth::refresh_claude_tokens(&refresh_token)
+        .await
+        .context("OAuth refresh endpoint rejected the refresh token")?;
+
+    {
+        let mut cached = credentials.write().await;
+        *cached = Some(CachedCredentials {
+            access_token: refreshed.access_token.clone(),
+            refresh_token: refreshed.refresh_token,
+            expires_at: refreshed.expires_at,
+        });
+    }
+
+    Ok(refreshed.access_token)
 }
 
 /// Stream the response from Anthropic API
@@ -747,6 +796,16 @@ fn is_retryable_error(error_str: &str) -> bool {
         || error_str.contains("503 service unavailable")
         || error_str.contains("504 gateway timeout")
         || error_str.contains("overloaded")
+}
+
+fn is_oauth_auth_error(error_str: &str) -> bool {
+    error_str.contains("oauth token has expired")
+        || error_str.contains("token has expired")
+        || error_str.contains("authentication_error")
+        || error_str.contains("invalid token")
+        || error_str.contains("invalid_grant")
+        || ((error_str.contains("401 unauthorized") || error_str.contains("403 forbidden"))
+            && (error_str.contains("oauth") || error_str.contains("token")))
 }
 
 /// Accumulator for tool_use blocks (input comes in chunks)
