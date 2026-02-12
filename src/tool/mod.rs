@@ -578,4 +578,23 @@ mod tests {
             "Tool definitions should be sorted alphabetically"
         );
     }
+
+    #[tokio::test]
+    async fn test_request_permission_is_ambient_only() {
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+        let registry = Registry::new(provider).await;
+
+        let defs = registry.definitions(None).await;
+        assert!(
+            !defs.iter().any(|d| d.name == "request_permission"),
+            "request_permission should not be available in normal sessions"
+        );
+
+        registry.register_ambient_tools().await;
+        let defs_after = registry.definitions(None).await;
+        assert!(
+            defs_after.iter().any(|d| d.name == "request_permission"),
+            "request_permission should be available after ambient tool registration"
+        );
+    }
 }

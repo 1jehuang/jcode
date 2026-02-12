@@ -191,7 +191,7 @@ fn spawn_session_signal_watchers() {
 #[cfg(not(unix))]
 fn spawn_session_signal_watchers() {}
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, PartialEq, Eq, ValueEnum)]
 enum ProviderChoice {
     Claude,
     ClaudeSubprocess,
@@ -200,6 +200,20 @@ enum ProviderChoice {
     Copilot,
     Antigravity,
     Auto,
+}
+
+impl ProviderChoice {
+    fn as_arg_value(&self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::ClaudeSubprocess => "claude-subprocess",
+            Self::Openai => "openai",
+            Self::Cursor => "cursor",
+            Self::Copilot => "copilot",
+            Self::Antigravity => "antigravity",
+            Self::Auto => "auto",
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -599,6 +613,21 @@ async fn run_main(mut args: Args) -> Result<()> {
                     false
                 };
 
+                if server_running && (args.provider != ProviderChoice::Auto || args.model.is_some())
+                {
+                    eprintln!(
+                        "Server already running; provider/model flags only apply when starting a new server."
+                    );
+                    eprintln!(
+                        "Current server settings control `/model`. Restart server to apply: --provider {}{}",
+                        args.provider.as_arg_value(),
+                        args.model
+                            .as_ref()
+                            .map(|m| format!(" --model {}", m))
+                            .unwrap_or_default()
+                    );
+                }
+
                 if !server_running {
                     // Clean up any stale sockets
                     let _ = std::fs::remove_file(server::socket_path());
@@ -607,7 +636,12 @@ async fn run_main(mut args: Args) -> Result<()> {
                     // Start server in background
                     eprintln!("Starting server...");
                     let exe = std::env::current_exe()?;
-                    let mut child = std::process::Command::new(&exe)
+                    let mut cmd = std::process::Command::new(&exe);
+                    cmd.arg("--provider").arg(args.provider.as_arg_value());
+                    if let Some(model) = args.model.as_deref() {
+                        cmd.arg("--model").arg(model);
+                    }
+                    let mut child = cmd
                         .arg("serve")
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
@@ -2608,6 +2642,70 @@ fn run_promote() -> Result<()> {
 }
 
 #[cfg(test)]
+mod test_env {
+    use std::ffi::OsString;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        let mutex = ENV_LOCK.get_or_init(|| Mutex::new(()));
+        match mutex.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    pub struct TestEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev_home: Option<OsString>,
+        prev_test_session: Option<OsString>,
+        _temp_home: tempfile::TempDir,
+    }
+
+    impl TestEnvGuard {
+        fn new() -> anyhow::Result<Self> {
+            let lock = lock_env();
+            let temp_home = tempfile::Builder::new()
+                .prefix("jcode-main-test-home-")
+                .tempdir()?;
+            let prev_home = std::env::var_os("JCODE_HOME");
+            let prev_test_session = std::env::var_os("JCODE_TEST_SESSION");
+
+            std::env::set_var("JCODE_HOME", temp_home.path());
+            std::env::set_var("JCODE_TEST_SESSION", "1");
+
+            Ok(Self {
+                _lock: lock,
+                prev_home,
+                prev_test_session,
+                _temp_home: temp_home,
+            })
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            if let Some(prev_home) = &self.prev_home {
+                std::env::set_var("JCODE_HOME", prev_home);
+            } else {
+                std::env::remove_var("JCODE_HOME");
+            }
+
+            if let Some(prev_test_session) = &self.prev_test_session {
+                std::env::set_var("JCODE_TEST_SESSION", prev_test_session);
+            } else {
+                std::env::remove_var("JCODE_TEST_SESSION");
+            }
+        }
+    }
+
+    pub fn setup() -> TestEnvGuard {
+        TestEnvGuard::new().expect("failed to setup isolated test environment")
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
@@ -2644,6 +2742,20 @@ mod tests {
                 panic!("Session ID should be set");
             }
         }
+    }
+
+    #[test]
+    fn test_provider_choice_arg_values() {
+        assert_eq!(ProviderChoice::Claude.as_arg_value(), "claude");
+        assert_eq!(
+            ProviderChoice::ClaudeSubprocess.as_arg_value(),
+            "claude-subprocess"
+        );
+        assert_eq!(ProviderChoice::Openai.as_arg_value(), "openai");
+        assert_eq!(ProviderChoice::Cursor.as_arg_value(), "cursor");
+        assert_eq!(ProviderChoice::Copilot.as_arg_value(), "copilot");
+        assert_eq!(ProviderChoice::Antigravity.as_arg_value(), "antigravity");
+        assert_eq!(ProviderChoice::Auto.as_arg_value(), "auto");
     }
 }
 
@@ -2696,6 +2808,8 @@ mod selfdev_integration_tests {
 
     #[tokio::test]
     async fn test_selfdev_tool_registration() {
+        let _env = super::test_env::setup();
+
         // Create a canary session
         let mut session = session::Session::create(None, Some("Test".to_string()));
         session.set_canary("test");
@@ -2739,6 +2853,8 @@ mod selfdev_e2e_tests {
 
     #[tokio::test]
     async fn test_selfdev_session_and_registry() {
+        let _env = super::test_env::setup();
+
         // 1. Create a canary session
         let mut session = session::Session::create(None, Some("Test E2E".to_string()));
         session.set_canary("test-build");

@@ -847,6 +847,7 @@ impl App {
     /// Configure ambient mode: override system prompt and queue an initial message.
     pub fn set_ambient_mode(&mut self, system_prompt: String, initial_message: String) {
         self.ambient_system_prompt = Some(system_prompt);
+        crate::tool::ambient::register_ambient_session(self.session.id.clone());
         self.queued_messages.push(initial_message);
         self.pending_turn = true;
     }
@@ -11137,6 +11138,30 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_file(crate::session::session_path(&session_id).unwrap());
+    }
+
+    #[test]
+    fn test_recover_session_without_tools_preserves_debug_and_canary_flags() {
+        let mut app = create_test_app();
+        app.session.is_debug = true;
+        app.session.is_canary = true;
+        app.session.testing_build = Some("self-dev".to_string());
+        app.session.working_dir = Some("/tmp/jcode-test".to_string());
+        let old_session_id = app.session.id.clone();
+
+        app.recover_session_without_tools();
+
+        assert_ne!(app.session.id, old_session_id);
+        assert_eq!(
+            app.session.parent_id.as_deref(),
+            Some(old_session_id.as_str())
+        );
+        assert!(app.session.is_debug);
+        assert!(app.session.is_canary);
+        assert_eq!(app.session.testing_build.as_deref(), Some("self-dev"));
+        assert_eq!(app.session.working_dir.as_deref(), Some("/tmp/jcode-test"));
+
+        let _ = std::fs::remove_file(crate::session::session_path(&app.session.id).unwrap());
     }
 
     #[test]

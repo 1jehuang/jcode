@@ -181,6 +181,46 @@ fn semver() -> &'static str {
     })
 }
 
+/// True when this process is running from the stable release binary path.
+fn is_running_stable_release() -> bool {
+    static IS_STABLE: OnceLock<bool> = OnceLock::new();
+    *IS_STABLE.get_or_init(|| {
+        let current = match std::env::current_exe()
+            .ok()
+            .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)))
+        {
+            Some(path) => path,
+            None => return false,
+        };
+
+        // Self-dev stable symlink (~/.jcode/builds/stable/jcode)
+        if let Ok(stable_path) = crate::build::stable_binary_path() {
+            if let Some(stable_resolved) = std::fs::canonicalize(&stable_path)
+                .ok()
+                .or(Some(stable_path))
+            {
+                if stable_resolved == current {
+                    return true;
+                }
+            }
+        }
+
+        // Installed stable launcher (~/.local/bin/jcode)
+        if let Some(home) = dirs::home_dir() {
+            let installed = home.join(".local").join("bin").join("jcode");
+            if let Some(installed_resolved) =
+                std::fs::canonicalize(&installed).ok().or(Some(installed))
+            {
+                if installed_resolved == current {
+                    return true;
+                }
+            }
+        }
+
+        false
+    })
+}
+
 /// Create a modern pill-style badge: ⟨ label ⟩
 fn pill_badge(label: &str, color: Color) -> Vec<Span<'static>> {
     vec![
@@ -360,7 +400,16 @@ fn build_auth_status_line(auth: &crate::auth::AuthStatus) -> Line<'static> {
         dot_char(auth.openai),
         Style::default().fg(dot_color(auth.openai)),
     ));
-    spans.push(Span::styled(" openai", Style::default().fg(DIM_COLOR)));
+    let openai_label = if auth.openai_has_oauth && auth.openai_has_api_key {
+        " openai(oauth+key) "
+    } else if auth.openai_has_oauth {
+        " openai(oauth) "
+    } else if auth.openai_has_api_key {
+        " openai(key) "
+    } else {
+        " openai "
+    };
+    spans.push(Span::styled(openai_label, Style::default().fg(DIM_COLOR)));
 
     Line::from(spans)
 }
@@ -1724,7 +1773,11 @@ fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>>
     lines.push(Line::from(model_spans).alignment(align));
 
     // Line 4: Version and build info (dim, no chroma)
-    let version_text = format!("{} · built {}", semver(), build_info);
+    let version_text = if is_running_stable_release() {
+        format!("{} · stable · built {}", semver(), build_info)
+    } else {
+        format!("{} · built {}", semver(), build_info)
+    };
     let version_line =
         Line::from(Span::styled(version_text, Style::default().fg(DIM_COLOR))).alignment(align);
     lines.push(version_line);
@@ -3672,7 +3725,16 @@ fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usi
         })
         .collect();
 
-    let paragraph = Paragraph::new(lines);
+    let paragraph = if app.centered_mode() {
+        Paragraph::new(
+            lines
+                .iter()
+                .map(|line| line.clone().alignment(Alignment::Center))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        Paragraph::new(lines)
+    };
     frame.render_widget(paragraph, area);
 }
 
