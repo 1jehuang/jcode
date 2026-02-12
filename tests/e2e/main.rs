@@ -33,6 +33,7 @@ struct TestEnvGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     prev_home: Option<OsString>,
     prev_test_session: Option<OsString>,
+    prev_debug_control: Option<OsString>,
     _temp_home: tempfile::TempDir,
 }
 
@@ -44,14 +45,17 @@ impl TestEnvGuard {
             .tempdir()?;
         let prev_home = std::env::var_os("JCODE_HOME");
         let prev_test_session = std::env::var_os("JCODE_TEST_SESSION");
+        let prev_debug_control = std::env::var_os("JCODE_DEBUG_CONTROL");
 
         std::env::set_var("JCODE_HOME", temp_home.path());
         std::env::set_var("JCODE_TEST_SESSION", "1");
+        std::env::set_var("JCODE_DEBUG_CONTROL", "1");
 
         Ok(Self {
             _lock: lock,
             prev_home,
             prev_test_session,
+            prev_debug_control,
             _temp_home: temp_home,
         })
     }
@@ -70,11 +74,56 @@ impl Drop for TestEnvGuard {
         } else {
             std::env::remove_var("JCODE_TEST_SESSION");
         }
+
+        if let Some(prev_debug_control) = &self.prev_debug_control {
+            std::env::set_var("JCODE_DEBUG_CONTROL", prev_debug_control);
+        } else {
+            std::env::remove_var("JCODE_DEBUG_CONTROL");
+        }
     }
 }
 
 fn setup_test_env() -> Result<TestEnvGuard> {
     TestEnvGuard::new()
+}
+
+async fn wait_for_socket(path: &std::path::Path) -> Result<()> {
+    let start = Instant::now();
+    while !path.exists() {
+        if start.elapsed() > Duration::from_secs(10) {
+            anyhow::bail!("Server socket did not appear");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    Ok(())
+}
+
+async fn debug_create_headless_session(debug_socket_path: std::path::PathBuf) -> Result<String> {
+    let mut debug_client = server::Client::connect_debug_with_path(debug_socket_path).await?;
+    let request_id = debug_client.debug_command("create_session", None).await?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let event =
+            tokio::time::timeout(Duration::from_secs(1), debug_client.read_event()).await??;
+        match event {
+            ServerEvent::Ack { .. } => continue,
+            ServerEvent::DebugResponse { id, ok, output } if id == request_id => {
+                if !ok {
+                    anyhow::bail!("create_session debug command failed: {}", output);
+                }
+                let value: serde_json::Value = serde_json::from_str(&output)?;
+                let session_id = value
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("missing session_id in debug response"))?;
+                return Ok(session_id.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    anyhow::bail!("Timed out waiting for create_session debug response")
 }
 
 /// Test that a simple text response works
@@ -102,6 +151,132 @@ async fn test_simple_response() -> Result<()> {
 
     assert_eq!(response, "Hello! How can I help?");
     assert!(saved.is_debug, "test sessions should be marked debug");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_agent_clear_preserves_debug_flag() -> Result<()> {
+    let _env = setup_test_env()?;
+    let provider = MockProvider::new();
+    let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.set_debug(true);
+    let old_session_id = agent.session_id().to_string();
+
+    agent.clear();
+
+    assert_ne!(agent.session_id(), old_session_id);
+    assert!(agent.is_debug());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_debug_create_session_marks_debug() -> Result<()> {
+    let _env = setup_test_env()?;
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "jcode-debug-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir)?;
+    let socket_path = runtime_dir.join("jcode.sock");
+    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+
+    let provider = MockProvider::new();
+    let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
+    let server_instance =
+        server::Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
+    let server_handle = tokio::spawn(async move { server_instance.run().await });
+
+    wait_for_socket(&socket_path).await?;
+
+    let session_id = debug_create_headless_session(debug_socket_path.clone()).await?;
+    let session = Session::load(&session_id)?;
+    assert!(session.is_debug);
+
+    server_handle.abort();
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_file(&debug_socket_path);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_clear_preserves_debug_for_resumed_debug_session() -> Result<()> {
+    let _env = setup_test_env()?;
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "jcode-clear-debug-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir)?;
+    let socket_path = runtime_dir.join("jcode.sock");
+    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+
+    let provider = MockProvider::new();
+    let provider: Arc<dyn jcode::provider::Provider> = Arc::new(provider);
+    let server_instance =
+        server::Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
+    let server_handle = tokio::spawn(async move { server_instance.run().await });
+
+    wait_for_socket(&socket_path).await?;
+
+    let debug_session_id = debug_create_headless_session(debug_socket_path.clone()).await?;
+    let mut client = server::Client::connect_with_path(socket_path.clone()).await?;
+    let resume_id = client.resume_session(&debug_session_id).await?;
+
+    // Drain resume completion so clear() events are unambiguous.
+    let mut saw_resume_history = false;
+    let resume_deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < resume_deadline {
+        let event = tokio::time::timeout(Duration::from_secs(1), client.read_event()).await??;
+        match event {
+            ServerEvent::Ack { .. } => continue,
+            ServerEvent::History { id, .. } if id == resume_id => {
+                saw_resume_history = true;
+                break;
+            }
+            ServerEvent::Error { id, message } if id == resume_id => {
+                anyhow::bail!("resume_session failed: {}", message);
+            }
+            _ => {}
+        }
+    }
+    if !saw_resume_history {
+        anyhow::bail!("Timed out waiting for resume history event");
+    }
+
+    client.clear().await?;
+
+    let mut new_session_id = None;
+    let clear_deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < clear_deadline {
+        let event = tokio::time::timeout(Duration::from_secs(1), client.read_event()).await??;
+        match event {
+            ServerEvent::Ack { .. } => continue,
+            ServerEvent::SessionId { session_id } => {
+                new_session_id = Some(session_id);
+            }
+            ServerEvent::Done { .. } if new_session_id.is_some() => break,
+            _ => {}
+        }
+    }
+
+    let new_session_id = new_session_id
+        .ok_or_else(|| anyhow::anyhow!("Did not receive new session id after clear"))?;
+    assert_ne!(new_session_id, debug_session_id);
+    let session = Session::load(&new_session_id)?;
+    assert!(session.is_debug);
+
+    server_handle.abort();
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_file(&debug_socket_path);
+
     Ok(())
 }
 

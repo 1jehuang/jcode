@@ -7712,6 +7712,20 @@ impl Client {
         self.writer.write_all(json.as_bytes()).await?;
         Ok(id)
     }
+
+    pub async fn debug_command(&mut self, command: &str, session_id: Option<&str>) -> Result<u64> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::DebugCommand {
+            id,
+            command: command.to_string(),
+            session_id: session_id.map(|s| s.to_string()),
+        };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+        Ok(id)
+    }
 }
 
 /// Get the jcode repository directory

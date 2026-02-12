@@ -505,6 +505,41 @@ pub fn session_exists(session_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        let mutex = ENV_LOCK.get_or_init(|| Mutex::new(()));
+        match mutex.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = &self.prev {
+                std::env::set_var(self.key, prev);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn test_session_exists_roundtrip() {
@@ -531,6 +566,60 @@ mod tests {
                 .as_nanos()
         );
         assert!(!session_exists(&random_id));
+    }
+
+    #[test]
+    fn test_create_marks_debug_when_test_session_env_enabled() {
+        let _env_lock = lock_env();
+        let _test_flag = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+
+        let s1 = Session::create(None, None);
+        assert!(s1.is_debug);
+
+        let s2 = Session::create_with_id("session_test_1".to_string(), None, None);
+        assert!(s2.is_debug);
+    }
+
+    #[test]
+    fn test_create_not_debug_when_test_session_env_disabled() {
+        let _env_lock = lock_env();
+        let _test_flag = EnvVarGuard::set("JCODE_TEST_SESSION", "0");
+
+        let s = Session::create(None, None);
+        assert!(!s.is_debug);
+    }
+
+    #[test]
+    fn test_recover_crashed_sessions_preserves_debug_flag() {
+        let _env_lock = lock_env();
+        let temp_home = tempfile::Builder::new()
+            .prefix("jcode-recover-debug-test-")
+            .tempdir()
+            .expect("create temp JCODE_HOME");
+        let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+        let _test_flag = EnvVarGuard::set("JCODE_TEST_SESSION", "0");
+
+        let mut crashed = Session::create_with_id(
+            "session_recover_debug_source".to_string(),
+            None,
+            Some("debug source".to_string()),
+        );
+        crashed.is_debug = true;
+        crashed.mark_crashed(Some("test crash".to_string()));
+        crashed.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "hello".to_string(),
+                cache_control: None,
+            }],
+        );
+        crashed.save().expect("save crashed session");
+
+        let recovered_ids = recover_crashed_sessions().expect("recover crashed sessions");
+        assert_eq!(recovered_ids.len(), 1);
+
+        let recovered = Session::load(&recovered_ids[0]).expect("load recovered session");
+        assert!(recovered.is_debug);
     }
 }
 
