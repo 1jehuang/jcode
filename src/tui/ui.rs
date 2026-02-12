@@ -327,6 +327,18 @@ fn build_auth_status_line(auth: &crate::auth::AuthStatus) -> Line<'static> {
         }
     }
 
+    fn cli_provider_label(name: &'static str, info: crate::auth::CliProviderAuth) -> String {
+        if info.has_cli && info.has_auth {
+            format!(" {}(cli+auth) ", name)
+        } else if info.has_cli {
+            format!(" {}(cli) ", name)
+        } else if info.has_auth {
+            format!(" {}(auth) ", name)
+        } else {
+            format!(" {} ", name)
+        }
+    }
+
     let mut spans = Vec::new();
 
     // Anthropic (with auth method hint)
@@ -360,7 +372,37 @@ fn build_auth_status_line(auth: &crate::auth::AuthStatus) -> Line<'static> {
         dot_char(auth.openai),
         Style::default().fg(dot_color(auth.openai)),
     ));
-    spans.push(Span::styled(" openai", Style::default().fg(DIM_COLOR)));
+    spans.push(Span::styled(" openai ", Style::default().fg(DIM_COLOR)));
+
+    // Cursor
+    spans.push(Span::styled(
+        dot_char(auth.cursor.state),
+        Style::default().fg(dot_color(auth.cursor.state)),
+    ));
+    spans.push(Span::styled(
+        cli_provider_label("cursor", auth.cursor),
+        Style::default().fg(DIM_COLOR),
+    ));
+
+    // Copilot
+    spans.push(Span::styled(
+        dot_char(auth.copilot.state),
+        Style::default().fg(dot_color(auth.copilot.state)),
+    ));
+    spans.push(Span::styled(
+        cli_provider_label("copilot", auth.copilot),
+        Style::default().fg(DIM_COLOR),
+    ));
+
+    // Antigravity
+    spans.push(Span::styled(
+        dot_char(auth.antigravity.state),
+        Style::default().fg(dot_color(auth.antigravity.state)),
+    ));
+    spans.push(Span::styled(
+        cli_provider_label("antigravity", auth.antigravity),
+        Style::default().fg(DIM_COLOR),
+    ));
 
     Line::from(spans)
 }
