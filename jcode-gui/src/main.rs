@@ -19,83 +19,41 @@ use model::{BackendCommand, GuiModel, RuntimeFeature};
 
 const GUI_CSS: &str = r#"
 :root {
-  --bg: #0f1725;
-  --bg-grad: #101f38;
-  --surface: #132338;
-  --surface-2: #1b2f49;
-  --line: #2b4362;
-  --text: #e6edf7;
-  --muted: #9fb3c8;
-  --accent: #38bdf8;
+  --bg: #000000;
+  --bg-grad: #000000;
+  --surface: #040404;
+  --surface-2: #080808;
+  --line: #1b1b1b;
+  --text: #f3f3f3;
+  --muted: #8a8a8a;
+  --accent: #22c55e;
   --ok: #22c55e;
-  --warn: #f97316;
+  --warn: #f59e0b;
   --err: #ef4444;
 }
 * { box-sizing: border-box; }
 body {
   margin: 0;
-  background: radial-gradient(1200px 700px at 85% 0%, var(--bg-grad), var(--bg));
+  background: var(--bg);
   color: var(--text);
   font-family: "Iosevka Aile", "JetBrains Mono", ui-monospace, monospace;
 }
 .shell {
-  display: grid;
-  grid-template-columns: 260px 1fr;
-  height: 100vh;
-  max-width: 1200px;
-  margin: 0 auto;
-  border-left: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
-  border-right: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
-  background: color-mix(in srgb, #0f1c30 88%, black);
-}
-.sidebar {
   display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border-right: 1px solid var(--line);
-  background: color-mix(in srgb, #122338 88%, black);
-}
-.side-head {
-  border-bottom: 1px solid var(--line);
-  padding: 12px;
-  display: grid;
-  gap: 10px;
-}
-.side-section {
-  padding: 10px 12px;
-  border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
-  display: grid;
-  gap: 8px;
-}
-.side-title {
-  font-size: 11px;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.side-list {
-  display: grid;
-  gap: 6px;
-  max-height: 44vh;
-  overflow: auto;
-}
-.side-item {
-  border: 1px solid color-mix(in srgb, var(--line) 85%, transparent);
-  border-radius: 8px;
-  padding: 7px 8px;
-  font-size: 11px;
-  line-height: 1.35;
-  color: #c8d7e7;
-  background: color-mix(in srgb, #15263c 85%, black);
-}
-.side-meta {
-  font-size: 10px;
-  color: var(--muted);
+  justify-content: center;
+  width: 100%;
+  height: 100vh;
+  padding: 0 14px;
+  background: #000000;
 }
 .main-col {
+  width: min(980px, 100%);
   display: flex;
   flex-direction: column;
   min-height: 0;
+  border-left: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-right: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  background: #000000;
 }
 .topbar {
   display: flex;
@@ -104,7 +62,7 @@ body {
   gap: 10px;
   padding: 12px 14px;
   border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--surface) 85%, black);
+  background: #030303;
 }
 .top-left {
   display: flex;
@@ -131,7 +89,7 @@ body {
   padding: 8px 10px;
   font-size: 12px;
 }
-.banner.err { border-color: color-mix(in srgb, var(--err) 70%, var(--line)); color: #ffc2c2; }
+.banner.err { border-color: color-mix(in srgb, var(--err) 70%, var(--line)); color: #ffd1d1; }
 .chat-panel {
   flex: 1;
   min-height: 0;
@@ -152,19 +110,19 @@ body {
   border: 1px solid var(--line);
   border-radius: 14px;
   padding: 10px 12px;
-  background: color-mix(in srgb, #12243b 86%, black);
+  background: #080808;
   align-self: flex-start;
 }
 .msg.role-user {
   align-self: flex-end;
-  border-color: color-mix(in srgb, #4f78a8 60%, var(--line));
-  background: color-mix(in srgb, #1e3a5d 82%, black);
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--line));
+  background: #0b120d;
 }
 .msg.role-assistant {
-  border-color: color-mix(in srgb, #3d5b85 60%, var(--line));
+  border-color: color-mix(in srgb, #3e3e3e 60%, var(--line));
 }
 .msg.role-tool {
-  border-color: color-mix(in srgb, #a68f3d 58%, var(--line));
+  border-color: color-mix(in srgb, #8c6c2f 58%, var(--line));
 }
 .msg.role-error {
   border-color: color-mix(in srgb, var(--err) 70%, var(--line));
@@ -188,7 +146,7 @@ body {
 .composer {
   border-top: 1px solid var(--line);
   padding: 10px 12px 12px;
-  background: color-mix(in srgb, var(--surface) 83%, black);
+  background: #030303;
   display: grid;
   gap: 8px;
 }
@@ -220,7 +178,7 @@ body {
 }
 button {
   border: 1px solid var(--line);
-  background: #14263b;
+  background: #0a0a0a;
   color: var(--text);
   padding: 7px 10px;
   border-radius: 9px;
@@ -229,16 +187,16 @@ button {
   font-size: 12px;
 }
 button:hover { border-color: var(--accent); }
-button.primary { background: #204061; border-color: #3c6894; }
-button.warn { border-color: var(--warn); color: #ffd6bc; }
-button.danger { border-color: var(--err); color: #ffc2c2; }
-button.on { border-color: var(--ok); color: #b8f3ca; }
-button.ghost { background: #112034; }
+button.primary { background: #0f2013; border-color: #1e3a23; }
+button.warn { border-color: var(--warn); color: #ffe6bf; }
+button.danger { border-color: var(--err); color: #ffd1d1; }
+button.on { border-color: var(--ok); color: #c8f7d8; }
+button.ghost { background: #050505; }
 textarea, input {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 9px;
-  background: #0f1f33;
+  background: #050505;
   color: var(--text);
   padding: 9px 10px;
   font: inherit;
@@ -252,14 +210,14 @@ textarea { min-height: 74px; resize: vertical; }
   font-size: 11px;
   color: var(--muted);
 }
-.badge.ok { border-color: var(--ok); color: #b8f3ca; }
-.badge.err { border-color: var(--err); color: #ffc2c2; }
-.badge.active { border-color: var(--accent); color: #bde9ff; }
+.badge.ok { border-color: var(--ok); color: #c8f7d8; }
+.badge.err { border-color: var(--err); color: #ffd1d1; }
+.badge.active { border-color: var(--accent); color: #cbf7da; }
 .small { font-size: 11px; color: var(--muted); }
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(3, 8, 18, 0.58);
+  background: rgba(0, 0, 0, 0.72);
   backdrop-filter: blur(1.5px);
   z-index: 30;
 }
@@ -270,7 +228,7 @@ textarea { min-height: 74px; resize: vertical; }
   bottom: 0;
   width: min(440px, 96vw);
   border-left: 1px solid var(--line);
-  background: color-mix(in srgb, var(--surface-2) 89%, black);
+  background: #020202;
   z-index: 31;
   display: flex;
   flex-direction: column;
@@ -291,7 +249,7 @@ textarea { min-height: 74px; resize: vertical; }
 .section {
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: color-mix(in srgb, #182b44 86%, black);
+  background: #060606;
   padding: 10px;
   display: grid;
   gap: 8px;
@@ -319,17 +277,18 @@ textarea { min-height: 74px; resize: vertical; }
 .logline {
   font-size: 11px;
   white-space: pre-wrap;
-  border-bottom: 1px dashed #2a425f;
+  border-bottom: 1px dashed #252525;
   padding: 4px 0;
 }
 @media (max-width: 900px) {
   .shell {
-    max-width: 100%;
-    grid-template-columns: 1fr;
+    padding: 0;
+  }
+  .main-col {
+    width: 100%;
     border-left: none;
     border-right: none;
   }
-  .sidebar { display: none; }
   .topbar { padding: 10px; }
   .messages { padding: 12px 10px; }
   .composer { padding: 10px; }
@@ -339,7 +298,12 @@ textarea { min-height: 74px; resize: vertical; }
 fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        dioxus::LaunchBuilder::desktop().launch(app);
+        let window = dioxus::desktop::WindowBuilder::new().with_title("jcode");
+        let cfg = dioxus::desktop::Config::new()
+            .with_window(window)
+            .with_menu(None::<dioxus::desktop::muda::Menu>);
+
+        dioxus::LaunchBuilder::desktop().with_cfg(cfg).launch(app);
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -370,76 +334,25 @@ fn app() -> Element {
     let show_settings = *settings_open.read();
 
     rsx! {
-        document::Title { "jcode GUI" }
+        document::Title { "jcode" }
         style { "{GUI_CSS}" }
 
         div { class: "shell",
-            aside { class: "sidebar",
-                div { class: "side-head",
-                    div { class: "brand", "jcode" }
-                    button {
-                        class: "primary",
-                        onclick: {
-                            let backend = backend.clone();
-                            move |_| backend.send(BackendCommand::Clear)
-                        },
-                        "New chat"
-                    }
-                    div { class: "row tight",
-                        if snapshot.connected {
-                            span { class: "badge ok", "connected" }
-                        } else {
-                            span { class: "badge err", "disconnected" }
-                        }
-                        if snapshot.is_processing {
-                            span { class: "badge active", "processing" }
-                        } else {
-                            span { class: "badge", "idle" }
-                        }
-                    }
-                }
-
-                div { class: "side-section",
-                    div { class: "side-title", "Current Session" }
-                    if let Some(session_id) = snapshot.session_id.clone() {
-                        div { class: "side-item",
-                            "{session_id}"
-                            div { class: "side-meta", "{snapshot.provider_name} • {snapshot.provider_model}" }
-                        }
-                    } else {
-                        div { class: "small", "no active session id yet" }
-                    }
-                }
-
-                div { class: "side-section",
-                    div { class: "side-title", "Recent Prompts" }
-                    div { class: "side-list",
-                        for (idx, message) in snapshot.messages.iter().enumerate().rev().filter(|(_, msg)| msg.role == "user").take(12) {
-                            div {
-                                key: "recent-{idx}",
-                                class: "side-item",
-                                "{preview_line(&message.content, 120)}"
-                                div { class: "side-meta", "prompt #{idx}" }
-                            }
-                        }
-                    }
-                    if !snapshot.messages.iter().any(|msg| msg.role == "user") {
-                        div { class: "small", "No prompts yet. Start by sending a message." }
-                    }
-                }
-
-                div { class: "side-section",
-                    div { class: "side-title", "Hints" }
-                    div { class: "small", "Shift+Enter adds a newline" }
-                    div { class: "small", "Use Settings for model/session controls" }
-                    div { class: "small", "Stop button cancels current run" }
-                }
-            }
-
             div { class: "main-col",
                 header { class: "topbar",
                     div { class: "top-left",
+                        div { class: "brand", "jcode" }
                         div { class: "row tight",
+                            if snapshot.connected {
+                                span { class: "badge ok", "connected" }
+                            } else {
+                                span { class: "badge err", "disconnected" }
+                            }
+                            if snapshot.is_processing {
+                                span { class: "badge active", "processing" }
+                            } else {
+                                span { class: "badge", "idle" }
+                            }
                             span { class: "badge", "{snapshot.provider_name}" }
                             span { class: "badge active", "{snapshot.provider_model}" }
                             if snapshot.server_has_update.unwrap_or(false) {
@@ -449,14 +362,6 @@ fn app() -> Element {
                     }
 
                     div { class: "row tight",
-                        button {
-                            class: "ghost warn",
-                            onclick: {
-                                let backend = backend.clone();
-                                move |_| backend.send(BackendCommand::Cancel)
-                            },
-                            "Stop"
-                        }
                         button {
                             class: "ghost",
                             onclick: move |_| settings_open.set(true),
@@ -863,23 +768,4 @@ fn app() -> Element {
             }
         }
     }
-}
-
-fn preview_line(value: &str, max_chars: usize) -> String {
-    let single_line = value.replace('\n', " ");
-    let trimmed = single_line.trim();
-
-    if trimmed.chars().count() <= max_chars {
-        return trimmed.to_string();
-    }
-
-    let mut out = String::with_capacity(max_chars + 3);
-    for (idx, ch) in trimmed.chars().enumerate() {
-        if idx >= max_chars {
-            break;
-        }
-        out.push(ch);
-    }
-    out.push_str("...");
-    out
 }
