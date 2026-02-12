@@ -164,6 +164,7 @@ fn command_to_request(command: BackendCommand, next_id: &mut u64) -> Option<Requ
             }
             Some(Request::Message { id, content })
         }
+        BackendCommand::RefreshHistory => Some(Request::GetHistory { id }),
         BackendCommand::Cancel => Some(Request::Cancel { id }),
         BackendCommand::SoftInterrupt { content, urgent } => {
             let content = content.trim().to_string();
@@ -306,6 +307,7 @@ fn map_server_event(event: ServerEvent) -> Option<BackendEvent> {
             mcp_servers,
             skills,
             total_tokens,
+            all_sessions,
             client_count,
             is_canary,
             server_version,
@@ -329,6 +331,7 @@ fn map_server_event(event: ServerEvent) -> Option<BackendEvent> {
             mcp_servers,
             skills,
             total_tokens,
+            all_sessions,
             client_count,
             is_canary,
             server_version,
