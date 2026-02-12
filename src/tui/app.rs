@@ -2810,6 +2810,43 @@ impl App {
         false
     }
 
+    /// Restart this client into the current stable binary.
+    fn spawn_stable_release(&mut self, resume_session_id: String) {
+        let stable_binary = match crate::build::stable_binary_path() {
+            Ok(path) if path.exists() => path,
+            Ok(path) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Stable binary not found at {}. Run `cargo build --release && scripts/install_release.sh` first.",
+                    path.display()
+                )));
+                self.set_status_notice("Stable binary not found");
+                return;
+            }
+            Err(e) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Failed to resolve stable binary path: {}",
+                    e
+                )));
+                self.set_status_notice("Stable binary unavailable");
+                return;
+            }
+        };
+
+        self.session.provider_session_id = self.provider_session_id.clone();
+        self.session
+            .set_status(crate::session::SessionStatus::Reloaded);
+        let _ = self.session.save();
+
+        std::env::set_var("JCODE_MIGRATE_BINARY", &stable_binary);
+        self.reload_requested = Some(resume_session_id);
+        self.push_display_message(DisplayMessage::system(format!(
+            "Spawning stable release ({})...",
+            stable_binary.display()
+        )));
+        self.set_status_notice("Spawning stable release...");
+        self.should_quit = true;
+    }
+
     fn build_debug_snapshot(&self) -> DebugSnapshot {
         let frame = crate::tui::visual_debug::latest_frame();
         let recent_messages = self
@@ -4424,6 +4461,14 @@ impl App {
         // Handle Alt combos
         if modifiers.contains(KeyModifiers::ALT) {
             match code {
+                KeyCode::Char('\'') => {
+                    let session_id = self
+                        .remote_session_id
+                        .clone()
+                        .unwrap_or_else(|| self.session.id.clone());
+                    self.spawn_stable_release(session_id);
+                    return Ok(());
+                }
                 KeyCode::Char('b') => {
                     self.cursor_pos = self.find_word_boundary_back();
                     return Ok(());
@@ -4973,6 +5018,10 @@ impl App {
         // Handle Alt combos (readline word movement)
         if modifiers.contains(KeyModifiers::ALT) {
             match code {
+                KeyCode::Char('\'') => {
+                    self.spawn_stable_release(self.session.id.clone());
+                    return Ok(());
+                }
                 KeyCode::Char('b') => {
                     // Alt+B: back one word
                     self.cursor_pos = self.find_word_boundary_back();
@@ -5464,6 +5513,7 @@ impl App {
                      • `[` / `]` - Zoom diagram (when focused)\n\
                      • `+` / `-` - Resize diagram pane (when focused)\n\
                      • `Alt+M` - Toggle diagram pane\n\
+                     • `Alt+'` - Spawn stable release\n\
                      • `Ctrl+R` - Recover from missing tool outputs\n\
                      • `PageUp/Down` or `Up/Down` - Scroll history\n\
                      • `{}`/`{}` - Scroll up/down (see `/config`)\n\
