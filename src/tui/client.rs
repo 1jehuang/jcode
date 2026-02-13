@@ -59,6 +59,9 @@ pub struct ClientApp {
     total_output_tokens: u64,
     total_cost: f32,
     processing_started: Option<Instant>,
+    streaming_tps_start: Option<Instant>,
+    streaming_tps_elapsed: Duration,
+    streaming_total_output_tokens: u64,
     last_activity: Option<Instant>,
 
     // Client-specific state
@@ -92,6 +95,20 @@ pub struct ClientApp {
 impl ClientApp {
     fn bump_display_messages_version(&mut self) {
         self.display_messages_version = self.display_messages_version.wrapping_add(1);
+    }
+
+    fn compute_streaming_tps(&self) -> Option<f32> {
+        let mut elapsed = self.streaming_tps_elapsed;
+        let total_tokens = self.streaming_total_output_tokens;
+        if let Some(start) = self.streaming_tps_start {
+            elapsed += start.elapsed();
+        }
+        let elapsed_secs = elapsed.as_secs_f32();
+        if elapsed_secs > 0.1 && total_tokens > 0 {
+            Some(total_tokens as f32 / elapsed_secs)
+        } else {
+            None
+        }
     }
 
     fn scroll_up(&mut self, amount: usize) {
@@ -213,6 +230,9 @@ impl ClientApp {
             total_output_tokens: 0,
             total_cost: 0.0,
             processing_started: None,
+            streaming_tps_start: None,
+            streaming_tps_elapsed: Duration::ZERO,
+            streaming_total_output_tokens: 0,
             last_activity: None,
 
             // Client-specific state
@@ -565,10 +585,15 @@ impl ClientApp {
     fn handle_server_event(&mut self, event: ServerEvent) {
         match event {
             ServerEvent::TextDelta { text } => {
+                if self.streaming_tps_start.is_none() {
+                    self.streaming_tps_start = Some(Instant::now());
+                }
                 self.streaming_text.push_str(&text);
             }
             ServerEvent::ToolStart { id, name } => {
-                // Start tracking this tool for potential diff generation
+                if let Some(start) = self.streaming_tps_start.take() {
+                    self.streaming_tps_elapsed += start.elapsed();
+                }
                 self.current_tool_id = Some(id);
                 self.current_tool_name = Some(name);
                 self.current_tool_input.clear();
@@ -634,6 +659,7 @@ impl ClientApp {
                 cache_read_input,
                 cache_creation_input,
             } => {
+                self.streaming_total_output_tokens += output;
                 self.streaming_input_tokens = input;
                 self.streaming_output_tokens = output;
                 if cache_read_input.is_some() {
@@ -647,8 +673,11 @@ impl ClientApp {
                 self.upstream_provider = Some(provider);
             }
             ServerEvent::Done { .. } => {
-                // Log unexpected cache misses for debugging
                 self.log_cache_miss_if_unexpected();
+
+                if let Some(start) = self.streaming_tps_start.take() {
+                    self.streaming_tps_elapsed += start.elapsed();
+                }
 
                 if !self.streaming_text.is_empty() {
                     let content = std::mem::take(&mut self.streaming_text);
@@ -768,6 +797,9 @@ impl ClientApp {
                     self.streaming_cache_creation_tokens = None;
                     self.upstream_provider = None;
                     self.processing_started = None;
+                    self.streaming_tps_start = None;
+                    self.streaming_tps_elapsed = Duration::ZERO;
+                    self.streaming_total_output_tokens = 0;
                     self.last_activity = None;
                     self.is_processing = false;
                     self.status = ProcessingStatus::Idle;
@@ -993,6 +1025,10 @@ impl ClientApp {
 
                         self.is_processing = true;
                         self.upstream_provider = None;
+                        self.processing_started = Some(Instant::now());
+                        self.streaming_tps_start = None;
+                        self.streaming_tps_elapsed = Duration::ZERO;
+                        self.streaming_total_output_tokens = 0;
                     }
                 }
             }
@@ -1126,17 +1162,7 @@ impl TuiState for ClientApp {
         if !self.is_processing {
             return None;
         }
-        match (self.processing_started, self.streaming_output_tokens) {
-            (Some(start), output) if output > 0 => {
-                let elapsed = start.elapsed().as_secs_f32();
-                if elapsed > 0.0 {
-                    Some(output as f32 / elapsed)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
+        self.compute_streaming_tps()
     }
 
     fn streaming_tool_calls(&self) -> Vec<ToolCall> {
@@ -1263,17 +1289,7 @@ impl TuiState for ClientApp {
         let is_api_key_provider = provider_name.contains("openrouter");
 
         let output_tps = if self.is_processing {
-            match (self.processing_started, self.streaming_output_tokens) {
-                (Some(start), output) if output > 0 => {
-                    let elapsed = start.elapsed().as_secs_f32();
-                    if elapsed > 0.0 {
-                        Some(output as f32 / elapsed)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            }
+            self.compute_streaming_tps()
         } else {
             None
         };
@@ -1328,14 +1344,7 @@ impl TuiState for ClientApp {
             super::info_widget::AuthMethod::Unknown
         };
 
-        let tokens_per_second = self.processing_started.and_then(|started| {
-            let elapsed = started.elapsed().as_secs_f32();
-            if elapsed >= 0.2 && self.streaming_output_tokens > 0 {
-                Some(self.streaming_output_tokens as f32 / elapsed)
-            } else {
-                None
-            }
-        });
+        let tokens_per_second = self.compute_streaming_tps();
 
         // Gather memory info (read from local disk, same as server)
         let memory_info = {
