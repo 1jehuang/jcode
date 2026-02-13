@@ -217,6 +217,18 @@ pub(crate) fn redraw_interval(state: &dyn TuiState) -> Duration {
     }
 }
 
+/// Returns true when cache behavior is unexpected for a multi-turn conversation.
+///
+/// Anthropic conversation caching is usually warmed on turn 2 (cache creation without reads),
+/// so misses are only unexpected from turn 3 onward.
+pub(crate) fn is_unexpected_cache_miss(
+    user_turn_count: usize,
+    cache_read: Option<u64>,
+    cache_creation: Option<u64>,
+) -> bool {
+    user_turn_count > 2 && cache_creation.unwrap_or(0) > 0 && cache_read.unwrap_or(0) == 0
+}
+
 pub(crate) fn subscribe_metadata() -> (Option<String>, Option<bool>) {
     let working_dir = std::env::current_dir().ok();
     let working_dir_str = working_dir.as_ref().map(|p| p.display().to_string());
@@ -241,4 +253,29 @@ pub(crate) fn subscribe_metadata() -> (Option<String>, Option<bool>) {
 /// Public wrapper to render a single frame (used by benchmarks/tools).
 pub fn render_frame(frame: &mut Frame<'_>, state: &dyn TuiState) {
     ui::draw(frame, state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_unexpected_cache_miss;
+
+    #[test]
+    fn cache_creation_only_on_turn_two_is_expected() {
+        assert!(!is_unexpected_cache_miss(2, Some(0), Some(12_000)));
+    }
+
+    #[test]
+    fn cache_creation_only_on_later_turns_is_unexpected() {
+        assert!(is_unexpected_cache_miss(3, Some(0), Some(12_000)));
+    }
+
+    #[test]
+    fn cache_reads_disable_miss_warning() {
+        assert!(!is_unexpected_cache_miss(3, Some(8_000), Some(12_000)));
+    }
+
+    #[test]
+    fn no_cache_creation_is_not_a_miss() {
+        assert!(!is_unexpected_cache_miss(3, Some(0), Some(0)));
+    }
 }
