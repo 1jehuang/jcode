@@ -6,7 +6,7 @@ use super::visual_debug::{
     self, FrameCaptureBuilder, ImageRegionCapture, InfoWidgetCapture, InfoWidgetSummary,
     MarginsCapture, MessageCapture, RenderTimingCapture, WidgetPlacementCapture,
 };
-use super::{DisplayMessage, ProcessingStatus, TuiState};
+use super::{is_unexpected_cache_miss, DisplayMessage, ProcessingStatus, TuiState};
 use crate::message::ToolCall;
 use ratatui::{
     prelude::*,
@@ -3399,7 +3399,7 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
     let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
     let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
 
-    // Check for unexpected cache miss (cache write on turn 2+)
+    // Check for unexpected cache miss (cache write on turn 3+)
     let (cache_read, cache_creation) = app.streaming_cache_tokens();
     let user_turn_count = app
         .display_messages()
@@ -3407,7 +3407,7 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
         .filter(|m| m.role == "user")
         .count();
     let unexpected_cache_miss =
-        user_turn_count > 1 && cache_creation.unwrap_or(0) > 0 && cache_read.unwrap_or(0) == 0;
+        is_unexpected_cache_miss(user_turn_count, cache_read, cache_creation);
 
     // Helper to append queued count indicator
     let queued_suffix = if pending_count > 0 {
