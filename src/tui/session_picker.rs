@@ -40,6 +40,8 @@ pub struct SessionInfo {
     pub status: SessionStatus,
     pub estimated_tokens: usize,
     pub messages_preview: Vec<PreviewMessage>,
+    /// Lowercased searchable text used by picker filtering
+    pub search_index: String,
     /// Server name this session belongs to (if running)
     pub server_name: Option<String>,
     /// Server icon
@@ -62,6 +64,60 @@ pub struct PreviewMessage {
     pub role: String,
     pub content: String,
     pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+const SEARCH_CONTENT_BUDGET_BYTES: usize = 12_000;
+
+fn push_with_byte_budget(dst: &mut String, src: &str, budget: &mut usize) {
+    if *budget == 0 || src.is_empty() {
+        return;
+    }
+
+    let mut end = src.len().min(*budget);
+    while end > 0 && !src.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end == 0 {
+        return;
+    }
+
+    dst.push_str(&src[..end]);
+    *budget = budget.saturating_sub(end);
+}
+
+fn build_search_index(
+    id: &str,
+    short_name: &str,
+    title: &str,
+    working_dir: Option<&str>,
+    messages_preview: &[PreviewMessage],
+) -> String {
+    let mut combined = String::new();
+    combined.push_str(title);
+    combined.push(' ');
+    combined.push_str(short_name);
+    combined.push(' ');
+    combined.push_str(id);
+
+    if let Some(dir) = working_dir {
+        combined.push(' ');
+        combined.push_str(dir);
+    }
+
+    let mut budget = SEARCH_CONTENT_BUDGET_BYTES;
+    for msg in messages_preview {
+        let content = msg.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        combined.push(' ');
+        push_with_byte_budget(&mut combined, content, &mut budget);
+        if budget == 0 {
+            break;
+        }
+    }
+
+    combined.to_lowercase()
 }
 
 #[derive(Clone, Debug)]
@@ -162,11 +218,20 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
                         continue;
                     }
 
+                    let title = session.title.unwrap_or_else(|| "Untitled".to_string());
+                    let search_index = build_search_index(
+                        stem,
+                        &short_name,
+                        &title,
+                        session.working_dir.as_deref(),
+                        &messages_preview,
+                    );
+
                     sessions.push(SessionInfo {
                         id: stem.to_string(),
                         short_name,
                         icon: icon.to_string(),
-                        title: session.title.unwrap_or_else(|| "Untitled".to_string()),
+                        title,
                         message_count: session.messages.len(),
                         user_message_count,
                         assistant_message_count,
@@ -178,6 +243,7 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
                         status,
                         estimated_tokens,
                         messages_preview,
+                        search_index,
                         server_name: None,
                         server_icon: None,
                     });
@@ -631,14 +697,7 @@ impl SessionPicker {
             return true;
         }
         let q = query.to_lowercase();
-        session.title.to_lowercase().contains(&q)
-            || session.short_name.to_lowercase().contains(&q)
-            || session.id.to_lowercase().contains(&q)
-            || session
-                .working_dir
-                .as_ref()
-                .map(|d| d.to_lowercase().contains(&q))
-                .unwrap_or(false)
+        session.search_index.contains(&q)
     }
 
     /// Rebuild the items list based on current filters (show_test_sessions, search_query)
@@ -1616,33 +1675,45 @@ mod tests {
         status: SessionStatus,
     ) -> SessionInfo {
         let now = Utc::now();
+        let title = "Test session".to_string();
+        let working_dir = Some("/tmp".to_string());
+        let messages_preview = vec![
+            PreviewMessage {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                timestamp: None,
+            },
+            PreviewMessage {
+                role: "assistant".to_string(),
+                content: "world".to_string(),
+                timestamp: None,
+            },
+        ];
+        let search_index = build_search_index(
+            id,
+            short_name,
+            &title,
+            working_dir.as_deref(),
+            &messages_preview,
+        );
+
         SessionInfo {
             id: id.to_string(),
             short_name: short_name.to_string(),
             icon: "🧪".to_string(),
-            title: "Test session".to_string(),
+            title,
             message_count: 2,
             user_message_count: 1,
             assistant_message_count: 1,
             created_at: now - ChronoDuration::minutes(5),
             last_message_time: now - ChronoDuration::minutes(1),
-            working_dir: Some("/tmp".to_string()),
+            working_dir,
             is_canary,
             is_debug,
             status,
             estimated_tokens: 200,
-            messages_preview: vec![
-                PreviewMessage {
-                    role: "user".to_string(),
-                    content: "hello".to_string(),
-                    timestamp: None,
-                },
-                PreviewMessage {
-                    role: "assistant".to_string(),
-                    content: "world".to_string(),
-                    timestamp: None,
-                },
-            ],
+            messages_preview,
+            search_index,
             server_name: None,
             server_icon: None,
         }
@@ -1741,5 +1812,23 @@ mod tests {
             .collect();
         assert!(text.contains("reason:"));
         assert!(text.contains("SIGHUP"));
+    }
+
+    #[test]
+    fn test_filter_matches_recent_message_content() {
+        let mut picker = SessionPicker::new(vec![make_session(
+            "session_content",
+            "content",
+            false,
+            SessionStatus::Closed,
+        )]);
+
+        picker.search_query = "world".to_string();
+        picker.rebuild_items();
+        assert_eq!(picker.sessions.len(), 1);
+
+        picker.search_query = "not-in-preview".to_string();
+        picker.rebuild_items();
+        assert!(picker.sessions.is_empty());
     }
 }
