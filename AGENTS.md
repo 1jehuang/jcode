@@ -71,6 +71,11 @@ The build also includes git hash and `-dev` suffix for uncommitted changes (e.g.
 - PRs should include a short summary, rationale, and the exact test commands run.
 - Note which provider you validated (`openai` or `claude`) and update docs when CLI behavior changes.
 
+## Multi-Agent Collaboration
+- If you see unexpected local changes, assume they are likely from another active agent.
+- Work alongside those changes; do not stop solely because the tree changed unexpectedly.
+- Do not revert or overwrite another agent’s edits unless explicitly asked.
+
 ## Security & Configuration Tips
 - OAuth credentials live at `~/.codex/auth.json` and `~/.claude/.credentials.json`; never commit secrets.
 - For Claude SDK usage, set `JCODE_CLAUDE_SDK_PYTHON` as documented in `CLAUDE.md`.
