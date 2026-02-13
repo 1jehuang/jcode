@@ -473,7 +473,7 @@ swarm = true
 
 [provider]
 # Default model (optional, uses provider default if not set)
-# default_model = "claude-sonnet-4-20250514"
+# default_model = "gpt-5.3-codex-spark"
 # OpenAI reasoning effort (none|low|medium|high|xhigh)
 openai_reasoning_effort = "xhigh"
 

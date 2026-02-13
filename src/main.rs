@@ -261,7 +261,7 @@ struct Args {
     #[arg(long, global = true)]
     debug_socket: bool,
 
-    /// Model to use (e.g., claude-opus-4-5-20251101, gpt-5.2-codex)
+    /// Model to use (e.g., claude-opus-4-5-20251101, gpt-5.3-codex-spark)
     #[arg(short, long, global = true)]
     model: Option<String>,
 
