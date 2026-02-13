@@ -231,8 +231,11 @@ impl Registry {
             "lsp".to_string(),
             Arc::new(lsp::LspTool::new()) as Arc<dyn Tool>,
         );
-        let task_tool = task::TaskTool::new(provider, registry.clone());
-        tools_map.insert("task".to_string(), Arc::new(task_tool) as Arc<dyn Tool>);
+        let subagent_tool = task::SubagentTool::new(provider, registry.clone());
+        tools_map.insert(
+            "subagent".to_string(),
+            Arc::new(subagent_tool) as Arc<dyn Tool>,
+        );
         tools_map.insert(
             "todowrite".to_string(),
             Arc::new(todo::TodoWriteTool::new()) as Arc<dyn Tool>,
@@ -340,8 +343,9 @@ impl Registry {
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let tools = self.tools.read().await;
+        let resolved_name = if name == "task" { "subagent" } else { name };
         let tool = tools
-            .get(name)
+            .get(resolved_name)
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", name))?
             .clone();
 
