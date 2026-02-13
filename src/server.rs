@@ -13,6 +13,7 @@ use crate::protocol::{
 };
 use crate::provider::Provider;
 use crate::registry::{server_debug_socket_path, server_socket_path};
+use crate::session::Session;
 use crate::tool::{Registry, ToolContext};
 use anyhow::Result;
 use futures::future::try_join_all;
@@ -2360,6 +2361,44 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::Done { id });
                 }
             },
+
+            Request::Split { id } => {
+                // Clone the current session's messages into a new session
+                let (new_session_id, new_session_name) = {
+                    let agent_guard = agent.lock().await;
+                    let parent_session_id = agent_guard.session_id().to_string();
+                    let messages = agent_guard.messages().to_vec();
+                    let working_dir = agent_guard.working_dir().map(|s| s.to_string());
+                    let model = Some(agent_guard.provider_model());
+
+                    // Create a new session with the same messages
+                    let mut child = Session::create(
+                        Some(parent_session_id),
+                        None,
+                    );
+                    child.messages = messages;
+                    child.working_dir = working_dir;
+                    child.model = model;
+                    child.status = crate::session::SessionStatus::Closed;
+
+                    if let Err(e) = child.save() {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Failed to save split session: {}", e),
+                        });
+                        continue;
+                    }
+
+                    let name = child.display_name().to_string();
+                    (child.id.clone(), name)
+                };
+
+                let _ = client_event_tx.send(ServerEvent::SplitResponse {
+                    id,
+                    new_session_id,
+                    new_session_name,
+                });
+            }
 
             // Agent-to-agent communication
             Request::AgentRegister { id, .. } => {
