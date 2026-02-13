@@ -613,6 +613,10 @@ impl Agent {
         self.provider.model().to_string()
     }
 
+    pub fn provider_fork(&self) -> Arc<dyn Provider> {
+        self.provider.fork()
+    }
+
     pub fn available_models(&self) -> Vec<&'static str> {
         self.provider.available_models()
     }

@@ -15,6 +15,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
+const DEFAULT_SUBAGENT_MODEL: &str = "gpt-5.3-codex-spark";
+
 pub struct SubagentTool {
     provider: Arc<dyn Provider>,
     registry: Registry,
@@ -87,8 +89,8 @@ impl Tool for SubagentTool {
             Session::create(Some(ctx.session_id.clone()), Some(subagent_title(&params)))
         };
         if session.model.is_none() {
-            // Default new subagent sessions to the coordinator's current model.
-            session.model = Some(self.provider.model());
+            // Subagent/task workers default to the fast model unless explicitly pinned.
+            session.model = Some(DEFAULT_SUBAGENT_MODEL.to_string());
         }
 
         if let Some(ref working_dir) = ctx.working_dir {
@@ -144,8 +146,10 @@ impl Tool for SubagentTool {
             params.description, params.subagent_type
         ));
 
+        // Run subagent on an isolated provider fork so model/session changes do not
+        // mutate the coordinator's provider instance.
         let mut agent = Agent::new_with_session(
-            self.provider.clone(),
+            self.provider.fork(),
             self.registry.clone(),
             session,
             Some(allowed),
@@ -196,4 +200,14 @@ fn subagent_title(params: &SubagentInput) -> String {
         "{} (@{} subagent)",
         params.description, params.subagent_type
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_SUBAGENT_MODEL;
+
+    #[test]
+    fn default_subagent_model_is_spark() {
+        assert_eq!(DEFAULT_SUBAGENT_MODEL, "gpt-5.3-codex-spark");
+    }
 }
