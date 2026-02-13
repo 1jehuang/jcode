@@ -4987,7 +4987,7 @@ async fn execute_debug_command(
             .to_lowercase();
         let default_model = match provider.as_str() {
             "claude" | "anthropic" => "claude-opus-4-5-20251101",
-            "openai" | "codex" => "gpt-5.2-codex",
+            "openai" | "codex" => "gpt-5.3-codex-spark",
             "openrouter" => "anthropic/claude-sonnet-4",
             "cursor" => "gpt-5",
             "copilot" => "claude-sonnet-4",
