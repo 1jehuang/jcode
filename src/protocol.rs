@@ -116,6 +116,10 @@ pub enum Request {
         enabled: bool,
     },
 
+    /// Split the current session — clone conversation into a new session
+    #[serde(rename = "split")]
+    Split { id: u64 },
+
     // === Agent-to-agent communication ===
     /// Register as an external agent
     #[serde(rename = "agent_register")]
@@ -537,6 +541,14 @@ pub enum ServerEvent {
         session_id: String,
         new_session_id: String,
     },
+
+    /// Response to split request — new session created with cloned conversation
+    #[serde(rename = "split_response")]
+    SplitResponse {
+        id: u64,
+        new_session_id: String,
+        new_session_name: String,
+    },
 }
 
 /// Summary of a tool call for the comm_summary response
@@ -640,6 +652,7 @@ impl Request {
             Request::CycleModel { id, .. } => *id,
             Request::SetModel { id, .. } => *id,
             Request::SetFeature { id, .. } => *id,
+            Request::Split { id } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,
             Request::AgentCapabilities { id } => *id,
