@@ -107,6 +107,9 @@ impl Tool for MemoryTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        use crate::memory;
+        use crate::tui::info_widget::{MemoryEventKind, MemoryState};
+
         let input: MemoryInput = serde_json::from_value(input)?;
 
         match input.action.as_str() {
@@ -116,17 +119,27 @@ impl Tool for MemoryTool {
                     .ok_or_else(|| anyhow::anyhow!("content required"))?;
                 let category: MemoryCategory =
                     input.category.as_deref().unwrap_or("fact").parse().unwrap();
+                let scope = input.scope.as_deref().unwrap_or("project");
+                memory::set_state(MemoryState::ToolAction {
+                    action: "remember".into(),
+                    detail: truncate_for_widget(&content, 40),
+                });
                 let mut entry =
                     MemoryEntry::new(category.clone(), &content).with_source(ctx.session_id);
                 if let Some(tags) = input.tags {
                     entry = entry.with_tags(tags);
                 }
-                let scope = input.scope.as_deref().unwrap_or("project");
                 let id = if scope == "global" {
                     self.manager.remember_global(entry)?
                 } else {
                     self.manager.remember_project(entry)?
                 };
+                memory::add_event(MemoryEventKind::ToolRemembered {
+                    content: truncate_for_widget(&content, 60),
+                    scope: scope.to_string(),
+                    category: category.to_string(),
+                });
+                memory::set_state(MemoryState::Idle);
                 Ok(ToolOutput::new(format!(
                     "Remembered {} ({}): \"{}\" [id: {}]",
                     category, scope, content, id
@@ -144,16 +157,31 @@ impl Tool for MemoryTool {
 
                 match mode {
                     "recent" => {
-                        // Original behavior: most recent memories
-                        match self.manager.get_prompt_memories(limit) {
+                        memory::set_state(MemoryState::ToolAction {
+                            action: "recall".into(),
+                            detail: "recent".into(),
+                        });
+                        let result = match self.manager.get_prompt_memories(limit) {
                             Some(memories) => {
+                                let count = memories.lines().filter(|l| l.starts_with("- ")).count();
+                                memory::add_event(MemoryEventKind::ToolRecalled {
+                                    query: "(recent)".into(),
+                                    count,
+                                });
                                 Ok(ToolOutput::new(format!("Recent memories:\n{}", memories)))
                             }
-                            None => Ok(ToolOutput::new("No memories stored yet.")),
-                        }
+                            None => {
+                                memory::add_event(MemoryEventKind::ToolRecalled {
+                                    query: "(recent)".into(),
+                                    count: 0,
+                                });
+                                Ok(ToolOutput::new("No memories stored yet."))
+                            }
+                        };
+                        memory::set_state(MemoryState::Idle);
+                        result
                     }
                     "semantic" | "cascade" => {
-                        // Semantic search with optional cascade
                         let query = match &input.query {
                             Some(q) => q.clone(),
                             None => {
@@ -162,12 +190,22 @@ impl Tool for MemoryTool {
                                 ))
                             }
                         };
+                        memory::set_state(MemoryState::ToolAction {
+                            action: "recall".into(),
+                            detail: truncate_for_widget(&query, 40),
+                        });
 
                         let results = if mode == "cascade" {
                             self.manager.find_similar_with_cascade(&query, 0.3, limit)?
                         } else {
                             self.manager.find_similar(&query, 0.3, limit)?
                         };
+
+                        memory::add_event(MemoryEventKind::ToolRecalled {
+                            query: truncate_for_widget(&query, 40),
+                            count: results.len(),
+                        });
+                        memory::set_state(MemoryState::Idle);
 
                         if results.is_empty() {
                             Ok(ToolOutput::new(format!(
@@ -208,7 +246,16 @@ impl Tool for MemoryTool {
                 let query = input
                     .query
                     .ok_or_else(|| anyhow::anyhow!("query required"))?;
+                memory::set_state(MemoryState::ToolAction {
+                    action: "search".into(),
+                    detail: truncate_for_widget(&query, 40),
+                });
                 let results = self.manager.search(&query)?;
+                memory::add_event(MemoryEventKind::ToolRecalled {
+                    query: truncate_for_widget(&query, 40),
+                    count: results.len(),
+                });
+                memory::set_state(MemoryState::Idle);
                 if results.is_empty() {
                     Ok(ToolOutput::new(format!("No memories matching '{}'", query)))
                 } else {
@@ -223,7 +270,13 @@ impl Tool for MemoryTool {
                 }
             }
             "list" => {
+                memory::set_state(MemoryState::ToolAction {
+                    action: "list".into(),
+                    detail: String::new(),
+                });
                 let all = self.manager.list_all()?;
+                memory::add_event(MemoryEventKind::ToolListed { count: all.len() });
+                memory::set_state(MemoryState::Idle);
                 if all.is_empty() {
                     Ok(ToolOutput::new("No memories stored."))
                 } else {
@@ -239,7 +292,14 @@ impl Tool for MemoryTool {
             }
             "forget" => {
                 let id = input.id.ok_or_else(|| anyhow::anyhow!("id required"))?;
-                if self.manager.forget(&id)? {
+                memory::set_state(MemoryState::ToolAction {
+                    action: "forget".into(),
+                    detail: truncate_for_widget(&id, 30),
+                });
+                let found = self.manager.forget(&id)?;
+                memory::add_event(MemoryEventKind::ToolForgot { id: id.clone() });
+                memory::set_state(MemoryState::Idle);
+                if found {
                     Ok(ToolOutput::new(format!("Forgot: {}", id)))
                 } else {
                     Ok(ToolOutput::new(format!("Not found: {}", id)))
@@ -253,14 +313,23 @@ impl Tool for MemoryTool {
                     return Err(anyhow::anyhow!("At least one tag required"));
                 }
 
+                memory::set_state(MemoryState::ToolAction {
+                    action: "tag".into(),
+                    detail: format!("{} +{}", truncate_for_widget(&id, 20), tags.join(",")),
+                });
                 for tag in &tags {
                     self.manager.tag_memory(&id, tag)?;
                 }
+                let tags_str = tags.join(", ");
+                memory::add_event(MemoryEventKind::ToolTagged {
+                    id: id.clone(),
+                    tags: tags_str.clone(),
+                });
+                memory::set_state(MemoryState::Idle);
 
                 Ok(ToolOutput::new(format!(
                     "Tagged memory {} with: {}",
-                    id,
-                    tags.join(", ")
+                    id, tags_str
                 )))
             }
             "link" => {
@@ -276,7 +345,20 @@ impl Tool for MemoryTool {
                     return Err(anyhow::anyhow!("weight must be between 0.0 and 1.0"));
                 }
 
+                memory::set_state(MemoryState::ToolAction {
+                    action: "link".into(),
+                    detail: format!(
+                        "{} → {}",
+                        truncate_for_widget(&from_id, 15),
+                        truncate_for_widget(&to_id, 15)
+                    ),
+                });
                 self.manager.link_memories(&from_id, &to_id, weight)?;
+                memory::add_event(MemoryEventKind::ToolLinked {
+                    from: from_id.clone(),
+                    to: to_id.clone(),
+                });
+                memory::set_state(MemoryState::Idle);
 
                 Ok(ToolOutput::new(format!(
                     "Linked {} -> {} (weight: {:.2})",
@@ -287,7 +369,16 @@ impl Tool for MemoryTool {
                 let id = input.id.ok_or_else(|| anyhow::anyhow!("id required"))?;
                 let depth = input.depth.unwrap_or(2);
 
+                memory::set_state(MemoryState::ToolAction {
+                    action: "related".into(),
+                    detail: truncate_for_widget(&id, 30),
+                });
                 let related = self.manager.get_related(&id, depth)?;
+                memory::add_event(MemoryEventKind::ToolRecalled {
+                    query: format!("related:{}", truncate_for_widget(&id, 25)),
+                    count: related.len(),
+                });
+                memory::set_state(MemoryState::Idle);
 
                 if related.is_empty() {
                     Ok(ToolOutput::new(format!(
@@ -317,6 +408,14 @@ impl Tool for MemoryTool {
             }
             other => Err(anyhow::anyhow!("Unknown action: {}", other)),
         }
+    }
+}
+
+fn truncate_for_widget(s: &str, max: usize) -> String {
+    if s.len() > max {
+        format!("{}…", &s[..max])
+    } else {
+        s.to_string()
     }
 }
 

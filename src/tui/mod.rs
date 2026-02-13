@@ -165,6 +165,7 @@ pub struct ModelEntry {
     pub routes: Vec<RouteOption>,
     pub selected_route: usize,
     pub is_current: bool,
+    pub recommended: bool,
 }
 
 /// A single route to reach a model
