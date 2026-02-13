@@ -535,6 +535,7 @@ struct ResponseSseEvent {
     item: Option<Value>,
     delta: Option<String>,
     response: Option<Value>,
+    error: Option<Value>,
 }
 
 struct OpenAIResponsesStream {
@@ -577,6 +578,21 @@ impl OpenAIResponsesStream {
             let data = data_lines.join("\n");
             if data == "[DONE]" {
                 return Some(StreamEvent::MessageEnd { stop_reason: None });
+            }
+
+            let lower_data = data.to_lowercase();
+            if lower_data.contains("stream disconnected before completion") {
+                return Some(StreamEvent::Error {
+                    message: data,
+                    retry_after_secs: None,
+                });
+            }
+            if lower_data.contains("falling back from websockets to https transport") {
+                crate::logging::warn(&format!(
+                    "OpenAI stream transport notice: {}",
+                    data.trim()
+                ));
+                continue;
             }
 
             let event: ResponseSseEvent = match serde_json::from_str(&data) {
@@ -622,8 +638,13 @@ impl OpenAIResponsesStream {
                         .push_back(StreamEvent::MessageEnd { stop_reason: None });
                     return self.pending.pop_front();
                 }
-                "response.failed" | "error" => {
-                    let (message, retry_after_secs) = extract_error_with_retry(&event.response);
+                "response.failed" | "response.error" | "error" => {
+                    crate::logging::warn(&format!(
+                        "OpenAI stream error event (type={}): response={:?}, error={:?}",
+                        event.kind, event.response, event.error
+                    ));
+                    let (message, retry_after_secs) =
+                        extract_error_with_retry(&event.response, &event.error);
                     return Some(StreamEvent::Error {
                         message,
                         retry_after_secs,
@@ -1049,6 +1070,11 @@ async fn stream_response(
     while let Some(result) = stream.next().await {
         match result {
             Ok(event) => {
+                if let StreamEvent::Error { message, .. } = &event {
+                    if is_retryable_error(&message.to_lowercase()) {
+                        return Err(anyhow::anyhow!("Stream error: {}", message));
+                    }
+                }
                 if tx.send(Ok(event)).await.is_err() {
                     // Receiver dropped, stop streaming
                     return Ok(());
@@ -1077,29 +1103,53 @@ fn should_refresh_token(status: StatusCode, body: &str) -> bool {
     false
 }
 
-fn extract_error_with_retry(response: &Option<Value>) -> (String, Option<u64>) {
-    let resp = match response.as_ref() {
-        Some(r) => r,
-        None => return ("OpenAI response stream error".to_string(), None),
-    };
+fn extract_error_with_retry(
+    response: &Option<Value>,
+    top_level_error: &Option<Value>,
+) -> (String, Option<u64>) {
+    // For "response.failed" events, the error is nested: response.error.message
+    // For "error"/"response.error" events, the error is top-level: error.message
+    let error = response
+        .as_ref()
+        .and_then(|r| r.get("error"))
+        .or(top_level_error.as_ref());
 
-    let error = match resp.get("error") {
+    let error = match error {
         Some(e) => e,
-        None => return ("OpenAI response stream error".to_string(), None),
+        None => {
+            // Last resort: check if response itself has a status_message or message
+            if let Some(resp) = response.as_ref() {
+                if let Some(msg) = resp
+                    .get("status_message")
+                    .or_else(|| resp.get("message"))
+                    .and_then(|v| v.as_str())
+                {
+                    return (msg.to_string(), None);
+                }
+            }
+            return (
+                "OpenAI response stream error (no error details)".to_string(),
+                None,
+            );
+        }
     };
 
     let message = error
         .get("message")
         .and_then(|v| v.as_str())
-        .unwrap_or("OpenAI response stream error")
+        .unwrap_or("OpenAI response stream error (unknown)")
         .to_string();
 
     // Try to extract retry_after from error object or response metadata
-    // OpenAI may include it in error.retry_after or response.retry_after
     let retry_after = error
         .get("retry_after")
         .and_then(|v| v.as_u64())
-        .or_else(|| resp.get("retry_after").and_then(|v| v.as_u64()));
+        .or_else(|| {
+            response
+                .as_ref()
+                .and_then(|r| r.get("retry_after"))
+                .and_then(|v| v.as_u64())
+        });
 
     (message, retry_after)
 }
@@ -1119,6 +1169,8 @@ fn is_retryable_error(error_str: &str) -> bool {
         || error_str.contains("error reading")
         || error_str.contains("unexpected eof")
         || error_str.contains("incomplete message")
+        || error_str.contains("stream disconnected before completion")
+        || error_str.contains("falling back from websockets to https transport")
         // Server errors (5xx)
         || error_str.contains("502 bad gateway")
         || error_str.contains("503 service unavailable")
@@ -1326,5 +1378,15 @@ mod tests {
 
         assert_eq!(output_a.as_deref(), Some(expected_missing.as_str()));
         assert_eq!(output_b.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn test_openai_retryable_error_patterns() {
+        assert!(is_retryable_error(
+            "stream disconnected before completion: transport error"
+        ));
+        assert!(is_retryable_error(
+            "falling back from websockets to https transport. stream disconnected before completion"
+        ));
     }
 }

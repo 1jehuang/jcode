@@ -381,6 +381,15 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Split the current session — ask server to clone conversation into a new session
+    pub async fn split(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        let request = Request::Split { id };
+        self.next_request_id += 1;
+        self.send_request(request).await?;
+        Ok(id)
+    }
+
     /// Send a response for a client debug request
     pub async fn send_client_debug_response(&mut self, id: u64, output: String) -> Result<()> {
         self.send_request(Request::ClientDebugResponse { id, output })
