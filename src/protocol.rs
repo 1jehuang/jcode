@@ -342,6 +342,30 @@ pub enum ServerEvent {
     #[serde(rename = "swarm_status")]
     SwarmStatus { members: Vec<SwarmMemberStatus> },
 
+    /// Full swarm plan snapshot for synchronization and UI rendering.
+    #[serde(rename = "swarm_plan")]
+    SwarmPlan {
+        swarm_id: String,
+        version: u64,
+        items: Vec<PlanItem>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        participants: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
+    /// Plan proposal payload delivered to the coordinator.
+    #[serde(rename = "swarm_plan_proposal")]
+    SwarmPlanProposal {
+        swarm_id: String,
+        proposer_session: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        proposer_name: Option<String>,
+        items: Vec<PlanItem>,
+        summary: String,
+        proposal_key: String,
+    },
+
     /// Soft interrupt message was injected at a safe point
     #[serde(rename = "soft_interrupt_injected")]
     SoftInterruptInjected {

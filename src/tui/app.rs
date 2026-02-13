@@ -555,6 +555,10 @@ pub struct App {
     remote_sessions: Vec<String>,
     // Swarm member status snapshots (remote mode only)
     remote_swarm_members: Vec<crate::protocol::SwarmMemberStatus>,
+    // Latest swarm plan snapshot (local or remote server event stream)
+    swarm_plan_items: Vec<crate::plan::PlanItem>,
+    swarm_plan_version: Option<u64>,
+    swarm_plan_swarm_id: Option<String>,
     // Number of connected clients (remote mode only)
     remote_client_count: Option<usize>,
     // Build version tracking for auto-migration
@@ -816,6 +820,9 @@ impl App {
             remote_session_id: None,
             remote_sessions: Vec::new(),
             remote_swarm_members: Vec::new(),
+            swarm_plan_items: Vec::new(),
+            swarm_plan_version: None,
+            swarm_plan_swarm_id: None,
             known_stable_version: crate::build::read_stable_version().ok().flatten(),
             last_version_check: Some(Instant::now()),
             pending_migration: None,
@@ -4265,6 +4272,9 @@ impl App {
                     self.pending_soft_interrupt = None;
                     self.remote_total_tokens = None;
                     self.remote_swarm_members.clear();
+                    self.swarm_plan_items.clear();
+                    self.swarm_plan_version = None;
+                    self.swarm_plan_swarm_id = None;
                 }
                 // Store provider info for UI display
                 if let Some(name) = provider_name {
@@ -4315,6 +4325,38 @@ impl App {
                 } else {
                     self.remote_swarm_members.clear();
                 }
+                false
+            }
+            ServerEvent::SwarmPlan {
+                swarm_id,
+                version,
+                items,
+                ..
+            } => {
+                self.swarm_plan_swarm_id = Some(swarm_id);
+                self.swarm_plan_version = Some(version);
+                self.swarm_plan_items = items;
+                self.set_status_notice(format!(
+                    "Swarm plan synced (v{}, {} items)",
+                    version,
+                    self.swarm_plan_items.len()
+                ));
+                false
+            }
+            ServerEvent::SwarmPlanProposal {
+                swarm_id,
+                proposer_session,
+                proposer_name,
+                summary,
+                ..
+            } => {
+                let proposer = proposer_name
+                    .unwrap_or_else(|| proposer_session.chars().take(8).collect::<String>());
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Plan proposal received in swarm {}\nFrom: {}\nSummary: {}",
+                    swarm_id, proposer, summary
+                )));
+                self.set_status_notice("Plan proposal received");
                 false
             }
             ServerEvent::McpStatus { servers } => {
@@ -4445,30 +4487,7 @@ impl App {
         // Typing should return to latest content, not absolute top when paused.
         self.follow_chat_bottom();
         self.reset_tab_completion();
-
-        // Preemptively show model picker preview when user types /model
-        if self.picker_state.is_none() {
-            let trimmed = self.input.trim();
-            if trimmed == "/model" || trimmed == "/models" {
-                let saved_input = self.input.clone();
-                let saved_cursor = self.cursor_pos;
-                self.open_model_picker();
-                if let Some(ref mut picker) = self.picker_state {
-                    picker.preview = true;
-                }
-                // Restore input - preview doesn't steal it
-                self.input = saved_input;
-                self.cursor_pos = saved_cursor;
-            }
-        } else if let Some(ref picker) = self.picker_state {
-            // Close preview if user keeps typing past /model
-            if picker.preview {
-                let trimmed = self.input.trim();
-                if trimmed != "/model" && trimmed != "/models" {
-                    self.picker_state = None;
-                }
-            }
-        }
+        self.sync_model_picker_preview_from_input();
     }
 
     /// Handle keyboard input in remote mode
@@ -4663,21 +4682,14 @@ impl App {
                     self.cursor_pos -= 1;
                     self.input.remove(self.cursor_pos);
                     self.reset_tab_completion();
-                    // Close preview picker if input no longer matches /model
-                    if let Some(ref picker) = self.picker_state {
-                        if picker.preview {
-                            let trimmed = self.input.trim();
-                            if trimmed != "/model" && trimmed != "/models" {
-                                self.picker_state = None;
-                            }
-                        }
-                    }
+                    self.sync_model_picker_preview_from_input();
                 }
             }
             KeyCode::Delete => {
                 if self.cursor_pos < self.input.len() {
                     self.input.remove(self.cursor_pos);
                     self.reset_tab_completion();
+                    self.sync_model_picker_preview_from_input();
                 }
             }
             KeyCode::Left => {
@@ -4701,6 +4713,9 @@ impl App {
                 self.autocomplete();
             }
             KeyCode::Enter => {
+                if self.activate_model_picker_from_preview() {
+                    return Ok(());
+                }
                 if !self.input.is_empty() {
                     let raw_input = std::mem::take(&mut self.input);
                     let expanded = self.expand_paste_placeholders(&raw_input);
@@ -4971,6 +4986,7 @@ impl App {
                     self.follow_chat_bottom();
                     self.input.clear();
                     self.cursor_pos = 0;
+                    self.sync_model_picker_preview_from_input();
                 }
             }
             _ => {}
@@ -5084,6 +5100,7 @@ impl App {
                     // Alt+D: delete word forward
                     let end = self.find_word_boundary_forward();
                     self.input.drain(self.cursor_pos..end);
+                    self.sync_model_picker_preview_from_input();
                     return Ok(());
                 }
                 KeyCode::Backspace => {
@@ -5091,6 +5108,7 @@ impl App {
                     let start = self.find_word_boundary_back();
                     self.input.drain(start..self.cursor_pos);
                     self.cursor_pos = start;
+                    self.sync_model_picker_preview_from_input();
                     return Ok(());
                 }
                 KeyCode::Char('i') => {
@@ -5160,6 +5178,7 @@ impl App {
                     // Ctrl+U: kill to beginning of line
                     self.input.drain(..self.cursor_pos);
                     self.cursor_pos = 0;
+                    self.sync_model_picker_preview_from_input();
                     return Ok(());
                 }
                 KeyCode::Char('a') => {
@@ -5191,6 +5210,7 @@ impl App {
                     let start = self.find_word_boundary_back();
                     self.input.drain(start..self.cursor_pos);
                     self.cursor_pos = start;
+                    self.sync_model_picker_preview_from_input();
                     return Ok(());
                 }
                 KeyCode::Char('v') => {
@@ -5244,6 +5264,9 @@ impl App {
 
         match code {
             KeyCode::Enter => {
+                if self.activate_model_picker_from_preview() {
+                    return Ok(());
+                }
                 if !self.input.is_empty() {
                     match self.send_action(false) {
                         SendAction::Submit => self.submit_input(),
@@ -5264,18 +5287,21 @@ impl App {
                 self.input.insert(self.cursor_pos, c);
                 self.cursor_pos += 1;
                 self.reset_tab_completion();
+                self.sync_model_picker_preview_from_input();
             }
             KeyCode::Backspace => {
                 if self.cursor_pos > 0 {
                     self.cursor_pos -= 1;
                     self.input.remove(self.cursor_pos);
                     self.reset_tab_completion();
+                    self.sync_model_picker_preview_from_input();
                 }
             }
             KeyCode::Delete => {
                 if self.cursor_pos < self.input.len() {
                     self.input.remove(self.cursor_pos);
                     self.reset_tab_completion();
+                    self.sync_model_picker_preview_from_input();
                 }
             }
             KeyCode::Left => {
@@ -5313,6 +5339,7 @@ impl App {
                     self.follow_chat_bottom();
                     self.input.clear();
                     self.cursor_pos = 0;
+                    self.sync_model_picker_preview_from_input();
                 }
             }
             _ => {}
@@ -5340,6 +5367,7 @@ impl App {
             self.input.insert_str(self.cursor_pos, &placeholder);
             self.cursor_pos += placeholder.len();
         }
+        self.sync_model_picker_preview_from_input();
     }
 
     /// Expand paste placeholders in input with actual content
@@ -5485,6 +5513,10 @@ impl App {
 
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
     fn submit_input(&mut self) {
+        if self.activate_model_picker_from_preview() {
+            return;
+        }
+
         let raw_input = std::mem::take(&mut self.input);
         let input = self.expand_paste_placeholders(&raw_input);
         self.pasted_contents.clear();
@@ -6855,7 +6887,7 @@ impl App {
             if let Some(event) = manager.poll_compaction_event() {
                 self.handle_compaction_event(event);
             }
-        }
+        };
     }
 
     fn handle_compaction_event(&mut self, event: CompactionEvent) {
@@ -6899,8 +6931,13 @@ impl App {
     fn should_inject_memory_context(&mut self, prompt: &str) -> bool {
         let signature = Self::memory_prompt_signature(prompt);
         let now = Instant::now();
-        if let Some((last_signature, last_injected_at)) = self.last_injected_memory_signature.as_ref() {
-            if *last_signature == signature && now.duration_since(*last_injected_at).as_secs() < MEMORY_INJECTION_SUPPRESSION_SECS {
+        if let Some((last_signature, last_injected_at)) =
+            self.last_injected_memory_signature.as_ref()
+        {
+            if *last_signature == signature
+                && now.duration_since(*last_injected_at).as_secs()
+                    < MEMORY_INJECTION_SUPPRESSION_SECS
+            {
                 return false;
             }
         }
@@ -6913,6 +6950,84 @@ impl App {
         if !enabled {
             self.remote_swarm_members.clear();
         }
+    }
+
+    fn model_picker_preview_filter(input: &str) -> Option<String> {
+        let trimmed = input.trim_start();
+        for cmd in ["/model", "/models"] {
+            if let Some(rest) = trimmed.strip_prefix(cmd) {
+                if rest.is_empty() {
+                    return Some(String::new());
+                }
+                if rest
+                    .chars()
+                    .next()
+                    .map(|c| c.is_whitespace())
+                    .unwrap_or(false)
+                {
+                    return Some(rest.trim_start().to_string());
+                }
+            }
+        }
+        None
+    }
+
+    fn sync_model_picker_preview_from_input(&mut self) {
+        let Some(filter) = Self::model_picker_preview_filter(&self.input) else {
+            if self
+                .picker_state
+                .as_ref()
+                .map(|picker| picker.preview)
+                .unwrap_or(false)
+            {
+                self.picker_state = None;
+            }
+            return;
+        };
+
+        if self.picker_state.is_none() {
+            let saved_input = self.input.clone();
+            let saved_cursor = self.cursor_pos;
+            self.open_model_picker();
+            if let Some(ref mut picker) = self.picker_state {
+                picker.preview = true;
+            }
+            // Preview must not steal the user's command input.
+            self.input = saved_input;
+            self.cursor_pos = saved_cursor;
+        }
+
+        if let Some(ref mut picker) = self.picker_state {
+            if picker.preview {
+                picker.filter = filter;
+                Self::apply_picker_filter(picker);
+            }
+        }
+    }
+
+    fn activate_model_picker_from_preview(&mut self) -> bool {
+        if !self
+            .picker_state
+            .as_ref()
+            .map(|picker| picker.preview)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
+        let Some(filter) = Self::model_picker_preview_filter(&self.input) else {
+            return false;
+        };
+
+        if let Some(ref mut picker) = self.picker_state {
+            picker.preview = false;
+            picker.column = 0;
+            picker.filter = filter;
+            Self::apply_picker_filter(picker);
+        }
+        self.input.clear();
+        self.cursor_pos = 0;
+        true
     }
 
     /// Open the model picker with available models
@@ -7247,8 +7362,10 @@ impl App {
             if pi < pat.len() && tc == pat[pi] {
                 score += 1;
                 // Consecutive match bonus
-                if last_match == Some(ti - 1) {
-                    score += 3;
+                if let Some(last) = last_match {
+                    if last + 1 == ti {
+                        score += 3;
+                    }
                 }
                 // Word boundary bonus (start, after / - _ space)
                 if ti == 0
@@ -10112,9 +10229,23 @@ impl super::TuiState for App {
             Some(self.session.id.as_str())
         };
 
-        let todos = session_id
-            .and_then(|id| crate::todo::load_todos(id).ok())
-            .unwrap_or_default();
+        let todos = if self.swarm_enabled && !self.swarm_plan_items.is_empty() {
+            self.swarm_plan_items
+                .iter()
+                .map(|item| crate::todo::TodoItem {
+                    content: item.content.clone(),
+                    status: item.status.clone(),
+                    priority: item.priority.clone(),
+                    id: item.id.clone(),
+                    blocked_by: item.blocked_by.clone(),
+                    assigned_to: item.assigned_to.clone(),
+                })
+                .collect()
+        } else {
+            session_id
+                .and_then(|id| crate::todo::load_todos(id).ok())
+                .unwrap_or_default()
+        };
 
         let context_info = self.context_info();
         let context_info = if context_info.total_chars > 0 {
@@ -10518,9 +10649,17 @@ fn spawn_in_new_terminal(
         }
     }
     candidates.extend(
-        ["kitty", "wezterm", "alacritty", "gnome-terminal", "konsole", "xterm", "foot"]
-            .iter()
-            .map(|s| s.to_string()),
+        [
+            "kitty",
+            "wezterm",
+            "alacritty",
+            "gnome-terminal",
+            "konsole",
+            "xterm",
+            "foot",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
     );
 
     for term in candidates {
@@ -10836,6 +10975,79 @@ mod tests {
         let app = create_test_app();
         let suggestions = app.get_suggestions_for("/mdl");
         assert!(suggestions.iter().any(|(cmd, _)| cmd == "/model"));
+    }
+
+    fn configure_test_remote_models(app: &mut App) {
+        app.is_remote = true;
+        app.remote_provider_model = Some("gpt-5.3-codex".to_string());
+        app.remote_available_models = vec![
+            "gpt-5.3-codex".to_string(),
+            "gpt-5.2-codex".to_string(),
+            "codex-mini-latest".to_string(),
+        ];
+    }
+
+    #[test]
+    fn test_model_picker_preview_filter_parsing() {
+        assert_eq!(
+            App::model_picker_preview_filter("/model"),
+            Some(String::new())
+        );
+        assert_eq!(
+            App::model_picker_preview_filter("/model   gpt-5"),
+            Some("gpt-5".to_string())
+        );
+        assert_eq!(
+            App::model_picker_preview_filter("   /models codex"),
+            Some("codex".to_string())
+        );
+        assert_eq!(App::model_picker_preview_filter("/modelx"), None);
+        assert_eq!(App::model_picker_preview_filter("hello /model"), None);
+    }
+
+    #[test]
+    fn test_model_picker_preview_stays_open_and_updates_filter() {
+        let mut app = create_test_app();
+        configure_test_remote_models(&mut app);
+
+        for c in "/model g52c".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+
+        let picker = app
+            .picker_state
+            .as_ref()
+            .expect("model picker preview should be open");
+        assert!(picker.preview);
+        assert_eq!(picker.filter, "g52c");
+        assert!(picker
+            .filtered
+            .iter()
+            .any(|&i| picker.models[i].name == "gpt-5.2-codex"));
+        assert_eq!(app.input(), "/model g52c");
+    }
+
+    #[test]
+    fn test_model_picker_preview_enter_opens_interactive_picker() {
+        let mut app = create_test_app();
+        configure_test_remote_models(&mut app);
+
+        for c in "/model g52c".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+
+        let picker = app
+            .picker_state
+            .as_ref()
+            .expect("model picker should remain open");
+        assert!(!picker.preview);
+        assert_eq!(picker.filter, "g52c");
+        assert!(app.input().is_empty());
+        assert_eq!(app.cursor_pos(), 0);
     }
 
     #[test]
