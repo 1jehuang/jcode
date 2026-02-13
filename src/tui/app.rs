@@ -32,6 +32,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::time::interval;
 
+const MEMORY_INJECTION_SUPPRESSION_SECS: u64 = 90;
+
 /// Debug command file path
 fn debug_cmd_path() -> PathBuf {
     if let Ok(path) = std::env::var("JCODE_DEBUG_CMD_PATH") {
@@ -567,6 +569,8 @@ pub struct App {
     requested_exit_code: Option<i32>,
     // Memory feature toggle for this session
     memory_enabled: bool,
+    // Suppress duplicate memory injection messages for near-identical prompts.
+    last_injected_memory_signature: Option<(String, Instant)>,
     // Swarm feature toggle for this session
     swarm_enabled: bool,
     // Show diffs for edit/write tool outputs (toggle with Alt+D)
@@ -819,6 +823,7 @@ impl App {
             resume_session_id: None,
             requested_exit_code: None,
             memory_enabled: features.memory,
+            last_injected_memory_signature: None,
             swarm_enabled: features.swarm,
             show_diffs: display.show_diffs,
             centered: display.centered,
@@ -3477,6 +3482,7 @@ impl App {
                                 self.streaming_text.push_str(&chunk);
                             }
                         }
+                        self.poll_compaction_completion();
                         // Check for debug commands
                         self.check_debug_command();
                         // Check for selfdev signals (rebuild/rollback)
@@ -6784,12 +6790,14 @@ impl App {
 
     fn replace_provider_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
+        self.last_injected_memory_signature = None;
         self.rebuild_tool_result_index();
         self.reseed_compaction_from_provider_messages();
     }
 
     fn clear_provider_messages(&mut self) {
         self.messages.clear();
+        self.last_injected_memory_signature = None;
         self.tool_result_ids.clear();
         self.reseed_compaction_from_provider_messages();
     }
@@ -6838,6 +6846,18 @@ impl App {
         result
     }
 
+    fn poll_compaction_completion(&mut self) {
+        if self.is_remote || !self.provider.supports_compaction() {
+            return;
+        }
+        let compaction = self.registry.compaction();
+        if let Ok(mut manager) = compaction.try_write() {
+            if let Some(event) = manager.poll_compaction_event() {
+                self.handle_compaction_event(event);
+            }
+        }
+    }
+
     fn handle_compaction_event(&mut self, event: CompactionEvent) {
         self.provider_session_id = None;
         self.session.provider_session_id = None;
@@ -6862,7 +6882,30 @@ impl App {
             crate::memory::clear_pending_memory();
             crate::memory::clear_activity();
             crate::memory_agent::reset();
+            self.last_injected_memory_signature = None;
         }
+    }
+
+    fn memory_prompt_signature(prompt: &str) -> String {
+        prompt
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_lowercase)
+            .collect::<Vec<String>>()
+            .join("\n")
+    }
+
+    fn should_inject_memory_context(&mut self, prompt: &str) -> bool {
+        let signature = Self::memory_prompt_signature(prompt);
+        let now = Instant::now();
+        if let Some((last_signature, last_injected_at)) = self.last_injected_memory_signature.as_ref() {
+            if *last_signature == signature && now.duration_since(*last_injected_at).as_secs() < MEMORY_INJECTION_SUPPRESSION_SECS {
+                return false;
+            }
+        }
+        self.last_injected_memory_signature = Some((signature, now));
+        true
     }
 
     fn set_swarm_feature_enabled(&mut self, enabled: bool) {
@@ -8865,6 +8908,9 @@ impl App {
         } else {
             prompt.to_string()
         };
+        if !self.should_inject_memory_context(&display_prompt) {
+            return;
+        }
         let prompt_chars = display_prompt.chars().count();
         crate::memory::record_injected_prompt(&display_prompt, count, age_ms);
         self.push_display_message(DisplayMessage::system(format!(
