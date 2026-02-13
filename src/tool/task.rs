@@ -15,8 +15,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
-const DEFAULT_SUBAGENT_MODEL: &str = "gpt-5.3-codex-spark";
-
 pub struct SubagentTool {
     provider: Arc<dyn Provider>,
     registry: Registry,
@@ -89,7 +87,8 @@ impl Tool for SubagentTool {
             Session::create(Some(ctx.session_id.clone()), Some(subagent_title(&params)))
         };
         if session.model.is_none() {
-            session.model = Some(DEFAULT_SUBAGENT_MODEL.to_string());
+            // Default new subagent sessions to the coordinator's current model.
+            session.model = Some(self.provider.model());
         }
 
         if let Some(ref working_dir) = ctx.working_dir {
