@@ -2,17 +2,23 @@ use super::{EventStream, Provider};
 use crate::auth::codex::CodexCredentials;
 use crate::auth::oauth;
 use crate::message::{
-    ContentBlock, Message, Role, StreamEvent, ToolDefinition, TOOL_OUTPUT_MISSING_TEXT,
+    ContentBlock, Message as ChatMessage, Role, StreamEvent, ToolDefinition, TOOL_OUTPUT_MISSING_TEXT,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::Stream;
+use futures::{SinkExt, Stream, StreamExt};
 use reqwest::{Client, StatusCode};
+use reqwest::header::HeaderValue;
+use tokio_tungstenite::tungstenite::Error as WsError;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::connect_async;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use tokio::sync::{mpsc, RwLock};
@@ -30,6 +36,7 @@ const MAX_RETRIES: u32 = 3;
 
 /// Base delay for exponential backoff (in milliseconds)
 const RETRY_BASE_DELAY_MS: u64 = 1000;
+const WEBSOCKET_UPGRADE_REQUIRED_ERROR: StatusCode = StatusCode::UPGRADE_REQUIRED;
 
 /// Available OpenAI/Codex models
 const AVAILABLE_MODELS: &[&str] = &[
@@ -54,6 +61,51 @@ const AVAILABLE_MODELS: &[&str] = &[
     "gpt-5",
 ];
 
+#[derive(Clone, Copy)]
+enum OpenAITransportMode {
+    Auto,
+    WebSocket,
+    HTTPS,
+}
+
+impl OpenAITransportMode {
+    fn from_config(raw: Option<&str>) -> Self {
+        let Some(raw) = raw else {
+            return Self::Auto;
+        };
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" | "" => Self::Auto,
+            "websocket" | "ws" | "wss" => Self::WebSocket,
+            "https" | "http" | "sse" => Self::HTTPS,
+            other => {
+                crate::logging::warn(&format!(
+                    "Unknown JCODE_OPENAI_TRANSPORT '{}'; using auto. Use: auto, websocket, or https.",
+                    other
+                ));
+                Self::Auto
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum OpenAIStreamFailure {
+    FallbackToHttps(anyhow::Error),
+    Other(anyhow::Error),
+}
+
+impl From<anyhow::Error> for OpenAIStreamFailure {
+    fn from(err: anyhow::Error) -> Self {
+        Self::Other(err)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OpenAITransport {
+    WebSocket,
+    HTTPS,
+}
+
 pub struct OpenAIProvider {
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
@@ -61,6 +113,8 @@ pub struct OpenAIProvider {
     prompt_cache_key: Option<String>,
     prompt_cache_retention: Option<String>,
     reasoning_effort: Option<String>,
+    transport_mode: OpenAITransportMode,
+    websocket_disabled: Arc<AtomicBool>,
 }
 
 impl OpenAIProvider {
@@ -100,6 +154,12 @@ impl OpenAIProvider {
             .openai_reasoning_effort
             .as_deref()
             .and_then(Self::normalize_reasoning_effort);
+        let transport_mode = OpenAITransportMode::from_config(
+            crate::config::config()
+                .provider
+                .openai_transport
+                .as_deref(),
+        );
 
         Self {
             client: Client::new(),
@@ -108,6 +168,8 @@ impl OpenAIProvider {
             prompt_cache_key,
             prompt_cache_retention,
             reasoning_effort,
+            transport_mode,
+            websocket_disabled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -156,6 +218,10 @@ impl OpenAIProvider {
         !credentials.refresh_token.is_empty() || credentials.id_token.is_some()
     }
 
+    fn should_prefer_websocket(model: &str) -> bool {
+        model.contains("codex") || model.starts_with("gpt-5")
+    }
+
     fn normalize_reasoning_effort(raw: &str) -> Option<String> {
         let value = raw.trim().to_lowercase();
         if value.is_empty() {
@@ -180,6 +246,11 @@ impl OpenAIProvider {
             OPENAI_API_BASE
         };
         format!("{}/{}", base.trim_end_matches('/'), RESPONSES_PATH)
+    }
+
+    fn responses_ws_url(credentials: &CodexCredentials) -> String {
+        let base = Self::responses_url(credentials);
+        base.replace("https://", "wss://").replace("http://", "ws://")
     }
 
     async fn model_id(&self) -> String {
@@ -225,7 +296,7 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
         .collect()
 }
 
-fn build_responses_input(messages: &[Message]) -> Vec<Value> {
+fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
     use std::collections::{HashMap, HashSet};
 
     let missing_output = format!("[Error] {}", TOOL_OUTPUT_MISSING_TEXT);
@@ -267,7 +338,7 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
                             content,
                             is_error,
                         } => {
-                            if used_outputs.contains(tool_use_id) {
+                            if used_outputs.contains(tool_use_id.as_str()) {
                                 skipped_results += 1;
                                 continue;
                             }
@@ -276,15 +347,15 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
                             } else {
                                 content.clone()
                             };
-                            if open_calls.contains(tool_use_id) {
+                            if open_calls.contains(tool_use_id.as_str()) {
                                 items.push(serde_json::json!({
                                     "type": "function_call_output",
                                     "call_id": tool_use_id,
                                     "output": output
                                 }));
-                                open_calls.remove(tool_use_id);
+                                open_calls.remove(tool_use_id.as_str());
                                 used_outputs.insert(tool_use_id.clone());
-                            } else if pending_outputs.contains_key(tool_use_id) {
+                            } else if pending_outputs.contains_key(tool_use_id.as_str()) {
                                 skipped_results += 1;
                             } else {
                                 pending_outputs.insert(tool_use_id.clone(), output);
@@ -306,7 +377,7 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
                             }));
                         }
                         ContentBlock::ToolUse { id, name, input } => {
-                            let arguments = serde_json::to_string(input).unwrap_or_default();
+                            let arguments = serde_json::to_string(&input).unwrap_or_default();
                             items.push(serde_json::json!({
                                 "type": "function_call",
                                 "name": name,
@@ -314,7 +385,7 @@ fn build_responses_input(messages: &[Message]) -> Vec<Value> {
                                 "call_id": id
                             }));
 
-                            if let Some(output) = pending_outputs.remove(id) {
+                            if let Some(output) = pending_outputs.remove(id.as_str()) {
                                 items.push(serde_json::json!({
                                     "type": "function_call_output",
                                     "call_id": id,
@@ -538,6 +609,164 @@ struct ResponseSseEvent {
     error: Option<Value>,
 }
 
+fn parse_openai_response_event(
+    data: &str,
+    saw_text_delta: &mut bool,
+    pending: &mut VecDeque<StreamEvent>,
+) -> Option<StreamEvent> {
+    if data == "[DONE]" {
+        return Some(StreamEvent::MessageEnd { stop_reason: None });
+    }
+
+    let lower_data = data.to_lowercase();
+    if lower_data.contains("stream disconnected before completion") {
+        return Some(StreamEvent::Error {
+            message: data.to_string(),
+            retry_after_secs: None,
+        });
+    }
+    if lower_data.contains("falling back from websockets to https transport") {
+        crate::logging::warn(&format!("OpenAI stream transport notice: {}", data.trim()));
+        return None;
+    }
+
+    let event: ResponseSseEvent = match serde_json::from_str(data) {
+        Ok(parsed) => parsed,
+        Err(_) => return None,
+    };
+
+    match event.kind.as_str() {
+        "response.output_text.delta" => {
+            if let Some(delta) = event.delta {
+                *saw_text_delta = true;
+                return Some(StreamEvent::TextDelta(delta));
+            }
+        }
+        "response.reasoning.delta" | "response.reasoning_summary_text.delta" => {
+            if let Some(delta) = event.delta {
+                return Some(StreamEvent::ThinkingDelta(delta));
+            }
+        }
+        "response.reasoning.done" | "response.output_item.added" => {
+            if let Some(item) = &event.item {
+                if item.get("type").and_then(|v| v.as_str()) == Some("reasoning") {
+                    return Some(StreamEvent::ThinkingStart);
+                }
+            }
+        }
+        "response.output_item.done" => {
+            if let Some(item) = event.item {
+                if let Some(event) = handle_openai_output_item(item, saw_text_delta, pending) {
+                    return Some(event);
+                }
+            }
+        }
+        "response.completed" => {
+            if let Some(response) = event.response {
+                if let Some(usage_event) = extract_usage_from_response(&response) {
+                    pending.push_back(usage_event);
+                }
+            }
+            pending.push_back(StreamEvent::MessageEnd { stop_reason: None });
+            return pending.pop_front();
+        }
+        "response.failed" | "response.error" | "error" => {
+            crate::logging::warn(&format!(
+                "OpenAI stream error event (type={}): response={:?}, error={:?}",
+                event.kind, event.response, event.error
+            ));
+            let (message, retry_after_secs) =
+                extract_error_with_retry(&event.response, &event.error);
+            return Some(StreamEvent::Error {
+                message,
+                retry_after_secs,
+            });
+        }
+        _ => {}
+    }
+
+    None
+}
+
+fn handle_openai_output_item(
+    item: Value,
+    saw_text_delta: &mut bool,
+    pending: &mut VecDeque<StreamEvent>,
+) -> Option<StreamEvent> {
+    let item_type = item.get("type")?.as_str()?;
+    match item_type {
+        "function_call" | "custom_tool_call" => {
+            let call_id = item
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let arguments = item
+                .get("arguments")
+                .and_then(|v| v.as_str())
+                .or_else(|| item.get("input").and_then(|v| v.as_str()))
+                .unwrap_or("{}");
+
+            pending.push_back(StreamEvent::ToolUseStart {
+                id: call_id.clone(),
+                name,
+            });
+            pending.push_back(StreamEvent::ToolInputDelta(arguments.to_string()));
+            pending.push_back(StreamEvent::ToolUseEnd);
+            return pending.pop_front();
+        }
+        "message" => {
+            if *saw_text_delta {
+                return None;
+            }
+            let mut text = String::new();
+            if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
+                for entry in content {
+                    let entry_type = entry.get("type").and_then(|v| v.as_str());
+                    if matches!(entry_type, Some("output_text") | Some("text")) {
+                        if let Some(t) = entry.get("text").and_then(|v| v.as_str()) {
+                            text.push_str(t);
+                        }
+                    }
+                }
+            }
+            if !text.is_empty() {
+                return Some(StreamEvent::TextDelta(text));
+            }
+        }
+        "reasoning" => {
+            if let Some(summary_arr) = item.get("summary").and_then(|v| v.as_array()) {
+                let mut summary_text = String::new();
+                for summary_item in summary_arr {
+                    if summary_item.get("type").and_then(|v| v.as_str()) == Some("summary_text")
+                    {
+                        if let Some(text) = summary_item.get("text").and_then(|v| v.as_str()) {
+                            if !summary_text.is_empty() {
+                                summary_text.push('\n');
+                            }
+                            summary_text.push_str(text);
+                        }
+                    }
+                }
+                if !summary_text.is_empty() {
+                    pending.push_back(StreamEvent::ThinkingStart);
+                    pending.push_back(StreamEvent::ThinkingDelta(summary_text));
+                    pending.push_back(StreamEvent::ThinkingEnd);
+                    return pending.pop_front();
+                }
+            }
+        }
+        _ => {}
+    }
+
+    None
+}
+
 struct OpenAIResponsesStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     buffer: String,
@@ -576,81 +805,12 @@ impl OpenAIResponsesStream {
             }
 
             let data = data_lines.join("\n");
-            if data == "[DONE]" {
-                return Some(StreamEvent::MessageEnd { stop_reason: None });
-            }
-
-            let lower_data = data.to_lowercase();
-            if lower_data.contains("stream disconnected before completion") {
-                return Some(StreamEvent::Error {
-                    message: data,
-                    retry_after_secs: None,
-                });
-            }
-            if lower_data.contains("falling back from websockets to https transport") {
-                crate::logging::warn(&format!(
-                    "OpenAI stream transport notice: {}",
-                    data.trim()
-                ));
-                continue;
-            }
-
-            let event: ResponseSseEvent = match serde_json::from_str(&data) {
-                Ok(parsed) => parsed,
-                Err(_) => continue,
-            };
-
-            match event.kind.as_str() {
-                "response.output_text.delta" => {
-                    if let Some(delta) = event.delta {
-                        self.saw_text_delta = true;
-                        return Some(StreamEvent::TextDelta(delta));
-                    }
-                }
-                "response.reasoning.delta" | "response.reasoning_summary_text.delta" => {
-                    // Reasoning/thinking delta - display as thinking content
-                    if let Some(delta) = event.delta {
-                        return Some(StreamEvent::ThinkingDelta(delta));
-                    }
-                }
-                "response.reasoning.done" | "response.output_item.added" => {
-                    // Check if this is a reasoning item starting
-                    if let Some(item) = &event.item {
-                        if item.get("type").and_then(|v| v.as_str()) == Some("reasoning") {
-                            return Some(StreamEvent::ThinkingStart);
-                        }
-                    }
-                }
-                "response.output_item.done" => {
-                    if let Some(item) = event.item {
-                        if let Some(event) = self.handle_output_item(item) {
-                            return Some(event);
-                        }
-                    }
-                }
-                "response.completed" => {
-                    if let Some(response) = event.response {
-                        if let Some(usage_event) = extract_usage_from_response(&response) {
-                            self.pending.push_back(usage_event);
-                        }
-                    }
-                    self.pending
-                        .push_back(StreamEvent::MessageEnd { stop_reason: None });
-                    return self.pending.pop_front();
-                }
-                "response.failed" | "response.error" | "error" => {
-                    crate::logging::warn(&format!(
-                        "OpenAI stream error event (type={}): response={:?}, error={:?}",
-                        event.kind, event.response, event.error
-                    ));
-                    let (message, retry_after_secs) =
-                        extract_error_with_retry(&event.response, &event.error);
-                    return Some(StreamEvent::Error {
-                        message,
-                        retry_after_secs,
-                    });
-                }
-                _ => {}
+            if let Some(event) = parse_openai_response_event(
+                &data,
+                &mut self.saw_text_delta,
+                &mut self.pending,
+            ) {
+                return Some(event);
             }
         }
 
@@ -658,82 +818,7 @@ impl OpenAIResponsesStream {
     }
 
     fn handle_output_item(&mut self, item: Value) -> Option<StreamEvent> {
-        let item_type = item.get("type")?.as_str()?;
-        match item_type {
-            "function_call" | "custom_tool_call" => {
-                let call_id = item
-                    .get("call_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let name = item
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let arguments = item
-                    .get("arguments")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| item.get("input").and_then(|v| v.as_str()))
-                    .unwrap_or("{}");
-
-                self.pending.push_back(StreamEvent::ToolUseStart {
-                    id: call_id.clone(),
-                    name,
-                });
-                self.pending
-                    .push_back(StreamEvent::ToolInputDelta(arguments.to_string()));
-                self.pending.push_back(StreamEvent::ToolUseEnd);
-                return self.pending.pop_front();
-            }
-            "message" => {
-                if self.saw_text_delta {
-                    return None;
-                }
-                let mut text = String::new();
-                if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
-                    for entry in content {
-                        let entry_type = entry.get("type").and_then(|v| v.as_str());
-                        if matches!(entry_type, Some("output_text") | Some("text")) {
-                            if let Some(t) = entry.get("text").and_then(|v| v.as_str()) {
-                                text.push_str(t);
-                            }
-                        }
-                    }
-                }
-                if !text.is_empty() {
-                    return Some(StreamEvent::TextDelta(text));
-                }
-            }
-            "reasoning" => {
-                // Extract reasoning summary text from the item
-                // OpenAI returns: {"type":"reasoning","summary":[{"type":"summary_text","text":"..."}]}
-                if let Some(summary_arr) = item.get("summary").and_then(|v| v.as_array()) {
-                    let mut summary_text = String::new();
-                    for summary_item in summary_arr {
-                        if summary_item.get("type").and_then(|v| v.as_str()) == Some("summary_text")
-                        {
-                            if let Some(text) = summary_item.get("text").and_then(|v| v.as_str()) {
-                                if !summary_text.is_empty() {
-                                    summary_text.push('\n');
-                                }
-                                summary_text.push_str(text);
-                            }
-                        }
-                    }
-                    if !summary_text.is_empty() {
-                        // Emit thinking events: start, content, end
-                        self.pending.push_back(StreamEvent::ThinkingStart);
-                        self.pending
-                            .push_back(StreamEvent::ThinkingDelta(summary_text));
-                        self.pending.push_back(StreamEvent::ThinkingEnd);
-                        return self.pending.pop_front();
-                    }
-                }
-            }
-            _ => {}
-        }
-        None
+        handle_openai_output_item(item, &mut self.saw_text_delta, &mut self.pending)
     }
 }
 
@@ -795,7 +880,7 @@ impl Stream for OpenAIResponsesStream {
 impl Provider for OpenAIProvider {
     async fn complete(
         &self,
-        messages: &[Message],
+        messages: &[ChatMessage],
         tools: &[ToolDefinition],
         system: &str,
         _resume_session_id: Option<&str>, // Not used by OpenAI provider
@@ -843,8 +928,11 @@ impl Provider for OpenAIProvider {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
         // Clone what we need for the async task
-        let client = self.client.clone();
         let credentials = Arc::clone(&self.credentials);
+        let transport_mode = self.transport_mode;
+        let websocket_disabled = Arc::clone(&self.websocket_disabled);
+        let model_for_transport = model_id.clone();
+        let client = self.client.clone();
 
         // Spawn task to handle streaming with retry logic
         tokio::spawn(async move {
@@ -862,25 +950,58 @@ impl Provider for OpenAIProvider {
                     ));
                 }
 
-                match stream_response(
-                    client.clone(),
-                    Arc::clone(&credentials),
-                    request.clone(),
-                    tx.clone(),
-                )
-                .await
-                {
+                let transport = if websocket_disabled.load(Ordering::Acquire) {
+                    OpenAITransport::HTTPS
+                } else {
+                    match transport_mode {
+                        OpenAITransportMode::HTTPS => OpenAITransport::HTTPS,
+                        OpenAITransportMode::WebSocket => OpenAITransport::WebSocket,
+                        OpenAITransportMode::Auto => {
+                            if Self::should_prefer_websocket(&model_for_transport) {
+                                OpenAITransport::WebSocket
+                            } else {
+                                OpenAITransport::HTTPS
+                            }
+                        }
+                    }
+                };
+
+                let use_websocket = matches!(transport, OpenAITransport::WebSocket);
+                let result = if use_websocket {
+                    stream_response_websocket(
+                        Arc::clone(&credentials),
+                        request.clone(),
+                        tx.clone(),
+                    )
+                    .await
+                } else {
+                    stream_response(
+                        client.clone(),
+                        Arc::clone(&credentials),
+                        request.clone(),
+                        tx.clone(),
+                    )
+                    .await
+                };
+
+                match result {
                     Ok(()) => return, // Success
-                    Err(e) => {
-                        let error_str = e.to_string().to_lowercase();
-                        // Check if this is a transient/retryable error
+                    Err(OpenAIStreamFailure::FallbackToHttps(error)) => {
+                        crate::logging::info(
+                            "WebSocket fallback detected. Retrying using HTTPS transport for this session.",
+                        );
+                        websocket_disabled.store(true, Ordering::SeqCst);
+                        last_error = Some(error);
+                        continue;
+                    }
+                    Err(OpenAIStreamFailure::Other(error)) => {
+                        let error_str = error.to_string().to_lowercase();
                         if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
-                            crate::logging::info(&format!("Transient error, will retry: {}", e));
-                            last_error = Some(e);
+                            crate::logging::info(&format!("Transient error, will retry: {}", error));
+                            last_error = Some(error);
                             continue;
                         }
-                        // Non-retryable or final attempt
-                        let _ = tx.send(Err(e)).await;
+                        let _ = tx.send(Err(error)).await;
                         return;
                     }
                 }
@@ -952,8 +1073,55 @@ impl Provider for OpenAIProvider {
             prompt_cache_key: self.prompt_cache_key.clone(),
             prompt_cache_retention: self.prompt_cache_retention.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
+            transport_mode: self.transport_mode,
+            websocket_disabled: Arc::clone(&self.websocket_disabled),
         })
     }
+}
+
+async fn openai_access_token(credentials: &Arc<RwLock<CodexCredentials>>) -> anyhow::Result<String> {
+    let (access_token, refresh_token, needs_refresh) = {
+        let tokens = credentials.read().await;
+        if tokens.access_token.is_empty() {
+            anyhow::bail!("OpenAI access token is empty");
+        }
+
+        let should_refresh = if let Some(expires_at) = tokens.expires_at {
+            expires_at < chrono::Utc::now().timestamp_millis() + 300_000 && !tokens.refresh_token.is_empty()
+        } else {
+            false
+        };
+
+        (
+            tokens.access_token.clone(),
+            tokens.refresh_token.clone(),
+            should_refresh,
+        )
+    };
+
+    if !needs_refresh {
+        return Ok(access_token);
+    }
+
+    if refresh_token.is_empty() {
+        return Ok(access_token);
+    }
+
+    let refreshed = oauth::refresh_openai_tokens(&refresh_token).await?;
+    let mut tokens = credentials.write().await;
+    let account_id = tokens.account_id.clone();
+    let id_token = refreshed.id_token.clone().or_else(|| tokens.id_token.clone());
+    let new_access_token = refreshed.access_token.clone();
+
+    *tokens = CodexCredentials {
+        access_token: new_access_token.clone(),
+        refresh_token: refreshed.refresh_token,
+        id_token,
+        account_id,
+        expires_at: Some(refreshed.expires_at),
+    };
+
+    Ok(new_access_token)
 }
 
 /// Stream the response from OpenAI API
@@ -962,59 +1130,13 @@ async fn stream_response(
     credentials: Arc<RwLock<CodexCredentials>>,
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
-) -> Result<()> {
-    // Get access token (with potential refresh)
-    let access_token = {
-        let tokens = credentials.read().await;
-        if tokens.access_token.is_empty() {
-            anyhow::bail!("OpenAI access token is empty");
-        }
-
-        // Check if token needs refresh
-        if let Some(expires_at) = tokens.expires_at {
-            let now = chrono::Utc::now().timestamp_millis();
-            if expires_at < now + 300_000 && !tokens.refresh_token.is_empty() {
-                drop(tokens);
-                // Refresh token
-                let mut tokens = credentials.write().await;
-                let refreshed = oauth::refresh_openai_tokens(&tokens.refresh_token).await?;
-                let id_token = refreshed
-                    .id_token
-                    .clone()
-                    .or_else(|| tokens.id_token.clone());
-                let account_id = tokens.account_id.clone();
-
-                *tokens = CodexCredentials {
-                    access_token: refreshed.access_token.clone(),
-                    refresh_token: refreshed.refresh_token,
-                    id_token,
-                    account_id,
-                    expires_at: Some(refreshed.expires_at),
-                };
-                refreshed.access_token
-            } else {
-                tokens.access_token.clone()
-            }
-        } else {
-            tokens.access_token.clone()
-        }
-    };
-
-    let creds = credentials.read().await;
+) -> Result<(), OpenAIStreamFailure> {
+    let access_token = openai_access_token(&credentials).await?;
+    let mut creds = credentials.read().await;
     let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
-    let url = if is_chatgpt_mode {
-        format!(
-            "{}/{}",
-            CHATGPT_API_BASE.trim_end_matches('/'),
-            RESPONSES_PATH
-        )
-    } else {
-        format!(
-            "{}/{}",
-            OPENAI_API_BASE.trim_end_matches('/'),
-            RESPONSES_PATH
-        )
-    };
+    let url = OpenAIProvider::responses_url(&creds);
+    let account_id = creds.account_id.clone();
+    drop(creds);
 
     let mut builder = client
         .post(&url)
@@ -1023,17 +1145,17 @@ async fn stream_response(
 
     if is_chatgpt_mode {
         builder = builder.header("originator", ORIGINATOR);
-        if let Some(account_id) = creds.account_id.as_ref() {
+        if let Some(account_id) = account_id.as_ref() {
             builder = builder.header("chatgpt-account-id", account_id);
         }
     }
-    drop(creds);
 
     let response = builder
         .json(&request)
         .send()
         .await
-        .context("Failed to send request to OpenAI API")?;
+        .context("Failed to send request to OpenAI API")
+        .map_err(OpenAIStreamFailure::Other)?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -1048,7 +1170,10 @@ async fn stream_response(
         // Check if we need to refresh token
         if should_refresh_token(status, &body) {
             // Token refresh needed - this is a retryable error
-            anyhow::bail!("Token refresh needed: {}", body);
+            return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+                "Token refresh needed: {}",
+                body
+            )));
         }
 
         // For rate limits, include retry info in the error
@@ -1060,7 +1185,7 @@ async fn stream_response(
         } else {
             format!("OpenAI API error {}: {}", status, body)
         };
-        anyhow::bail!("{}", msg);
+        return Err(OpenAIStreamFailure::Other(anyhow::anyhow!("{}", msg)));
     }
 
     // Stream the response
@@ -1072,7 +1197,10 @@ async fn stream_response(
             Ok(event) => {
                 if let StreamEvent::Error { message, .. } = &event {
                     if is_retryable_error(&message.to_lowercase()) {
-                        return Err(anyhow::anyhow!("Stream error: {}", message));
+                        return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+                            "Stream error: {}",
+                            message
+                        )));
                     }
                 }
                 if tx.send(Ok(event)).await.is_err() {
@@ -1083,6 +1211,173 @@ async fn stream_response(
             Err(e) => {
                 let _ = tx.send(Err(e)).await;
                 return Ok(());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn is_ws_upgrade_required(err: &WsError) -> bool {
+    match err {
+        WsError::Http(response) => response.status() == WEBSOCKET_UPGRADE_REQUIRED_ERROR,
+        _ => false,
+    }
+}
+
+/// Stream the response from OpenAI API using websockets
+async fn stream_response_websocket(
+    credentials: Arc<RwLock<CodexCredentials>>,
+    request: Value,
+    tx: mpsc::Sender<Result<StreamEvent>>,
+) -> Result<(), OpenAIStreamFailure> {
+    let access_token = openai_access_token(&credentials).await?;
+    let creds = credentials.read().await;
+    let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
+    let ws_url = OpenAIProvider::responses_ws_url(&creds);
+    let mut ws_request = ws_url
+        .into_client_request()
+        .map_err(|err| {
+            OpenAIStreamFailure::Other(anyhow::anyhow!("Failed to build websocket request: {}", err))
+        })?;
+
+    let auth_header = HeaderValue::from_str(&format!("Bearer {}", access_token)).map_err(|err| {
+        OpenAIStreamFailure::Other(anyhow::anyhow!("Invalid Authorization header: {}", err))
+    })?;
+    ws_request
+        .headers_mut()
+        .insert("Authorization", auth_header);
+    ws_request
+        .headers_mut()
+        .insert("Content-Type", HeaderValue::from_static("application/json"));
+
+    if is_chatgpt_mode {
+        ws_request
+            .headers_mut()
+            .insert("originator", HeaderValue::from_static(ORIGINATOR));
+        if let Some(account_id) = creds.account_id.as_ref() {
+            let account_header = HeaderValue::from_str(account_id).map_err(|err| {
+                OpenAIStreamFailure::Other(anyhow::anyhow!(
+                    "Invalid chatgpt-account-id header: {}",
+                    err
+                ))
+            })?;
+            ws_request.headers_mut().insert(
+                "chatgpt-account-id",
+                account_header,
+            );
+        }
+    }
+    drop(creds);
+
+    let (mut ws_stream, _response) = match connect_async(ws_request).await {
+        Ok((stream, response)) => (stream, response),
+        Err(err) if is_ws_upgrade_required(&err) => {
+            return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                "Falling back from websockets to HTTPS transport"
+            )));
+        }
+        Err(err) => {
+            return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+                "Failed to connect websocket stream: {}",
+                err
+            )));
+        }
+    };
+
+    let mut request_event = request;
+    if !request_event.is_object() {
+        return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+            "Invalid websocket request payload shape; expected an object"
+        )));
+    }
+    request_event
+        .as_object_mut()
+        .expect("request_event is object")
+        .insert(
+            "type".to_string(),
+            serde_json::Value::String("response.create".to_string()),
+        );
+
+    let request_text = serde_json::to_string(&request_event)
+        .map_err(|err| OpenAIStreamFailure::Other(anyhow::anyhow!(
+            "Failed to serialize OpenAI websocket request: {}",
+            err
+        )))?;
+    ws_stream
+        .send(WsMessage::Text(request_text))
+        .await
+        .map_err(|err| OpenAIStreamFailure::Other(anyhow::anyhow!(err)))?;
+
+    use futures::StreamExt;
+    let mut saw_text_delta = false;
+    let mut saw_response_completed = false;
+    let mut pending: VecDeque<StreamEvent> = VecDeque::new();
+
+    while let Some(result) = ws_stream.next().await {
+        match result {
+            Ok(message) => match message {
+                WsMessage::Text(text) => {
+                    let text = text.to_string();
+                    if let Some(event) =
+                        parse_openai_response_event(&text, &mut saw_text_delta, &mut pending)
+                    {
+                        if matches!(event, StreamEvent::MessageEnd { .. }) {
+                            saw_response_completed = true;
+                        }
+                        if let StreamEvent::Error { message, .. } = &event {
+                            if is_retryable_error(&message.to_lowercase()) {
+                                return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+                                    "Stream error: {}",
+                                    message
+                                )));
+                            }
+                        }
+                        if tx.send(Ok(event)).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    while let Some(event) = pending.pop_front() {
+                        if let StreamEvent::Error { message, .. } = &event {
+                            if is_retryable_error(&message.to_lowercase()) {
+                                return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+                                    "Stream error: {}",
+                                    message
+                                )));
+                            }
+                        }
+                        if matches!(event, StreamEvent::MessageEnd { .. }) {
+                            saw_response_completed = true;
+                        }
+                        if tx.send(Ok(event)).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+                WsMessage::Ping(payload) => {
+                    let _ = ws_stream.send(WsMessage::Pong(payload)).await;
+                }
+                WsMessage::Close(_) => {
+                    if saw_response_completed {
+                        return Ok(());
+                    }
+                    return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+                        "WebSocket stream closed before response.completed"
+                    )));
+                }
+                WsMessage::Binary(_) => {
+                    return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+                        "Unexpected binary websocket event"
+                    )));
+                }
+                WsMessage::Pong(_) => {}
+                _ => {}
+            },
+            Err(err) => {
+                return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+                    "Stream error: {}",
+                    err
+                )));
             }
         }
     }
@@ -1209,14 +1504,14 @@ mod tests {
     fn test_build_responses_input_injects_missing_tool_output() {
         let expected_missing = format!("[Error] {}", TOOL_OUTPUT_MISSING_TEXT);
         let messages = vec![
-            Message {
+            ChatMessage {
                 role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: "hi".to_string(),
                     cache_control: None,
                 }],
             },
-            Message {
+            ChatMessage {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "call_1".to_string(),
@@ -1256,7 +1551,7 @@ mod tests {
     #[test]
     fn test_build_responses_input_preserves_tool_output() {
         let messages = vec![
-            Message {
+            ChatMessage {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "call_1".to_string(),
@@ -1264,7 +1559,7 @@ mod tests {
                     input: serde_json::json!({"command": "ls"}),
                 }],
             },
-            Message::tool_result("call_1", "ok", false),
+            ChatMessage::tool_result("call_1", "ok", false),
         ];
 
         let items = build_responses_input(&messages);
@@ -1287,8 +1582,8 @@ mod tests {
     #[test]
     fn test_build_responses_input_reorders_early_tool_output() {
         let messages = vec![
-            Message::tool_result("call_1", "ok", false),
-            Message {
+            ChatMessage::tool_result("call_1", "ok", false),
+            ChatMessage {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "call_1".to_string(),
@@ -1333,7 +1628,7 @@ mod tests {
     fn test_build_responses_input_injects_only_missing_outputs() {
         let expected_missing = format!("[Error] {}", TOOL_OUTPUT_MISSING_TEXT);
         let messages = vec![
-            Message {
+            ChatMessage {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "call_a".to_string(),
@@ -1341,7 +1636,7 @@ mod tests {
                     input: serde_json::json!({"command": "pwd"}),
                 }],
             },
-            Message {
+            ChatMessage {
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "call_b".to_string(),
@@ -1349,7 +1644,7 @@ mod tests {
                     input: serde_json::json!({"command": "whoami"}),
                 }],
             },
-            Message::tool_result("call_b", "done", false),
+            ChatMessage::tool_result("call_b", "done", false),
         ];
 
         let items = build_responses_input(&messages);
