@@ -39,6 +39,9 @@ const MAX_RETRIES: u32 = 3;
 const RETRY_BASE_DELAY_MS: u64 = 1000;
 const WEBSOCKET_UPGRADE_REQUIRED_ERROR: StatusCode = StatusCode::UPGRADE_REQUIRED;
 const WEBSOCKET_FALLBACK_NOTICE: &str = "falling back from websockets to https transport";
+const WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS: u64 = 45;
+const WEBSOCKET_IDLE_TIMEOUT_SECS: u64 = 30;
+const WEBSOCKET_COMPLETION_TIMEOUT_SECS: u64 = 90;
 
 /// Available OpenAI/Codex models
 const AVAILABLE_MODELS: &[&str] = &[
@@ -1263,6 +1266,8 @@ async fn stream_response_websocket(
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<(), OpenAIStreamFailure> {
+    use std::time::{Duration, Instant};
+
     let access_token = openai_access_token(&credentials).await?;
     let creds = credentials.read().await;
     let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
@@ -1346,22 +1351,67 @@ async fn stream_response_websocket(
     use futures::StreamExt;
     let mut saw_text_delta = false;
     let mut saw_response_completed = false;
-    let mut saw_fallback_notice = false;
+    let mut saw_any_message = false;
+    let ws_started_at = Instant::now();
+    let mut last_non_keepalive_message_at = Instant::now();
     let mut pending: VecDeque<StreamEvent> = VecDeque::new();
 
-    while let Some(result) = ws_stream.next().await {
+    loop {
+        if !saw_response_completed
+            && ws_started_at.elapsed() >= Duration::from_secs(WEBSOCKET_COMPLETION_TIMEOUT_SECS)
+        {
+            return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                "WebSocket stream did not complete within {}s",
+                WEBSOCKET_COMPLETION_TIMEOUT_SECS
+            )));
+        }
+
+        if saw_any_message
+            && last_non_keepalive_message_at.elapsed()
+                >= Duration::from_secs(WEBSOCKET_IDLE_TIMEOUT_SECS)
+        {
+            return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                "WebSocket stream stalled without non-keepalive events for {}s",
+                WEBSOCKET_IDLE_TIMEOUT_SECS
+            )));
+        }
+
+        let timeout_secs = if saw_any_message {
+            WEBSOCKET_IDLE_TIMEOUT_SECS
+        } else {
+            WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS
+        };
+        let next_item = tokio::time::timeout(Duration::from_secs(timeout_secs), ws_stream.next())
+            .await
+            .map_err(|_| {
+                OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                    "WebSocket stream timed out waiting for {} event ({}s)",
+                    if saw_any_message { "next" } else { "first" },
+                    timeout_secs
+                ))
+            })?;
+
+        let Some(result) = next_item else {
+            break;
+        };
+        saw_any_message = true;
+
         match result {
             Ok(message) => match message {
                 WsMessage::Text(text) => {
                     let text = text.to_string();
                     if is_websocket_fallback_notice(&text) {
-                        saw_fallback_notice = true;
-                        continue;
+                        return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                            "{} reported by websocket stream",
+                            WEBSOCKET_FALLBACK_NOTICE
+                        )));
                     }
 
+                    let mut saw_progress_event = false;
                     if let Some(event) =
                         parse_openai_response_event(&text, &mut saw_text_delta, &mut pending)
                     {
+                        saw_progress_event = true;
                         if matches!(event, StreamEvent::MessageEnd { .. }) {
                             saw_response_completed = true;
                         }
@@ -1378,6 +1428,7 @@ async fn stream_response_websocket(
                         }
                     }
                     while let Some(event) = pending.pop_front() {
+                        saw_progress_event = true;
                         if let StreamEvent::Error { message, .. } = &event {
                             if is_retryable_error(&message.to_lowercase()) {
                                 return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
@@ -1393,6 +1444,9 @@ async fn stream_response_websocket(
                             return Ok(());
                         }
                     }
+                    if saw_progress_event {
+                        last_non_keepalive_message_at = Instant::now();
+                    }
                 }
                 WsMessage::Ping(payload) => {
                     let _ = ws_stream.send(WsMessage::Pong(payload)).await;
@@ -1400,12 +1454,6 @@ async fn stream_response_websocket(
                 WsMessage::Close(_) => {
                     if saw_response_completed {
                         return Ok(());
-                    }
-                    if saw_fallback_notice {
-                        return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
-                            "{} before response.completed",
-                            WEBSOCKET_FALLBACK_NOTICE
-                        )));
                     }
                     return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
                         "WebSocket stream closed before response.completed"
@@ -1426,13 +1474,6 @@ async fn stream_response_websocket(
                 )));
             }
         }
-    }
-
-    if saw_fallback_notice && !saw_response_completed {
-        return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
-            "{} after stream ended before response.completed",
-            WEBSOCKET_FALLBACK_NOTICE
-        )));
     }
 
     Ok(())
