@@ -630,6 +630,7 @@ pub struct InfoWidgetData {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub session_count: Option<usize>,
+    pub session_name: Option<String>,
     pub client_count: Option<usize>,
     /// Memory system statistics
     pub memory_info: Option<MemoryInfo>,
@@ -1236,6 +1237,9 @@ fn calculate_widget_height(
             let mut h = 1u16; // Model name
             if data.auth_method != AuthMethod::Unknown {
                 h += 1; // Auth method line
+            }
+            if data.session_count.is_some() || data.session_name.is_some() {
+                h += 1; // Session/name line
             }
             if let Some(info) = &data.usage_info {
                 if info.available {
@@ -2495,6 +2499,33 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
 
     lines.push(Line::from(spans));
 
+    // Add session info line if we have session count/name.
+    if data.session_count.is_some() || data.session_name.is_some() {
+        let mut parts = Vec::new();
+
+        if let Some(sessions) = data.session_count {
+            parts.push(format!(
+                "{} session{}",
+                sessions,
+                if sessions == 1 { "" } else { "s" }
+            ));
+        }
+
+        if let Some(name) = data.session_name.as_deref() {
+            if !name.trim().is_empty() {
+                parts.push(name.to_string());
+            }
+        }
+
+        if !parts.is_empty() {
+            let detail = truncate_smart(&parts.join(" · "), max_len.saturating_sub(2));
+            lines.push(Line::from(vec![Span::styled(
+                detail,
+                Style::default().fg(Color::Rgb(140, 140, 150)),
+            )]));
+        }
+    }
+
     if let Some(provider) = data
         .provider_name
         .as_deref()
@@ -2852,11 +2883,11 @@ fn compact_memory_height(data: &InfoWidgetData) -> u16 {
 fn compact_model_height(data: &InfoWidgetData) -> u16 {
     if data.model.is_some() {
         // 1 line for model, +1 if we have session info
-        if data.session_count.is_some() {
-            2
-        } else {
-            1
+        let mut lines = 1;
+        if data.session_count.is_some() || data.session_name.is_some() {
+            lines += 1;
         }
+        lines
     } else {
         0
     }
@@ -4310,23 +4341,30 @@ fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
 
     let mut lines = vec![Line::from(spans)];
 
-    // Add session info line if we have a session count
-    if data.session_count.is_some() {
-        let mut server_spans: Vec<Span> = Vec::new();
+    // Add session info line if we have session count/name.
+    if data.session_count.is_some() || data.session_name.is_some() {
+        let mut parts = Vec::new();
 
         if let Some(sessions) = data.session_count {
-            server_spans.push(Span::styled(
-                format!(
-                    "{} session{}",
-                    sessions,
-                    if sessions == 1 { "" } else { "s" }
-                ),
-                Style::default().fg(Color::Rgb(140, 140, 150)),
+            parts.push(format!(
+                "{} session{}",
+                sessions,
+                if sessions == 1 { "" } else { "s" }
             ));
         }
 
-        if !server_spans.is_empty() {
-            lines.push(Line::from(server_spans));
+        if let Some(name) = data.session_name.as_deref() {
+            if !name.trim().is_empty() {
+                parts.push(name.to_string());
+            }
+        }
+
+        if !parts.is_empty() {
+            let detail = truncate_smart(&parts.join(" · "), max_len.saturating_sub(2));
+            lines.push(Line::from(vec![Span::styled(
+                detail,
+                Style::default().fg(Color::Rgb(140, 140, 150)),
+            )]));
         }
     }
 

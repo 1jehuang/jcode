@@ -603,6 +603,11 @@ impl ClientApp {
                 if let Some(start) = self.streaming_tps_start.take() {
                     self.streaming_tps_elapsed += start.elapsed();
                 }
+                if matches!(name.as_str(), "memory" | "remember") {
+                    crate::memory::set_state(
+                        crate::tui::info_widget::MemoryState::Embedding,
+                    );
+                }
                 self.current_tool_id = Some(id);
                 self.current_tool_name = Some(name);
                 self.current_tool_input.clear();
@@ -1423,6 +1428,7 @@ impl TuiState for ClientApp {
             auth_method,
             memory_info,
             background_info,
+            session_name: self.session_display_name(),
             upstream_provider: None, // Client mode doesn't have upstream provider info
             ..Default::default()
         }

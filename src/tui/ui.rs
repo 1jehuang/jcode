@@ -4688,6 +4688,200 @@ fn get_tool_summary(tool: &ToolCall) -> String {
             .and_then(|v| v.as_str())
             .map(|q| format!("'{}'", truncate(q, 40)))
             .unwrap_or_default(),
+        "memory" => {
+            let action = tool
+                .input
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            match action {
+                "remember" => {
+                    let content = tool
+                        .input
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    format!("remember: {}", truncate(content, 35))
+                }
+                "recall" => {
+                    let query = tool
+                        .input
+                        .get("query")
+                        .and_then(|v| v.as_str());
+                    if let Some(q) = query {
+                        format!("recall '{}'", truncate(q, 35))
+                    } else {
+                        "recall (recent)".to_string()
+                    }
+                }
+                "search" => {
+                    let query = tool
+                        .input
+                        .get("query")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    format!("search '{}'", truncate(query, 35))
+                }
+                "forget" => {
+                    let id = tool
+                        .input
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    format!("forget {}", truncate(id, 30))
+                }
+                "tag" => {
+                    let id = tool
+                        .input
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    format!("tag {}", truncate(id, 30))
+                }
+                "link" => "link".to_string(),
+                "related" => {
+                    let id = tool
+                        .input
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    format!("related {}", truncate(id, 30))
+                }
+                _ => action.to_string(),
+            }
+        }
+        "remember" => {
+            let action = tool
+                .input
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("store");
+            match action {
+                "store" => {
+                    let content = tool
+                        .input
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    format!("store: {}", truncate(content, 40))
+                }
+                "search" => {
+                    let query = tool
+                        .input
+                        .get("query")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    format!("search '{}'", truncate(query, 35))
+                }
+                _ => action.to_string(),
+            }
+        }
+        "selfdev" => {
+            let action = tool
+                .input
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            action.to_string()
+        }
+        "communicate" => {
+            let action = tool
+                .input
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let target = tool
+                .input
+                .get("to_session")
+                .or_else(|| tool.input.get("target_session"))
+                .or_else(|| tool.input.get("channel"))
+                .and_then(|v| v.as_str());
+            if let Some(t) = target {
+                format!("{} → {}", action, truncate(t, 25))
+            } else {
+                action.to_string()
+            }
+        }
+        "session_search" => tool
+            .input
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(|q| format!("'{}'", truncate(q, 40)))
+            .unwrap_or_default(),
+        "conversation_search" => {
+            if let Some(q) = tool.input.get("query").and_then(|v| v.as_str()) {
+                format!("'{}'", truncate(q, 40))
+            } else if tool.input.get("stats").and_then(|v| v.as_bool()).unwrap_or(false) {
+                "stats".to_string()
+            } else {
+                "history".to_string()
+            }
+        }
+        "lsp" => {
+            let op = tool
+                .input
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let file = tool
+                .input
+                .get("filePath")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let short_file = file.rsplit('/').next().unwrap_or(file);
+            let line = tool
+                .input
+                .get("line")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            format!("{} {}:{}", op, short_file, line)
+        }
+        "bg" => {
+            let action = tool
+                .input
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let task_id = tool
+                .input
+                .get("task_id")
+                .and_then(|v| v.as_str());
+            if let Some(id) = task_id {
+                format!("{} {}", action, truncate(id, 20))
+            } else {
+                action.to_string()
+            }
+        }
+        "batch" => {
+            let count = tool
+                .input
+                .get("tool_calls")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            format!("{} tools", count)
+        }
+        "subagent" => {
+            let desc = tool
+                .input
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("task");
+            let agent_type = tool
+                .input
+                .get("subagent_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("agent");
+            format!("{} ({})", desc, agent_type)
+        }
+        "debug_socket" => {
+            let cmd = tool
+                .input
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            truncate(cmd, 40)
+        }
         // MCP tools (prefixed with mcp__)
         name if name.starts_with("mcp__") => {
             // Show first string parameter as summary
