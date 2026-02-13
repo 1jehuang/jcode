@@ -566,7 +566,7 @@ impl Provider for MultiProvider {
                 .openai
                 .as_ref()
                 .map(|o| o.model())
-                .unwrap_or_else(|| "gpt-5.2-codex".to_string()),
+                .unwrap_or_else(|| "gpt-5.3-codex-spark".to_string()),
             ActiveProvider::OpenRouter => self
                 .openrouter
                 .as_ref()
