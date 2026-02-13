@@ -3308,10 +3308,12 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         let unavailable = route.map(|r| !r.available).unwrap_or(true);
 
         // Model column
-        let model_text = if entry.name.len() > model_width {
-            format!("{:<w$}", &entry.name[..model_width], w = model_width)
+        let rec_suffix = if entry.recommended && !entry.is_current { " ★" } else { "" };
+        let display_name = format!("{}{}", entry.name, rec_suffix);
+        let model_text = if display_name.len() > model_width {
+            format!("{:<w$}", &display_name[..model_width], w = model_width)
         } else {
-            format!("{:<w$}", entry.name, w = model_width)
+            format!("{:<w$}", display_name, w = model_width)
         };
         let model_style = if unavailable {
             Style::default().fg(Color::Rgb(80, 80, 80))
@@ -3322,6 +3324,8 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                 .bold()
         } else if entry.is_current {
             Style::default().fg(ACCENT_COLOR)
+        } else if entry.recommended {
+            Style::default().fg(Color::Rgb(255, 220, 120))
         } else {
             Style::default().fg(Color::Rgb(200, 200, 220))
         };

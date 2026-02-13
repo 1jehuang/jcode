@@ -513,6 +513,8 @@ pub enum MemoryState {
     Extracting { reason: String },
     /// Background maintenance/gardening of the memory graph
     Maintaining { phase: String },
+    /// Agent is actively using a memory tool
+    ToolAction { action: String, detail: String },
 }
 
 impl Default for MemoryState {
@@ -582,6 +584,18 @@ pub enum MemoryEventKind {
     ExtractionComplete { count: usize },
     /// Error occurred
     Error { message: String },
+    /// Agent stored a memory via tool
+    ToolRemembered { content: String, scope: String, category: String },
+    /// Agent recalled/searched memories via tool
+    ToolRecalled { query: String, count: usize },
+    /// Agent forgot a memory via tool
+    ToolForgot { id: String },
+    /// Agent tagged a memory via tool
+    ToolTagged { id: String, tags: String },
+    /// Agent linked memories via tool
+    ToolLinked { from: String, to: String },
+    /// Agent listed memories via tool
+    ToolListed { count: usize },
 }
 
 /// Info about a mermaid diagram for display in the info widget
@@ -1924,6 +1938,32 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
                     Style::default().fg(Color::Rgb(180, 180, 190)),
                 ),
             ]),
+            MemoryState::ToolAction { action, detail } => {
+                let icon = match action.as_str() {
+                    "remember" | "store" => "💾",
+                    "recall" | "search" => "🔍",
+                    "forget" => "🗑\u{fe0f}",
+                    "tag" => "🏷\u{fe0f}",
+                    "link" => "🔗",
+                    "list" | "related" => "📋",
+                    _ => "🧠",
+                };
+                let text = if detail.is_empty() {
+                    action.clone()
+                } else {
+                    format!("{}: {}", action, detail)
+                };
+                Line::from(vec![
+                    Span::styled(
+                        format!("{} ", icon),
+                        Style::default().fg(Color::Rgb(200, 150, 255)),
+                    ),
+                    Span::styled(
+                        truncate_smart(&text, inner.width.saturating_sub(4) as usize),
+                        Style::default().fg(Color::Rgb(200, 200, 210)),
+                    ),
+                ])
+            }
         };
         lines.push(state_line);
 
@@ -2039,6 +2079,47 @@ fn format_memory_event(event: &MemoryEvent, max_width: usize) -> (&'static str, 
             let msg = truncate_smart(message, max_width.saturating_sub(2));
             ("!", msg, Color::Rgb(255, 100, 100))
         }
+        MemoryEventKind::ToolRemembered {
+            content,
+            scope,
+            category,
+        } => {
+            let msg = truncate_smart(
+                &format!("[{}] {} ({})", category, content, scope),
+                max_width.saturating_sub(2),
+            );
+            ("💾", msg, Color::Rgb(100, 200, 100))
+        }
+        MemoryEventKind::ToolRecalled { query, count } => {
+            let msg = truncate_smart(
+                &format!("{} found for '{}'", count, query),
+                max_width.saturating_sub(2),
+            );
+            ("🔍", msg, Color::Rgb(140, 180, 255))
+        }
+        MemoryEventKind::ToolForgot { id } => {
+            let msg = truncate_smart(id, max_width.saturating_sub(2));
+            ("🗑\u{fe0f}", msg, Color::Rgb(255, 170, 100))
+        }
+        MemoryEventKind::ToolTagged { id, tags } => {
+            let msg = truncate_smart(
+                &format!("{} +{}", id, tags),
+                max_width.saturating_sub(2),
+            );
+            ("🏷\u{fe0f}", msg, Color::Rgb(140, 200, 255))
+        }
+        MemoryEventKind::ToolLinked { from, to } => {
+            let msg = truncate_smart(
+                &format!("{} → {}", from, to),
+                max_width.saturating_sub(2),
+            );
+            ("🔗", msg, Color::Rgb(200, 180, 255))
+        }
+        MemoryEventKind::ToolListed { count } => (
+            "📋",
+            format!("{} memories", count),
+            Color::Rgb(140, 140, 150),
+        ),
     }
 }
 
@@ -3708,6 +3789,24 @@ fn render_memory_compact(info: &MemoryInfo) -> Vec<Line<'static>> {
                     Style::default().fg(Color::Rgb(120, 220, 180)),
                 ));
             }
+            MemoryState::ToolAction { action, .. } => {
+                let icon = match action.as_str() {
+                    "remember" | "store" => "💾",
+                    "recall" | "search" => "🔍",
+                    "forget" => "🗑\u{fe0f}",
+                    "tag" => "🏷\u{fe0f}",
+                    "link" => "🔗",
+                    _ => "🧠",
+                };
+                spans.push(Span::styled(
+                    " · ",
+                    Style::default().fg(Color::Rgb(100, 100, 110)),
+                ));
+                spans.push(Span::styled(
+                    icon,
+                    Style::default().fg(Color::Rgb(200, 150, 255)),
+                ));
+            }
             MemoryState::Idle => {}
         }
     }
@@ -3800,6 +3899,32 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
                     Style::default().fg(Color::Rgb(180, 180, 190)),
                 ),
             ]),
+            MemoryState::ToolAction { action, detail } => {
+                let icon = match action.as_str() {
+                    "remember" | "store" => "💾",
+                    "recall" | "search" => "🔍",
+                    "forget" => "🗑\u{fe0f}",
+                    "tag" => "🏷\u{fe0f}",
+                    "link" => "🔗",
+                    "list" | "related" => "📋",
+                    _ => "🧠",
+                };
+                let text = if detail.is_empty() {
+                    action.clone()
+                } else {
+                    format!("{}: {}", action, detail)
+                };
+                Line::from(vec![
+                    Span::styled(
+                        format!("{} ", icon),
+                        Style::default().fg(Color::Rgb(200, 150, 255)),
+                    ),
+                    Span::styled(
+                        truncate_smart(&text, inner.width.saturating_sub(4) as usize),
+                        Style::default().fg(Color::Rgb(200, 200, 210)),
+                    ),
+                ])
+            }
         };
         lines.push(state_line);
 
@@ -3955,6 +4080,47 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
                     let msg = truncate_with_ellipsis(message, max_width.saturating_sub(4));
                     ("!", msg, Color::Rgb(255, 100, 100))
                 }
+                MemoryEventKind::ToolRemembered {
+                    content,
+                    scope,
+                    category,
+                } => {
+                    let msg = truncate_with_ellipsis(
+                        &format!("[{}] {} ({})", category, content, scope),
+                        max_width.saturating_sub(4),
+                    );
+                    ("💾", msg, Color::Rgb(100, 200, 100))
+                }
+                MemoryEventKind::ToolRecalled { query, count } => {
+                    let msg = truncate_with_ellipsis(
+                        &format!("{} found for '{}'", count, query),
+                        max_width.saturating_sub(4),
+                    );
+                    ("🔍", msg, Color::Rgb(140, 180, 255))
+                }
+                MemoryEventKind::ToolForgot { id } => {
+                    let msg = truncate_with_ellipsis(id, max_width.saturating_sub(4));
+                    ("🗑\u{fe0f}", msg, Color::Rgb(255, 170, 100))
+                }
+                MemoryEventKind::ToolTagged { id, tags } => {
+                    let msg = truncate_with_ellipsis(
+                        &format!("{} +{}", id, tags),
+                        max_width.saturating_sub(4),
+                    );
+                    ("🏷\u{fe0f}", msg, Color::Rgb(140, 200, 255))
+                }
+                MemoryEventKind::ToolLinked { from, to } => {
+                    let msg = truncate_with_ellipsis(
+                        &format!("{} → {}", from, to),
+                        max_width.saturating_sub(4),
+                    );
+                    ("🔗", msg, Color::Rgb(200, 180, 255))
+                }
+                MemoryEventKind::ToolListed { count } => (
+                    "📋",
+                    format!("{} memories", count),
+                    Color::Rgb(140, 140, 150),
+                ),
             };
 
             lines.push(Line::from(vec![

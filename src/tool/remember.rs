@@ -172,9 +172,20 @@ impl Tool for RememberTool {
     }
 
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+        use crate::memory;
+        use crate::tui::info_widget::{MemoryEventKind, MemoryState};
+
         let params: RememberInput = serde_json::from_value(input)?;
         let path = self.notes_path()?;
         let mut notes = Notes::load(&path)?;
+
+        fn truncate(s: &str, max: usize) -> String {
+            if s.len() > max {
+                format!("{}…", &s[..max])
+            } else {
+                s.to_string()
+            }
+        }
 
         match params.action.as_str() {
             "store" => {
@@ -182,17 +193,41 @@ impl Tool for RememberTool {
                     .content
                     .ok_or_else(|| anyhow::anyhow!("'content' is required for store action"))?;
 
+                memory::set_state(MemoryState::ToolAction {
+                    action: "store".into(),
+                    detail: truncate(&content, 40),
+                });
                 let id = notes.add(content.clone(), params.tag.clone());
                 notes.save(&path)?;
 
-                let tag_str = params.tag.map(|t| format!(" [{}]", t)).unwrap_or_default();
+                let tag_str = params.tag.as_deref().unwrap_or("");
+                memory::add_event(MemoryEventKind::ToolRemembered {
+                    content: truncate(&content, 60),
+                    scope: "project".into(),
+                    category: if tag_str.is_empty() {
+                        "note".into()
+                    } else {
+                        tag_str.to_string()
+                    },
+                });
+                memory::set_state(MemoryState::Idle);
+
+                let tag_display = params.tag.map(|t| format!(" [{}]", t)).unwrap_or_default();
                 Ok(ToolOutput::new(format!(
                     "Remembered{}: \"{}\"\nID: {}",
-                    tag_str, content, id
+                    tag_display, content, id
                 )))
             }
 
             "list" => {
+                memory::set_state(MemoryState::ToolAction {
+                    action: "list".into(),
+                    detail: String::new(),
+                });
+                let count = notes.entries.len();
+                memory::add_event(MemoryEventKind::ToolListed { count });
+                memory::set_state(MemoryState::Idle);
+
                 if notes.entries.is_empty() {
                     Ok(ToolOutput::new("No notes stored for this project."))
                 } else {
@@ -218,7 +253,17 @@ impl Tool for RememberTool {
                     .query
                     .ok_or_else(|| anyhow::anyhow!("'query' is required for search action"))?;
 
+                memory::set_state(MemoryState::ToolAction {
+                    action: "search".into(),
+                    detail: truncate(&query, 40),
+                });
                 let results = notes.search(&query);
+                memory::add_event(MemoryEventKind::ToolRecalled {
+                    query: truncate(&query, 40),
+                    count: results.len(),
+                });
+                memory::set_state(MemoryState::Idle);
+
                 if results.is_empty() {
                     Ok(ToolOutput::new(format!("No notes matching '{}'", query)))
                 } else {
@@ -240,8 +285,18 @@ impl Tool for RememberTool {
                     .id
                     .ok_or_else(|| anyhow::anyhow!("'id' is required for forget action"))?;
 
-                if notes.remove(&id) {
+                memory::set_state(MemoryState::ToolAction {
+                    action: "forget".into(),
+                    detail: truncate(&id, 30),
+                });
+                let found = notes.remove(&id);
+                if found {
                     notes.save(&path)?;
+                }
+                memory::add_event(MemoryEventKind::ToolForgot { id: id.clone() });
+                memory::set_state(MemoryState::Idle);
+
+                if found {
                     Ok(ToolOutput::new(format!("Forgot note: {}", id)))
                 } else {
                     Ok(ToolOutput::new(format!("Note not found: {}", id)))

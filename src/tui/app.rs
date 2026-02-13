@@ -7148,6 +7148,12 @@ impl App {
             (avail, method, r.provider.clone())
         }
 
+        const RECOMMENDED_MODELS: &[&str] = &[
+            "gpt-5.3-codex-spark",
+            "gpt-5.3-codex",
+            "claude-opus-4-6",
+        ];
+
         let mut models: Vec<super::ModelEntry> = Vec::new();
         for name in &model_order {
             let mut entry_routes = model_routes.remove(name).unwrap_or_default();
@@ -7157,13 +7163,16 @@ impl App {
                 routes: entry_routes,
                 selected_route: 0,
                 is_current: *name == current_model,
+                recommended: RECOMMENDED_MODELS.contains(&name.as_str()),
             });
         }
 
-        // Sort models: current first, then available, then alphabetical
+        // Sort models: current first, then recommended, then available, then alphabetical
         models.sort_by(|a, b| {
             let a_current = if a.is_current { 0u8 } else { 1 };
             let b_current = if b.is_current { 0u8 } else { 1 };
+            let a_rec = if a.recommended { 0u8 } else { 1 };
+            let b_rec = if b.recommended { 0u8 } else { 1 };
             let a_avail = if a.routes.first().map(|r| r.available).unwrap_or(false) {
                 0u8
             } else {
@@ -7176,6 +7185,7 @@ impl App {
             };
             a_current
                 .cmp(&b_current)
+                .then(a_rec.cmp(&b_rec))
                 .then(a_avail.cmp(&b_avail))
                 .then(a.name.cmp(&b.name))
         });
@@ -7341,8 +7351,10 @@ impl App {
             }
             KeyCode::Char(c) => {
                 if let Some(ref mut picker) = self.picker_state {
-                    picker.filter.push(c);
-                    Self::apply_picker_filter(picker);
+                    if !c.is_whitespace() {
+                        picker.filter.push(c);
+                        Self::apply_picker_filter(picker);
+                    }
                 }
             }
             _ => {}
@@ -7353,7 +7365,7 @@ impl App {
     /// Fuzzy match score for picker: returns Some(score) if pattern is a subsequence of text.
     /// Higher score = better match. Bonuses for consecutive chars, word boundaries.
     fn picker_fuzzy_score(pattern: &str, text: &str) -> Option<i32> {
-        let pat: Vec<char> = pattern.to_lowercase().chars().collect();
+        let pat: Vec<char> = pattern.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
         let txt: Vec<char> = text.to_lowercase().chars().collect();
         if pat.is_empty() {
             return Some(0);
@@ -7409,7 +7421,10 @@ impl App {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, m)| {
-                    Self::picker_fuzzy_score(&picker.filter, &m.name).map(|s| (i, s))
+                    Self::picker_fuzzy_score(&picker.filter, &m.name).map(|s| {
+                        let bonus = if m.recommended { 5 } else { 0 };
+                        (i, s + bonus)
+                    })
                 })
                 .collect();
             // Sort by score descending (best matches first)
