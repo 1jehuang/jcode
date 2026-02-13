@@ -15,19 +15,21 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
-pub struct TaskTool {
+const DEFAULT_SUBAGENT_MODEL: &str = "gpt-5.3-codex-spark";
+
+pub struct SubagentTool {
     provider: Arc<dyn Provider>,
     registry: Registry,
 }
 
-impl TaskTool {
+impl SubagentTool {
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
         Self { provider, registry }
     }
 }
 
 #[derive(Deserialize)]
-struct TaskInput {
+struct SubagentInput {
     description: String,
     prompt: String,
     subagent_type: String,
@@ -38,14 +40,13 @@ struct TaskInput {
 }
 
 #[async_trait]
-impl Tool for TaskTool {
+impl Tool for SubagentTool {
     fn name(&self) -> &str {
-        "task"
+        "subagent"
     }
 
     fn description(&self) -> &str {
-        "Run a sub-task using a dedicated subagent session. Returns the subagent output and a task session id. \
-         After receiving the result, continue the main task (do not treat the subagent output as the final answer)."
+        "Run a focused subagent session. Returns subagent output and session metadata."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -59,7 +60,7 @@ impl Tool for TaskTool {
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "The task for the agent to perform"
+                    "description": "The task for the subagent to perform"
                 },
                 "subagent_type": {
                     "type": "string",
@@ -78,15 +79,18 @@ impl Tool for TaskTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let params: TaskInput = serde_json::from_value(input)?;
+        let params: SubagentInput = serde_json::from_value(input)?;
 
         let mut session = if let Some(session_id) = &params.session_id {
             Session::load(session_id).unwrap_or_else(|_| {
-                Session::create(Some(ctx.session_id.clone()), Some(task_title(&params)))
+                Session::create(Some(ctx.session_id.clone()), Some(subagent_title(&params)))
             })
         } else {
-            Session::create(Some(ctx.session_id.clone()), Some(task_title(&params)))
+            Session::create(Some(ctx.session_id.clone()), Some(subagent_title(&params)))
         };
+        if session.model.is_none() {
+            session.model = Some(DEFAULT_SUBAGENT_MODEL.to_string());
+        }
 
         if let Some(ref working_dir) = ctx.working_dir {
             session.working_dir = Some(working_dir.display().to_string());
@@ -95,7 +99,7 @@ impl Tool for TaskTool {
         session.save()?;
 
         let mut allowed: HashSet<String> = self.registry.tool_names().await.into_iter().collect();
-        for blocked in ["task", "todowrite", "todoread"] {
+        for blocked in ["subagent", "task", "todowrite", "todoread"] {
             allowed.remove(blocked);
         }
 
@@ -137,7 +141,7 @@ impl Tool for TaskTool {
         });
 
         logging::info(&format!(
-            "Task starting: {} (type: {})",
+            "Subagent starting: {} (type: {})",
             params.description, params.subagent_type
         ));
 
@@ -153,7 +157,7 @@ impl Tool for TaskTool {
         let sub_session_id = agent.session_id().to_string();
 
         logging::info(&format!(
-            "Task completed: {} in {:.1}s",
+            "Subagent completed: {} in {:.1}s",
             params.description,
             start.elapsed().as_secs_f64()
         ));
@@ -175,9 +179,9 @@ impl Tool for TaskTool {
         output.push('\n');
         output.push_str("Next step: integrate this result into the main task and continue.\n");
         output.push('\n');
-        output.push_str("<task_metadata>\n");
+        output.push_str("<subagent_metadata>\n");
         output.push_str(&format!("session_id: {}\n", sub_session_id));
-        output.push_str("</task_metadata>");
+        output.push_str("</subagent_metadata>");
 
         Ok(ToolOutput::new(output)
             .with_title(params.description)
@@ -188,7 +192,7 @@ impl Tool for TaskTool {
     }
 }
 
-fn task_title(params: &TaskInput) -> String {
+fn subagent_title(params: &SubagentInput) -> String {
     format!(
         "{} (@{} subagent)",
         params.description, params.subagent_type
