@@ -53,6 +53,11 @@ impl Tool for McpTool {
     }
 
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+        let input = if input.is_null() {
+            Value::Object(serde_json::Map::new())
+        } else {
+            input
+        };
         let manager = self.manager.read().await;
         let result = manager
             .call_tool(&self.server_name, &self.tool_def.name, input)
