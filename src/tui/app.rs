@@ -484,6 +484,13 @@ pub struct App {
     context_info: crate::prompt::ContextInfo,
     // Track last streaming activity for "stale" detection
     last_stream_activity: Option<Instant>,
+    // Accurate TPS tracking: only counts actual token streaming time, not tool execution
+    /// Set when first TextDelta arrives in a streaming response
+    streaming_tps_start: Option<Instant>,
+    /// Accumulated streaming-only time across agentic loop iterations
+    streaming_tps_elapsed: Duration,
+    /// Accumulated output tokens across all API calls in a turn
+    streaming_total_output_tokens: u64,
     // Current status
     status: ProcessingStatus,
     // Subagent status (shown during Task tool execution)
@@ -769,6 +776,9 @@ impl App {
             context_warning_shown: false,
             context_info,
             last_stream_activity: None,
+            streaming_tps_start: None,
+            streaming_tps_elapsed: Duration::ZERO,
+            streaming_total_output_tokens: 0,
             status: ProcessingStatus::default(),
             subagent_status: None,
             processing_started: None,
@@ -3801,6 +3811,9 @@ impl App {
                                 self.is_processing = true;
                                 self.status = ProcessingStatus::Sending;
                                 self.processing_started = Some(Instant::now());
+                                self.streaming_tps_start = None;
+                                self.streaming_tps_elapsed = Duration::ZERO;
+                                self.streaming_total_output_tokens = 0;
                             }
                         }
                     }
@@ -3878,6 +3891,9 @@ impl App {
                                                     self.is_processing = true;
                                                     self.status = ProcessingStatus::Sending;
                                                     self.processing_started = Some(Instant::now());
+                                                    self.streaming_tps_start = None;
+                                                    self.streaming_tps_elapsed = Duration::ZERO;
+                                                    self.streaming_total_output_tokens = 0;
                                                 }
                                                 Err(e) => {
                                                     self.push_display_message(DisplayMessage::error(format!(
@@ -3901,6 +3917,9 @@ impl App {
                                             self.is_processing = true;
                                             self.status = ProcessingStatus::Sending;
                                             self.processing_started = Some(Instant::now());
+                                            self.streaming_tps_start = None;
+                                            self.streaming_tps_elapsed = Duration::ZERO;
+                                            self.streaming_total_output_tokens = 0;
                                         }
                                     }
                                 }
@@ -3956,13 +3975,14 @@ impl App {
                     self.insert_thought_line(thought_line);
                     return false;
                 }
-                // Update status from Sending to Streaming on first text
                 if matches!(self.status, ProcessingStatus::Sending) {
-                    // Transition from Thinking to Streaming when text content arrives
                     if matches!(self.status, ProcessingStatus::Thinking(_)) {
                         self.status = ProcessingStatus::Streaming;
                     }
                     self.status = ProcessingStatus::Streaming;
+                }
+                if self.streaming_tps_start.is_none() {
+                    self.streaming_tps_start = Some(Instant::now());
                 }
                 if let Some(chunk) = self.stream_buffer.push(&text) {
                     self.streaming_text.push_str(&chunk);
@@ -3971,6 +3991,9 @@ impl App {
                 false
             }
             ServerEvent::ToolStart { id, name } => {
+                if let Some(start) = self.streaming_tps_start.take() {
+                    self.streaming_tps_elapsed += start.elapsed();
+                }
                 remote.handle_tool_start(&id, &name);
                 self.status = ProcessingStatus::RunningTool(name.clone());
                 self.streaming_tool_calls.push(ToolCall {
@@ -4051,6 +4074,7 @@ impl App {
                 cache_read_input,
                 cache_creation_input,
             } => {
+                self.streaming_total_output_tokens += output;
                 self.streaming_input_tokens = input;
                 self.streaming_output_tokens = output;
                 if cache_read_input.is_some() {
@@ -4066,12 +4090,12 @@ impl App {
                 false
             }
             ServerEvent::Done { id } => {
-                // Only process Done for our current message request
-                // (ignore Done events for Subscribe, GetHistory, etc.)
                 if self.current_message_id == Some(id) {
-                    // Flush stream buffer
                     if let Some(chunk) = self.stream_buffer.flush() {
                         self.streaming_text.push_str(&chunk);
+                    }
+                    if let Some(start) = self.streaming_tps_start.take() {
+                        self.streaming_tps_elapsed += start.elapsed();
                     }
                     if !self.streaming_text.is_empty() {
                         let duration = self.processing_started.map(|s| s.elapsed().as_secs_f32());
@@ -4209,6 +4233,9 @@ impl App {
                     self.streaming_cache_read_tokens = None;
                     self.streaming_cache_creation_tokens = None;
                     self.processing_started = None;
+                    self.streaming_tps_start = None;
+                    self.streaming_tps_elapsed = Duration::ZERO;
+                    self.streaming_total_output_tokens = 0;
                     self.last_stream_activity = None;
                     self.is_processing = false;
                     self.status = ProcessingStatus::Idle;
@@ -4355,6 +4382,36 @@ impl App {
                         count, plural, display_chars, computed_age_ms, display_prompt
                     )));
                     self.set_status_notice(format!("🧠 {} relevant {} injected", count, plural));
+                }
+                false
+            }
+            ServerEvent::SplitResponse {
+                new_session_id,
+                new_session_name,
+                ..
+            } => {
+                let exe = std::env::current_exe().unwrap_or_default();
+                let cwd = std::env::current_dir().unwrap_or_default();
+                match spawn_in_new_terminal(&exe, &new_session_id, &cwd) {
+                    Ok(true) => {
+                        self.push_display_message(DisplayMessage::system(format!(
+                            "✂ Split → **{}** (opened in new window)",
+                            new_session_name,
+                        )));
+                        self.set_status_notice(format!("Split → {}", new_session_name));
+                    }
+                    Ok(false) => {
+                        self.push_display_message(DisplayMessage::system(format!(
+                            "✂ Split → **{}**\n\nNo terminal found. Resume manually:\n```\njcode --resume {}\n```",
+                            new_session_name, new_session_id,
+                        )));
+                    }
+                    Err(e) => {
+                        self.push_display_message(DisplayMessage::error(format!(
+                            "Split created **{}** but failed to open window: {}\n\nResume manually: `jcode --resume {}`",
+                            new_session_name, e, new_session_id,
+                        )));
+                    }
                 }
                 false
             }
@@ -4556,6 +4613,9 @@ impl App {
                         self.is_processing = true;
                         self.status = ProcessingStatus::Sending;
                         self.processing_started = Some(Instant::now());
+                        self.streaming_tps_start = None;
+                        self.streaming_tps_elapsed = Duration::ZERO;
+                        self.streaming_total_output_tokens = 0;
                         self.thought_line_inserted = false;
                         self.thinking_prefix_emitted = false;
                         self.thinking_buffer.clear();
@@ -4825,6 +4885,20 @@ impl App {
                         return Ok(());
                     }
 
+                    if trimmed == "/split" {
+                        if self.is_processing {
+                            self.push_display_message(DisplayMessage::error(
+                                "Cannot split while processing. Wait for the current turn to finish.".to_string(),
+                            ));
+                            return Ok(());
+                        }
+                        self.push_display_message(DisplayMessage::system(
+                            "Splitting session...".to_string(),
+                        ));
+                        remote.split().await?;
+                        return Ok(());
+                    }
+
                     // Queue message if processing, otherwise send
                     match self.send_action(false) {
                         SendAction::Submit => {
@@ -4843,6 +4917,9 @@ impl App {
                             self.is_processing = true;
                             self.status = ProcessingStatus::Sending;
                             self.processing_started = Some(Instant::now());
+                            self.streaming_tps_start = None;
+                            self.streaming_tps_elapsed = Duration::ZERO;
+                            self.streaming_total_output_tokens = 0;
                             self.thought_line_inserted = false;
                             self.thinking_prefix_emitted = false;
                             self.thinking_buffer.clear();
@@ -5368,6 +5445,7 @@ impl App {
             "swarm" => "`/swarm [on|off|status]`\nToggle swarm features for this session.",
             "reload" => "`/reload`\nReload to a newer binary if one is available.",
             "rebuild" => "`/rebuild`\nRun full update flow (git pull + cargo build + tests).",
+            "split" => "`/split`\nSplit the current session into a new window. Clones the full conversation history so both sessions continue from the same point.",
             "info" => "`/info`\nShow session metadata and token usage.",
             "version" => "`/version`\nShow jcode version/build details.",
             "quit" => "`/quit`\nExit jcode.",
@@ -5449,6 +5527,7 @@ impl App {
                      • `/swarm [on|off|status]` - Toggle swarm features for this session\n\
                      • `/reload` - Smart reload (client/server if newer binary exists)\n\
                      • `/rebuild` - Full rebuild (git pull + cargo build + tests){}\n\
+                     • `/split` - Split session into a new window (clones conversation)\n\
                      • `/clear` - Clear conversation\n\
                      • `/rewind` - Show history with numbers, `/rewind N` to rewind\n\
                      • `/compact` - Manually compact context (summarize old messages)\n\
@@ -6411,6 +6490,9 @@ impl App {
         self.streaming_cache_read_tokens = None;
         self.streaming_cache_creation_tokens = None;
         self.upstream_provider = None;
+        self.streaming_tps_start = None;
+        self.streaming_tps_elapsed = Duration::ZERO;
+        self.streaming_total_output_tokens = 0;
         self.processing_started = Some(Instant::now());
         self.pending_turn = true;
     }
@@ -6456,6 +6538,9 @@ impl App {
             self.streaming_cache_read_tokens = None;
             self.streaming_cache_creation_tokens = None;
             self.upstream_provider = None;
+            self.streaming_tps_start = None;
+            self.streaming_tps_elapsed = Duration::ZERO;
+            self.streaming_total_output_tokens = 0;
             self.processing_started = Some(Instant::now());
             self.status = ProcessingStatus::Sending;
 
@@ -7485,12 +7570,17 @@ impl App {
                 match event? {
                     StreamEvent::TextDelta(text) => {
                         text_content.push_str(&text);
-                        // Use semantic buffer for chunked display
+                        if self.streaming_tps_start.is_none() {
+                            self.streaming_tps_start = Some(Instant::now());
+                        }
                         if let Some(chunk) = self.stream_buffer.push(&text) {
                             self.streaming_text.push_str(&chunk);
                         }
                     }
                     StreamEvent::ToolUseStart { id, name } => {
+                        if let Some(start) = self.streaming_tps_start.take() {
+                            self.streaming_tps_elapsed += start.elapsed();
+                        }
                         current_tool = Some(ToolCall {
                             id,
                             name,
@@ -7553,6 +7643,7 @@ impl App {
                         }
                         if let Some(output) = output_tokens {
                             self.streaming_output_tokens = output;
+                            self.streaming_total_output_tokens += output;
                         }
                         if cache_read_input_tokens.is_some() {
                             self.streaming_cache_read_tokens = cache_read_input_tokens;
@@ -7570,8 +7661,10 @@ impl App {
                         }
                     }
                     StreamEvent::MessageEnd { .. } => {
+                        if let Some(start) = self.streaming_tps_start.take() {
+                            self.streaming_tps_elapsed += start.elapsed();
+                        }
                         saw_message_end = true;
-                        // Don't break yet - wait for SessionId
                     }
                     StreamEvent::SessionId(sid) => {
                         self.provider_session_id = Some(sid);
@@ -8156,16 +8249,20 @@ impl App {
                                 match event {
                                     StreamEvent::TextDelta(text) => {
                                         text_content.push_str(&text);
-                                        // Use semantic buffer for chunked display
+                                        if self.streaming_tps_start.is_none() {
+                                            self.streaming_tps_start = Some(Instant::now());
+                                        }
                                         if let Some(chunk) = self.stream_buffer.push(&text) {
                                             self.streaming_text.push_str(&chunk);
-                                            // Broadcast buffered text
                                             self.broadcast_debug(super::backend::DebugEvent::TextDelta {
                                                 text: chunk.clone()
                                             });
                                         }
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
+                                        if let Some(start) = self.streaming_tps_start.take() {
+                                            self.streaming_tps_elapsed += start.elapsed();
+                                        }
                                         self.broadcast_debug(super::backend::DebugEvent::ToolStart {
                                             id: id.clone(),
                                             name: name.clone(),
@@ -8247,6 +8344,7 @@ impl App {
                                         }
                                         if let Some(output) = output_tokens {
                                             self.streaming_output_tokens = output;
+                                            self.streaming_total_output_tokens += output;
                                         }
                                         if cache_read_input_tokens.is_some() {
                                             self.streaming_cache_read_tokens = cache_read_input_tokens;
@@ -8272,8 +8370,10 @@ impl App {
                                         });
                                     }
                                     StreamEvent::MessageEnd { .. } => {
+                                        if let Some(start) = self.streaming_tps_start.take() {
+                                            self.streaming_tps_elapsed += start.elapsed();
+                                        }
                                         saw_message_end = true;
-                                        // Don't break yet - wait for SessionId
                                     }
                                     StreamEvent::SessionId(sid) => {
                                         self.provider_session_id = Some(sid);
@@ -9047,6 +9147,7 @@ impl App {
             ("/info".into(), "Show session info and tokens"),
             ("/reload".into(), "Smart reload (if newer binary exists)"),
             ("/rebuild".into(), "Full rebuild (git pull + build + tests)"),
+            ("/split".into(), "Split session into a new window"),
             ("/quit".into(), "Exit jcode"),
         ];
 
@@ -9161,12 +9262,8 @@ impl App {
         if let Some(secs) = duration {
             parts.push(format!("{:.1}s", secs));
         }
-        // Add TPS if we have output tokens and duration
-        if let Some(secs) = duration {
-            if self.streaming_output_tokens > 0 && secs > 0.0 {
-                let tps = self.streaming_output_tokens as f32 / secs;
-                parts.push(format!("{:.1} tps", tps));
-            }
+        if let Some(tps) = self.compute_streaming_tps() {
+            parts.push(format!("{:.1} tps", tps));
         }
         if self.streaming_input_tokens > 0 || self.streaming_output_tokens > 0 {
             parts.push(format!(
@@ -9609,6 +9706,20 @@ impl App {
             (self.streaming_output_tokens as f32 * completion_price) / 1_000_000.0;
         self.total_cost += prompt_cost + completion_cost;
     }
+
+    fn compute_streaming_tps(&self) -> Option<f32> {
+        let mut elapsed = self.streaming_tps_elapsed;
+        let total_tokens = self.streaming_total_output_tokens;
+        if let Some(start) = self.streaming_tps_start {
+            elapsed += start.elapsed();
+        }
+        let elapsed_secs = elapsed.as_secs_f32();
+        if elapsed_secs > 0.1 && total_tokens > 0 {
+            Some(total_tokens as f32 / elapsed_secs)
+        } else {
+            None
+        }
+    }
 }
 
 impl super::TuiState for App {
@@ -9695,17 +9806,7 @@ impl super::TuiState for App {
         if !self.is_processing {
             return None;
         }
-        match (self.processing_started, self.streaming_output_tokens) {
-            (Some(start), output) if output > 0 => {
-                let elapsed = start.elapsed().as_secs_f32();
-                if elapsed > 0.0 {
-                    Some(output as f32 / elapsed)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
+        self.compute_streaming_tps()
     }
 
     fn streaming_tool_calls(&self) -> Vec<ToolCall> {
@@ -10143,17 +10244,7 @@ impl super::TuiState for App {
             let is_api_key_provider = provider_name.contains("openrouter");
 
             let output_tps = if self.is_processing {
-                match (self.processing_started, self.streaming_output_tokens) {
-                    (Some(start), output) if output > 0 => {
-                        let elapsed = start.elapsed().as_secs_f32();
-                        if elapsed > 0.0 {
-                            Some(output as f32 / elapsed)
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                }
+                self.compute_streaming_tps()
             } else {
                 None
             };
@@ -10194,14 +10285,7 @@ impl super::TuiState for App {
             }
         };
 
-        let tokens_per_second = self.processing_started.and_then(|started| {
-            let elapsed = started.elapsed().as_secs_f32();
-            if elapsed >= 0.2 && self.streaming_output_tokens > 0 {
-                Some(self.streaming_output_tokens as f32 / elapsed)
-            } else {
-                None
-            }
-        });
+        let tokens_per_second = self.compute_streaming_tps();
 
         // Determine authentication method
         let auth_method = if self.is_remote {
@@ -10348,6 +10432,87 @@ impl super::TuiState for App {
     fn picker_state(&self) -> Option<&super::PickerState> {
         self.picker_state.as_ref()
     }
+}
+
+/// Spawn a new terminal window that resumes a jcode session.
+/// Returns Ok(true) if a terminal was successfully launched, Ok(false) if no terminal found.
+#[cfg(unix)]
+fn spawn_in_new_terminal(
+    exe: &std::path::Path,
+    session_id: &str,
+    cwd: &std::path::Path,
+) -> anyhow::Result<bool> {
+    use std::process::{Command, Stdio};
+
+    let mut candidates: Vec<String> = Vec::new();
+    if let Ok(term) = std::env::var("JCODE_TERMINAL") {
+        if !term.trim().is_empty() {
+            candidates.push(term);
+        }
+    }
+    candidates.extend(
+        ["kitty", "wezterm", "alacritty", "gnome-terminal", "konsole", "xterm", "foot"]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+
+    for term in candidates {
+        let mut cmd = Command::new(&term);
+        cmd.current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        match term.as_str() {
+            "kitty" => {
+                cmd.args(["--title", "jcode split", "-e"])
+                    .arg(exe)
+                    .arg("--resume")
+                    .arg(session_id);
+            }
+            "wezterm" => {
+                cmd.args([
+                    "start",
+                    "--always-new-process",
+                    "--",
+                    exe.to_string_lossy().as_ref(),
+                    "--resume",
+                    session_id,
+                ]);
+            }
+            "alacritty" => {
+                cmd.args(["-e"]).arg(exe).arg("--resume").arg(session_id);
+            }
+            "gnome-terminal" => {
+                cmd.args(["--", exe.to_string_lossy().as_ref(), "--resume", session_id]);
+            }
+            "konsole" => {
+                cmd.args(["-e"]).arg(exe).arg("--resume").arg(session_id);
+            }
+            "xterm" => {
+                cmd.args(["-e"]).arg(exe).arg("--resume").arg(session_id);
+            }
+            "foot" => {
+                cmd.args(["-e"]).arg(exe).arg("--resume").arg(session_id);
+            }
+            _ => continue,
+        }
+
+        if cmd.spawn().is_ok() {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+#[cfg(not(unix))]
+fn spawn_in_new_terminal(
+    _exe: &std::path::Path,
+    _session_id: &str,
+    _cwd: &std::path::Path,
+) -> anyhow::Result<bool> {
+    Ok(false)
 }
 
 #[cfg(test)]
