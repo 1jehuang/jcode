@@ -2,18 +2,15 @@ use super::{EventStream, Provider};
 use crate::auth::codex::CodexCredentials;
 use crate::auth::oauth;
 use crate::message::{
-    ContentBlock, Message as ChatMessage, Role, StreamEvent, ToolDefinition, TOOL_OUTPUT_MISSING_TEXT,
+    ContentBlock, Message as ChatMessage, Role, StreamEvent, ToolDefinition,
+    TOOL_OUTPUT_MISSING_TEXT,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{SinkExt, Stream, StreamExt};
-use reqwest::{Client, StatusCode};
 use reqwest::header::HeaderValue;
-use tokio_tungstenite::tungstenite::Error as WsError;
-use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::connect_async;
+use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -23,6 +20,10 @@ use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::Error as WsError;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
 const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
@@ -37,6 +38,7 @@ const MAX_RETRIES: u32 = 3;
 /// Base delay for exponential backoff (in milliseconds)
 const RETRY_BASE_DELAY_MS: u64 = 1000;
 const WEBSOCKET_UPGRADE_REQUIRED_ERROR: StatusCode = StatusCode::UPGRADE_REQUIRED;
+const WEBSOCKET_FALLBACK_NOTICE: &str = "falling back from websockets to https transport";
 
 /// Available OpenAI/Codex models
 const AVAILABLE_MODELS: &[&str] = &[
@@ -86,6 +88,14 @@ impl OpenAITransportMode {
             }
         }
     }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::WebSocket => "websocket",
+            Self::HTTPS => "https",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -104,6 +114,15 @@ impl From<anyhow::Error> for OpenAIStreamFailure {
 enum OpenAITransport {
     WebSocket,
     HTTPS,
+}
+
+impl OpenAITransport {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::WebSocket => "websocket",
+            Self::HTTPS => "https",
+        }
+    }
 }
 
 pub struct OpenAIProvider {
@@ -155,10 +174,7 @@ impl OpenAIProvider {
             .as_deref()
             .and_then(Self::normalize_reasoning_effort);
         let transport_mode = OpenAITransportMode::from_config(
-            crate::config::config()
-                .provider
-                .openai_transport
-                .as_deref(),
+            crate::config::config().provider.openai_transport.as_deref(),
         );
 
         Self {
@@ -250,7 +266,8 @@ impl OpenAIProvider {
 
     fn responses_ws_url(credentials: &CodexCredentials) -> String {
         let base = Self::responses_url(credentials);
-        base.replace("https://", "wss://").replace("http://", "ws://")
+        base.replace("https://", "wss://")
+            .replace("http://", "ws://")
     }
 
     async fn model_id(&self) -> String {
@@ -618,16 +635,19 @@ fn parse_openai_response_event(
         return Some(StreamEvent::MessageEnd { stop_reason: None });
     }
 
-    let lower_data = data.to_lowercase();
-    if lower_data.contains("stream disconnected before completion") {
+    if is_websocket_fallback_notice(data) {
+        crate::logging::warn(&format!("OpenAI stream transport notice: {}", data.trim()));
+        return None;
+    }
+
+    if data
+        .to_lowercase()
+        .contains("stream disconnected before completion")
+    {
         return Some(StreamEvent::Error {
             message: data.to_string(),
             retry_after_secs: None,
         });
-    }
-    if lower_data.contains("falling back from websockets to https transport") {
-        crate::logging::warn(&format!("OpenAI stream transport notice: {}", data.trim()));
-        return None;
     }
 
     let event: ResponseSseEvent = match serde_json::from_str(data) {
@@ -743,8 +763,7 @@ fn handle_openai_output_item(
             if let Some(summary_arr) = item.get("summary").and_then(|v| v.as_array()) {
                 let mut summary_text = String::new();
                 for summary_item in summary_arr {
-                    if summary_item.get("type").and_then(|v| v.as_str()) == Some("summary_text")
-                    {
+                    if summary_item.get("type").and_then(|v| v.as_str()) == Some("summary_text") {
                         if let Some(text) = summary_item.get("text").and_then(|v| v.as_str()) {
                             if !summary_text.is_empty() {
                                 summary_text.push('\n');
@@ -805,11 +824,9 @@ impl OpenAIResponsesStream {
             }
 
             let data = data_lines.join("\n");
-            if let Some(event) = parse_openai_response_event(
-                &data,
-                &mut self.saw_text_delta,
-                &mut self.pending,
-            ) {
+            if let Some(event) =
+                parse_openai_response_event(&data, &mut self.saw_text_delta, &mut self.pending)
+            {
                 return Some(event);
             }
         }
@@ -966,14 +983,20 @@ impl Provider for OpenAIProvider {
                     }
                 };
 
+                let transport_label = transport.as_str();
+                crate::logging::info(&format!(
+                    "OpenAI stream attempt {}/{} using transport '{}'; model='{}'; mode='{}'",
+                    attempt + 1,
+                    MAX_RETRIES,
+                    transport_label,
+                    model_for_transport,
+                    transport_mode.as_str()
+                ));
+
                 let use_websocket = matches!(transport, OpenAITransport::WebSocket);
                 let result = if use_websocket {
-                    stream_response_websocket(
-                        Arc::clone(&credentials),
-                        request.clone(),
-                        tx.clone(),
-                    )
-                    .await
+                    stream_response_websocket(Arc::clone(&credentials), request.clone(), tx.clone())
+                        .await
                 } else {
                     stream_response(
                         client.clone(),
@@ -997,7 +1020,10 @@ impl Provider for OpenAIProvider {
                     Err(OpenAIStreamFailure::Other(error)) => {
                         let error_str = error.to_string().to_lowercase();
                         if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
-                            crate::logging::info(&format!("Transient error, will retry: {}", error));
+                            crate::logging::info(&format!(
+                                "Transient error, will retry: {}",
+                                error
+                            ));
                             last_error = Some(error);
                             continue;
                         }
@@ -1079,7 +1105,9 @@ impl Provider for OpenAIProvider {
     }
 }
 
-async fn openai_access_token(credentials: &Arc<RwLock<CodexCredentials>>) -> anyhow::Result<String> {
+async fn openai_access_token(
+    credentials: &Arc<RwLock<CodexCredentials>>,
+) -> anyhow::Result<String> {
     let (access_token, refresh_token, needs_refresh) = {
         let tokens = credentials.read().await;
         if tokens.access_token.is_empty() {
@@ -1087,7 +1115,8 @@ async fn openai_access_token(credentials: &Arc<RwLock<CodexCredentials>>) -> any
         }
 
         let should_refresh = if let Some(expires_at) = tokens.expires_at {
-            expires_at < chrono::Utc::now().timestamp_millis() + 300_000 && !tokens.refresh_token.is_empty()
+            expires_at < chrono::Utc::now().timestamp_millis() + 300_000
+                && !tokens.refresh_token.is_empty()
         } else {
             false
         };
@@ -1110,7 +1139,10 @@ async fn openai_access_token(credentials: &Arc<RwLock<CodexCredentials>>) -> any
     let refreshed = oauth::refresh_openai_tokens(&refresh_token).await?;
     let mut tokens = credentials.write().await;
     let account_id = tokens.account_id.clone();
-    let id_token = refreshed.id_token.clone().or_else(|| tokens.id_token.clone());
+    let id_token = refreshed
+        .id_token
+        .clone()
+        .or_else(|| tokens.id_token.clone());
     let new_access_token = refreshed.access_token.clone();
 
     *tokens = CodexCredentials {
@@ -1235,15 +1267,17 @@ async fn stream_response_websocket(
     let creds = credentials.read().await;
     let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
     let ws_url = OpenAIProvider::responses_ws_url(&creds);
-    let mut ws_request = ws_url
-        .into_client_request()
-        .map_err(|err| {
-            OpenAIStreamFailure::Other(anyhow::anyhow!("Failed to build websocket request: {}", err))
-        })?;
-
-    let auth_header = HeaderValue::from_str(&format!("Bearer {}", access_token)).map_err(|err| {
-        OpenAIStreamFailure::Other(anyhow::anyhow!("Invalid Authorization header: {}", err))
+    let mut ws_request = ws_url.into_client_request().map_err(|err| {
+        OpenAIStreamFailure::Other(anyhow::anyhow!(
+            "Failed to build websocket request: {}",
+            err
+        ))
     })?;
+
+    let auth_header =
+        HeaderValue::from_str(&format!("Bearer {}", access_token)).map_err(|err| {
+            OpenAIStreamFailure::Other(anyhow::anyhow!("Invalid Authorization header: {}", err))
+        })?;
     ws_request
         .headers_mut()
         .insert("Authorization", auth_header);
@@ -1262,10 +1296,9 @@ async fn stream_response_websocket(
                     err
                 ))
             })?;
-            ws_request.headers_mut().insert(
-                "chatgpt-account-id",
-                account_header,
-            );
+            ws_request
+                .headers_mut()
+                .insert("chatgpt-account-id", account_header);
         }
     }
     drop(creds);
@@ -1299,11 +1332,12 @@ async fn stream_response_websocket(
             serde_json::Value::String("response.create".to_string()),
         );
 
-    let request_text = serde_json::to_string(&request_event)
-        .map_err(|err| OpenAIStreamFailure::Other(anyhow::anyhow!(
+    let request_text = serde_json::to_string(&request_event).map_err(|err| {
+        OpenAIStreamFailure::Other(anyhow::anyhow!(
             "Failed to serialize OpenAI websocket request: {}",
             err
-        )))?;
+        ))
+    })?;
     ws_stream
         .send(WsMessage::Text(request_text))
         .await
@@ -1312,6 +1346,7 @@ async fn stream_response_websocket(
     use futures::StreamExt;
     let mut saw_text_delta = false;
     let mut saw_response_completed = false;
+    let mut saw_fallback_notice = false;
     let mut pending: VecDeque<StreamEvent> = VecDeque::new();
 
     while let Some(result) = ws_stream.next().await {
@@ -1319,6 +1354,11 @@ async fn stream_response_websocket(
             Ok(message) => match message {
                 WsMessage::Text(text) => {
                     let text = text.to_string();
+                    if is_websocket_fallback_notice(&text) {
+                        saw_fallback_notice = true;
+                        continue;
+                    }
+
                     if let Some(event) =
                         parse_openai_response_event(&text, &mut saw_text_delta, &mut pending)
                     {
@@ -1361,6 +1401,12 @@ async fn stream_response_websocket(
                     if saw_response_completed {
                         return Ok(());
                     }
+                    if saw_fallback_notice {
+                        return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                            "{} before response.completed",
+                            WEBSOCKET_FALLBACK_NOTICE
+                        )));
+                    }
                     return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
                         "WebSocket stream closed before response.completed"
                     )));
@@ -1380,6 +1426,13 @@ async fn stream_response_websocket(
                 )));
             }
         }
+    }
+
+    if saw_fallback_notice && !saw_response_completed {
+        return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+            "{} after stream ended before response.completed",
+            WEBSOCKET_FALLBACK_NOTICE
+        )));
     }
 
     Ok(())
@@ -1471,6 +1524,10 @@ fn is_retryable_error(error_str: &str) -> bool {
         || error_str.contains("503 service unavailable")
         || error_str.contains("504 gateway timeout")
         || error_str.contains("overloaded")
+}
+
+fn is_websocket_fallback_notice(data: &str) -> bool {
+    data.to_lowercase().contains(WEBSOCKET_FALLBACK_NOTICE)
 }
 
 #[cfg(test)]

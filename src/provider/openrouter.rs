@@ -15,7 +15,7 @@ use crate::message::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,7 +25,14 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll};
 use std::time::Instant;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
+use tokio_stream::wrappers::ReceiverStream;
+
+/// Maximum number of retries for transient errors
+const MAX_RETRIES: u32 = 3;
+
+/// Base delay for exponential backoff (in milliseconds)
+const RETRY_BASE_DELAY_MS: u64 = 1000;
 
 /// OpenRouter API base URL
 const API_BASE: &str = "https://openrouter.ai/api/v1";
@@ -1732,34 +1739,31 @@ impl Provider for OpenRouterProvider {
             request["provider"] = obj;
         }
 
-        // Send request
-        let url = format!("{}/chat/completions", API_BASE);
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .header("Accept-Encoding", "identity")
-            .header("HTTP-Referer", "https://github.com/jcode")
-            .header("X-Title", "jcode")
-            .json(&request)
-            .send()
-            .await
-            .context("Failed to send request to OpenRouter")?;
+        // OpenRouter uses HTTPS/SSE transport only
+        crate::logging::info("OpenRouter transport: HTTPS (SSE)");
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("OpenRouter API error ({}): {}", status, body);
-        }
+        let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+        let request_for_retries = request;
+        let model_for_stream = model.clone();
+        let provider_stats = Arc::clone(&self.provider_stats);
+        let provider_pin = Arc::clone(&self.provider_pin);
 
-        let stream = OpenRouterStream::new(
-            response.bytes_stream(),
-            model.clone(),
-            Arc::clone(&self.provider_stats),
-            Arc::clone(&self.provider_pin),
-        );
-        Ok(Box::pin(stream))
+        tokio::spawn(async move {
+            run_stream_with_retries(
+                client,
+                api_key,
+                request_for_retries,
+                tx,
+                provider_stats,
+                provider_pin,
+                model_for_stream,
+            )
+            .await;
+        });
+
+        Ok(Box::pin(ReceiverStream::new(rx)))
     }
 
     fn name(&self) -> &str {
@@ -1851,6 +1855,137 @@ impl Provider for OpenRouterProvider {
 // ============================================================================
 // SSE Stream Parser
 // ============================================================================
+
+async fn run_stream_with_retries(
+    client: Client,
+    api_key: String,
+    request: Value,
+    tx: mpsc::Sender<Result<StreamEvent>>,
+    provider_stats: Arc<Mutex<ProviderStatsStore>>,
+    provider_pin: Arc<Mutex<Option<ProviderPin>>>,
+    model: String,
+) {
+    let mut last_error = None;
+
+    for attempt in 0..MAX_RETRIES {
+        if attempt > 0 {
+            let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            crate::logging::info(&format!(
+                "Retrying OpenRouter API request (attempt {}/{})",
+                attempt + 1,
+                MAX_RETRIES
+            ));
+        }
+
+        crate::logging::info(&format!(
+            "OpenRouter stream attempt {}/{} over HTTPS transport (model: {})",
+            attempt + 1,
+            MAX_RETRIES,
+            model
+        ));
+
+        match stream_response(
+            client.clone(),
+            api_key.clone(),
+            request.clone(),
+            tx.clone(),
+            Arc::clone(&provider_stats),
+            Arc::clone(&provider_pin),
+            model.clone(),
+        )
+        .await
+        {
+            Ok(()) => return,
+            Err(e) => {
+                let error_str = e.to_string().to_lowercase();
+                if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                    crate::logging::info(&format!("OpenRouter transient error, will retry: {}", e));
+                    last_error = Some(e);
+                    continue;
+                }
+
+                let _ = tx.send(Err(e)).await;
+                return;
+            }
+        }
+    }
+
+    if let Some(e) = last_error {
+        let _ = tx
+            .send(Err(anyhow::anyhow!(
+                "Failed after {} retries: {}",
+                MAX_RETRIES,
+                e
+            )))
+            .await;
+    }
+}
+
+async fn stream_response(
+    client: Client,
+    api_key: String,
+    request: Value,
+    tx: mpsc::Sender<Result<StreamEvent>>,
+    provider_stats: Arc<Mutex<ProviderStatsStore>>,
+    provider_pin: Arc<Mutex<Option<ProviderPin>>>,
+    model: String,
+) -> Result<()> {
+    let url = format!("{}/chat/completions", API_BASE);
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .header("Accept-Encoding", "identity")
+        .header("HTTP-Referer", "https://github.com/jcode")
+        .header("X-Title", "jcode")
+        .json(&request)
+        .send()
+        .await
+        .context("Failed to send request to OpenRouter")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("OpenRouter API error ({}): {}", status, body);
+    }
+
+    let mut stream = OpenRouterStream::new(
+        response.bytes_stream(),
+        model.clone(),
+        provider_stats,
+        provider_pin,
+    );
+
+    while let Some(event) = stream.next().await {
+        if tx.send(event).await.is_err() {
+            return Ok(());
+        }
+    }
+
+    Ok(())
+}
+
+fn is_retryable_error(error_str: &str) -> bool {
+    error_str.contains("connection reset")
+        || error_str.contains("connection reset by peer")
+        || error_str.contains("connection refused")
+        || error_str.contains("broken pipe")
+        || error_str.contains("timed out")
+        || error_str.contains("timeout")
+        || error_str.contains("error decoding")
+        || error_str.contains("stream error")
+        || error_str.contains("error reading")
+        || error_str.contains("unexpected eof")
+        || error_str.contains("eof")
+        || error_str.contains("5")
+            && (error_str.contains("50")
+                || error_str.contains("502")
+                || error_str.contains("503")
+                || error_str.contains("504")
+                || error_str.contains("internal server error"))
+        || error_str.contains("overloaded")
+}
 
 struct OpenRouterStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,

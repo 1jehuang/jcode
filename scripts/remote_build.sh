@@ -2,8 +2,8 @@
 # Remote cargo runner (build/test/check/clippy) via SSH + rsync.
 #
 # Defaults:
-# - Host: desktop-tailscale (override with JCODE_REMOTE_HOST or --host)
-# - Remote dir: ~/jcode (override with JCODE_REMOTE_DIR or --remote-dir)
+# - Host: desktop (override with JCODE_REMOTE_HOST or --host)
+# - Remote dir: .cache/remote-builds/jcode/<repo-name> (override with JCODE_REMOTE_DIR or --remote-dir)
 #
 # Examples:
 #   scripts/remote_build.sh --release
@@ -19,8 +19,8 @@ Usage: scripts/remote_build.sh [options] [cargo-subcommand] [cargo-args...]
 
 Options:
   -r, --release        Add --release to cargo invocation
-  --host HOST          Remote SSH host (default: $JCODE_REMOTE_HOST or desktop-tailscale)
-  --remote-dir DIR     Remote project directory (default: $JCODE_REMOTE_DIR or ~/jcode)
+  --host HOST          Remote SSH host (default: $JCODE_REMOTE_HOST or desktop)
+  --remote-dir DIR     Remote project directory (default: $JCODE_REMOTE_DIR or .cache/remote-builds/jcode/<repo-name>)
   --no-sync            Skip rsync upload step
   --sync-back          Force sync-back of built binary after command
   --no-sync-back       Disable sync-back of built binary after command
@@ -34,9 +34,12 @@ Behavior:
 EOF
 }
 
-REMOTE="${JCODE_REMOTE_HOST:-desktop-tailscale}"
-REMOTE_DIR="${JCODE_REMOTE_DIR:-~/jcode}"
 LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_NAME="$(basename "$LOCAL_DIR")"
+REMOTE="${JCODE_REMOTE_HOST:-desktop}"
+REMOTE_DIR="${JCODE_REMOTE_DIR:-.cache/remote-builds/jcode/${REPO_NAME}}"
+SSH_BIN="${JCODE_REMOTE_SSH_BIN:-ssh}"
+RSYNC_BIN="${JCODE_REMOTE_RSYNC_BIN:-rsync}"
 
 SYNC_SOURCE=1
 SYNC_BACK_MODE="auto" # auto|always|never
@@ -94,6 +97,18 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ "$REMOTE_DIR" == *" "* ]]; then
+    echo "error: remote dir cannot contain spaces: $REMOTE_DIR" >&2
+    exit 2
+fi
+
+for bin in "$SSH_BIN" "$RSYNC_BIN"; do
+    if ! command -v "$bin" >/dev/null 2>&1; then
+        echo "error: required binary not found: $bin" >&2
+        exit 2
+    fi
+done
+
 CARGO_CMD=(cargo "$SUBCOMMAND")
 if [[ "$RELEASE" -eq 1 ]]; then
     CARGO_CMD+=(--release)
@@ -140,7 +155,8 @@ echo "Mode:    $build_mode"
 if [[ "$SYNC_SOURCE" -eq 1 ]]; then
     echo ""
     echo "[1/3] Syncing source files..."
-    rsync -avz --delete \
+    "$SSH_BIN" "$REMOTE" "$(printf 'mkdir -p %q' "$REMOTE_DIR")"
+    "$RSYNC_BIN" -avz --delete \
         --exclude 'target/' \
         --exclude '.git/' \
         --exclude '*.log' \
@@ -152,16 +168,18 @@ else
 fi
 
 printf -v REMOTE_CARGO_CMD '%q ' "${CARGO_CMD[@]}"
+printf -v REMOTE_RUN_CMD 'cd %q && %s' "$REMOTE_DIR" "$REMOTE_CARGO_CMD"
 echo ""
 echo "[2/3] Running on remote..."
-ssh "$REMOTE" "cd $REMOTE_DIR && $REMOTE_CARGO_CMD 2>&1"
+"$SSH_BIN" "$REMOTE" "$REMOTE_RUN_CMD 2>&1"
 
 echo ""
 if [[ "$sync_back" -eq 1 ]]; then
-    if ssh "$REMOTE" "test -f $REMOTE_DIR/$BINARY_PATH"; then
+    printf -v REMOTE_TEST_CMD 'test -f %q' "$REMOTE_DIR/$BINARY_PATH"
+    if "$SSH_BIN" "$REMOTE" "$REMOTE_TEST_CMD"; then
         echo "[3/3] Syncing built artifact back..."
         mkdir -p "$(dirname "$LOCAL_DIR/$BINARY_PATH")"
-        rsync -avz "$REMOTE:$REMOTE_DIR/$BINARY_PATH" "$LOCAL_DIR/$BINARY_PATH"
+        "$RSYNC_BIN" -avz "$REMOTE:$REMOTE_DIR/$BINARY_PATH" "$LOCAL_DIR/$BINARY_PATH"
         echo ""
         echo "=== Remote cargo complete ==="
         ls -la "$LOCAL_DIR/$BINARY_PATH"

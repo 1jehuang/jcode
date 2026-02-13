@@ -70,6 +70,8 @@ jcode supports multiple providers and authentication methods:
 
 Uses your Claude Pro/Max subscription - no API key needed, included in subscription cost.
 
+Direct Claude API transport is the default in jcode. The legacy `claude` subprocess mode is only used when explicitly enabled.
+
 **Setup:**
 1. Install Claude Code CLI: `npm install -g @anthropic-ai/claude-code`
 2. Login: `claude login`
@@ -99,15 +101,18 @@ Both auth methods support prompt caching. The system prompt is cached for 5 minu
 - `cache_write`: Tokens cached on first request
 - `cache_read`: Tokens read from cache (90% cheaper)
 
-### Legacy: Claude CLI Provider
+### Legacy: Claude CLI Provider (deprecated)
 
-To use Claude Code CLI as a subprocess (legacy mode):
+Direct Anthropic API is now the default Claude transport.
+
+To use Claude Code CLI as a subprocess (legacy rollback mode only):
 
 ```bash
 export JCODE_USE_CLAUDE_CLI=1
 ```
 
-This shells out to `claude` binary instead of calling the API directly.
+This shells out to the `claude` binary instead of calling the API directly.
+It is retained only for legacy compatibility.
 
 ### Option 3: OpenRouter (200+ Models)
 
@@ -137,7 +142,7 @@ export OPENROUTER_API_KEY=sk-or-v1-...
 # Authentication
 export ANTHROPIC_API_KEY=sk-ant-...     # Direct API key (overrides OAuth)
 export OPENROUTER_API_KEY=sk-or-v1-...  # OpenRouter API key
-export JCODE_USE_CLAUDE_CLI=1           # Use Claude CLI subprocess (legacy)
+export JCODE_USE_CLAUDE_CLI=1           # Deprecated: legacy Claude CLI subprocess mode
 
 # Model selection
 export JCODE_ANTHROPIC_MODEL=claude-opus-4-5-20251101

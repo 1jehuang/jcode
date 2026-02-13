@@ -442,6 +442,11 @@ impl CompactionManager {
             .sum()
     }
 
+    /// Poll for compaction completion and return an event if one was applied.
+    pub fn poll_compaction_event(&mut self) -> Option<CompactionEvent> {
+        self.check_and_apply_compaction();
+        self.take_compaction_event()
+    }
 }
 
 impl Default for CompactionManager {

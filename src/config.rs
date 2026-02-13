@@ -143,6 +143,8 @@ pub struct ProviderConfig {
     pub default_model: Option<String>,
     /// Reasoning effort for OpenAI Responses API (none|low|medium|high|xhigh)
     pub openai_reasoning_effort: Option<String>,
+    /// OpenAI transport mode (auto|websocket|https)
+    pub openai_transport: Option<String>,
 }
 
 impl Default for ProviderConfig {
@@ -150,6 +152,7 @@ impl Default for ProviderConfig {
         Self {
             default_model: None,
             openai_reasoning_effort: Some("xhigh".to_string()),
+            openai_transport: None,
         }
     }
 }
@@ -406,6 +409,12 @@ impl Config {
                 self.provider.openai_reasoning_effort = Some(trimmed);
             }
         }
+        if let Ok(v) = std::env::var("JCODE_OPENAI_TRANSPORT") {
+            let trimmed = v.trim().to_string();
+            if !trimmed.is_empty() {
+                self.provider.openai_transport = Some(trimmed);
+            }
+        }
     }
 
     /// Save config to file
@@ -476,6 +485,8 @@ swarm = true
 # default_model = "gpt-5.3-codex-spark"
 # OpenAI reasoning effort (none|low|medium|high|xhigh)
 openai_reasoning_effort = "xhigh"
+# OpenAI transport mode (auto|websocket|https)
+# openai_transport = "auto"
 
 [ambient]
 # Ambient mode: background agent that maintains your codebase
@@ -561,6 +572,7 @@ desktop_notifications = true
 **Provider:**
 - Default model: {}
 - OpenAI reasoning effort: {}
+- OpenAI transport: {}
 
 **Ambient:**
 - Enabled: {}
@@ -601,6 +613,10 @@ desktop_notifications = true
                 .openai_reasoning_effort
                 .as_deref()
                 .unwrap_or("(provider default)"),
+            self.provider
+                .openai_transport
+                .as_deref()
+                .unwrap_or("(auto)"),
             self.ambient.enabled,
             self.ambient.provider.as_deref().unwrap_or("(auto)"),
             self.ambient
