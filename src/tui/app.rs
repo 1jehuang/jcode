@@ -4022,6 +4022,11 @@ impl App {
                     self.streaming_tps_elapsed += start.elapsed();
                 }
                 remote.handle_tool_start(&id, &name);
+                if matches!(name.as_str(), "memory" | "remember") {
+                    crate::memory::set_state(
+                        crate::tui::info_widget::MemoryState::Embedding,
+                    );
+                }
                 self.status = ProcessingStatus::RunningTool(name.clone());
                 self.streaming_tool_calls.push(ToolCall {
                     id,
@@ -8077,6 +8082,11 @@ impl App {
             // selfdev are not known to the SDK and need to be executed locally.
             for tc in tool_calls {
                 self.status = ProcessingStatus::RunningTool(tc.name.clone());
+                if matches!(tc.name.as_str(), "memory" | "remember") {
+                    crate::memory::set_state(
+                        crate::tui::info_widget::MemoryState::Embedding,
+                    );
+                }
                 let message_id = assistant_message_id
                     .clone()
                     .unwrap_or_else(|| self.session.id.clone());
@@ -8450,6 +8460,11 @@ impl App {
                                         });
                                         // Update status to show tool in progress
                                         self.status = ProcessingStatus::RunningTool(name.clone());
+                                        if matches!(name.as_str(), "memory" | "remember") {
+                                            crate::memory::set_state(
+                                                crate::tui::info_widget::MemoryState::Embedding,
+                                            );
+                                        }
                                         self.streaming_tool_calls.push(ToolCall {
                                             id: id.clone(),
                                             name: name.clone(),
@@ -8787,6 +8802,11 @@ impl App {
             // SDK may have executed some tools, but custom tools need local execution
             for tc in tool_calls {
                 self.status = ProcessingStatus::RunningTool(tc.name.clone());
+                if matches!(tc.name.as_str(), "memory" | "remember") {
+                    crate::memory::set_state(
+                        crate::tui::info_widget::MemoryState::Embedding,
+                    );
+                }
                 terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
 
                 let message_id = assistant_message_id
@@ -10270,6 +10290,7 @@ impl super::TuiState for App {
         } else {
             (None, None)
         };
+        let session_name = self.session_display_name();
 
         // Gather memory info
         let memory_info = if self.memory_enabled {
@@ -10537,6 +10558,7 @@ impl super::TuiState for App {
             model,
             reasoning_effort,
             session_count,
+            session_name,
             client_count,
             memory_info,
             swarm_info,
