@@ -4404,7 +4404,7 @@ async fn run_swarm_task(
         tool_call_id: call_id,
         working_dir,
     };
-    let output = registry.execute("task", input, ctx).await?;
+    let output = registry.execute("subagent", input, ctx).await?;
     Ok(output.output)
 }
 
@@ -7141,7 +7141,7 @@ SERVER COMMANDS (server: prefix or no prefix):
   last_response            - Get last assistant response
   message:<text>           - Send message to agent
   message_async:<text>     - Send message async (returns job id)
-  swarm_message:<text>     - Plan and run subtasks via task tool, then integrate
+  swarm_message:<text>     - Plan and run subtasks via subagent tool, then integrate
   swarm_message_async:<text> - Async swarm message (returns job id)
   tool:<name> <json>       - Execute tool directly
   cancel                   - Cancel in-flight generation (urgent interrupt)
