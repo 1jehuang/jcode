@@ -1749,7 +1749,6 @@ fn chroma_spans(text: &str, elapsed: f32, offset: f32, bold: bool) -> Vec<Span<'
 /// Line 4: Version and build info
 fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let model = app.provider_model();
-    let anim_elapsed = app.animation_elapsed();
     let session_name = app.session_display_name().unwrap_or_default();
     let short_model = shorten_model_name(&model);
     let icon = crate::id::session_icon(&session_name);
@@ -1787,8 +1786,9 @@ fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>>
 
     if !status_items.is_empty() {
         let badge_text = format!("⟨{}⟩", status_items.join("·"));
-        let badge_spans = chroma_spans(&badge_text, anim_elapsed, 0.0, false);
-        lines.push(Line::from(badge_spans).alignment(align));
+        lines.push(
+            Line::from(Span::styled(badge_text, Style::default().fg(DIM_COLOR))).alignment(align),
+        );
     } else if centered {
         lines.push(Line::from("")); // Empty line if no badges (only in centered mode)
     }
@@ -1796,16 +1796,25 @@ fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>>
     // Line 2: "JCode <icon> <SessionName>" (chroma)
     if !session_name.is_empty() {
         let full_name = format!("JCode {} {}", icon, capitalize(&session_name));
-        let name_spans = chroma_spans(&full_name, anim_elapsed, 0.15, true);
-        lines.push(Line::from(name_spans).alignment(align));
+        lines.push(
+            Line::from(Span::styled(full_name, Style::default().fg(HEADER_NAME_COLOR)))
+                .alignment(align),
+        );
     } else {
-        let jcode_spans = chroma_spans("JCode", anim_elapsed, 0.15, true);
-        lines.push(Line::from(jcode_spans).alignment(align));
+        lines.push(
+            Line::from(Span::styled("JCode", Style::default().fg(HEADER_NAME_COLOR)))
+                .alignment(align),
+        );
     }
 
     // Line 3: Model name (chroma)
-    let model_spans = chroma_spans(&nice_model, anim_elapsed, 0.4, false);
-    lines.push(Line::from(model_spans).alignment(align));
+    lines.push(
+        Line::from(Span::styled(
+            nice_model,
+            Style::default().fg(HEADER_SESSION_COLOR),
+        ))
+        .alignment(align),
+    );
 
     // Line 4: Version and build info (dim, no chroma)
     let version_text = if is_running_stable_release() {
