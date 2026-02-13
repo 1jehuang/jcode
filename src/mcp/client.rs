@@ -59,6 +59,11 @@ impl McpHandle {
 
     /// Call a tool
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolCallResult> {
+        let arguments = if arguments.is_null() {
+            Value::Object(serde_json::Map::new())
+        } else {
+            arguments
+        };
         let params = ToolCallParams {
             name: name.to_string(),
             arguments,
