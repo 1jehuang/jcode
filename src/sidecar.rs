@@ -1,4 +1,4 @@
-//! Lightweight sidecar client for fast, cheap model calls (Haiku 4.5)
+//! Lightweight sidecar client for fast, cheap model calls.
 //!
 //! Used for memory relevance verification and other quick tasks that don't
 //! need the full Agent SDK infrastructure.
@@ -7,8 +7,8 @@ use crate::auth;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// Haiku 3.5 model identifier (works with OAuth)
-pub const HAIKU_MODEL: &str = "claude-3-5-haiku-20241022";
+/// Default sidecar model identifier for fast memory checks.
+pub const SIDECAR_FAST_MODEL: &str = "gpt-5.3-codex-spark";
 
 /// Claude Messages API endpoint (with beta=true for OAuth)
 const CLAUDE_API_URL: &str = "https://api.anthropic.com/v1/messages?beta=true";
@@ -27,7 +27,7 @@ const CLAUDE_CODE_JCODE_NOTICE: &str =
 /// Maximum tokens for sidecar responses (keep small for speed/cost)
 const DEFAULT_MAX_TOKENS: u32 = 1024;
 
-/// Lightweight client for Haiku sidecar calls
+/// Lightweight client for fast sidecar calls
 #[derive(Clone)]
 pub struct HaikuSidecar {
     client: reqwest::Client,
@@ -40,7 +40,7 @@ impl HaikuSidecar {
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
-            model: HAIKU_MODEL.to_string(),
+            model: SIDECAR_FAST_MODEL.to_string(),
             max_tokens: DEFAULT_MAX_TOKENS,
         }
     }
@@ -303,7 +303,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_haiku_model_name() {
-        assert!(HAIKU_MODEL.contains("haiku"));
+    fn test_sidecar_fast_model() {
+        assert_eq!(SIDECAR_FAST_MODEL, "gpt-5.3-codex-spark");
     }
 }
