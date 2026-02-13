@@ -1898,6 +1898,7 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static PENDING_MEMORY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_temp_home<F, T>(f: F) -> T
     where
@@ -1929,6 +1930,9 @@ mod tests {
 
     #[test]
     fn pending_memory_freshness_and_clear() {
+        let _guard = PENDING_MEMORY_TEST_LOCK
+            .lock()
+            .expect("pending memory test lock poisoned");
         clear_pending_memory();
 
         set_pending_memory("hello".to_string(), 2);
@@ -1951,6 +1955,9 @@ mod tests {
 
     #[test]
     fn pending_memory_suppresses_immediate_duplicate_payloads() {
+        let _guard = PENDING_MEMORY_TEST_LOCK
+            .lock()
+            .expect("pending memory test lock poisoned");
         clear_pending_memory();
 
         set_pending_memory("same payload".to_string(), 1);

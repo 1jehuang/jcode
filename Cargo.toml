@@ -28,6 +28,7 @@ async-trait = "0.1"
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

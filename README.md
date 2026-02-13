@@ -1,6 +1,6 @@
 # J-Code
 
-A Rust coding agent that uses the **Claude Code CLI** (Claude Max OAuth) or **ChatGPT Pro** via OAuth.
+A Rust coding agent that uses Claude over OAuth HTTP APIs (Anthropic API for Claude models, OpenAI/Codex via OAuth) and supports OpenRouter.
 
 ## Demo
 
@@ -8,8 +8,8 @@ A Rust coding agent that uses the **Claude Code CLI** (Claude Max OAuth) or **Ch
 
 ## Features
 
-- **No API keys needed** - Uses Claude Code CLI credentials and Codex OAuth
-- **Dual provider support** - Works with Claude Code CLI and OpenAI/Codex
+- **No API keys needed** - Uses Claude OAuth credentials and Codex OAuth
+- **Dual provider support** - Works with Claude, OpenAI/Codex, and OpenRouter
 - **Server/Client architecture** - Run as daemon, connect from multiple clients
 - **20+ built-in tools** - File ops, search, web, shell, memory, and parallel execution
 - **MCP support** - Extend with Model Context Protocol servers
@@ -21,7 +21,7 @@ A Rust coding agent that uses the **Claude Code CLI** (Claude Max OAuth) or **Ch
 ## Prerequisites
 
 You need at least one of:
-- **Claude Max subscription** - Install Claude Code CLI, then run `claude` to authenticate
+- **Claude subscription** - Install Claude Code CLI, then run `claude` to generate OAuth credentials
 - **ChatGPT Pro/Plus subscription** - Run `codex login` to authenticate
 
 ## Installation
@@ -38,7 +38,7 @@ cargo build --release
 
 Remote build/test (offload local CPU/RAM):
 ```bash
-# Defaults: host=desktop-tailscale, remote dir=~/jcode
+# Defaults: host=desktop, remote dir=.cache/remote-builds/jcode/jcode
 scripts/remote_build.sh --release
 scripts/remote_build.sh test
 
@@ -50,6 +50,10 @@ export JCODE_REMOTE_CARGO=1
 scripts/test_e2e.sh
 scripts/agent_trace.sh
 ```
+
+The remote wrapper syncs into an isolated directory under remote `~/.cache` by default
+and uses `rsync --delete` there, so it does not modify your normal desktop working copy
+unless you explicitly point `JCODE_REMOTE_DIR` at it.
 
 ## Usage
 
@@ -169,9 +173,9 @@ jcode --resume session_abc123_fox  # by full ID
 │   ClaudeProvider        │     │   OpenAIProvider        │
 │   (provider/claude.rs)  │     │   (provider/openai.rs)  │
 ├─────────────────────────┤     ├─────────────────────────┤
-│ - Claude Code CLI       │     │ - Codex OAuth           │
-│ - CLI subprocess        │     │ - Direct HTTP API       │
-│ - Tool execution by CLI │     │ - Local tool execution  │
+│ - Claude OAuth HTTP API  │     │ - Codex OAuth           │
+│ - Direct HTTP API       │     │ - Direct HTTP API       │
+│ - Tool execution local  │     │ - Local tool execution  │
 │ - Session resume        │     │ - Reasoning effort ctrl │
 └─────────────────────────┘     └─────────────────────────┘
          │                               │
@@ -195,8 +199,8 @@ Provider Trait:
 ```
 
 **Key Design Decisions:**
-- `MultiProvider` allows seamless switching between Claude and OpenAI mid-session
-- Claude Code CLI handles tool execution internally; OpenAI requires local execution
+- `MultiProvider` allows seamless switching between Claude, OpenAI/Codex, and OpenRouter
+- Claude direct API mode executes tools locally; legacy CLI subprocess mode executes tools itself
 - Credentials are loaded lazily and cached
 
 </details>
@@ -929,8 +933,8 @@ MCP servers communicate via JSON-RPC 2.0 over stdio. See the [MCP specification]
 
 ## How It Works
 
-J-Code uses the Claude Code CLI to talk to Claude. Credentials are stored at:
-- `~/.claude/.credentials.json` (Claude Code CLI)
+J-Code uses Claude OAuth credentials to call Anthropic APIs. Credentials are stored at:
+- `~/.claude/.credentials.json` (Claude OAuth)
 - `~/.local/share/opencode/auth.json` (OpenCode, if installed)
 
 OpenAI/Codex OAuth credentials are stored at:
@@ -943,7 +947,7 @@ For provider/auth details, see `OAUTH.md`.
 ## Testing
 
 - `cargo test` - Run all tests
-- `cargo run --bin test_api` - Claude Code CLI smoke test
+- `cargo run --bin test_api` - Claude CLI transport smoke test (legacy path)
 - `cargo run --bin jcode-harness` - Tool harness (add `--include-network` for web tools)
 - `cargo run --release --bin tui_bench` - TUI rendering benchmark (see Architecture > Rendering Benchmarks)
 - `scripts/agent_trace.sh` - End-to-end agent smoke test (set `JCODE_PROVIDER=openai|claude`)

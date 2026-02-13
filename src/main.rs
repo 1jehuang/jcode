@@ -194,6 +194,8 @@ fn spawn_session_signal_watchers() {}
 #[derive(Debug, Clone, PartialEq, Eq, ValueEnum)]
 enum ProviderChoice {
     Claude,
+    /// Deprecated: legacy transport that shells out to Claude CLI.
+    /// Use `--provider claude` for the default HTTP API path.
     ClaudeSubprocess,
     Openai,
     Cursor,
@@ -221,7 +223,7 @@ impl ProviderChoice {
 #[command(version = env!("JCODE_VERSION"))]
 #[command(about = "J-Code: A coding agent using Claude Max or ChatGPT Pro subscriptions")]
 struct Args {
-    /// Provider to use (claude, openai, cursor, copilot, antigravity, or auto-detect)
+    /// Provider to use (claude, claude-subprocess, openai, cursor, copilot, antigravity, or auto-detect)
     #[arg(short, long, default_value = "auto", global = true)]
     provider: ProviderChoice,
 
@@ -680,9 +682,18 @@ async fn init_provider_and_registry(
     model: Option<&str>,
 ) -> Result<(Arc<dyn provider::Provider>, tool::Registry)> {
     let provider: Arc<dyn provider::Provider> = match choice {
-        ProviderChoice::Claude | ProviderChoice::ClaudeSubprocess => {
+        ProviderChoice::Claude => {
             // Explicit Claude - use MultiProvider but prefer Claude
             eprintln!("Using Claude (with multi-provider support)");
+            std::env::set_var("JCODE_ACTIVE_PROVIDER", "claude");
+            Arc::new(provider::MultiProvider::with_preference(false))
+        }
+        ProviderChoice::ClaudeSubprocess => {
+            crate::logging::warn(
+                "Using --provider claude-subprocess is deprecated. Prefer `--provider claude`.",
+            );
+            std::env::set_var("JCODE_USE_CLAUDE_CLI", "1");
+            eprintln!("Using deprecated Claude subprocess transport (legacy mode)");
             std::env::set_var("JCODE_ACTIVE_PROVIDER", "claude");
             Arc::new(provider::MultiProvider::with_preference(false))
         }
@@ -1720,6 +1731,9 @@ async fn debug_start_server(arg: &str, socket_path: Option<String>) -> Result<()
 async fn run_login(choice: &ProviderChoice) -> Result<()> {
     match choice {
         ProviderChoice::Claude | ProviderChoice::ClaudeSubprocess => {
+            if matches!(choice, ProviderChoice::ClaudeSubprocess) {
+                eprintln!("Warning: Claude subprocess transport is deprecated. Direct Claude API mode is preferred.");
+            }
             login_claude_flow().await?;
         }
         ProviderChoice::Openai => {
@@ -1753,7 +1767,7 @@ async fn run_login(choice: &ProviderChoice) -> Result<()> {
                 "4" => login_copilot_flow()?,
                 "5" => login_antigravity_flow()?,
                 _ => anyhow::bail!(
-                    "Invalid choice. Use --provider claude|openai|cursor|copilot|antigravity"
+                    "Invalid choice. Use --provider claude|claude-subprocess|openai|cursor|copilot|antigravity"
                 ),
             }
         }

@@ -280,12 +280,17 @@ impl MultiProvider {
         let has_openai_creds = auth::codex::load_credentials().is_ok();
         let has_openrouter_creds = openrouter::OpenRouterProvider::has_credentials();
 
-        // Check if we should use Claude CLI instead of direct API
-        // Set JCODE_USE_CLAUDE_CLI=1 to use Claude Code CLI (legacy mode)
-        // Default is now direct Anthropic API for simpler session management
+        // Check if we should use Claude CLI instead of direct API.
+        // Set JCODE_USE_CLAUDE_CLI=1 to use Claude Code CLI (deprecated legacy mode).
+        // Default is now direct Anthropic API for simpler session management.
         let use_claude_cli = std::env::var("JCODE_USE_CLAUDE_CLI")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        if use_claude_cli {
+            crate::logging::warn(
+                "JCODE_USE_CLAUDE_CLI is deprecated. Direct Anthropic API transport is preferred.",
+            );
+        }
 
         // Initialize providers based on available credentials
         // Claude CLI provider (legacy - shells out to `claude` binary)

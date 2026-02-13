@@ -435,6 +435,11 @@ impl Provider for AnthropicProvider {
             stream: true,
         };
 
+        crate::logging::info(&format!(
+            "Anthropic transport: HTTPS SSE stream (oauth={})",
+            is_oauth
+        ));
+
         // Create channel for streaming events
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
@@ -512,6 +517,11 @@ impl Provider for AnthropicProvider {
             },
             stream: true,
         };
+
+        crate::logging::info(&format!(
+            "Anthropic transport: HTTPS SSE split stream (oauth={})",
+            is_oauth
+        ));
 
         // Create channel for streaming events
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);

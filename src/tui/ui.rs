@@ -12,7 +12,7 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, Paragraph},
 };
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -1078,6 +1078,41 @@ struct MessageCacheKey {
 #[derive(Default)]
 struct MessageCacheState {
     entries: HashMap<MessageCacheKey, Vec<Line<'static>>>,
+    order: VecDeque<MessageCacheKey>,
+}
+
+impl MessageCacheState {
+    fn touch(&mut self, key: &MessageCacheKey) {
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(key.clone());
+    }
+
+    fn get(&mut self, key: &MessageCacheKey) -> Option<Vec<Line<'static>>> {
+        let lines = self.entries.get(key).cloned();
+        if lines.is_some() {
+            self.touch(key);
+        }
+        lines
+    }
+
+    fn insert(&mut self, key: MessageCacheKey, lines: Vec<Line<'static>>) {
+        if self.entries.contains_key(&key) {
+            self.entries.insert(key.clone(), lines);
+            self.touch(&key);
+            return;
+        }
+
+        self.entries.insert(key.clone(), lines);
+        self.order.push_back(key);
+
+        while self.order.len() > MESSAGE_CACHE_LIMIT {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
 }
 
 static MESSAGE_CACHE: OnceLock<Mutex<MessageCacheState>> = OnceLock::new();
@@ -2195,15 +2230,12 @@ where
     };
 
     let mut cache = message_cache().lock().unwrap();
-    if let Some(lines) = cache.entries.get(&key) {
-        return lines.clone();
+    if let Some(lines) = cache.get(&key) {
+        return lines;
     }
 
     let lines = render(msg, width, show_diffs);
-    if cache.entries.len() >= MESSAGE_CACHE_LIMIT {
-        cache.entries.clear();
-    }
-    cache.entries.insert(key, lines.clone());
+    cache.insert(key, lines.clone());
     lines
 }
 
@@ -2416,11 +2448,17 @@ fn wrap_lines(
     let full_width = width as usize;
     let user_width = width.saturating_sub(2) as usize; // Leave margin for right bar
     let mut wrapped_user_indices: Vec<usize> = Vec::new();
+    let mut user_line_mask = vec![false; lines.len()];
+    for &idx in user_line_indices {
+        if idx < user_line_mask.len() {
+            user_line_mask[idx] = true;
+        }
+    }
     let mut wrapped_idx = 0usize;
 
     let mut wrapped_lines: Vec<Line> = Vec::new();
     for (orig_idx, line) in lines.into_iter().enumerate() {
-        let is_user_line = user_line_indices.contains(&orig_idx);
+        let is_user_line = user_line_mask.get(orig_idx).copied().unwrap_or(false);
         // User lines need margin for bar, AI lines use full width
         let wrap_width = if is_user_line { user_width } else { full_width };
         let new_lines = markdown::wrap_line(line, wrap_width);
