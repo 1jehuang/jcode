@@ -9486,18 +9486,20 @@ impl App {
         }
     }
 
-    /// Log detailed info when an unexpected cache miss occurs (cache write on turn 2+)
+    /// Log detailed info when an unexpected cache miss occurs (cache write on turn 3+)
     fn log_cache_miss_if_unexpected(&self) {
         let user_turn_count = self
             .display_messages
             .iter()
             .filter(|m| m.role == "user")
             .count();
-        let cache_read = self.streaming_cache_read_tokens.unwrap_or(0);
-        let cache_creation = self.streaming_cache_creation_tokens.unwrap_or(0);
 
-        // Unexpected cache miss: on turn 2+, we have cache writes but no cache reads
-        let is_unexpected = user_turn_count > 1 && cache_creation > 0 && cache_read == 0;
+        // Unexpected cache miss: on turn 3+, we should no longer be in cache warm-up
+        let is_unexpected = super::is_unexpected_cache_miss(
+            user_turn_count,
+            self.streaming_cache_read_tokens,
+            self.streaming_cache_creation_tokens,
+        );
 
         if is_unexpected {
             // Collect context for debugging
