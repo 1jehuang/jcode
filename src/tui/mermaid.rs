@@ -35,6 +35,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Instant;
 
+const DEFAULT_RENDER_WIDTH: u32 = 1600;
+const DEFAULT_RENDER_HEIGHT: u32 = 1200;
+
 /// Global picker for terminal capability detection
 /// Initialized once on first use
 static PICKER: OnceLock<Option<Picker>> = OnceLock::new();
@@ -65,6 +68,14 @@ static SOURCE_CACHE: LazyLock<Mutex<SourceImageCache>> =
 
 /// Last render state for skip-redundant-render optimization
 static LAST_RENDER: LazyLock<Mutex<HashMap<u64, LastRenderState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Render errors for lazy mermaid diagrams (hash -> error message)
+static RENDER_ERRORS: LazyLock<Mutex<HashMap<u64, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Pending mermaid content for lazy rendering (hash -> content)
+static PENDING_DIAGRAMS: LazyLock<Mutex<HashMap<u64, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Active diagrams for info widget display
@@ -1120,6 +1131,37 @@ pub fn protocol_type() -> Option<ProtocolType> {
     PICKER.get().and_then(|p| p.map(|p| p.protocol_type()))
 }
 
+pub fn image_protocol_available() -> bool {
+    PICKER.get().and_then(|p| *p).is_some()
+}
+
+fn has_render_error(hash: u64) -> bool {
+    RENDER_ERRORS
+        .lock()
+        .ok()
+        .map_or(false, |errors| errors.contains_key(&hash))
+}
+
+fn record_render_error(hash: u64, message: String) {
+    if let Ok(mut errors) = RENDER_ERRORS.lock() {
+        errors.insert(hash, message);
+    }
+}
+
+fn clear_render_error(hash: u64) {
+    if let Ok(mut errors) = RENDER_ERRORS.lock() {
+        errors.remove(&hash);
+    }
+}
+
+pub fn error_lines_for(hash: u64) -> Option<Vec<Line<'static>>> {
+    let message = RENDER_ERRORS
+        .lock()
+        .ok()
+        .and_then(|errors| errors.get(&hash).cloned());
+    message.map(|msg| error_to_lines(&msg))
+}
+
 /// Get terminal font size for adaptive sizing
 pub fn get_font_size() -> Option<(u16, u16)> {
     PICKER.get().and_then(|p| p.map(|p| p.font_size()))
@@ -1363,7 +1405,7 @@ fn calculate_render_size(
     let base_width = if let Some(term_width) = terminal_width {
         let font_width = get_font_size().map(|(w, _)| w).unwrap_or(8) as f64;
         let pixel_width = term_width as f64 * font_width;
-        pixel_width.clamp(400.0, 1600.0)
+        pixel_width.clamp(400.0, DEFAULT_RENDER_WIDTH as f64)
     } else {
         1200.0
     };
@@ -1376,8 +1418,8 @@ fn calculate_render_size(
         _ => 1.1,
     };
 
-    let width = (base_width * complexity_factor).clamp(400.0, 1600.0);
-    let height = (width * 0.75).clamp(300.0, 1200.0);
+    let width = (base_width * complexity_factor).clamp(400.0, DEFAULT_RENDER_WIDTH as f64);
+    let height = (width * 0.75).clamp(300.0, DEFAULT_RENDER_HEIGHT as f64);
 
     (width, height)
 }
@@ -1505,8 +1547,8 @@ fn render_mermaid_sized_internal(
 
         // Convert SVG to PNG with adaptive dimensions
         let render_config = RenderConfig {
-            width: target_width as f32,
-            height: target_height as f32,
+            width: DEFAULT_RENDER_WIDTH as f32,
+            height: DEFAULT_RENDER_HEIGHT as f32,
             background: theme.background.clone(),
         };
 

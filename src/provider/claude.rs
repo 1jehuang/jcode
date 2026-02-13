@@ -661,6 +661,8 @@ impl Provider for ClaudeProvider {
         let resume = resume_session_id.map(|s| s.to_string());
         let cwd = std::env::current_dir().ok();
 
+        crate::logging::info("Claude transport: CLI subprocess");
+
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
         tokio::spawn(async move {
