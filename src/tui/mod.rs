@@ -180,11 +180,25 @@ pub(crate) const REDRAW_FAST: Duration = Duration::from_millis(50);
 pub(crate) const REDRAW_IDLE: Duration = Duration::from_millis(250);
 pub(crate) const REDRAW_DEEP_IDLE: Duration = Duration::from_millis(1000);
 const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
+pub(crate) const STARTUP_ANIMATION_WINDOW: Duration = Duration::from_millis(3000);
+
+pub(crate) fn startup_animation_active(state: &dyn TuiState) -> bool {
+    state.animation_elapsed() < STARTUP_ANIMATION_WINDOW.as_secs_f32()
+        && !state.is_processing()
+        && state.display_messages().is_empty()
+        && state.streaming_text().is_empty()
+        && state.input().trim().is_empty()
+        && state.queued_messages().is_empty()
+        && state.interleave_message().is_none()
+        && state.pending_soft_interrupt().is_none()
+        && state.picker_state().is_none()
+}
 
 pub(crate) fn should_animate(state: &dyn TuiState) -> bool {
     state.is_processing()
         || state.status_notice().is_some()
         || state.rate_limit_remaining().is_some()
+        || startup_animation_active(state)
 }
 
 pub(crate) fn redraw_interval(state: &dyn TuiState) -> Duration {

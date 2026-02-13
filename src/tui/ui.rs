@@ -49,6 +49,78 @@ const HEADER_SESSION_COLOR: Color = Color::Rgb(255, 255, 255); // White for sess
 // Spinner frames for animated status
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+const STARTUP_ASCII_FPS: f32 = 10.0;
+const STARTUP_ASCII_STATUS_FPS: f32 = 12.0;
+const STARTUP_ASCII_STATUS_SPINNER: &[&str] = &["|", "/", "-", "\\"];
+const STARTUP_ASCII_FRAMES: &[&[&str]] = &[
+    &[
+        "             _",
+        "          .-` `-.",
+        "        .'  .-.  '.",
+        "       /   (o|o)   \\",
+        "      |   .-===-.   |",
+        "      |   |( )| |   |",
+        "       \\   '==='   /",
+        "        '.       .'",
+        "          `-._.-`",
+    ],
+    &[
+        "             _",
+        "          .-` `-.",
+        "        .'  .-.  '.",
+        "       /   (o/o)   \\",
+        "      |   .-===-.   |",
+        "      |   | \\_/ |   |",
+        "       \\   '==='   /",
+        "        '.       .'",
+        "          `-._.-`",
+    ],
+    &[
+        "             _",
+        "          .-` `-.",
+        "        .'  .-.  '.",
+        "       /   (o-o)   \\",
+        "      |   .-===-.   |",
+        "      |   |  _  |   |",
+        "       \\   '==='   /",
+        "        '.       .'",
+        "          `-._.-`",
+    ],
+    &[
+        "             _",
+        "          .-` `-.",
+        "        .'  .-.  '.",
+        "       /   (o\\o)   \\",
+        "      |   .-===-.   |",
+        "      |   | /_\\ |   |",
+        "       \\   '==='   /",
+        "        '.       .'",
+        "          `-._.-`",
+    ],
+    &[
+        "             _",
+        "          .-` `-.",
+        "        .'  .-.  '.",
+        "       /   (o-o)   \\",
+        "      |   .-===-.   |",
+        "      |   | \\_/ |   |",
+        "       \\   '==='   /",
+        "        '.       .'",
+        "          `-._.-`",
+    ],
+    &[
+        "             _",
+        "          .-` `-.",
+        "        .'  .-.  '.",
+        "       /   (o/o)   \\",
+        "      |   .-===-.   |",
+        "      |   |( )| |   |",
+        "       \\   '==='   /",
+        "        '.       .'",
+        "          `-._.-`",
+    ],
+];
+
 /// Duration of the startup fade-in animation in seconds
 const HEADER_ANIM_DURATION: f32 = 1.5;
 
@@ -1679,6 +1751,15 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
     // Add the rest of the header (model ID, changelog, MCPs, etc.)
     all_header_lines.extend(build_header_lines(app, width));
     let header_prepared = wrap_lines(all_header_lines, &[], width);
+    let startup_prepared = if super::startup_animation_active(app) {
+        wrap_lines(build_startup_animation_lines(app), &[], width)
+    } else {
+        PreparedMessages {
+            wrapped_lines: Vec::new(),
+            wrapped_user_indices: Vec::new(),
+            image_regions: Vec::new(),
+        }
+    };
 
     let body_prepared = prepare_body_cached(app, width);
     let has_streaming = app.is_processing() && !app.streaming_text().is_empty();
@@ -1695,23 +1776,25 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
 
     let mut wrapped_lines = header_prepared.wrapped_lines;
     let header_len = wrapped_lines.len();
+    let startup_len = startup_prepared.wrapped_lines.len();
+    wrapped_lines.extend(startup_prepared.wrapped_lines);
     let body_len = body_prepared.wrapped_lines.len();
     wrapped_lines.extend(body_prepared.wrapped_lines);
     wrapped_lines.extend(streaming_prepared.wrapped_lines);
 
     let mut wrapped_user_indices = body_prepared.wrapped_user_indices;
     for idx in &mut wrapped_user_indices {
-        *idx += header_len;
+        *idx += header_len + startup_len;
     }
 
     // Combine image regions with adjusted indices
     let mut image_regions = Vec::new();
     for mut region in body_prepared.image_regions {
-        region.abs_line_idx += header_len;
+        region.abs_line_idx += header_len + startup_len;
         image_regions.push(region);
     }
     for mut region in streaming_prepared.image_regions {
-        region.abs_line_idx += header_len + body_len;
+        region.abs_line_idx += header_len + startup_len + body_len;
         image_regions.push(region);
     }
 
@@ -1720,6 +1803,50 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
         wrapped_user_indices,
         image_regions,
     }
+}
+
+fn build_startup_animation_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
+    let elapsed = app.animation_elapsed();
+    let frame_idx = ((elapsed * STARTUP_ASCII_FPS) as usize) % STARTUP_ASCII_FRAMES.len();
+    let status_idx =
+        ((elapsed * STARTUP_ASCII_STATUS_FPS) as usize) % STARTUP_ASCII_STATUS_SPINNER.len();
+    let status_spinner = STARTUP_ASCII_STATUS_SPINNER[status_idx];
+    let progress = (elapsed / super::STARTUP_ANIMATION_WINDOW.as_secs_f32()).clamp(0.0, 1.0);
+    let fade_in = (progress / 0.2).clamp(0.0, 1.0);
+    let fade_out = ((1.0 - progress) / 0.25).clamp(0.0, 1.0);
+    let envelope = fade_in.min(fade_out);
+    let boost = (envelope * 120.0) as u8;
+    let base = 80u8.saturating_add(boost);
+    let art_color = Color::Rgb(base, base.saturating_add(16), base.saturating_add(30));
+    let centered = app.centered_mode();
+    let align = if centered {
+        ratatui::layout::Alignment::Center
+    } else {
+        ratatui::layout::Alignment::Left
+    };
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(""));
+    for line in STARTUP_ASCII_FRAMES[frame_idx] {
+        lines.push(Line::from(Span::styled(
+            (*line).to_string(),
+            Style::default().fg(art_color),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("{} booting jcode interface...", status_spinner),
+        Style::default().fg(DIM_COLOR),
+    )));
+    lines.push(Line::from(Span::styled(
+        "waiting for your first prompt",
+        Style::default().fg(DIM_COLOR),
+    )));
+
+    lines
+        .into_iter()
+        .map(|line| line.alignment(align))
+        .collect()
 }
 
 /// Build chroma-colored text (each character gets a different hue in the rainbow wave)
@@ -1797,13 +1924,19 @@ fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>>
     if !session_name.is_empty() {
         let full_name = format!("JCode {} {}", icon, capitalize(&session_name));
         lines.push(
-            Line::from(Span::styled(full_name, Style::default().fg(HEADER_NAME_COLOR)))
-                .alignment(align),
+            Line::from(Span::styled(
+                full_name,
+                Style::default().fg(HEADER_NAME_COLOR),
+            ))
+            .alignment(align),
         );
     } else {
         lines.push(
-            Line::from(Span::styled("JCode", Style::default().fg(HEADER_NAME_COLOR)))
-                .alignment(align),
+            Line::from(Span::styled(
+                "JCode",
+                Style::default().fg(HEADER_NAME_COLOR),
+            ))
+            .alignment(align),
         );
     }
 
