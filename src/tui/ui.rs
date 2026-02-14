@@ -49,77 +49,70 @@ const HEADER_SESSION_COLOR: Color = Color::Rgb(255, 255, 255); // White for sess
 // Spinner frames for animated status
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-const STARTUP_ASCII_FPS: f32 = 10.0;
 const STARTUP_ASCII_STATUS_FPS: f32 = 12.0;
 const STARTUP_ASCII_STATUS_SPINNER: &[&str] = &["|", "/", "-", "\\"];
-const STARTUP_ASCII_FRAMES: &[&[&str]] = &[
-    &[
-        "             _",
-        "          .-` `-.",
-        "        .'  .-.  '.",
-        "       /   (o|o)   \\",
-        "      |   .-===-.   |",
-        "      |   |( )| |   |",
-        "       \\   '==='   /",
-        "        '.       .'",
-        "          `-._.-`",
-    ],
-    &[
-        "             _",
-        "          .-` `-.",
-        "        .'  .-.  '.",
-        "       /   (o/o)   \\",
-        "      |   .-===-.   |",
-        "      |   | \\_/ |   |",
-        "       \\   '==='   /",
-        "        '.       .'",
-        "          `-._.-`",
-    ],
-    &[
-        "             _",
-        "          .-` `-.",
-        "        .'  .-.  '.",
-        "       /   (o-o)   \\",
-        "      |   .-===-.   |",
-        "      |   |  _  |   |",
-        "       \\   '==='   /",
-        "        '.       .'",
-        "          `-._.-`",
-    ],
-    &[
-        "             _",
-        "          .-` `-.",
-        "        .'  .-.  '.",
-        "       /   (o\\o)   \\",
-        "      |   .-===-.   |",
-        "      |   | /_\\ |   |",
-        "       \\   '==='   /",
-        "        '.       .'",
-        "          `-._.-`",
-    ],
-    &[
-        "             _",
-        "          .-` `-.",
-        "        .'  .-.  '.",
-        "       /   (o-o)   \\",
-        "      |   .-===-.   |",
-        "      |   | \\_/ |   |",
-        "       \\   '==='   /",
-        "        '.       .'",
-        "          `-._.-`",
-    ],
-    &[
-        "             _",
-        "          .-` `-.",
-        "        .'  .-.  '.",
-        "       /   (o/o)   \\",
-        "      |   .-===-.   |",
-        "      |   |( )| |   |",
-        "       \\   '==='   /",
-        "        '.       .'",
-        "          `-._.-`",
-    ],
-];
+
+const DONUT_LUMINANCE: &[u8] = b".,-~:;=!*#$@";
+
+fn render_donut(elapsed: f32, width: usize, height: usize) -> Vec<String> {
+    let a = elapsed * 1.5;
+    let b = elapsed * 0.8;
+    let cos_a = a.cos();
+    let sin_a = a.sin();
+    let cos_b = b.cos();
+    let sin_b = b.sin();
+
+    let mut output = vec![vec![b' '; width]; height];
+    let mut zbuffer = vec![vec![0.0f32; width]; height];
+
+    let mut theta: f32 = 0.0;
+    while theta < std::f32::consts::TAU {
+        let cos_theta = theta.cos();
+        let sin_theta = theta.sin();
+
+        let mut phi: f32 = 0.0;
+        while phi < std::f32::consts::TAU {
+            let cos_phi = phi.cos();
+            let sin_phi = phi.sin();
+
+            let circle_x = 2.0 + cos_theta;
+            let circle_y = sin_theta;
+
+            let x = circle_x * (cos_b * cos_phi + sin_a * sin_b * sin_phi)
+                - circle_y * cos_a * sin_b;
+            let y = circle_x * (sin_b * cos_phi - sin_a * cos_b * sin_phi)
+                + circle_y * cos_a * cos_b;
+            let z = 5.0 + cos_a * circle_x * sin_phi + circle_y * sin_a;
+            let ooz = 1.0 / z;
+
+            let xp = (width as f32 / 2.0 + width as f32 * 0.35 * ooz * x) as isize;
+            let yp = (height as f32 / 2.0 - height as f32 * 0.35 * ooz * y) as isize;
+
+            let lum = cos_phi * cos_theta * sin_b - cos_a * cos_theta * sin_phi
+                - sin_a * sin_theta
+                + cos_b * (cos_a * sin_theta - cos_theta * sin_a * sin_phi);
+
+            if xp >= 0
+                && (xp as usize) < width
+                && yp >= 0
+                && (yp as usize) < height
+                && ooz > zbuffer[yp as usize][xp as usize]
+            {
+                zbuffer[yp as usize][xp as usize] = ooz;
+                let li = (lum * 8.0).max(0.0).min((DONUT_LUMINANCE.len() - 1) as f32) as usize;
+                output[yp as usize][xp as usize] = DONUT_LUMINANCE[li];
+            }
+
+            phi += 0.02;
+        }
+        theta += 0.07;
+    }
+
+    output
+        .into_iter()
+        .map(|row| String::from_utf8(row).unwrap_or_default())
+        .collect()
+}
 
 /// Duration of the startup fade-in animation in seconds
 const HEADER_ANIM_DURATION: f32 = 1.5;
@@ -1756,7 +1749,7 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
     all_header_lines.extend(build_header_lines(app, width));
     let header_prepared = wrap_lines(all_header_lines, &[], width);
     let startup_prepared = if super::startup_animation_active(app) {
-        wrap_lines(build_startup_animation_lines(app), &[], width)
+        wrap_lines(build_startup_animation_lines(app, width), &[], width)
     } else {
         PreparedMessages {
             wrapped_lines: Vec::new(),
@@ -1809,9 +1802,8 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
     }
 }
 
-fn build_startup_animation_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
+fn build_startup_animation_lines(app: &dyn TuiState, term_width: u16) -> Vec<Line<'static>> {
     let elapsed = app.animation_elapsed();
-    let frame_idx = ((elapsed * STARTUP_ASCII_FPS) as usize) % STARTUP_ASCII_FRAMES.len();
     let status_idx =
         ((elapsed * STARTUP_ASCII_STATUS_FPS) as usize) % STARTUP_ASCII_STATUS_SPINNER.len();
     let status_spinner = STARTUP_ASCII_STATUS_SPINNER[status_idx];
@@ -1829,11 +1821,15 @@ fn build_startup_animation_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
         ratatui::layout::Alignment::Left
     };
 
+    let max_w = (term_width as usize).min(80);
+    let max_h = max_w / 2;
+    let donut_lines = render_donut(elapsed, max_w, max_h);
+
     let mut lines = Vec::new();
     lines.push(Line::from(""));
-    for line in STARTUP_ASCII_FRAMES[frame_idx] {
+    for line in &donut_lines {
         lines.push(Line::from(Span::styled(
-            (*line).to_string(),
+            line.clone(),
             Style::default().fg(art_color),
         )));
     }
