@@ -10669,6 +10669,10 @@ impl super::TuiState for App {
     fn picker_state(&self) -> Option<&super::PickerState> {
         self.picker_state.as_ref()
     }
+
+    fn working_dir(&self) -> Option<String> {
+        self.session.working_dir.clone()
+    }
 }
 
 /// Spawn a new terminal window that resumes a jcode session.

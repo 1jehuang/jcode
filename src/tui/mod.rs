@@ -139,6 +139,8 @@ pub trait TuiState {
     fn diagram_zoom(&self) -> u8;
     /// Interactive model/provider picker state (shown as inline row above input)
     fn picker_state(&self) -> Option<&PickerState>;
+    /// Working directory for this session
+    fn working_dir(&self) -> Option<String>;
 }
 
 /// Unified model/provider picker with three columns

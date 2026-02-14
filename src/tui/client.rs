@@ -1478,4 +1478,10 @@ impl TuiState for ClientApp {
     fn picker_state(&self) -> Option<&super::PickerState> {
         None
     }
+
+    fn working_dir(&self) -> Option<String> {
+        std::env::current_dir()
+            .ok()
+            .map(|p| p.display().to_string())
+    }
 }
