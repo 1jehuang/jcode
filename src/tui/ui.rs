@@ -1872,6 +1872,20 @@ fn chroma_spans(text: &str, elapsed: f32, offset: f32, bold: bool) -> Vec<Span<'
 /// Build the top header (chroma animated)
 /// Line 1: Status badges (client, dev, updates)
 /// Line 2: Session name with icon (e.g., "🦋 Moth")
+/// Abbreviate a path by replacing the home directory prefix with `~`
+fn abbreviate_home(path: &str) -> String {
+    if let Some(home) = dirs::home_dir() {
+        let home_str = home.display().to_string();
+        if path == home_str {
+            return "~".to_string();
+        }
+        if let Some(rest) = path.strip_prefix(&home_str) {
+            return format!("~{}", rest);
+        }
+    }
+    path.to_string()
+}
+
 /// Line 3: Model name (e.g., "Claude 4.5 Opus")
 /// Line 4: Version and build info
 fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
@@ -1958,6 +1972,13 @@ fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>>
     let version_line =
         Line::from(Span::styled(version_text, Style::default().fg(DIM_COLOR))).alignment(align);
     lines.push(version_line);
+
+    if let Some(dir) = app.working_dir() {
+        let display_dir = abbreviate_home(&dir);
+        lines.push(
+            Line::from(Span::styled(display_dir, Style::default().fg(DIM_COLOR))).alignment(align),
+        );
+    }
 
     lines
 }
