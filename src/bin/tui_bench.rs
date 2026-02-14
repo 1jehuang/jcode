@@ -346,6 +346,10 @@ impl TuiState for BenchState {
     fn picker_state(&self) -> Option<&jcode::tui::PickerState> {
         None
     }
+
+    fn working_dir(&self) -> Option<String> {
+        None
+    }
 }
 
 fn make_text(len: usize) -> String {
