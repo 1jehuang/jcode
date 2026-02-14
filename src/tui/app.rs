@@ -4003,9 +4003,12 @@ impl App {
                     return false;
                 }
                 if matches!(self.status, ProcessingStatus::Sending) {
-                    if matches!(self.status, ProcessingStatus::Thinking(_)) {
-                        self.status = ProcessingStatus::Streaming;
-                    }
+                    self.status = ProcessingStatus::Streaming;
+                } else if matches!(self.status, ProcessingStatus::Thinking(_)) {
+                    self.status = ProcessingStatus::Streaming;
+                } else if self.is_processing
+                    && matches!(self.status, ProcessingStatus::Idle)
+                {
                     self.status = ProcessingStatus::Streaming;
                 }
                 if self.streaming_tps_start.is_none() {
