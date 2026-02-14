@@ -254,36 +254,40 @@ fn semver() -> &'static str {
 }
 
 /// True when this process is running from the stable release binary path.
+/// Only matches the explicit ~/.jcode/builds/stable/jcode path, NOT
+/// ~/.local/bin/jcode (which is the latest build from source).
 fn is_running_stable_release() -> bool {
     static IS_STABLE: OnceLock<bool> = OnceLock::new();
     *IS_STABLE.get_or_init(|| {
-        let current = match std::env::current_exe()
-            .ok()
-            .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)))
-        {
+        // Use the raw symlink target (read_link), not canonicalize, to
+        // distinguish ~/.local/bin/jcode -> target/release/jcode (latest)
+        // from ~/.jcode/builds/stable/jcode -> builds/versions/XXX/jcode (release).
+        let current_exe = match std::env::current_exe().ok() {
             Some(path) => path,
             None => return false,
         };
 
-        // Self-dev stable symlink (~/.jcode/builds/stable/jcode)
+        // Check if we were launched via the stable symlink
         if let Ok(stable_path) = crate::build::stable_binary_path() {
-            if let Some(stable_resolved) = std::fs::canonicalize(&stable_path)
-                .ok()
-                .or(Some(stable_path))
-            {
-                if stable_resolved == current {
-                    return true;
-                }
+            // Compare the symlink target (not canonical) to avoid
+            // conflating target/release/jcode with the stable binary
+            let stable_target = std::fs::read_link(&stable_path)
+                .unwrap_or_else(|_| stable_path.clone());
+            let current_target = std::fs::read_link(&current_exe)
+                .unwrap_or_else(|_| current_exe.clone());
+            if stable_target == current_target {
+                return true;
             }
-        }
-
-        // Installed stable launcher (~/.local/bin/jcode)
-        if let Some(home) = dirs::home_dir() {
-            let installed = home.join(".local").join("bin").join("jcode");
-            if let Some(installed_resolved) =
-                std::fs::canonicalize(&installed).ok().or(Some(installed))
-            {
-                if installed_resolved == current {
+            // Also check canonical paths for when launched directly
+            if let (Ok(stable_canon), Ok(current_canon)) = (
+                std::fs::canonicalize(&stable_path),
+                std::fs::canonicalize(&current_exe),
+            ) {
+                if stable_canon == current_canon
+                    && !current_exe
+                        .to_string_lossy()
+                        .contains("target/release")
+                {
                     return true;
                 }
             }
@@ -1965,7 +1969,14 @@ fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>>
 
     // Line 4: Version and build info (dim, no chroma)
     let version_text = if is_running_stable_release() {
-        format!("{} · stable · built {}", semver(), build_info)
+        let tag = env!("JCODE_GIT_TAG");
+        if tag.is_empty() || tag.contains('-') {
+            // No exact tag match — show version with "release" label
+            format!("{} · release · built {}", semver(), build_info)
+        } else {
+            // Exact tag (e.g., "v0.1.2") — show it
+            format!("{} · release {} · built {}", semver(), tag, build_info)
+        }
     } else {
         format!("{} · built {}", semver(), build_info)
     };
@@ -4608,7 +4619,21 @@ fn get_tool_summary(tool: &ToolCall) -> String {
             .and_then(|v| v.as_str())
             .map(|cmd| format!("$ {}", truncate(cmd, 50)))
             .unwrap_or_default(),
-        "read" | "write" | "edit" => tool
+        "read" => {
+            let path = tool
+                .input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let offset = tool.input.get("offset").and_then(|v| v.as_u64());
+            let limit = tool.input.get("limit").and_then(|v| v.as_u64());
+            match (offset, limit) {
+                (Some(o), Some(l)) => format!("{}:{}-{}", path, o, o + l),
+                (Some(o), None) => format!("{}:{}", path, o),
+                _ => path.to_string(),
+            }
+        }
+        "write" | "edit" => tool
             .input
             .get("file_path")
             .and_then(|v| v.as_str())
@@ -4672,7 +4697,19 @@ fn get_tool_summary(tool: &ToolCall) -> String {
             .and_then(|v| v.as_str())
             .map(|p| {
                 let lines = p.lines().count();
-                format!("({} lines)", lines)
+                let first_file = p.lines()
+                    .find(|l| l.starts_with("--- ") || l.starts_with("+++ ") || l.starts_with("*** "))
+                    .and_then(|l| {
+                        let rest = l.trim_start_matches("--- ").trim_start_matches("+++ ").trim_start_matches("*** ");
+                        let path = rest.split_whitespace().next().unwrap_or("");
+                        let path = path.strip_prefix("a/").or(path.strip_prefix("b/")).unwrap_or(path);
+                        if path.is_empty() || path == "/dev/null" { None } else { Some(path.to_string()) }
+                    });
+                if let Some(file) = first_file {
+                    format!("{} ({} lines)", file, lines)
+                } else {
+                    format!("({} lines)", lines)
+                }
             })
             .unwrap_or_default(),
         "webfetch" => tool
@@ -4700,7 +4737,16 @@ fn get_tool_summary(tool: &ToolCall) -> String {
                 action.to_string()
             }
         }
-        "todowrite" | "todoread" => "todos".to_string(),
+        "todoread" => "todos".to_string(),
+        "todowrite" => {
+            let count = tool
+                .input
+                .get("todos")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            format!("{} items", count)
+        }
         "skill" => tool
             .input
             .get("skill")
@@ -4878,13 +4924,34 @@ fn get_tool_summary(tool: &ToolCall) -> String {
             }
         }
         "batch" => {
-            let count = tool
+            let calls = tool
                 .input
                 .get("tool_calls")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
-            format!("{} tools", count)
+                .and_then(|v| v.as_array());
+            if let Some(calls) = calls {
+                let mut counts: Vec<(String, usize)> = Vec::new();
+                for call in calls {
+                    let name = call.get("tool").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                    if let Some(entry) = counts.iter_mut().find(|(n, _)| *n == name) {
+                        entry.1 += 1;
+                    } else {
+                        counts.push((name, 1));
+                    }
+                }
+                let parts: Vec<String> = counts
+                    .iter()
+                    .map(|(name, count)| {
+                        if *count > 1 {
+                            format!("{} ×{}", name, count)
+                        } else {
+                            name.clone()
+                        }
+                    })
+                    .collect();
+                parts.join(", ")
+            } else {
+                "0 tools".to_string()
+            }
         }
         "subagent" => {
             let desc = tool
