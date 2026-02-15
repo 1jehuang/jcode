@@ -5466,15 +5466,24 @@ impl App {
     }
 
     /// Queue a message to be sent later
-    /// Handle paste: store content and insert placeholder (or inline for small pastes)
+    /// Handle paste: check for clipboard images first, then store text content
     fn handle_paste(&mut self, text: String) {
+        // Check if clipboard has an image (e.g., Discord copies both text/html and image/png)
+        if let Some((media_type, base64_data)) = clipboard_image() {
+            self.pending_images.push((media_type, base64_data));
+            let n = self.pending_images.len();
+            let placeholder = format!("[image {}]", n);
+            self.input.insert_str(self.cursor_pos, &placeholder);
+            self.cursor_pos += placeholder.len();
+            self.sync_model_picker_preview_from_input();
+            return;
+        }
+
         let line_count = text.lines().count().max(1);
         if line_count < 5 {
-            // Small paste: insert text directly (no placeholder needed)
             self.input.insert_str(self.cursor_pos, &text);
             self.cursor_pos += text.len();
         } else {
-            // Large paste: use placeholder
             self.pasted_contents.push(text);
             let placeholder = format!(
                 "[pasted {} line{}]",
