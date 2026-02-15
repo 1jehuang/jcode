@@ -8,6 +8,7 @@ pub mod background;
 pub mod build;
 pub mod bus;
 pub mod cache_tracker;
+pub mod channel;
 pub mod compaction;
 pub mod config;
 pub mod embedding;
