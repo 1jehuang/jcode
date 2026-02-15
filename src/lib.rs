@@ -3,7 +3,6 @@ pub mod ambient;
 pub mod ambient_runner;
 pub mod ambient_scheduler;
 pub mod auth;
-pub mod auto_debug;
 pub mod background;
 pub mod build;
 pub mod bus;
