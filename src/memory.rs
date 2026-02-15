@@ -1981,6 +1981,7 @@ mod tests {
                     name: "memory".to_string(),
                     input: json!({"action": "list"}),
                 }],
+                timestamp: None,
             },
             Message::tool_result("tool-1", "ok", false),
             Message {
@@ -1990,6 +1991,7 @@ mod tests {
                     content: "boom".to_string(),
                     is_error: Some(true),
                 }],
+                timestamp: None,
             },
         ];
 

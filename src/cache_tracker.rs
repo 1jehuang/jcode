@@ -199,6 +199,7 @@ mod tests {
                 text: text.to_string(),
                 cache_control: None,
             }],
+            timestamp: None,
         }
     }
 
