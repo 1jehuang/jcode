@@ -340,10 +340,32 @@ impl Registry {
         crate::logging::info("Memory test mode enabled - using isolated storage");
     }
 
+    /// Resolve tool name aliases.
+    ///
+    /// When using OAuth, the API presents tools with Claude Code names
+    /// (e.g. `file_grep`, `shell_exec`). The model uses those names in
+    /// sub-tool calls (e.g. inside `batch`), but our registry uses internal
+    /// names (`grep`, `bash`). This mapping ensures both forms resolve
+    /// correctly.
+    fn resolve_tool_name(name: &str) -> &str {
+        match name {
+            "task" | "task_runner" => "subagent",
+            "shell_exec" => "bash",
+            "file_read" => "read",
+            "file_write" => "write",
+            "file_edit" => "edit",
+            "file_glob" => "glob",
+            "file_grep" => "grep",
+            "todo_read" => "todoread",
+            "todo_write" => "todowrite",
+            other => other,
+        }
+    }
+
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let tools = self.tools.read().await;
-        let resolved_name = if name == "task" { "subagent" } else { name };
+        let resolved_name = Self::resolve_tool_name(name);
         let tool = tools
             .get(resolved_name)
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", name))?
@@ -587,6 +609,46 @@ mod tests {
             names, sorted_names,
             "Tool definitions should be sorted alphabetically"
         );
+    }
+
+    #[test]
+    fn test_resolve_tool_name_oauth_aliases() {
+        assert_eq!(Registry::resolve_tool_name("file_grep"), "grep");
+        assert_eq!(Registry::resolve_tool_name("file_read"), "read");
+        assert_eq!(Registry::resolve_tool_name("file_write"), "write");
+        assert_eq!(Registry::resolve_tool_name("file_edit"), "edit");
+        assert_eq!(Registry::resolve_tool_name("file_glob"), "glob");
+        assert_eq!(Registry::resolve_tool_name("shell_exec"), "bash");
+        assert_eq!(Registry::resolve_tool_name("task_runner"), "subagent");
+        assert_eq!(Registry::resolve_tool_name("task"), "subagent");
+        assert_eq!(Registry::resolve_tool_name("todo_read"), "todoread");
+        assert_eq!(Registry::resolve_tool_name("todo_write"), "todowrite");
+        assert_eq!(Registry::resolve_tool_name("bash"), "bash");
+        assert_eq!(Registry::resolve_tool_name("grep"), "grep");
+        assert_eq!(Registry::resolve_tool_name("batch"), "batch");
+        assert_eq!(Registry::resolve_tool_name("memory"), "memory");
+    }
+
+    #[tokio::test]
+    async fn test_batch_resolves_oauth_names() {
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+        let registry = Registry::new(provider).await;
+
+        let ctx = ToolContext {
+            session_id: "test".to_string(),
+            message_id: "test".to_string(),
+            tool_call_id: "test".to_string(),
+            working_dir: Some(std::path::PathBuf::from("/tmp")),
+        };
+
+        let result = registry
+            .execute(
+                "file_grep",
+                serde_json::json!({"pattern": "nonexistent_xyz", "path": "/tmp"}),
+                ctx,
+            )
+            .await;
+        assert!(result.is_ok(), "file_grep should resolve to grep tool");
     }
 
     #[tokio::test]
