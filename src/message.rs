@@ -65,6 +65,10 @@ pub enum ContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
+    Image {
+        media_type: String,
+        data: String,
+    },
 }
 
 impl Message {
@@ -75,6 +79,22 @@ impl Message {
                 text: text.to_string(),
                 cache_control: None,
             }],
+            timestamp: Some(Utc::now()),
+        }
+    }
+
+    pub fn user_with_images(text: &str, images: Vec<(String, String)>) -> Self {
+        let mut content: Vec<ContentBlock> = images
+            .into_iter()
+            .map(|(media_type, data)| ContentBlock::Image { media_type, data })
+            .collect();
+        content.push(ContentBlock::Text {
+            text: text.to_string(),
+            cache_control: None,
+        });
+        Self {
+            role: Role::User,
+            content,
             timestamp: Some(Utc::now()),
         }
     }

@@ -344,13 +344,19 @@ fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
     for (idx, msg) in messages.iter().enumerate() {
         match msg.role {
             Role::User => {
+                let mut content_parts: Vec<serde_json::Value> = Vec::new();
                 for block in &msg.content {
                     match block {
+                        ContentBlock::Image { media_type, data } => {
+                            content_parts.push(serde_json::json!({
+                                "type": "input_image",
+                                "image_url": format!("data:{};base64,{}", media_type, data)
+                            }));
+                        }
                         ContentBlock::Text { text, .. } => {
-                            items.push(serde_json::json!({
-                                "type": "message",
-                                "role": "user",
-                                "content": [{ "type": "input_text", "text": text }]
+                            content_parts.push(serde_json::json!({
+                                "type": "input_text",
+                                "text": text
                             }));
                         }
                         ContentBlock::ToolResult {
@@ -358,6 +364,14 @@ fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
                             content,
                             is_error,
                         } => {
+                            // Flush any accumulated content_parts before tool result
+                            if !content_parts.is_empty() {
+                                items.push(serde_json::json!({
+                                    "type": "message",
+                                    "role": "user",
+                                    "content": std::mem::take(&mut content_parts)
+                                }));
+                            }
                             if used_outputs.contains(tool_use_id.as_str()) {
                                 skipped_results += 1;
                                 continue;
@@ -384,6 +398,13 @@ fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
                         }
                         _ => {}
                     }
+                }
+                if !content_parts.is_empty() {
+                    items.push(serde_json::json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": content_parts
+                    }));
                 }
             }
             Role::Assistant => {

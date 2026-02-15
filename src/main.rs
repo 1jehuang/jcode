@@ -30,6 +30,7 @@ mod session;
 mod sidecar;
 mod skill;
 mod storage;
+mod telegram;
 mod todo;
 mod tool;
 mod tui;

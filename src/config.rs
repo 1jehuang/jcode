@@ -234,6 +234,14 @@ pub struct SafetyConfig {
     pub email_imap_port: u16,
     /// Enable email reply → agent directive feature (default: false)
     pub email_reply_enabled: bool,
+    /// Enable Telegram notifications (default: false)
+    pub telegram_enabled: bool,
+    /// Telegram bot token (from @BotFather)
+    pub telegram_bot_token: Option<String>,
+    /// Telegram chat ID to send messages to
+    pub telegram_chat_id: Option<String>,
+    /// Enable Telegram reply → agent directive feature (default: false)
+    pub telegram_reply_enabled: bool,
 }
 
 impl Default for SafetyConfig {
@@ -251,6 +259,10 @@ impl Default for SafetyConfig {
             email_imap_host: None,
             email_imap_port: 993,
             email_reply_enabled: false,
+            telegram_enabled: false,
+            telegram_bot_token: None,
+            telegram_chat_id: None,
+            telegram_reply_enabled: false,
         }
     }
 }
@@ -396,6 +408,18 @@ impl Config {
                 self.safety.email_reply_enabled = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_TELEGRAM_BOT_TOKEN") {
+            self.safety.telegram_bot_token = Some(v);
+            self.safety.telegram_enabled = true;
+        }
+        if let Ok(v) = std::env::var("JCODE_TELEGRAM_CHAT_ID") {
+            self.safety.telegram_chat_id = Some(v);
+        }
+        if let Ok(v) = std::env::var("JCODE_TELEGRAM_REPLY_ENABLED") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.safety.telegram_reply_enabled = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_AMBIENT_VISIBLE") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.ambient.visible = parsed;
@@ -539,6 +563,12 @@ desktop_notifications = true
 # email_reply_enabled = false
 # email_imap_host = "imap.gmail.com"
 # email_imap_port = 993
+
+# Telegram notifications via Bot API (free, https://telegram.org)
+# telegram_enabled = false
+# telegram_bot_token = ""  # From @BotFather (prefer JCODE_TELEGRAM_BOT_TOKEN env var)
+# telegram_chat_id = ""    # Your user/chat ID
+# telegram_reply_enabled = false  # Reply to bot messages to send directives
 "#;
 
         std::fs::write(&path, default_content)?;
