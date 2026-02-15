@@ -5894,41 +5894,6 @@ impl App {
                         }
                     );
 
-                    // If context is severely over limit (>150%), do hard compact first
-                    if stats.context_usage > 1.5 {
-                        match manager.hard_compact() {
-                            Ok(dropped) => {
-                                self.push_display_message(DisplayMessage {
-                                    role: "system".to_string(),
-                                    content: format!(
-                                        "{}\n\n⚡ **Emergency compaction** — dropped {} old messages.\n\
-                                        Context was at {:.0}% which is too large to summarize.\n\
-                                        Kept most recent messages. You can continue working.",
-                                        status_msg,
-                                        dropped,
-                                        stats.context_usage * 100.0
-                                    ),
-                                    tool_calls: vec![],
-                                    duration_secs: None,
-                                    title: None,
-                                    tool_data: None,
-                                });
-                            }
-                            Err(reason) => {
-                                self.push_display_message(DisplayMessage {
-                                    role: "system".to_string(),
-                                    content: format!(
-                                        "{}\n\n⚠ **Cannot compact:** {}",
-                                        status_msg, reason
-                                    ),
-                                    tool_calls: vec![],
-                                    duration_secs: None,
-                                    title: None,
-                                    tool_data: None,
-                                });
-                            }
-                        }
-                    } else {
                     match manager.force_compact(self.provider.clone()) {
                         Ok(()) => {
                             self.push_display_message(DisplayMessage {
@@ -5946,38 +5911,19 @@ impl App {
                             });
                         }
                         Err(reason) => {
-                            match manager.hard_compact() {
-                                Ok(dropped) => {
-                                    self.push_display_message(DisplayMessage {
-                                        role: "system".to_string(),
-                                        content: format!(
-                                            "{}\n\n⚠ Normal compaction failed: {}\n\
-                                            ⚡ **Emergency compaction** — dropped {} old messages instead.\n\
-                                            You can continue working.",
-                                            status_msg, reason, dropped
-                                        ),
-                                        tool_calls: vec![],
-                                        duration_secs: None,
-                                        title: None,
-                                        tool_data: None,
-                                    });
-                                }
-                                Err(hard_reason) => {
-                                    self.push_display_message(DisplayMessage {
-                                        role: "system".to_string(),
-                                        content: format!(
-                                            "{}\n\n⚠ **Cannot compact:** {}\nEmergency fallback also failed: {}",
-                                            status_msg, reason, hard_reason
-                                        ),
-                                        tool_calls: vec![],
-                                        duration_secs: None,
-                                        title: None,
-                                        tool_data: None,
-                                    });
-                                }
-                            }
+                            self.push_display_message(DisplayMessage {
+                                role: "system".to_string(),
+                                content: format!(
+                                    "{}\n\n⚠ **Cannot compact:** {}\n\
+                                    Try `/fix` for emergency recovery.",
+                                    status_msg, reason
+                                ),
+                                tool_calls: vec![],
+                                duration_secs: None,
+                                title: None,
+                                tool_data: None,
+                            });
                         }
-                    }
                     }
                 }
                 Err(_) => {
