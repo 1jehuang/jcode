@@ -449,6 +449,108 @@ impl CompactionManager {
         self.check_and_apply_compaction();
         self.take_compaction_event()
     }
+
+    /// Emergency hard compaction: drop old messages without summarizing.
+    /// Used when context is so large that even the summarization request would
+    /// exceed the context limit. Creates a minimal summary from message metadata
+    /// and keeps only the most recent turns.
+    pub fn hard_compact(&mut self) -> Result<usize, String> {
+        if self.messages.len() <= RECENT_TURNS_TO_KEEP {
+            return Err(format!(
+                "Not enough messages to compact (have {}, need more than {})",
+                self.messages.len(),
+                RECENT_TURNS_TO_KEEP
+            ));
+        }
+
+        let pre_tokens = self.effective_token_count() as u64;
+        let total_msgs = self.messages.len();
+
+        let mut cutoff = total_msgs.saturating_sub(RECENT_TURNS_TO_KEEP);
+        cutoff = self.safe_cutoff(cutoff);
+        if cutoff == 0 {
+            return Err("Cannot compact — would split tool call/result pairs".to_string());
+        }
+
+        let dropped_count = cutoff;
+
+        let mut summary_parts: Vec<String> = Vec::new();
+
+        if let Some(ref existing) = self.active_summary {
+            summary_parts.push(existing.text.clone());
+        }
+
+        summary_parts.push(format!(
+            "**[Emergency compaction]**: {} messages were dropped to recover from context overflow. \
+             The conversation had ~{}k tokens which exceeded the {}k limit.",
+            dropped_count,
+            pre_tokens / 1000,
+            self.token_budget / 1000,
+        ));
+
+        let mut file_mentions = Vec::new();
+        let mut tool_names = std::collections::HashSet::new();
+        for msg in &self.messages[..cutoff] {
+            for block in &msg.content {
+                match block {
+                    ContentBlock::ToolUse { name, .. } => {
+                        tool_names.insert(name.clone());
+                    }
+                    ContentBlock::Text { text, .. } => {
+                        for word in text.split_whitespace() {
+                            if (word.contains('/') || word.contains('.'))
+                                && word.len() > 3
+                                && word.len() < 120
+                                && !word.starts_with("http")
+                            {
+                                if word.contains(".rs")
+                                    || word.contains(".ts")
+                                    || word.contains(".py")
+                                    || word.contains(".toml")
+                                    || word.contains(".json")
+                                    || word.starts_with("src/")
+                                    || word.starts_with("./")
+                                {
+                                    let cleaned = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-');
+                                    file_mentions.push(cleaned.to_string());
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if !tool_names.is_empty() {
+            let mut tools: Vec<_> = tool_names.into_iter().collect();
+            tools.sort();
+            summary_parts.push(format!("Tools used: {}", tools.join(", ")));
+        }
+
+        file_mentions.sort();
+        file_mentions.dedup();
+        if !file_mentions.is_empty() {
+            file_mentions.truncate(30);
+            summary_parts.push(format!("Files referenced: {}", file_mentions.join(", ")));
+        }
+
+        let summary = Summary {
+            text: summary_parts.join("\n\n"),
+            covers_up_to_turn: cutoff,
+            original_turn_count: cutoff,
+        };
+
+        self.messages.drain(..cutoff);
+        self.active_summary = Some(summary);
+        self.last_compaction = Some(CompactionEvent {
+            trigger: "hard_compact".to_string(),
+            pre_tokens: Some(pre_tokens),
+        });
+        self.observed_input_tokens = None;
+
+        Ok(dropped_count)
+    }
 }
 
 impl Default for CompactionManager {
@@ -520,6 +622,16 @@ async fn generate_summary(
             }
         }
         conversation_text.push('\n');
+    }
+
+    // Truncate conversation text if it would exceed the provider's context limit.
+    // Reserve space for the summary prompt, system prompt, and output.
+    let max_prompt_chars = provider.context_window().saturating_sub(4000) * CHARS_PER_TOKEN;
+    let overhead = SUMMARY_PROMPT.len() + 50;
+    if conversation_text.len() + overhead > max_prompt_chars && max_prompt_chars > overhead {
+        let budget = max_prompt_chars - overhead;
+        conversation_text = crate::util::truncate_str(&conversation_text, budget).to_string();
+        conversation_text.push_str("\n\n... [earlier conversation truncated to fit context window]\n");
     }
 
     // Generate summary using simple completion
