@@ -5253,6 +5253,35 @@ impl App {
                             "Pasted {} ({} KB)",
                             media_type, size_kb
                         ));
+                    } else if let Ok(mut cb) = arboard::Clipboard::new() {
+                        // Try clipboard text for image URL (Discord <img> tags)
+                        if let Ok(text) = cb.get_text() {
+                            if let Some(url) = extract_image_url(&text) {
+                                self.set_status_notice("Downloading image...");
+                                if let Some((media_type, base64_data)) =
+                                    download_image_url(&url)
+                                {
+                                    let size_kb = base64_data.len() / 1024;
+                                    self.pending_images
+                                        .push((media_type.clone(), base64_data));
+                                    let n = self.pending_images.len();
+                                    let placeholder = format!("[image {}]", n);
+                                    self.input.insert_str(self.cursor_pos, &placeholder);
+                                    self.cursor_pos += placeholder.len();
+                                    self.sync_model_picker_preview_from_input();
+                                    self.set_status_notice(&format!(
+                                        "Pasted {} ({} KB)",
+                                        media_type, size_kb
+                                    ));
+                                } else {
+                                    self.set_status_notice("Failed to download image");
+                                }
+                            } else {
+                                self.set_status_notice("No image in clipboard");
+                            }
+                        } else {
+                            self.set_status_notice("No image in clipboard");
+                        }
                     } else {
                         self.set_status_notice("No image in clipboard");
                     }
@@ -5497,7 +5526,7 @@ impl App {
     /// Queue a message to be sent later
     /// Handle paste: check for clipboard images first, then store text content
     fn handle_paste(&mut self, text: String) {
-        // Check if clipboard has an image (e.g., Discord copies both text/html and image/png)
+        // Check if clipboard has actual image data (e.g., screenshot, native image copy)
         if let Some((media_type, base64_data)) = clipboard_image() {
             let size_kb = base64_data.len() / 1024;
             crate::logging::info(&format!(
@@ -5511,6 +5540,25 @@ impl App {
             self.cursor_pos += placeholder.len();
             self.sync_model_picker_preview_from_input();
             return;
+        }
+
+        // Check if pasted text contains an image URL (e.g., Discord <img src="...">)
+        if let Some(url) = extract_image_url(&text) {
+            crate::logging::info(&format!("Downloading image from pasted URL: {}", url));
+            self.set_status_notice("Downloading image...");
+            if let Some((media_type, base64_data)) = download_image_url(&url) {
+                let size_kb = base64_data.len() / 1024;
+                self.pending_images.push((media_type.clone(), base64_data));
+                let n = self.pending_images.len();
+                let placeholder = format!("[image {}]", n);
+                self.input.insert_str(self.cursor_pos, &placeholder);
+                self.cursor_pos += placeholder.len();
+                self.sync_model_picker_preview_from_input();
+                self.set_status_notice(&format!("Pasted {} ({} KB)", media_type, size_kb));
+                return;
+            } else {
+                self.set_status_notice("Failed to download image");
+            }
         }
 
         crate::logging::info(&format!(
@@ -11362,6 +11410,80 @@ fn clipboard_image() -> Option<(String, String)> {
     }
 
     None
+}
+
+/// Extract an image URL from text that looks like an HTML img tag or a bare image URL.
+/// Returns the URL if found.
+fn extract_image_url(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+
+    // Check for <img src="..."> pattern (Discord web copies)
+    if let Some(start) = trimmed.find("<img") {
+        if let Some(src_start) = trimmed[start..].find("src=\"") {
+            let url_start = start + src_start + 5;
+            if let Some(url_end) = trimmed[url_start..].find('"') {
+                let url = &trimmed[url_start..url_start + url_end];
+                if url.starts_with("http") {
+                    return Some(url.to_string());
+                }
+            }
+        }
+        if let Some(src_start) = trimmed[start..].find("src='") {
+            let url_start = start + src_start + 5;
+            if let Some(url_end) = trimmed[url_start..].find('\'') {
+                let url = &trimmed[url_start..url_start + url_end];
+                if url.starts_with("http") {
+                    return Some(url.to_string());
+                }
+            }
+        }
+    }
+
+    // Check for bare image URL
+    if trimmed.starts_with("http")
+        && (trimmed.contains(".png")
+            || trimmed.contains(".jpg")
+            || trimmed.contains(".jpeg")
+            || trimmed.contains(".gif")
+            || trimmed.contains(".webp"))
+    {
+        // Strip query params for extension check but return full URL
+        return Some(trimmed.to_string());
+    }
+
+    None
+}
+
+/// Download an image from a URL and return (media_type, base64_data).
+/// Uses curl for simplicity (available on all platforms).
+fn download_image_url(url: &str) -> Option<(String, String)> {
+    use base64::Engine;
+
+    let output = std::process::Command::new("curl")
+        .args(["-sL", "--max-time", "10", "--max-filesize", "10000000", url])
+        .output()
+        .ok()?;
+
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+
+    // Detect image type from magic bytes
+    let data = &output.stdout;
+    let media_type = if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        "image/png"
+    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if data.starts_with(b"GIF8") {
+        "image/gif"
+    } else if data.starts_with(b"RIFF") && data.len() > 12 && &data[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        return None;
+    };
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(data);
+    Some((media_type.to_string(), b64))
 }
 
 /// Encode raw RGBA pixel data as PNG bytes
