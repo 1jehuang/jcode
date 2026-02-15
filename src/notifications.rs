@@ -45,19 +45,23 @@ impl Priority {
 pub struct NotificationDispatcher {
     client: reqwest::Client,
     config: SafetyConfig,
+    channels: crate::channel::ChannelRegistry,
 }
 
 impl NotificationDispatcher {
     pub fn new() -> Self {
+        let cfg = config().safety.clone();
         Self {
             client: reqwest::Client::new(),
-            config: config().safety.clone(),
+            channels: crate::channel::ChannelRegistry::from_config(&cfg),
+            config: cfg,
         }
     }
 
     pub fn from_config(config: SafetyConfig) -> Self {
         Self {
             client: reqwest::Client::new(),
+            channels: crate::channel::ChannelRegistry::from_config(&config),
             config,
         }
     }
@@ -218,27 +222,9 @@ impl NotificationDispatcher {
             }
         }
 
-        // Telegram — uses DETAILED body (sent to your bot chat, private)
-        if self.config.telegram_enabled {
-            if let (Some(ref token), Some(ref chat_id)) = (
-                &self.config.telegram_bot_token,
-                &self.config.telegram_chat_id,
-            ) {
-                let client = self.client.clone();
-                let token = token.clone();
-                let chat_id = chat_id.clone();
-                let title = title.to_string();
-                let body = detailed_body.to_string();
-                tokio::spawn(async move {
-                    let text = format!("*{}*\n\n{}", title, body);
-                    if let Err(e) =
-                        crate::telegram::send_message(&client, &token, &chat_id, &text).await
-                    {
-                        logging::error(&format!("Telegram notification failed: {}", e));
-                    }
-                });
-            }
-        }
+        // Message channels (Telegram, Discord, etc.) — uses DETAILED body
+        let channel_text = format!("*{}*\n\n{}", title, detailed_body);
+        self.channels.send_all(&channel_text);
     }
 }
 
@@ -633,121 +619,12 @@ fn poll_imap_once(host: &str, port: u16, user: &str, pass: &str) -> anyhow::Resu
 }
 
 // ---------------------------------------------------------------------------
-// Telegram reply polling
+// Permission helpers (used by channel implementations in channel.rs)
 // ---------------------------------------------------------------------------
 
-/// Run a Telegram Bot API polling loop checking for replies.
-/// Should be spawned as a tokio task alongside the ambient runner.
-/// Messages are injected directly into the active ambient agent session
-/// via soft interrupts. If no cycle is running, a new cycle is triggered.
-pub async fn telegram_reply_loop(
-    config: SafetyConfig,
-    runner: crate::ambient_runner::AmbientRunnerHandle,
-) {
-    let token = match config.telegram_bot_token.as_ref() {
-        Some(t) => t.clone(),
-        None => {
-            logging::error("Telegram reply loop: no bot_token configured");
-            return;
-        }
-    };
-    let expected_chat_id = match config.telegram_chat_id.as_ref() {
-        Some(c) => c.clone(),
-        None => {
-            logging::error("Telegram reply loop: no chat_id configured");
-            return;
-        }
-    };
-
-    logging::info("Telegram reply loop: starting");
-
-    let client = reqwest::Client::new();
-    let mut offset: Option<i64> = None;
-
-    loop {
-        match crate::telegram::get_updates(&client, &token, offset, 30).await {
-            Ok(updates) => {
-                for update in updates {
-                    offset = Some(update.update_id + 1);
-
-                    let msg = match update.message {
-                        Some(m) => m,
-                        None => continue,
-                    };
-
-                    if msg.chat.id.to_string() != expected_chat_id {
-                        continue;
-                    }
-
-                    let text = match msg.text {
-                        Some(t) => t,
-                        None => continue,
-                    };
-
-                    let trimmed = text.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-
-                    // Check if this is a permission reply (e.g. "approve req_abc123")
-                    if let Some(req_id) = extract_permission_id(trimmed) {
-                        let (approved, message) = parse_permission_reply(trimmed);
-                        if let Err(e) = crate::safety::record_permission_via_file(
-                            &req_id,
-                            approved,
-                            "telegram_reply",
-                            message,
-                        ) {
-                            logging::error(&format!(
-                                "Failed to record permission from Telegram for {}: {}",
-                                req_id, e
-                            ));
-                        } else {
-                            logging::info(&format!(
-                                "Permission {} via Telegram: {}",
-                                if approved { "approved" } else { "denied" },
-                                req_id
-                            ));
-                            let _ = crate::telegram::send_message(
-                                &client,
-                                &token,
-                                &expected_chat_id,
-                                &format!(
-                                    "✅ Permission {} for `{}`",
-                                    if approved { "approved" } else { "denied" },
-                                    req_id
-                                ),
-                            )
-                            .await;
-                        }
-                    } else {
-                        let injected = runner.inject_telegram_message(trimmed).await;
-                        let ack = if injected {
-                            format!("💬 Message sent to active session: _{}_", trimmed)
-                        } else {
-                            format!("📋 Message queued, waking agent: _{}_", trimmed)
-                        };
-                        let _ = crate::telegram::send_message(
-                            &client,
-                            &token,
-                            &expected_chat_id,
-                            &ack,
-                        )
-                        .await;
-                    }
-                }
-            }
-            Err(e) => {
-                logging::error(&format!("Telegram poll error: {}", e));
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            }
-        }
-    }
-}
-
-/// Extract a permission request ID from a Telegram message.
+/// Extract a permission request ID from a message.
 /// Matches patterns like "approve req_abc123" or "deny req_abc123".
-fn extract_permission_id(text: &str) -> Option<String> {
+pub fn extract_permission_id(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
     for word in lower.split_whitespace() {
         if word.starts_with("req_") {
@@ -777,7 +654,7 @@ fn strip_quoted_reply(text: &str) -> String {
 ///
 /// Checks the first line for approve keywords vs deny keywords.
 /// Defaults to deny if ambiguous (fail-safe).
-fn parse_permission_reply(text: &str) -> (bool, Option<String>) {
+pub fn parse_permission_reply(text: &str) -> (bool, Option<String>) {
     let lower = text.to_lowercase();
     let first_line = lower.lines().next().unwrap_or("").trim();
 
