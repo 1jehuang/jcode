@@ -4,7 +4,8 @@
 
 - **Commit as you go** - Make small, focused commits after completing each feature or fix
 - **Push when done** - Push all commits to remote when finishing a task or session
-- **Rebuild and install when done** - Run `cargo build --release && scripts/install_release.sh`
+- **Rebuild when done** - Run `cargo build --release` (the `jcode` symlink picks it up automatically)
+- **Promote to stable release** - Run `scripts/install_release.sh` to update the stable/release binary
 - **Test before committing** - Run `cargo test` to verify changes
 - **Bump version for releases** - Update version in `Cargo.toml` when making releases
 
@@ -33,7 +34,8 @@ The build also includes git hash and `-dev` suffix for uncommitted changes (e.g.
 
 ## Build, Test, and Development Commands
 - `cargo install --path .`: install the local CLI.
-- `cargo build --release && scripts/install_release.sh`: rebuild and install the release binary (versioned + symlink).
+- `cargo build --release`: rebuild latest (jcode on PATH picks it up automatically).
+- `scripts/install_release.sh`: promote current build to stable/release.
 - `jcode`: launch the TUI.
 - `jcode serve` / `jcode connect`: start the daemon and attach a client.
 - `cargo test`: run unit + integration tests.
@@ -51,8 +53,9 @@ The build also includes git hash and `-dev` suffix for uncommitted changes (e.g.
 - Protocol is newline-delimited JSON; see `Request::DebugCommand` in `src/protocol.rs`.
 
 ## Install Notes
-- `scripts/install_release.sh` installs a versioned binary and atomically flips the `~/.local/bin/jcode` symlink.
-- Ensure `~/.local/bin` is **before** `~/.cargo/bin` in `PATH` so the symlinked release is used.
+- `~/.local/bin/jcode` is a symlink to `target/release/jcode` — always the latest build from source.
+- `~/.jcode/builds/stable/jcode` is the stable/release binary, updated by `scripts/install_release.sh`.
+- Ensure `~/.local/bin` is **before** `~/.cargo/bin` in `PATH`.
 
 ## Coding Style & Naming Conventions
 - Rust 2021 style; format with `cargo fmt`.

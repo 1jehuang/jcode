@@ -482,6 +482,11 @@ impl Agent {
         let _ = self.session.save();
     }
 
+    pub fn mark_crashed(&mut self, message: Option<String>) {
+        self.session.mark_crashed(message);
+        let _ = self.session.save();
+    }
+
     /// Get the last token usage from the most recent API request
     pub fn last_usage(&self) -> &TokenUsage {
         &self.last_usage

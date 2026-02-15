@@ -534,6 +534,27 @@ pub fn update_canary_symlink(hash: &str) -> Result<()> {
     Ok(())
 }
 
+/// Update rollback symlink (safety net for self-dev, separate from stable/release)
+pub fn update_rollback_symlink(hash: &str) -> Result<()> {
+    let rollback_dir = builds_dir()?.join("rollback");
+    storage::ensure_dir(&rollback_dir)?;
+
+    let link_path = rollback_dir.join("jcode");
+    let target = builds_dir()?.join("versions").join(hash).join("jcode");
+
+    let _ = std::fs::remove_file(&link_path);
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &link_path)?;
+
+    Ok(())
+}
+
+/// Get path to rollback binary
+pub fn rollback_binary_path() -> Result<PathBuf> {
+    Ok(builds_dir()?.join("rollback").join("jcode"))
+}
+
 /// Clear canary symlink (called after promotion or when canary is no longer active)
 pub fn clear_canary_symlink() -> Result<()> {
     let link_path = builds_dir()?.join("canary").join("jcode");

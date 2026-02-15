@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# Install the current release binary as the stable/release version.
+#
+# This updates ~/.jcode/builds/stable/jcode to point to a versioned copy
+# of the current target/release/jcode binary.
+#
+# The "jcode" command on PATH (~/.local/bin/jcode) should be a symlink to
+# target/release/jcode (latest build from source). This script does NOT
+# touch that symlink.
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
@@ -24,12 +32,16 @@ if [[ -z "$hash" ]]; then
   hash="$(date +%Y%m%d%H%M%S)"
 fi
 
-dest_dir="$HOME/.local/bin"
-mkdir -p "$dest_dir"
+# Install versioned binary into ~/.jcode/builds/versions/<hash>/
+builds_dir="$HOME/.jcode/builds"
+version_dir="$builds_dir/versions/$hash"
+mkdir -p "$version_dir"
+install -m 755 "$bin" "$version_dir/jcode"
 
-versioned="$dest_dir/jcode-$hash"
-install -m 755 "$bin" "$versioned"
-ln -sfn "$versioned" "$dest_dir/jcode"
+# Update stable symlink
+stable_dir="$builds_dir/stable"
+mkdir -p "$stable_dir"
+ln -sfn "$version_dir/jcode" "$stable_dir/jcode"
 
-echo "Installed: $versioned"
-echo "Updated symlink: $dest_dir/jcode -> $versioned"
+echo "Installed: $version_dir/jcode"
+echo "Updated stable symlink: $stable_dir/jcode -> $version_dir/jcode"

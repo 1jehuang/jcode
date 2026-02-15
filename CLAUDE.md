@@ -5,7 +5,8 @@
 - **Commit as you go** - Make small, focused commits after completing each feature or fix
 - **Push when done** - Push all commits to remote when finishing a task or session
 - **No AI co-author** - Never include `Co-Authored-By` lines in commits
-- **Rebuild and install when done** - Run `cargo build --release && scripts/install_release.sh`
+- **Rebuild when done** - Run `cargo build --release` (the `jcode` symlink picks it up automatically)
+- **Promote to stable release** - Run `scripts/install_release.sh` to update the stable/release binary
 - **Test before committing** - Run `cargo test` to verify changes
 - **Bump version for releases** - Update version in `Cargo.toml` when making releases
 - **Remote builds available** - Use `scripts/remote_build.sh` to offload cargo work to another machine
@@ -44,7 +45,8 @@ kitten @ --to unix:$sock launch --type=os-window ./target/release/jcode
 ## Commands
 
 ```bash
-cargo build --release && scripts/install_release.sh  # Build and install (versioned + symlink)
+cargo build --release                  # Build latest (jcode on PATH picks it up)
+scripts/install_release.sh             # Promote current build to stable/release
 cargo test              # Run all tests
 cargo test --test e2e   # Run only e2e tests
 scripts/remote_build.sh --release  # Build on remote machine, sync binary back
@@ -59,8 +61,9 @@ Logs are written to `~/.jcode/logs/` (daily files like `jcode-YYYY-MM-DD.log`).
 
 ## Install Notes
 
-- `scripts/install_release.sh` installs a versioned binary and atomically flips the `~/.local/bin/jcode` symlink.
-- Ensure `~/.local/bin` is **before** `~/.cargo/bin` in `PATH` so the symlinked release is used.
+- `~/.local/bin/jcode` is a symlink to `target/release/jcode` — always the latest build from source.
+- `~/.jcode/builds/stable/jcode` is the stable/release binary, updated by `scripts/install_release.sh`.
+- Ensure `~/.local/bin` is **before** `~/.cargo/bin` in `PATH`.
 
 ## Authentication
 

@@ -418,9 +418,9 @@ fn server_update_candidate() -> Option<(PathBuf, &'static str)> {
                 return Some((canary, "canary"));
             }
         }
-        if let Ok(stable) = crate::build::stable_binary_path() {
-            if stable.exists() {
-                return Some((stable, "stable"));
+        if let Ok(rollback) = crate::build::rollback_binary_path() {
+            if rollback.exists() {
+                return Some((rollback, "rollback"));
             }
         }
     }
@@ -960,9 +960,13 @@ impl Server {
         let _ = std::fs::write(&hash_path, env!("JCODE_GIT_HASH"));
 
         // Spawn selfdev signal monitor (checks for reload/rollback signals)
-        tokio::spawn(async {
-            monitor_selfdev_signals().await;
-        });
+        // Only run on selfdev servers to avoid non-selfdev servers picking up
+        // rebuild-signal and exec'ing, which would kill all their client connections
+        if is_selfdev_env() {
+            tokio::spawn(async {
+                monitor_selfdev_signals().await;
+            });
+        }
 
         // Log when we receive SIGTERM for debugging
         #[cfg(unix)]
@@ -1653,6 +1657,12 @@ async fn handle_client(
                     agent_guard.is_debug()
                 };
 
+                // Mark the old session as closed before replacing
+                {
+                    let mut agent_guard = agent.lock().await;
+                    agent_guard.mark_closed();
+                }
+
                 let mut new_agent = Agent::new(Arc::clone(&provider), registry.clone());
                 let new_id = new_agent.session_id().to_string();
 
@@ -2027,6 +2037,12 @@ async fn handle_client(
             }
 
             Request::ResumeSession { id, session_id } => {
+                // Mark the current session as closed before switching
+                {
+                    let mut agent_guard = agent.lock().await;
+                    agent_guard.mark_closed();
+                }
+
                 // Load the specified session into this client's agent
                 let (result, is_canary) = {
                     let mut agent_guard = agent.lock().await;
@@ -4222,12 +4238,24 @@ async fn handle_client(
     }
 
     // Clean up: remove this client's session from the map
-    // Extract transcript for final memory extraction before dropping the agent
+    // Mark session status and persist before dropping the agent
+    let disconnected_while_processing = client_is_processing
+        || processing_task
+            .as_ref()
+            .map(|handle| !handle.is_finished())
+            .unwrap_or(false);
     {
         let mut sessions_guard = sessions.write().await;
         if let Some(agent_arc) = sessions_guard.remove(&client_session_id) {
             drop(sessions_guard);
-            let agent = agent_arc.lock().await;
+            let mut agent = agent_arc.lock().await;
+
+            if disconnected_while_processing {
+                agent.mark_crashed(Some("Client disconnected while processing".to_string()));
+            } else {
+                agent.mark_closed();
+            }
+
             let memory_enabled = agent.memory_enabled();
             let transcript = if memory_enabled {
                 Some(agent.build_transcript_for_extraction())
@@ -4244,11 +4272,7 @@ async fn handle_client(
 
     // Clean up: remove from swarm tracking
     {
-        let crashed = client_is_processing
-            || processing_task
-                .as_ref()
-                .map(|handle| !handle.is_finished())
-                .unwrap_or(false);
+        let crashed = disconnected_while_processing;
         let (status, detail) = if crashed {
             ("crashed", Some("disconnect while running".to_string()))
         } else {
@@ -8582,10 +8606,16 @@ fn normalize_model_arg(model: String) -> Option<String> {
 
 /// Monitor for selfdev signal files and exec into new binary
 /// The server directly execs into the new binary instead of exiting
+/// NOTE: This should only be called on selfdev servers (guarded at call site)
 async fn monitor_selfdev_signals() {
     use std::os::unix::process::CommandExt;
     use std::process::Command as ProcessCommand;
     use tokio::time::{interval, Duration};
+
+    // Double-check: only run on selfdev servers
+    if !is_selfdev_env() {
+        return;
+    }
 
     let mut check_interval = interval(Duration::from_millis(500));
 

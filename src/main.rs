@@ -2352,16 +2352,16 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
     let hash = build::current_git_hash(&repo_dir)?;
     let binary_path = target_binary.clone();
 
-    // On fresh start (not resume), set current build as stable
-    // This gives us a safety net to rollback to if canary crashes
+    // On fresh start (not resume), set current build as rollback safety net
+    // This does NOT touch the stable/release symlink (which tracks GitHub releases)
     if is_fresh_start {
-        eprintln!("Setting {} as stable (safety net)...", hash);
+        eprintln!("Setting {} as rollback safety net...", hash);
 
-        // Install this version and set as stable
+        // Install this version and set as rollback target
         build::install_version(&repo_dir, &hash)?;
-        build::update_stable_symlink(&hash)?;
+        build::update_rollback_symlink(&hash)?;
 
-        // Update manifest - clear any old canary, set stable
+        // Update manifest - clear any old canary
         let mut manifest = build::BuildManifest::load()?;
         manifest.stable = Some(hash.clone());
         manifest.canary = None;
@@ -2590,11 +2590,11 @@ async fn run_canary_wrapper(
             // Small delay for filesystem sync
             std::thread::sleep(std::time::Duration::from_millis(200));
 
-            // Get the appropriate binary (canary for reload, stable for rollback)
+            // Get the appropriate binary (canary for reload, rollback for rollback)
             let binary_path = if code == EXIT_RELOAD_REQUESTED {
                 build::canary_binary_path().ok()
             } else {
-                build::stable_binary_path().ok()
+                build::rollback_binary_path().ok()
             };
 
             let binary = binary_path

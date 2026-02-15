@@ -52,7 +52,7 @@ const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 const STARTUP_ASCII_STATUS_FPS: f32 = 12.0;
 const STARTUP_ASCII_STATUS_SPINNER: &[&str] = &["|", "/", "-", "\\"];
 
-const DONUT_LUMINANCE: &[u8] = b".,-~:;=!*#$@";
+const LUMINANCE: &[u8] = b".,-~:;=!*#$@";
 
 fn render_donut(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     let a = elapsed * 1.5;
@@ -78,18 +78,17 @@ fn render_donut(elapsed: f32, width: usize, height: usize) -> Vec<String> {
             let circle_x = 2.0 + cos_theta;
             let circle_y = sin_theta;
 
-            let x = circle_x * (cos_b * cos_phi + sin_a * sin_b * sin_phi)
-                - circle_y * cos_a * sin_b;
-            let y = circle_x * (sin_b * cos_phi - sin_a * cos_b * sin_phi)
-                + circle_y * cos_a * cos_b;
+            let x =
+                circle_x * (cos_b * cos_phi + sin_a * sin_b * sin_phi) - circle_y * cos_a * sin_b;
+            let y =
+                circle_x * (sin_b * cos_phi - sin_a * cos_b * sin_phi) + circle_y * cos_a * cos_b;
             let z = 5.0 + cos_a * circle_x * sin_phi + circle_y * sin_a;
             let ooz = 1.0 / z;
 
             let xp = (width as f32 / 2.0 + width as f32 * 0.35 * ooz * x) as isize;
             let yp = (height as f32 / 2.0 - height as f32 * 0.35 * ooz * y) as isize;
 
-            let lum = cos_phi * cos_theta * sin_b - cos_a * cos_theta * sin_phi
-                - sin_a * sin_theta
+            let lum = cos_phi * cos_theta * sin_b - cos_a * cos_theta * sin_phi - sin_a * sin_theta
                 + cos_b * (cos_a * sin_theta - cos_theta * sin_a * sin_phi);
 
             if xp >= 0
@@ -99,8 +98,8 @@ fn render_donut(elapsed: f32, width: usize, height: usize) -> Vec<String> {
                 && ooz > zbuffer[yp as usize][xp as usize]
             {
                 zbuffer[yp as usize][xp as usize] = ooz;
-                let li = (lum * 8.0).max(0.0).min((DONUT_LUMINANCE.len() - 1) as f32) as usize;
-                output[yp as usize][xp as usize] = DONUT_LUMINANCE[li];
+                let li = (lum * 8.0).max(0.0).min((LUMINANCE.len() - 1) as f32) as usize;
+                output[yp as usize][xp as usize] = LUMINANCE[li];
             }
 
             phi += 0.02;
@@ -112,6 +111,298 @@ fn render_donut(elapsed: f32, width: usize, height: usize) -> Vec<String> {
         .into_iter()
         .map(|row| String::from_utf8(row).unwrap_or_default())
         .collect()
+}
+
+fn render_startup_animation(
+    elapsed: f32,
+    width: usize,
+    height: usize,
+    variant: usize,
+) -> Vec<String> {
+    match variant % 7 {
+        0 => render_donut(elapsed, width, height),
+        1 => render_globe(elapsed, width, height),
+        2 => render_cube(elapsed, width, height),
+        3 => render_mobius(elapsed, width, height),
+        4 => render_octahedron(elapsed, width, height),
+        5 => render_lorenz(elapsed, width, height),
+        6 => render_dna_helix(elapsed, width, height),
+        _ => render_donut(elapsed, width, height),
+    }
+}
+
+fn render_globe(elapsed: f32, width: usize, height: usize) -> Vec<String> {
+    let mut output = vec![vec![b' '; width]; height];
+    let mut zbuffer = vec![vec![0.0f32; width]; height];
+    let rot = elapsed * 0.8;
+    let cos_r = rot.cos();
+    let sin_r = rot.sin();
+    let radius = (width.min(height * 2) as f32) * 0.35;
+    let cx = width as f32 / 2.0;
+    let cy = height as f32 / 2.0;
+
+    let mut lat: f32 = -std::f32::consts::FRAC_PI_2;
+    while lat < std::f32::consts::FRAC_PI_2 {
+        let cos_lat = lat.cos();
+        let sin_lat = lat.sin();
+        let mut lon: f32 = 0.0;
+        while lon < std::f32::consts::TAU {
+            let cos_lon = lon.cos();
+            let sin_lon = lon.sin();
+            let x3 = cos_lat * sin_lon;
+            let y3 = sin_lat;
+            let z3 = cos_lat * cos_lon;
+            let rx = x3 * cos_r + z3 * sin_r;
+            let rz = -x3 * sin_r + z3 * cos_r;
+            if rz < -0.1 {
+                lon += 0.03;
+                continue;
+            }
+            let xp = (cx + rx * radius) as isize;
+            let yp = (cy - y3 * radius * 0.5) as isize;
+            let lum = (rz + 1.0) * 0.5;
+            if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height {
+                let depth = rz + 1.0;
+                if depth > zbuffer[yp as usize][xp as usize] {
+                    zbuffer[yp as usize][xp as usize] = depth;
+                    let is_grid = (lat * 6.0).fract().abs() < 0.15
+                        || ((lon + rot) * 6.0 / std::f32::consts::TAU).fract().abs() < 0.1;
+                    if is_grid {
+                        let li = (lum * (LUMINANCE.len() - 1) as f32)
+                            .max(0.0)
+                            .min((LUMINANCE.len() - 1) as f32) as usize;
+                        output[yp as usize][xp as usize] = LUMINANCE[li];
+                    } else {
+                        let li = (lum * 3.0).max(0.0).min(2.0) as usize;
+                        output[yp as usize][xp as usize] = b".,:"[li];
+                    }
+                }
+            }
+            lon += 0.03;
+        }
+        lat += 0.03;
+    }
+    output.into_iter().map(|row| String::from_utf8(row).unwrap_or_default()).collect()
+}
+
+fn rotate_xyz(x: f32, y: f32, z: f32, ax: f32, ay: f32, az: f32) -> (f32, f32, f32) {
+    let (sx, cx) = ax.sin_cos();
+    let (sy, cy) = ay.sin_cos();
+    let (sz, cz) = az.sin_cos();
+    let y1 = y * cx - z * sx;
+    let z1 = y * sx + z * cx;
+    let x1 = x * cy + z1 * sy;
+    let z2 = -x * sy + z1 * cy;
+    let x2 = x1 * cz - y1 * sz;
+    let y2 = x1 * sz + y1 * cz;
+    (x2, y2, z2)
+}
+
+fn project_3d(x: f32, y: f32, z: f32, width: usize, height: usize, cam_dist: f32) -> Option<(isize, isize, f32)> {
+    let d = cam_dist + z;
+    if d < 0.1 { return None; }
+    let scale = cam_dist / d;
+    let xp = (width as f32 / 2.0 + x * scale * height as f32 * 0.4) as isize;
+    let yp = (height as f32 / 2.0 - y * scale * height as f32 * 0.4) as isize;
+    Some((xp, yp, 1.0 / d))
+}
+
+fn draw_line_3d(output: &mut [Vec<u8>], zbuffer: &mut [Vec<f32>], x0: f32, y0: f32, z0: f32, x1: f32, y1: f32, z1: f32, width: usize, height: usize, cam_dist: f32, ch: u8) {
+    let steps = 40;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let x = x0 + (x1 - x0) * t;
+        let y = y0 + (y1 - y0) * t;
+        let z = z0 + (z1 - z0) * t;
+        if let Some((xp, yp, depth)) = project_3d(x, y, z, width, height, cam_dist) {
+            if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height && depth > zbuffer[yp as usize][xp as usize] {
+                zbuffer[yp as usize][xp as usize] = depth;
+                output[yp as usize][xp as usize] = ch;
+            }
+        }
+    }
+}
+
+fn render_cube(elapsed: f32, width: usize, height: usize) -> Vec<String> {
+    let mut output = vec![vec![b' '; width]; height];
+    let mut zbuffer = vec![vec![0.0f32; width]; height];
+    let ax = elapsed * 0.7;
+    let ay = elapsed * 1.1;
+    let az = elapsed * 0.3;
+    let cam_dist = 5.0;
+    let verts: [(f32,f32,f32); 8] = [
+        (-1.0,-1.0,-1.0),(1.0,-1.0,-1.0),(1.0,1.0,-1.0),(-1.0,1.0,-1.0),
+        (-1.0,-1.0,1.0),(1.0,-1.0,1.0),(1.0,1.0,1.0),(-1.0,1.0,1.0),
+    ];
+    let edges: [(usize,usize); 12] = [
+        (0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7),
+    ];
+    let rotated: Vec<(f32,f32,f32)> = verts.iter().map(|&(x,y,z)| rotate_xyz(x,y,z,ax,ay,az)).collect();
+    for &(a,b) in &edges {
+        let (x0,y0,z0) = rotated[a];
+        let (x1,y1,z1) = rotated[b];
+        draw_line_3d(&mut output, &mut zbuffer, x0,y0,z0, x1,y1,z1, width, height, cam_dist, b'#');
+    }
+    for &(x,y,z) in &rotated {
+        if let Some((xp,yp,_)) = project_3d(x,y,z,width,height,cam_dist) {
+            if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height {
+                output[yp as usize][xp as usize] = b'@';
+            }
+        }
+    }
+    output.into_iter().map(|row| String::from_utf8(row).unwrap_or_default()).collect()
+}
+
+fn render_mobius(elapsed: f32, width: usize, height: usize) -> Vec<String> {
+    let mut output = vec![vec![b' '; width]; height];
+    let mut zbuffer = vec![vec![0.0f32; width]; height];
+    let rot = elapsed * 0.6;
+    let cam_dist = 6.0;
+    let mut u: f32 = 0.0;
+    while u < std::f32::consts::TAU {
+        let mut v: f32 = -0.4;
+        while v <= 0.4 {
+            let half_u = u / 2.0;
+            let x = (1.0 + v * half_u.cos()) * u.cos();
+            let y = (1.0 + v * half_u.cos()) * u.sin();
+            let z = v * half_u.sin();
+            let (rx, ry, rz) = rotate_xyz(x, y, z, elapsed * 0.3, rot, 0.0);
+            if let Some((xp, yp, depth)) = project_3d(rx, ry, rz, width, height, cam_dist) {
+                if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height && depth > zbuffer[yp as usize][xp as usize] {
+                    zbuffer[yp as usize][xp as usize] = depth;
+                    let nx = half_u.cos() * u.cos();
+                    let ny = half_u.cos() * u.sin();
+                    let nz = half_u.sin();
+                    let (rnx, rny, _) = rotate_xyz(nx, ny, nz, elapsed * 0.3, rot, 0.0);
+                    let lum = (rnx * 0.5 + rny * 0.5 + 0.5).clamp(0.0, 1.0);
+                    let li = (lum * (LUMINANCE.len() - 1) as f32) as usize;
+                    output[yp as usize][xp as usize] = LUMINANCE[li.min(LUMINANCE.len() - 1)];
+                }
+            }
+            v += 0.04;
+        }
+        u += 0.03;
+    }
+    output.into_iter().map(|row| String::from_utf8(row).unwrap_or_default()).collect()
+}
+
+fn render_octahedron(elapsed: f32, width: usize, height: usize) -> Vec<String> {
+    let mut output = vec![vec![b' '; width]; height];
+    let mut zbuffer = vec![vec![0.0f32; width]; height];
+    let ax = elapsed * 0.9;
+    let ay = elapsed * 0.6;
+    let az = elapsed * 0.4;
+    let cam_dist = 4.5;
+    let s = 1.3;
+    let verts: [(f32,f32,f32); 6] = [
+        (s,0.0,0.0),(-s,0.0,0.0),(0.0,s,0.0),(0.0,-s,0.0),(0.0,0.0,s),(0.0,0.0,-s),
+    ];
+    let edges: [(usize,usize); 12] = [
+        (0,2),(0,3),(0,4),(0,5),(1,2),(1,3),(1,4),(1,5),(2,4),(4,3),(3,5),(5,2),
+    ];
+    let rotated: Vec<(f32,f32,f32)> = verts.iter().map(|&(x,y,z)| rotate_xyz(x,y,z,ax,ay,az)).collect();
+    for &(a,b) in &edges {
+        let (x0,y0,z0) = rotated[a];
+        let (x1,y1,z1) = rotated[b];
+        draw_line_3d(&mut output, &mut zbuffer, x0,y0,z0, x1,y1,z1, width, height, cam_dist, b'=');
+    }
+    for &(x,y,z) in &rotated {
+        if let Some((xp,yp,_)) = project_3d(x,y,z,width,height,cam_dist) {
+            if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height {
+                output[yp as usize][xp as usize] = b'@';
+            }
+        }
+    }
+    output.into_iter().map(|row| String::from_utf8(row).unwrap_or_default()).collect()
+}
+
+fn render_lorenz(elapsed: f32, width: usize, height: usize) -> Vec<String> {
+    let mut output = vec![vec![b' '; width]; height];
+    let sigma: f32 = 10.0;
+    let rho: f32 = 28.0;
+    let beta: f32 = 8.0 / 3.0;
+    let dt: f32 = 0.005;
+    let mut x: f32 = 0.1;
+    let mut y: f32 = 0.0;
+    let mut z: f32 = 0.0;
+    let rot = elapsed * 0.3;
+    let cos_r = rot.cos();
+    let sin_r = rot.sin();
+    let scale_x = width as f32 / 55.0;
+    let scale_y = height as f32 / 55.0;
+    let cx = width as f32 / 2.0;
+    let cy = height as f32 * 0.65;
+    let total_steps = 4000 + (elapsed * 500.0) as usize;
+    let trail_start = total_steps.saturating_sub(3000);
+    for step in 0..total_steps {
+        let dx = sigma * (y - x);
+        let dy = x * (rho - z) - y;
+        let dz = x * y - beta * z;
+        x += dx * dt;
+        y += dy * dt;
+        z += dz * dt;
+        if step >= trail_start {
+            let rx = x * cos_r - y * sin_r;
+            let ry_unused = x * sin_r + y * cos_r;
+            let _ = ry_unused;
+            let xp = (cx + rx * scale_x) as isize;
+            let yp = (cy - z * scale_y) as isize;
+            if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height {
+                let age = (step - trail_start) as f32 / 3000.0;
+                let li = (age * (LUMINANCE.len() - 1) as f32) as usize;
+                let ch = LUMINANCE[li.min(LUMINANCE.len() - 1)];
+                if ch > output[yp as usize][xp as usize] || output[yp as usize][xp as usize] == b' ' {
+                    output[yp as usize][xp as usize] = ch;
+                }
+            }
+        }
+    }
+    output.into_iter().map(|row| String::from_utf8(row).unwrap_or_default()).collect()
+}
+
+fn render_dna_helix(elapsed: f32, width: usize, height: usize) -> Vec<String> {
+    let mut output = vec![vec![b' '; width]; height];
+    let mut zbuffer = vec![vec![0.0f32; width]; height];
+    let cx = width as f32 / 2.0;
+    let radius = width as f32 * 0.2;
+    let speed = elapsed * 2.0;
+    for row in 0..height {
+        let t = row as f32 / height as f32 * 4.0 * std::f32::consts::PI + speed;
+        let x1 = t.cos();
+        let z1 = t.sin();
+        let x2 = (t + std::f32::consts::PI).cos();
+        let z2 = (t + std::f32::consts::PI).sin();
+        let xp1 = (cx + x1 * radius) as isize;
+        let xp2 = (cx + x2 * radius) as isize;
+        let d1 = z1 * 0.5 + 0.5;
+        let d2 = z2 * 0.5 + 0.5;
+        if xp1 >= 0 && (xp1 as usize) < width && d1 > zbuffer[row][xp1 as usize] {
+            zbuffer[row][xp1 as usize] = d1;
+            let li = (d1 * (LUMINANCE.len() - 1) as f32) as usize;
+            output[row][xp1 as usize] = LUMINANCE[li.min(LUMINANCE.len() - 1)];
+        }
+        if xp2 >= 0 && (xp2 as usize) < width && d2 > zbuffer[row][xp2 as usize] {
+            zbuffer[row][xp2 as usize] = d2;
+            let li = (d2 * (LUMINANCE.len() - 1) as f32) as usize;
+            output[row][xp2 as usize] = LUMINANCE[li.min(LUMINANCE.len() - 1)];
+        }
+        if (row % 3) == 0 {
+            let left = xp1.min(xp2).max(0) as usize;
+            let right = xp1.max(xp2).max(0) as usize;
+            if left < width && right < width {
+                for col in left..=right {
+                    if output[row][col] == b' ' {
+                        let frac = if right > left { (col - left) as f32 / (right - left) as f32 } else { 0.5 };
+                        let d = d1 + (d2 - d1) * frac;
+                        if d > zbuffer[row][col] * 0.9 {
+                            output[row][col] = b'-';
+                        }
+                    }
+                }
+            }
+        }
+    }
+    output.into_iter().map(|row| String::from_utf8(row).unwrap_or_default()).collect()
 }
 
 /// Duration of the startup fade-in animation in seconds
@@ -224,7 +515,7 @@ fn header_chrome_color(base: Color, pos: f32, elapsed: f32, intensity: f32) -> C
 /// Set alignment on a line only if it doesn't already have one set.
 /// This allows markdown rendering to mark code blocks as left-aligned while
 /// other content inherits the default alignment (e.g., centered mode).
-fn align_if_unset(line: Line<'static>, align: Alignment) -> Line<'static> {
+pub(crate) fn align_if_unset(line: Line<'static>, align: Alignment) -> Line<'static> {
     if line.alignment.is_some() {
         line
     } else {
@@ -264,10 +555,10 @@ fn is_running_stable_release() -> bool {
         if let Ok(stable_path) = crate::build::stable_binary_path() {
             // Compare the symlink target (not canonical) to avoid
             // conflating target/release/jcode with the stable binary
-            let stable_target = std::fs::read_link(&stable_path)
-                .unwrap_or_else(|_| stable_path.clone());
-            let current_target = std::fs::read_link(&current_exe)
-                .unwrap_or_else(|_| current_exe.clone());
+            let stable_target =
+                std::fs::read_link(&stable_path).unwrap_or_else(|_| stable_path.clone());
+            let current_target =
+                std::fs::read_link(&current_exe).unwrap_or_else(|_| current_exe.clone());
             if stable_target == current_target {
                 return true;
             }
@@ -277,9 +568,7 @@ fn is_running_stable_release() -> bool {
                 std::fs::canonicalize(&current_exe),
             ) {
                 if stable_canon == current_canon
-                    && !current_exe
-                        .to_string_lossy()
-                        .contains("target/release")
+                    && !current_exe.to_string_lossy().contains("target/release")
                 {
                     return true;
                 }
@@ -1402,7 +1691,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         capture.render_order.push("prepare_messages".to_string());
     }
     let prep_start = Instant::now();
-    let mut prepared = prepare_messages(app, area.width);
+    let mut prepared = prepare_messages(app, area.width, area.height);
 
     // Check diagram display mode and get active diagrams
     let diagrams = super::mermaid::get_active_diagrams();
@@ -1453,7 +1742,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                         .render_order
                         .push("prepare_messages_rewrap".to_string());
                 }
-                prepared = prepare_messages(app, messages_width);
+                prepared = prepare_messages(app, messages_width, area.height);
             }
         }
     }
@@ -1742,13 +2031,14 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
 }
 
-fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
+fn prepare_messages(app: &dyn TuiState, width: u16, height: u16) -> PreparedMessages {
     // Build the top header (chroma animated name/model/badges)
     let mut all_header_lines = build_persistent_header(app, width);
     // Add the rest of the header (model ID, changelog, MCPs, etc.)
     all_header_lines.extend(build_header_lines(app, width));
     let header_prepared = wrap_lines(all_header_lines, &[], width);
-    let startup_prepared = if super::startup_animation_active(app) {
+    let startup_active = super::startup_animation_active(app);
+    let startup_prepared = if startup_active {
         wrap_lines(build_startup_animation_lines(app, width), &[], width)
     } else {
         PreparedMessages {
@@ -1771,28 +2061,82 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
         }
     };
 
-    let mut wrapped_lines = header_prepared.wrapped_lines;
-    let header_len = wrapped_lines.len();
-    let startup_len = startup_prepared.wrapped_lines.len();
-    wrapped_lines.extend(startup_prepared.wrapped_lines);
-    let body_len = body_prepared.wrapped_lines.len();
-    wrapped_lines.extend(body_prepared.wrapped_lines);
-    wrapped_lines.extend(streaming_prepared.wrapped_lines);
+    let mut wrapped_lines: Vec<Line<'static>>;
+    let mut wrapped_user_indices;
+    let mut image_regions;
 
-    let mut wrapped_user_indices = body_prepared.wrapped_user_indices;
-    for idx in &mut wrapped_user_indices {
-        *idx += header_len + startup_len;
-    }
+    if startup_active {
+        let elapsed = app.animation_elapsed();
+        let anim_duration = super::STARTUP_ANIMATION_WINDOW.as_secs_f32();
+        let fade_t = (elapsed / (anim_duration * 0.75)).clamp(0.0, 1.0);
 
-    // Combine image regions with adjusted indices
-    let mut image_regions = Vec::new();
-    for mut region in body_prepared.image_regions {
-        region.abs_line_idx += header_len + startup_len;
-        image_regions.push(region);
-    }
-    for mut region in streaming_prepared.image_regions {
-        region.abs_line_idx += header_len + startup_len + body_len;
-        image_regions.push(region);
+        let anim_lines = &startup_prepared.wrapped_lines;
+        let header_lines = &header_prepared.wrapped_lines;
+
+        let content_lines: Vec<Line<'static>> = if fade_t < 0.8 {
+            anim_lines.clone()
+        } else {
+            let blend = ((fade_t - 0.8) / 0.2).clamp(0.0, 1.0);
+            let dim = (blend * 255.0) as u8;
+            let mut blended = Vec::new();
+            for line in header_lines {
+                let spans: Vec<Span<'static>> = line
+                    .spans
+                    .iter()
+                    .map(|span| {
+                        let mut style = span.style;
+                        if let Some(Color::Rgb(r, g, b)) = style.fg {
+                            style.fg = Some(Color::Rgb(
+                                ((r as u16 * dim as u16) / 255) as u8,
+                                ((g as u16 * dim as u16) / 255) as u8,
+                                ((b as u16 * dim as u16) / 255) as u8,
+                            ));
+                        } else if style.fg.is_none() || matches!(style.fg, Some(Color::Reset)) {
+                            style.fg = Some(Color::Rgb(dim, dim, dim));
+                        }
+                        Span::styled(span.content.clone(), style)
+                    })
+                    .collect();
+                blended.push(Line::from(spans).alignment(line.alignment.unwrap_or(ratatui::layout::Alignment::Left)));
+            }
+            blended
+        };
+
+        let content_height = content_lines.len();
+        let input_reserve = 4;
+        let available = (height as usize).saturating_sub(input_reserve);
+        let pad_top = available.saturating_sub(content_height) / 2;
+
+        wrapped_lines = Vec::with_capacity(pad_top + content_height);
+        for _ in 0..pad_top {
+            wrapped_lines.push(Line::from(""));
+        }
+        wrapped_lines.extend(content_lines);
+        wrapped_user_indices = Vec::new();
+        image_regions = Vec::new();
+    } else {
+        wrapped_lines = header_prepared.wrapped_lines;
+        let header_len = wrapped_lines.len();
+        let startup_len = startup_prepared.wrapped_lines.len();
+        wrapped_lines.extend(startup_prepared.wrapped_lines);
+        let body_len = body_prepared.wrapped_lines.len();
+        wrapped_lines.extend(body_prepared.wrapped_lines);
+        wrapped_lines.extend(streaming_prepared.wrapped_lines);
+
+        wrapped_user_indices = body_prepared.wrapped_user_indices;
+        for idx in &mut wrapped_user_indices {
+            *idx += header_len + startup_len;
+        }
+
+        image_regions = Vec::new();
+        for mut region in body_prepared.image_regions {
+            region.abs_line_idx += header_len + startup_len;
+            image_regions.push(region);
+        }
+        for mut region in streaming_prepared.image_regions {
+            region.abs_line_idx += header_len + startup_len + body_len;
+            image_regions.push(region);
+        }
     }
 
     PreparedMessages {
@@ -1800,6 +2144,17 @@ fn prepare_messages(app: &dyn TuiState, width: u16) -> PreparedMessages {
         wrapped_user_indices,
         image_regions,
     }
+}
+
+fn startup_animation_variant() -> usize {
+    use std::sync::OnceLock;
+    static VARIANT: OnceLock<usize> = OnceLock::new();
+    *VARIANT.get_or_init(|| {
+        let mut hasher = DefaultHasher::new();
+        std::time::SystemTime::now().hash(&mut hasher);
+        std::process::id().hash(&mut hasher);
+        (std::hash::Hasher::finish(&hasher) % 7) as usize
+    })
 }
 
 fn build_startup_animation_lines(app: &dyn TuiState, term_width: u16) -> Vec<Line<'static>> {
@@ -1823,11 +2178,12 @@ fn build_startup_animation_lines(app: &dyn TuiState, term_width: u16) -> Vec<Lin
 
     let max_w = (term_width as usize).min(80);
     let max_h = max_w / 2;
-    let donut_lines = render_donut(elapsed, max_w, max_h);
+    let variant = startup_animation_variant();
+    let anim_lines = render_startup_animation(elapsed, max_w, max_h, variant);
 
     let mut lines = Vec::new();
     lines.push(Line::from(""));
-    for line in &donut_lines {
+    for line in &anim_lines {
         lines.push(Line::from(Span::styled(
             line.clone(),
             Style::default().fg(art_color),
@@ -2409,7 +2765,7 @@ where
     lines
 }
 
-fn render_assistant_message(
+pub(crate) fn render_assistant_message(
     msg: &DisplayMessage,
     width: u16,
     _show_diffs: bool,
@@ -2428,7 +2784,11 @@ fn render_assistant_message(
     lines
 }
 
-fn render_tool_message(msg: &DisplayMessage, width: u16, show_diffs: bool) -> Vec<Line<'static>> {
+pub(crate) fn render_tool_message(
+    msg: &DisplayMessage,
+    width: u16,
+    show_diffs: bool,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let Some(ref tc) = msg.tool_data else {
         return lines;
@@ -3336,7 +3696,11 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         let unavailable = route.map(|r| !r.available).unwrap_or(true);
 
         // Model column
-        let rec_suffix = if entry.recommended && !entry.is_current { " ★" } else { "" };
+        let rec_suffix = if entry.recommended && !entry.is_current {
+            " ★"
+        } else {
+            ""
+        };
         let display_name = format!("{}{}", entry.name, rec_suffix);
         let model_text = if display_name.len() > model_width {
             format!("{:<w$}", &display_name[..model_width], w = model_width)
@@ -4693,13 +5057,26 @@ fn get_tool_summary(tool: &ToolCall) -> String {
             .and_then(|v| v.as_str())
             .map(|p| {
                 let lines = p.lines().count();
-                let first_file = p.lines()
-                    .find(|l| l.starts_with("--- ") || l.starts_with("+++ ") || l.starts_with("*** "))
+                let first_file = p
+                    .lines()
+                    .find(|l| {
+                        l.starts_with("--- ") || l.starts_with("+++ ") || l.starts_with("*** ")
+                    })
                     .and_then(|l| {
-                        let rest = l.trim_start_matches("--- ").trim_start_matches("+++ ").trim_start_matches("*** ");
+                        let rest = l
+                            .trim_start_matches("--- ")
+                            .trim_start_matches("+++ ")
+                            .trim_start_matches("*** ");
                         let path = rest.split_whitespace().next().unwrap_or("");
-                        let path = path.strip_prefix("a/").or(path.strip_prefix("b/")).unwrap_or(path);
-                        if path.is_empty() || path == "/dev/null" { None } else { Some(path.to_string()) }
+                        let path = path
+                            .strip_prefix("a/")
+                            .or(path.strip_prefix("b/"))
+                            .unwrap_or(path);
+                        if path.is_empty() || path == "/dev/null" {
+                            None
+                        } else {
+                            Some(path.to_string())
+                        }
                     });
                 if let Some(file) = first_file {
                     format!("{} ({} lines)", file, lines)
@@ -4771,10 +5148,7 @@ fn get_tool_summary(tool: &ToolCall) -> String {
                     format!("remember: {}", truncate(content, 35))
                 }
                 "recall" => {
-                    let query = tool
-                        .input
-                        .get("query")
-                        .and_then(|v| v.as_str());
+                    let query = tool.input.get("query").and_then(|v| v.as_str());
                     if let Some(q) = query {
                         format!("recall '{}'", truncate(q, 35))
                     } else {
@@ -4790,28 +5164,16 @@ fn get_tool_summary(tool: &ToolCall) -> String {
                     format!("search '{}'", truncate(query, 35))
                 }
                 "forget" => {
-                    let id = tool
-                        .input
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
+                    let id = tool.input.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                     format!("forget {}", truncate(id, 30))
                 }
                 "tag" => {
-                    let id = tool
-                        .input
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
+                    let id = tool.input.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                     format!("tag {}", truncate(id, 30))
                 }
                 "link" => "link".to_string(),
                 "related" => {
-                    let id = tool
-                        .input
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
+                    let id = tool.input.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                     format!("related {}", truncate(id, 30))
                 }
                 _ => action.to_string(),
@@ -4878,7 +5240,12 @@ fn get_tool_summary(tool: &ToolCall) -> String {
         "conversation_search" => {
             if let Some(q) = tool.input.get("query").and_then(|v| v.as_str()) {
                 format!("'{}'", truncate(q, 40))
-            } else if tool.input.get("stats").and_then(|v| v.as_bool()).unwrap_or(false) {
+            } else if tool
+                .input
+                .get("stats")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 "stats".to_string()
             } else {
                 "history".to_string()
@@ -4896,11 +5263,7 @@ fn get_tool_summary(tool: &ToolCall) -> String {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let short_file = file.rsplit('/').next().unwrap_or(file);
-            let line = tool
-                .input
-                .get("line")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let line = tool.input.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
             format!("{} {}:{}", op, short_file, line)
         }
         "bg" => {
@@ -4909,10 +5272,7 @@ fn get_tool_summary(tool: &ToolCall) -> String {
                 .get("action")
                 .and_then(|v| v.as_str())
                 .unwrap_or("?");
-            let task_id = tool
-                .input
-                .get("task_id")
-                .and_then(|v| v.as_str());
+            let task_id = tool.input.get("task_id").and_then(|v| v.as_str());
             if let Some(id) = task_id {
                 format!("{} {}", action, truncate(id, 20))
             } else {
@@ -4920,14 +5280,15 @@ fn get_tool_summary(tool: &ToolCall) -> String {
             }
         }
         "batch" => {
-            let calls = tool
-                .input
-                .get("tool_calls")
-                .and_then(|v| v.as_array());
+            let calls = tool.input.get("tool_calls").and_then(|v| v.as_array());
             if let Some(calls) = calls {
                 let mut counts: Vec<(String, usize)> = Vec::new();
                 for call in calls {
-                    let name = call.get("tool").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                    let name = call
+                        .get("tool")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string();
                     if let Some(entry) = counts.iter_mut().find(|(n, _)| *n == name) {
                         entry.1 += 1;
                     } else {

@@ -163,7 +163,8 @@ impl Tool for MemoryTool {
                         });
                         let result = match self.manager.get_prompt_memories(limit) {
                             Some(memories) => {
-                                let count = memories.lines().filter(|l| l.starts_with("- ")).count();
+                                let count =
+                                    memories.lines().filter(|l| l.starts_with("- ")).count();
                                 memory::add_event(MemoryEventKind::ToolRecalled {
                                     query: "(recent)".into(),
                                     count,

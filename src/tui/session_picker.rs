@@ -8,11 +8,11 @@ use crate::message::{ContentBlock, Role};
 use crate::registry::{self, ServerInfo};
 use crate::session::{self, CrashedSessionsInfo, Session, SessionStatus};
 use crate::storage;
-use crate::tui::markdown;
+use crate::tui::{markdown, DisplayMessage};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
@@ -63,6 +63,8 @@ pub struct ServerGroup {
 pub struct PreviewMessage {
     pub role: String,
     pub content: String,
+    pub tool_calls: Vec<String>,
+    pub tool_data: Option<crate::message::ToolCall>,
     pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -169,45 +171,18 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
                     // Rough token estimate: ~4 chars per token
                     let estimated_tokens = total_chars / 4;
 
-                    // Extract preview messages (last 20)
-                    let messages_preview: Vec<PreviewMessage> = session
-                        .messages
-                        .iter()
+                    // Extract preview messages (last 20 rendered entries)
+                    let messages_preview: Vec<PreviewMessage> = session::render_messages(&session)
+                        .into_iter()
                         .rev()
                         .take(20)
                         .rev()
-                        .map(|msg| {
-                            let role = match msg.role {
-                                Role::User => "user",
-                                Role::Assistant => "assistant",
-                            };
-                            let content: String = msg
-                                .content
-                                .iter()
-                                .filter_map(|c| {
-                                    match c {
-                                        ContentBlock::Text { text, .. } => Some(text.clone()),
-                                        ContentBlock::ToolUse { name, .. } => {
-                                            Some(format!("[Tool: {}]", name))
-                                        }
-                                        ContentBlock::ToolResult { content, .. } => {
-                                            // Truncate tool results (safely for UTF-8)
-                                            if content.chars().count() > 200 {
-                                                Some(format!("{}...", safe_truncate(content, 200)))
-                                            } else {
-                                                Some(content.clone())
-                                            }
-                                        }
-                                        _ => None,
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("");
-                            PreviewMessage {
-                                role: role.to_string(),
-                                content,
-                                timestamp: None,
-                            }
+                        .map(|msg| PreviewMessage {
+                            role: msg.role,
+                            content: msg.content,
+                            tool_calls: msg.tool_calls,
+                            tool_data: msg.tool_data,
+                            timestamp: None,
                         })
                         .collect();
 
@@ -439,17 +414,10 @@ pub struct SessionPicker {
 impl SessionPicker {
     pub fn new(sessions: Vec<SessionInfo>) -> Self {
         let total_session_count = sessions.len();
-        let hidden_test_count = sessions
-            .iter()
-            .filter(|s| s.is_debug || s.is_canary)
-            .count();
+        let hidden_test_count = sessions.iter().filter(|s| s.is_debug).count();
 
-        // Filter out debug/canary sessions by default
-        let visible: Vec<SessionInfo> = sessions
-            .iter()
-            .filter(|s| !s.is_debug && !s.is_canary)
-            .cloned()
-            .collect();
+        // Filter out debug/test sessions by default (canary sessions are shown)
+        let visible: Vec<SessionInfo> = sessions.iter().filter(|s| !s.is_debug).cloned().collect();
 
         let items: Vec<PickerItem> = visible.iter().cloned().map(PickerItem::Session).collect();
         let item_to_session: Vec<Option<usize>> = (0..visible.len()).map(Some).collect();
@@ -500,10 +468,10 @@ impl SessionPicker {
             .iter()
             .flat_map(|g| g.sessions.iter())
             .chain(orphan_sessions.iter())
-            .filter(|s| s.is_debug || s.is_canary)
+            .filter(|s| s.is_debug)
             .count();
 
-        // Build filtered view (hide debug sessions by default)
+        // Build filtered view (hide debug/test sessions by default, canary sessions are shown)
         let mut items: Vec<PickerItem> = Vec::new();
         let mut all_sessions: Vec<SessionInfo> = Vec::new();
         let mut item_to_session: Vec<Option<usize>> = Vec::new();
@@ -511,11 +479,8 @@ impl SessionPicker {
         let server_count = server_groups.len();
 
         for group in &server_groups {
-            let visible_sessions: Vec<&SessionInfo> = group
-                .sessions
-                .iter()
-                .filter(|s| !s.is_debug && !s.is_canary)
-                .collect();
+            let visible_sessions: Vec<&SessionInfo> =
+                group.sessions.iter().filter(|s| !s.is_debug).collect();
 
             if visible_sessions.is_empty() {
                 continue;
@@ -537,10 +502,8 @@ impl SessionPicker {
             }
         }
 
-        let visible_orphans: Vec<&SessionInfo> = orphan_sessions
-            .iter()
-            .filter(|s| !s.is_debug && !s.is_canary)
-            .collect();
+        let visible_orphans: Vec<&SessionInfo> =
+            orphan_sessions.iter().filter(|s| !s.is_debug).collect();
         if !visible_orphans.is_empty() {
             items.push(PickerItem::OrphanHeader {
                 session_count: visible_orphans.len(),
@@ -706,7 +669,7 @@ impl SessionPicker {
         let query = self.search_query.clone();
 
         let session_visible = |s: &SessionInfo| -> bool {
-            (show_test || (!s.is_debug && !s.is_canary)) && Self::session_matches_search(s, &query)
+            (show_test || !s.is_debug) && Self::session_matches_search(s, &query)
         };
 
         self.items.clear();
@@ -781,7 +744,7 @@ impl SessionPicker {
                 .flat_map(|g| g.sessions.iter())
                 .chain(self.all_orphan_sessions.iter())
                 .chain(self.all_sessions.iter())
-                .filter(|s| (s.is_debug || s.is_canary) && Self::session_matches_search(s, &query))
+                .filter(|s| s.is_debug && Self::session_matches_search(s, &query))
                 .count()
         };
 
@@ -1080,10 +1043,10 @@ impl SessionPicker {
     fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
         // Colors matching the actual TUI
         const USER_COLOR: Color = Color::Rgb(138, 180, 248); // Soft blue
-        const USER_TEXT: Color = Color::Rgb(220, 220, 220); // Bright white for user text
-        const DIM_COLOR: Color = Color::Rgb(100, 100, 100); // Dim gray
-        const HEADER_ICON_COLOR: Color = Color::Rgb(110, 210, 255); // Cyan
-        const HEADER_SESSION_COLOR: Color = Color::Rgb(140, 220, 160); // Soft green
+        const USER_TEXT: Color = Color::Rgb(245, 245, 255); // Bright cool white
+        const DIM_COLOR: Color = Color::Rgb(80, 80, 80); // Dim gray
+        const HEADER_ICON_COLOR: Color = Color::Rgb(120, 210, 230); // Teal
+        const HEADER_SESSION_COLOR: Color = Color::Rgb(255, 255, 255); // White
 
         let Some(session) = self.selected_session().cloned() else {
             let block = Block::default()
@@ -1098,39 +1061,58 @@ impl SessionPicker {
             return;
         };
 
+        let centered = crate::config::config().display.centered;
+        let show_diffs = crate::config::config().display.show_diffs;
+        let align = if centered {
+            Alignment::Center
+        } else {
+            Alignment::Left
+        };
+        let preview_inner_width = area.width.saturating_sub(2);
+        let assistant_width = preview_inner_width.saturating_sub(2);
+
         // Build preview content
         let mut lines: Vec<Line> = Vec::new();
 
         // Header matching TUI style
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{} ", session.icon),
-                Style::default().fg(HEADER_ICON_COLOR),
-            ),
-            Span::styled(
-                session.short_name.clone(),
-                Style::default()
-                    .fg(HEADER_SESSION_COLOR)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  {}", format_time_ago(session.last_message_time)),
-                Style::default().fg(DIM_COLOR),
-            ),
-        ]));
+        lines.push(
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", session.icon),
+                    Style::default().fg(HEADER_ICON_COLOR),
+                ),
+                Span::styled(
+                    session.short_name.clone(),
+                    Style::default()
+                        .fg(HEADER_SESSION_COLOR)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {}", format_time_ago(session.last_message_time)),
+                    Style::default().fg(DIM_COLOR),
+                ),
+            ])
+            .alignment(align),
+        );
 
         // Title
-        lines.push(Line::from(vec![Span::styled(
-            session.title.clone(),
-            Style::default().fg(Color::White),
-        )]));
+        lines.push(
+            Line::from(vec![Span::styled(
+                session.title.clone(),
+                Style::default().fg(Color::White),
+            )])
+            .alignment(align),
+        );
 
         // Working directory
         if let Some(ref dir) = session.working_dir {
-            lines.push(Line::from(vec![Span::styled(
-                format!("📁 {}", dir),
-                Style::default().fg(DIM_COLOR),
-            )]));
+            lines.push(
+                Line::from(vec![Span::styled(
+                    format!("📁 {}", dir),
+                    Style::default().fg(DIM_COLOR),
+                )])
+                .alignment(align),
+            );
         }
 
         // Status line with details
@@ -1158,105 +1140,92 @@ impl SessionPicker {
                 ("❌", text, Color::Rgb(220, 100, 100))
             }
         };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{} ", status_icon),
-                Style::default().fg(status_color),
-            ),
-            Span::styled(status_text, Style::default().fg(status_color)),
-        ]));
+        lines.push(
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", status_icon),
+                    Style::default().fg(status_color),
+                ),
+                Span::styled(status_text, Style::default().fg(status_color)),
+            ])
+            .alignment(align),
+        );
 
         if self.crashed_session_ids.contains(&session.id) {
-            lines.push(Line::from(vec![Span::styled(
-                "Included in batch restore",
-                Style::default()
-                    .fg(Color::Rgb(255, 140, 140))
-                    .add_modifier(Modifier::BOLD),
-            )]));
+            lines.push(
+                Line::from(vec![Span::styled(
+                    "Included in batch restore",
+                    Style::default()
+                        .fg(Color::Rgb(255, 140, 140))
+                        .add_modifier(Modifier::BOLD),
+                )])
+                .alignment(align),
+            );
         }
 
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![Span::styled(
-            "─".repeat(area.width.saturating_sub(4) as usize),
-            Style::default().fg(Color::Rgb(60, 60, 60)),
-        )]));
-        lines.push(Line::from(""));
+        lines.push(Line::from("").alignment(align));
+        lines.push(
+            Line::from(vec![Span::styled(
+                "─".repeat(area.width.saturating_sub(4) as usize),
+                Style::default().fg(Color::Rgb(60, 60, 60)),
+            )])
+            .alignment(align),
+        );
+        lines.push(Line::from("").alignment(align));
 
         // Messages preview - styled like the actual TUI
         let mut prompt_num = 0;
+        let mut rendered_messages = 0usize;
         for msg in &session.messages_preview {
-            // Truncate long messages for preview
-            let content = if msg.content.chars().count() > 800 {
-                format!("{}...", safe_truncate(&msg.content, 797))
-            } else {
-                msg.content.clone()
+            if msg.content.trim().is_empty() {
+                continue;
+            }
+
+            if !lines.is_empty() && msg.role != "tool" && msg.role != "meta" {
+                lines.push(Line::from("").alignment(align));
+            }
+
+            let display_msg = DisplayMessage {
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+                tool_calls: msg.tool_calls.clone(),
+                duration_secs: None,
+                title: None,
+                tool_data: msg.tool_data.clone(),
             };
-
-            // Skip empty messages and tool results
-            if content.trim().is_empty() {
-                continue;
-            }
-
-            // Skip tool-related content (starts with [Tool:)
-            if content.starts_with("[Tool:") {
-                continue;
-            }
 
             match msg.role.as_str() {
                 "user" => {
                     prompt_num += 1;
-                    // User messages: number + "› " + content (like TUI)
-                    let first_line = content.lines().next().unwrap_or("");
-                    let max_width = (area.width as usize).saturating_sub(8);
-                    let display = if first_line.chars().count() > max_width {
-                        format!(
-                            "{}...",
-                            safe_truncate(first_line, max_width.saturating_sub(3))
-                        )
-                    } else {
-                        first_line.to_string()
-                    };
-
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("{}", prompt_num), Style::default().fg(USER_COLOR)),
-                        Span::styled("› ", Style::default().fg(USER_COLOR)),
-                        Span::styled(display, Style::default().fg(USER_TEXT)),
-                    ]));
-
-                    // Show additional lines if any (indented)
-                    for line in content.lines().skip(1).take(3) {
-                        let display = if line.chars().count() > max_width {
-                            format!("{}...", safe_truncate(line, max_width.saturating_sub(3)))
-                        } else {
-                            line.to_string()
-                        };
-                        lines.push(Line::from(vec![
-                            Span::styled("  ", Style::default()),
-                            Span::styled(display, Style::default().fg(USER_TEXT)),
-                        ]));
-                    }
-                    if content.lines().count() > 4 {
-                        lines.push(Line::from(vec![
-                            Span::styled("  ", Style::default()),
-                            Span::styled("...", Style::default().fg(DIM_COLOR)),
-                        ]));
-                    }
-                    lines.push(Line::from("")); // Spacing after user message
+                    lines.push(
+                        Line::from(vec![
+                            Span::styled(
+                                format!("{}", prompt_num),
+                                Style::default().fg(USER_COLOR),
+                            ),
+                            Span::styled("› ", Style::default().fg(USER_COLOR)),
+                            Span::styled(display_msg.content, Style::default().fg(USER_TEXT)),
+                        ])
+                        .alignment(align),
+                    );
+                    rendered_messages += 1;
                 }
                 "assistant" => {
-                    // AI messages: use actual markdown renderer
-                    let max_width = (area.width as usize).saturating_sub(4);
-                    let md_lines = markdown::render_markdown_with_width(&content, Some(max_width));
-                    let mut sanitized = Vec::new();
+                    let md_lines =
+                        super::ui::render_assistant_message(&display_msg, assistant_width, false);
                     let mut skip_mermaid_blank = false;
 
                     for line in md_lines {
                         if super::mermaid::parse_image_placeholder(&line).is_some() {
-                            sanitized.push(Line::from(vec![Span::styled(
-                                "[mermaid diagram]",
-                                Style::default().fg(DIM_COLOR),
-                            )]));
+                            lines.push(
+                                Line::from(vec![Span::styled(
+                                    "[mermaid diagram]",
+                                    Style::default().fg(DIM_COLOR),
+                                )])
+                                .alignment(align),
+                            );
                             skip_mermaid_blank = true;
+                            rendered_messages += 1;
                             continue;
                         }
 
@@ -1268,30 +1237,100 @@ impl SessionPicker {
                         }
 
                         skip_mermaid_blank = false;
-                        sanitized.push(line);
+                        lines.push(super::ui::align_if_unset(line, align));
+                        rendered_messages += 1;
                     }
-
-                    // Take first 12 lines of rendered markdown
-                    let truncated = sanitized.len() > 12;
-                    let preview_lines = sanitized.into_iter().take(12).collect::<Vec<_>>();
-                    lines.extend(preview_lines);
-                    if truncated {
-                        lines.push(Line::from(vec![Span::styled(
-                            "...",
-                            Style::default().fg(DIM_COLOR),
-                        )]));
-                    }
-                    lines.push(Line::from("")); // Spacing after assistant message
                 }
-                _ => {}
+                "tool" => {
+                    let tool_lines = super::ui::render_tool_message(
+                        &display_msg,
+                        preview_inner_width,
+                        show_diffs,
+                    );
+                    for line in tool_lines {
+                        lines.push(super::ui::align_if_unset(line, align));
+                        rendered_messages += 1;
+                    }
+                }
+                "meta" => {
+                    lines.push(
+                        Line::from(vec![Span::styled(
+                            msg.content.clone(),
+                            Style::default().fg(DIM_COLOR),
+                        )])
+                        .alignment(align),
+                    );
+                    rendered_messages += 1;
+                }
+                "system" => {
+                    let should_render_markdown = msg.content.contains('\n')
+                        || msg.content.contains("```")
+                        || msg.content.contains("# ")
+                        || msg.content.contains("- ");
+
+                    if should_render_markdown {
+                        let md_lines = markdown::render_markdown_with_width(
+                            &msg.content,
+                            Some(assistant_width as usize),
+                        );
+                        for line in md_lines {
+                            lines.push(super::ui::align_if_unset(line, align));
+                            rendered_messages += 1;
+                        }
+                    } else {
+                        lines.push(
+                            Line::from(vec![Span::styled(
+                                msg.content.clone(),
+                                Style::default()
+                                    .fg(Color::Rgb(186, 139, 255))
+                                    .add_modifier(Modifier::ITALIC),
+                            )])
+                            .alignment(align),
+                        );
+                        rendered_messages += 1;
+                    }
+                }
+                "usage" => {
+                    lines.push(
+                        Line::from(vec![Span::styled(
+                            msg.content.clone(),
+                            Style::default().fg(DIM_COLOR),
+                        )])
+                        .alignment(align),
+                    );
+                    rendered_messages += 1;
+                }
+                "error" => {
+                    lines.push(
+                        Line::from(vec![
+                            Span::styled("✗ ", Style::default().fg(Color::Red)),
+                            Span::styled(msg.content.clone(), Style::default().fg(Color::Red)),
+                        ])
+                        .alignment(align),
+                    );
+                    rendered_messages += 1;
+                }
+                _ => {
+                    lines.push(
+                        Line::from(vec![Span::styled(
+                            msg.content.clone(),
+                            Style::default().fg(Color::White),
+                        )])
+                        .alignment(align),
+                    );
+                    rendered_messages += 1;
+                }
             }
         }
 
-        if session.messages_preview.is_empty() {
-            lines.push(Line::from(vec![Span::styled(
-                "(empty session)",
-                Style::default().fg(DIM_COLOR),
-            )]));
+        if rendered_messages == 0 {
+            lines.push(
+                Line::from(vec![Span::styled(
+                    "(empty session)",
+                    Style::default().fg(DIM_COLOR),
+                )])
+                .alignment(align),
+            );
         }
 
         let block = Block::default()
@@ -1301,7 +1340,7 @@ impl SessionPicker {
             .border_style(Style::default().fg(Color::Rgb(70, 70, 70)));
 
         // Pre-wrap preview lines to keep rendering and scroll bounds aligned.
-        let preview_width = area.width.saturating_sub(2) as usize;
+        let preview_width = preview_inner_width as usize;
         let lines = if preview_width > 0 {
             markdown::wrap_lines(lines, preview_width)
         } else {
@@ -1681,11 +1720,15 @@ mod tests {
             PreviewMessage {
                 role: "user".to_string(),
                 content: "hello".to_string(),
+                tool_calls: Vec::new(),
+                tool_data: None,
                 timestamp: None,
             },
             PreviewMessage {
                 role: "assistant".to_string(),
                 content: "world".to_string(),
+                tool_calls: Vec::new(),
+                tool_data: None,
                 timestamp: None,
             },
         ];
@@ -1751,7 +1794,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_grouped_hides_debug_and_canary_by_default() {
+    fn test_new_grouped_hides_debug_by_default() {
         let normal = make_session("session_normal", "normal", false, SessionStatus::Closed);
         let debug = make_session("session_debug", "debug", true, SessionStatus::Closed);
         let canary = make_session_with_flags(
@@ -1782,9 +1825,10 @@ mod tests {
         let mut picker = SessionPicker::new_grouped(groups, vec![orphan_normal, orphan_debug]);
 
         assert!(!picker.show_test_sessions);
-        assert_eq!(picker.sessions.len(), 2);
-        assert!(picker.sessions.iter().all(|s| !s.is_debug && !s.is_canary));
-        assert_eq!(picker.hidden_test_count, 3);
+        // Canary sessions are now visible by default, only debug sessions are hidden
+        assert_eq!(picker.sessions.len(), 3); // normal + canary + orphan_normal
+        assert!(picker.sessions.iter().all(|s| !s.is_debug));
+        assert_eq!(picker.hidden_test_count, 2); // debug + orphan_debug
 
         picker.toggle_test_sessions();
         assert!(picker.show_test_sessions);
