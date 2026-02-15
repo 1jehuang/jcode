@@ -2372,22 +2372,29 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
     let hash = build::current_git_hash(&repo_dir)?;
     let binary_path = target_binary.clone();
 
-    // On fresh start (not resume), set current build as rollback safety net
-    // This does NOT touch the stable/release symlink (which tracks GitHub releases)
+    // On fresh start (not resume), set current build as rollback safety net —
+    // but only if no self-dev server is already running (to avoid clobbering
+    // manifest state that other sessions depend on).
     if is_fresh_start {
-        eprintln!("Setting {} as rollback safety net...", hash);
+        let selfdev_socket = std::path::Path::new(SELFDEV_SOCKET);
+        let server_already_running = selfdev_socket.exists()
+            && tokio::net::UnixStream::connect(SELFDEV_SOCKET)
+                .await
+                .is_ok();
 
-        // Install this version and set as rollback target
-        build::install_version(&repo_dir, &hash)?;
-        build::update_rollback_symlink(&hash)?;
+        if !server_already_running {
+            eprintln!("Setting {} as rollback safety net...", hash);
 
-        // Update manifest - clear any old canary
-        let mut manifest = build::BuildManifest::load()?;
-        manifest.stable = Some(hash.clone());
-        manifest.canary = None;
-        manifest.canary_session = None;
-        manifest.canary_status = None;
-        manifest.save()?;
+            build::install_version(&repo_dir, &hash)?;
+            build::update_rollback_symlink(&hash)?;
+
+            let mut manifest = build::BuildManifest::load()?;
+            manifest.stable = Some(hash.clone());
+            manifest.canary = None;
+            manifest.canary_session = None;
+            manifest.canary_status = None;
+            manifest.save()?;
+        }
     }
 
     // Launch wrapper process
@@ -2488,54 +2495,29 @@ async fn run_canary_wrapper(
         }
         eprintln!("Self-dev server ready on {}", socket_path);
     } else {
-        // Server is running - compare git hashes to detect version mismatch
+        // Server is already running - just connect to it.
+        // Don't force a server restart on version mismatch: that would kill
+        // all other connected sessions. The client/server protocol is
+        // compatible across versions; explicit `/reload` can be used when a
+        // server restart is actually desired.
         let hash_path = format!("{}.hash", socket_path);
         let server_hash = std::fs::read_to_string(&hash_path).unwrap_or_default();
 
+        let server_ver = if server_hash.is_empty() {
+            "unknown version"
+        } else {
+            server_hash.trim()
+        };
+
         if !server_hash.is_empty() && server_hash.trim() != current_hash {
             eprintln!(
-                "Server hash {} != current {}, reloading...",
-                server_hash.trim(),
-                current_hash
+                "Connecting to existing self-dev server ({}) on {} (client built from {})",
+                server_ver, socket_path, current_hash
             );
-
-            // Install version and update canary symlink for the reload
-            if let Some(repo_dir) = build::get_repo_dir() {
-                let _ = build::install_version(&repo_dir, current_hash);
-                let _ = build::update_canary_symlink(current_hash);
-            }
-
-            // Write rebuild signal to trigger server restart
-            if let Ok(jcode_dir) = storage::jcode_dir() {
-                let signal_path = jcode_dir.join("rebuild-signal");
-                let _ = std::fs::write(&signal_path, current_hash);
-
-                // Wait for server to restart (socket will briefly disconnect)
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-                // Wait for server to come back up
-                let start = std::time::Instant::now();
-                loop {
-                    if start.elapsed() > std::time::Duration::from_secs(30) {
-                        eprintln!("Warning: Server reload timed out, continuing anyway");
-                        break;
-                    }
-                    if is_server_alive(&socket_path).await {
-                        eprintln!("Server reloaded with {}", current_hash);
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-            }
         } else {
             eprintln!(
                 "Connecting to existing self-dev server ({}) on {}...",
-                if server_hash.is_empty() {
-                    "unknown version"
-                } else {
-                    server_hash.trim()
-                },
-                socket_path
+                server_ver, socket_path
             );
         }
     }
