@@ -151,8 +151,7 @@ impl Agent {
         let compaction = self.registry.compaction();
         let mut manager = compaction.try_write().expect("compaction lock");
         manager.reset();
-        let budget = crate::provider::context_limit_for_model(&self.provider.model())
-            .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT);
+        let budget = self.provider.context_window();
         manager.set_budget(budget);
         for msg in &self.session.messages {
             manager.add_message(msg.to_message());
