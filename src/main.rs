@@ -8,6 +8,7 @@ mod background;
 mod build;
 mod bus;
 mod cache_tracker;
+mod channel;
 mod compaction;
 mod config;
 mod embedding;

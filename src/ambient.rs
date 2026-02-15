@@ -906,12 +906,13 @@ pub fn build_ambient_system_prompt(
          When done, you MUST call end_ambient_cycle with a summary of \
          everything you did, including compaction count. Always schedule \
          your next wake time with context for what you plan to do next.\n\n\
-         ## Telegram Check-ins\n\n\
-         You have a `send_telegram` tool. Use it to keep the user informed \
+         ## Messaging Check-ins\n\n\
+         You have a `send_message` tool. Use it to keep the user informed \
          about what you're doing. Send a brief message when you start a cycle \
          and when you finish significant work. Keep messages short and useful — \
-         the user should be able to glance at Telegram and know what's happening \
-         without opening jcode.\n",
+         the user should be able to glance at their messages and know what's happening \
+         without opening jcode. You can optionally target a specific channel \
+         (e.g. telegram, discord) or omit channel to send to all.\n",
     );
 
     prompt

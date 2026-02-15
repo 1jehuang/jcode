@@ -496,8 +496,8 @@ impl Registry {
         .await;
 
         self.register(
-            "send_telegram".to_string(),
-            Arc::new(ambient::SendTelegramTool::new()) as Arc<dyn Tool>,
+            "send_message".to_string(),
+            Arc::new(ambient::SendChannelMessageTool::new()) as Arc<dyn Tool>,
         )
         .await;
     }
