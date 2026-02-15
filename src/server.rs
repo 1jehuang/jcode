@@ -17,6 +17,7 @@ use crate::session::Session;
 use crate::tool::Registry;
 use anyhow::Result;
 use futures::future::try_join_all;
+use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1479,8 +1480,17 @@ async fn handle_client(
             done = processing_done_rx.recv() => {
                 if let Some((done_id, result)) = done {
                     if Some(done_id) != processing_message_id {
+                        crate::logging::warn(&format!(
+                            "Done event id={} doesn't match processing_message_id={:?}, dropping",
+                            done_id, processing_message_id
+                        ));
                         continue;
                     }
+                    crate::logging::info(&format!(
+                        "Processing done for message id={}, result={}",
+                        done_id,
+                        if result.is_ok() { "ok" } else { "err" }
+                    ));
                     processing_message_id = None;
                     processing_task = None;
                     client_is_processing = false;
@@ -1600,8 +1610,40 @@ async fn handle_client(
                 let agent = Arc::clone(&agent);
                 let tx = client_event_tx.clone();
                 let done_tx = processing_done_tx.clone();
+                crate::logging::info(&format!("Processing message id={} spawning task", id));
                 processing_task = Some(tokio::spawn(async move {
-                    let result = process_message_streaming_mpsc(agent, &content, tx).await;
+                    let result = match std::panic::AssertUnwindSafe(
+                        process_message_streaming_mpsc(agent, &content, tx),
+                    )
+                    .catch_unwind()
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(panic_payload) => {
+                            let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                                s.to_string()
+                            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                                s.clone()
+                            } else {
+                                "unknown panic".to_string()
+                            };
+                            crate::logging::error(&format!(
+                                "Processing task PANICKED for message id={}: {}",
+                                id, msg
+                            ));
+                            Err(anyhow::anyhow!("Processing task panicked: {}", msg))
+                        }
+                    };
+                    match &result {
+                        Ok(()) => crate::logging::info(&format!(
+                            "Processing task completed OK for message id={}",
+                            id
+                        )),
+                        Err(e) => crate::logging::warn(&format!(
+                            "Processing task completed with error for message id={}: {}",
+                            id, e
+                        )),
+                    }
                     let _ = done_tx.send((id, result));
                 }));
             }

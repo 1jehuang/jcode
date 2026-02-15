@@ -4145,12 +4145,47 @@ impl App {
                 false
             }
             ServerEvent::Done { id } => {
+                crate::logging::info(&format!(
+                    "Client received Done id={}, current_message_id={:?}",
+                    id, self.current_message_id
+                ));
                 if self.current_message_id == Some(id) {
                     if let Some(chunk) = self.stream_buffer.flush() {
                         self.streaming_text.push_str(&chunk);
                     }
                     if let Some(start) = self.streaming_tps_start.take() {
                         self.streaming_tps_elapsed += start.elapsed();
+                    }
+                    if !self.streaming_text.is_empty() {
+                        let duration = self.processing_started.map(|s| s.elapsed().as_secs_f32());
+                        let content = self.take_streaming_text();
+                        self.push_display_message(DisplayMessage {
+                            role: "assistant".to_string(),
+                            content,
+                            tool_calls: vec![],
+                            duration_secs: duration,
+                            title: None,
+                            tool_data: None,
+                        });
+                        self.push_turn_footer(duration);
+                    }
+                    crate::tui::mermaid::clear_streaming_preview_diagram();
+                    self.is_processing = false;
+                    self.status = ProcessingStatus::Idle;
+                    self.processing_started = None;
+                    self.streaming_tool_calls.clear();
+                    self.current_message_id = None;
+                    self.thought_line_inserted = false;
+                    self.thinking_prefix_emitted = false;
+                    self.thinking_buffer.clear();
+                    remote.clear_pending();
+                } else if self.is_processing {
+                    crate::logging::warn(&format!(
+                        "Done id={} doesn't match current_message_id={:?} but is_processing=true, forcing idle",
+                        id, self.current_message_id
+                    ));
+                    if let Some(chunk) = self.stream_buffer.flush() {
+                        self.streaming_text.push_str(&chunk);
                     }
                     if !self.streaming_text.is_empty() {
                         let duration = self.processing_started.map(|s| s.elapsed().as_secs_f32());
