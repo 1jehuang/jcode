@@ -36,6 +36,23 @@ fn main() {
 
     let dirty = output.map(|o| !o.stdout.is_empty()).unwrap_or(false);
 
+    // Get git tag (e.g., "v0.1.2" if HEAD is tagged, or "v0.1.2-3-gabc1234" if ahead)
+    let output = Command::new("git")
+        .args(["describe", "--tags", "--always"])
+        .output()
+        .ok();
+
+    let git_tag = output
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout).ok()
+            } else {
+                None
+            }
+        })
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
     // Get recent commit messages (last 20 commits, with short hash for tracking "last seen")
     // Format: "hash:subject" per line so runtime can filter to only new-since-last-seen
     let output = Command::new("git")
@@ -67,6 +84,7 @@ fn main() {
     println!("cargo:rustc-env=JCODE_BUILD_TIME={}", build_time);
     println!("cargo:rustc-env=JCODE_VERSION={}", version);
     println!("cargo:rustc-env=JCODE_BUILD_NUMBER={}", build_number);
+    println!("cargo:rustc-env=JCODE_GIT_TAG={}", git_tag);
     println!("cargo:rustc-env=JCODE_CHANGELOG={}", changelog);
 
     // Re-run if git HEAD changes

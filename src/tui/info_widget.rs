@@ -585,7 +585,11 @@ pub enum MemoryEventKind {
     /// Error occurred
     Error { message: String },
     /// Agent stored a memory via tool
-    ToolRemembered { content: String, scope: String, category: String },
+    ToolRemembered {
+        content: String,
+        scope: String,
+        category: String,
+    },
     /// Agent recalled/searched memories via tool
     ToolRecalled { query: String, count: usize },
     /// Agent forgot a memory via tool
@@ -2102,17 +2106,11 @@ fn format_memory_event(event: &MemoryEvent, max_width: usize) -> (&'static str, 
             ("🗑\u{fe0f}", msg, Color::Rgb(255, 170, 100))
         }
         MemoryEventKind::ToolTagged { id, tags } => {
-            let msg = truncate_smart(
-                &format!("{} +{}", id, tags),
-                max_width.saturating_sub(2),
-            );
+            let msg = truncate_smart(&format!("{} +{}", id, tags), max_width.saturating_sub(2));
             ("🏷\u{fe0f}", msg, Color::Rgb(140, 200, 255))
         }
         MemoryEventKind::ToolLinked { from, to } => {
-            let msg = truncate_smart(
-                &format!("{} → {}", from, to),
-                max_width.saturating_sub(2),
-            );
+            let msg = truncate_smart(&format!("{} → {}", from, to), max_width.saturating_sub(2));
             ("🔗", msg, Color::Rgb(200, 180, 255))
         }
         MemoryEventKind::ToolListed { count } => (
