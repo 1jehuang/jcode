@@ -84,6 +84,7 @@ impl StoredMessage {
         Message {
             role: self.role.clone(),
             content: self.content.clone(),
+            timestamp: None,
         }
     }
 

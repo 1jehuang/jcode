@@ -226,6 +226,8 @@ pub enum WidgetKind {
     Diagrams,
     /// Ambient mode status
     AmbientMode,
+    /// Rotating tips/shortcuts
+    Tips,
 }
 
 impl WidgetKind {
@@ -242,6 +244,7 @@ impl WidgetKind {
             WidgetKind::AmbientMode => 7,
             WidgetKind::UsageLimits => 8,
             WidgetKind::ModelInfo => 9,
+            WidgetKind::Tips => 10,
         }
     }
 
@@ -258,6 +261,7 @@ impl WidgetKind {
             WidgetKind::AmbientMode => Side::Left,
             WidgetKind::UsageLimits => Side::Left,
             WidgetKind::ModelInfo => Side::Left,
+            WidgetKind::Tips => Side::Left,
         }
     }
 
@@ -274,6 +278,7 @@ impl WidgetKind {
             WidgetKind::AmbientMode => 3,
             WidgetKind::UsageLimits => 3,
             WidgetKind::ModelInfo => 3, // Model + usage bars
+            WidgetKind::Tips => 3,
         }
     }
 
@@ -290,6 +295,7 @@ impl WidgetKind {
             WidgetKind::AmbientMode,
             WidgetKind::UsageLimits,
             WidgetKind::ModelInfo,
+            WidgetKind::Tips,
         ]
     }
 
@@ -305,6 +311,7 @@ impl WidgetKind {
             WidgetKind::AmbientMode => "ambient",
             WidgetKind::UsageLimits => "usage",
             WidgetKind::ModelInfo => "model",
+            WidgetKind::Tips => "tips",
         }
     }
 }
@@ -768,6 +775,7 @@ impl InfoWidgetData {
             WidgetKind::AmbientMode => self.ambient_info.is_some(),
             WidgetKind::UsageLimits => false, // Combined into ModelInfo
             WidgetKind::ModelInfo => self.model.is_some(),
+            WidgetKind::Tips => true, // Always available
         }
     }
 
@@ -1280,6 +1288,11 @@ fn calculate_widget_height(
             }
             h
         }
+        WidgetKind::Tips => {
+            let tip = current_tip(inner_width);
+            let lines = wrap_tip_text(&tip.text, inner_width);
+            (1 + lines.len() as u16) // header + wrapped text
+        }
     };
 
     let total = content_height + border_height;
@@ -1685,6 +1698,7 @@ fn render_widget_content(
         WidgetKind::AmbientMode => render_ambient_widget(data, inner),
         WidgetKind::UsageLimits => render_usage_widget(data, inner),
         WidgetKind::ModelInfo => render_model_widget(data, inner),
+        WidgetKind::Tips => render_tips_widget(inner),
     }
 }
 
@@ -3364,6 +3378,116 @@ fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
     }
     let truncated = truncate_chars(s, max_chars.saturating_sub(1));
     format!("{}…", truncated)
+}
+
+// ---------------------------------------------------------------------------
+// Tips widget — rotating helpful tips and keyboard shortcuts
+// ---------------------------------------------------------------------------
+
+const TIP_CYCLE_SECONDS: u64 = 15;
+
+struct Tip {
+    text: String,
+}
+
+fn all_tips() -> Vec<Tip> {
+    [
+        "Ctrl+J / Ctrl+K to scroll chat up and down",
+        "Ctrl+U / Ctrl+D to scroll half a page at a time",
+        "/help to see all slash commands",
+        "/model to open the interactive model picker",
+        "/compact to manually compress context when running low",
+        "/clear to start a fresh conversation",
+        "Use todo_write to plan tasks — they show in the sidebar",
+        "Ctrl+C to interrupt a running response",
+        "Tab for autocomplete on slash commands",
+        "Use ```mermaid blocks to render diagrams inline",
+        "Memory persists across sessions — recall with the memory tool",
+        "@ to reference files when writing messages",
+        "Up/Down arrow to cycle through input history",
+    ]
+    .iter()
+    .map(|t| Tip {
+        text: t.to_string(),
+    })
+    .collect()
+}
+
+static TIP_STATE: Mutex<Option<(usize, Instant)>> = Mutex::new(None);
+
+fn current_tip(_max_width: usize) -> Tip {
+    let tips = all_tips();
+    let mut guard = TIP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    let (idx, _last) = guard.get_or_insert_with(|| (0, now));
+
+    let should_advance = now.duration_since(*_last).as_secs() >= TIP_CYCLE_SECONDS;
+    if should_advance {
+        *idx = (*idx + 1) % tips.len();
+        *_last = now;
+    }
+
+    let i = *idx % tips.len();
+    drop(guard);
+    Tip {
+        text: tips[i].text.clone(),
+    }
+}
+
+fn wrap_tip_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        if remaining.len() <= width {
+            lines.push(remaining.to_string());
+            break;
+        }
+        let split = remaining[..width]
+            .rfind(' ')
+            .unwrap_or(width);
+        let (line, rest) = remaining.split_at(split);
+        lines.push(line.to_string());
+        remaining = rest.trim_start();
+    }
+    lines
+}
+
+fn render_tips_widget(inner: Rect) -> Vec<Line<'static>> {
+    let w = inner.width.saturating_sub(3) as usize; // leave room for icon
+    let tip = current_tip(w);
+    let wrapped = wrap_tip_text(&tip.text, w);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Header line: icon + "Did you know?"
+    lines.push(Line::from(vec![
+        Span::styled(
+            "💡 ",
+            Style::default().fg(Color::Rgb(255, 210, 80)),
+        ),
+        Span::styled(
+            "Did you know?",
+            Style::default()
+                .fg(Color::Rgb(200, 200, 210))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Tip text lines
+    for line_text in wrapped {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                line_text,
+                Style::default().fg(Color::Rgb(160, 160, 175)),
+            ),
+        ]));
+    }
+
+    lines
 }
 
 #[cfg(test)]

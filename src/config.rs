@@ -124,6 +124,8 @@ pub struct FeatureConfig {
     pub memory: bool,
     /// Enable swarm coordination features (default: true)
     pub swarm: bool,
+    /// Inject timestamps into user messages and tool results sent to the model (default: true)
+    pub message_timestamps: bool,
 }
 
 impl Default for FeatureConfig {
@@ -131,6 +133,7 @@ impl Default for FeatureConfig {
         Self {
             memory: true,
             swarm: true,
+            message_timestamps: true,
         }
     }
 }

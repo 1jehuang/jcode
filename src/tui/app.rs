@@ -3584,6 +3584,7 @@ impl App {
                                             text: notification,
                                             cache_control: None,
                                         }],
+                                        timestamp: Some(chrono::Utc::now()),
                                     });
                                     self.session.add_message(Role::User, vec![ContentBlock::Text {
                                         text: format!("[Background task {} completed]", task.task_id),
@@ -7662,6 +7663,7 @@ impl App {
                     let inserted_message = Message {
                         role: Role::User,
                         content: vec![tool_block.clone()],
+                        timestamp: None,
                     };
                     let stored_message = crate::session::StoredMessage {
                         id: id::new_id("message"),
@@ -7726,6 +7728,7 @@ impl App {
             self.add_provider_message(Message {
                 role: role.clone(),
                 content: kept_blocks.clone(),
+                timestamp: None,
             });
             self.push_display_message(DisplayMessage {
                 role: match role {
@@ -7794,10 +7797,17 @@ impl App {
             }
 
             self.status = ProcessingStatus::Sending;
+            let stamped;
+            let send_messages = if crate::config::config().features.message_timestamps {
+                stamped = Message::with_timestamps(&provider_messages);
+                &stamped
+            } else {
+                &provider_messages
+            };
             let mut stream = self
                 .provider
                 .complete_split(
-                    &provider_messages,
+                    send_messages,
                     &tools,
                     &split_prompt.static_part,
                     &split_prompt.dynamic_part,
@@ -8103,6 +8113,7 @@ impl App {
                 self.add_provider_message(Message {
                     role: Role::Assistant,
                     content: content_blocks,
+                    timestamp: Some(chrono::Utc::now()),
                 });
                 let message_id = self.session.add_message(Role::Assistant, content_clone);
                 let _ = self.session.save();
@@ -8323,7 +8334,11 @@ impl App {
             // Clone data needed for the API call to avoid borrow issues
             // The future would hold references across the select! which conflicts with handle_key
             let provider = self.provider.clone();
-            let messages_clone = provider_messages.clone();
+            let messages_clone = if crate::config::config().features.message_timestamps {
+                Message::with_timestamps(&provider_messages)
+            } else {
+                provider_messages.clone()
+            };
             let session_id_clone = self.provider_session_id.clone();
             let static_part = split_prompt.static_part.clone();
             let dynamic_part = split_prompt.dynamic_part.clone();
@@ -8464,6 +8479,7 @@ impl App {
                                                 self.add_provider_message(Message {
                                                     role: Role::Assistant,
                                                     content: content_blocks,
+                                                    timestamp: Some(chrono::Utc::now()),
                                                 });
                                             }
                                             // Add display message for partial response
@@ -8825,6 +8841,7 @@ impl App {
                 self.add_provider_message(Message {
                     role: Role::Assistant,
                     content: content_blocks,
+                    timestamp: Some(chrono::Utc::now()),
                 });
                 let message_id = self.session.add_message(Role::Assistant, content_clone);
                 let _ = self.session.save();
@@ -8928,6 +8945,7 @@ impl App {
                             content: sdk_content,
                             is_error: if sdk_is_error { Some(true) } else { None },
                         }],
+                        timestamp: Some(chrono::Utc::now()),
                     });
                     self.session.add_message(
                         Role::User,
