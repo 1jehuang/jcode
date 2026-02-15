@@ -600,13 +600,11 @@ impl ClientApp {
                 self.streaming_text.push_str(&text);
             }
             ServerEvent::ToolStart { id, name } => {
-                if let Some(start) = self.streaming_tps_start.take() {
-                    self.streaming_tps_elapsed += start.elapsed();
+                if self.streaming_tps_start.is_none() {
+                    self.streaming_tps_start = Some(Instant::now());
                 }
                 if matches!(name.as_str(), "memory" | "remember") {
-                    crate::memory::set_state(
-                        crate::tui::info_widget::MemoryState::Embedding,
-                    );
+                    crate::memory::set_state(crate::tui::info_widget::MemoryState::Embedding);
                 }
                 self.current_tool_id = Some(id);
                 self.current_tool_name = Some(name);
@@ -617,6 +615,9 @@ impl ClientApp {
                 self.current_tool_input.push_str(&delta);
             }
             ServerEvent::ToolExec { id, name } => {
+                if let Some(start) = self.streaming_tps_start.take() {
+                    self.streaming_tps_elapsed += start.elapsed();
+                }
                 // Tool is about to execute - if it's edit/write, cache the file content
                 if show_diffs_enabled() && (name == "edit" || name == "write") {
                     if let Ok(input) =
