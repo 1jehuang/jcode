@@ -242,6 +242,16 @@ pub struct SafetyConfig {
     pub telegram_chat_id: Option<String>,
     /// Enable Telegram reply → agent directive feature (default: false)
     pub telegram_reply_enabled: bool,
+    /// Enable Discord notifications (default: false)
+    pub discord_enabled: bool,
+    /// Discord bot token
+    pub discord_bot_token: Option<String>,
+    /// Discord channel ID to send messages to
+    pub discord_channel_id: Option<String>,
+    /// Discord bot user ID (for filtering own messages in polling)
+    pub discord_bot_user_id: Option<String>,
+    /// Enable Discord reply → agent directive feature (default: false)
+    pub discord_reply_enabled: bool,
 }
 
 impl Default for SafetyConfig {
@@ -263,6 +273,11 @@ impl Default for SafetyConfig {
             telegram_bot_token: None,
             telegram_chat_id: None,
             telegram_reply_enabled: false,
+            discord_enabled: false,
+            discord_bot_token: None,
+            discord_channel_id: None,
+            discord_bot_user_id: None,
+            discord_reply_enabled: false,
         }
     }
 }
@@ -420,6 +435,21 @@ impl Config {
                 self.safety.telegram_reply_enabled = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_DISCORD_BOT_TOKEN") {
+            self.safety.discord_bot_token = Some(v);
+            self.safety.discord_enabled = true;
+        }
+        if let Ok(v) = std::env::var("JCODE_DISCORD_CHANNEL_ID") {
+            self.safety.discord_channel_id = Some(v);
+        }
+        if let Ok(v) = std::env::var("JCODE_DISCORD_BOT_USER_ID") {
+            self.safety.discord_bot_user_id = Some(v);
+        }
+        if let Ok(v) = std::env::var("JCODE_DISCORD_REPLY_ENABLED") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.safety.discord_reply_enabled = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_AMBIENT_VISIBLE") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.ambient.visible = parsed;
@@ -569,6 +599,13 @@ desktop_notifications = true
 # telegram_bot_token = ""  # From @BotFather (prefer JCODE_TELEGRAM_BOT_TOKEN env var)
 # telegram_chat_id = ""    # Your user/chat ID
 # telegram_reply_enabled = false  # Reply to bot messages to send directives
+
+# Discord notifications via Bot API (https://discord.com/developers)
+# discord_enabled = false
+# discord_bot_token = ""     # From Discord Developer Portal (prefer JCODE_DISCORD_BOT_TOKEN env var)
+# discord_channel_id = ""    # Channel ID to post in
+# discord_bot_user_id = ""   # Bot's user ID (for filtering own messages)
+# discord_reply_enabled = false  # Messages in channel become agent directives
 "#;
 
         std::fs::write(&path, default_content)?;
@@ -624,6 +661,8 @@ desktop_notifications = true
 - Email replies: {}
 - Telegram: {}
 - Telegram replies: {}
+- Discord: {}
+- Discord replies: {}
 
 *Edit the config file or set environment variables to customize.*
 *Environment variables (e.g., `JCODE_SCROLL_UP_KEY`) override file settings.*"#,
@@ -699,6 +738,19 @@ desktop_notifications = true
                 "disabled"
             },
             if self.safety.telegram_reply_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            if self.safety.discord_enabled {
+                self.safety
+                    .discord_channel_id
+                    .as_deref()
+                    .unwrap_or("enabled (no channel_id)")
+            } else {
+                "disabled"
+            },
+            if self.safety.discord_reply_enabled {
                 "enabled"
             } else {
                 "disabled"

@@ -669,28 +669,27 @@ fn parse_priority(s: Option<&str>) -> Priority {
 }
 
 // ---------------------------------------------------------------------------
-// SendTelegramTool
+// SendChannelMessageTool — send messages via any configured channel
 // ---------------------------------------------------------------------------
 
-pub struct SendTelegramTool;
+pub struct SendChannelMessageTool;
 
-impl SendTelegramTool {
+impl SendChannelMessageTool {
     pub fn new() -> Self {
         Self
     }
 }
 
 #[async_trait]
-impl Tool for SendTelegramTool {
+impl Tool for SendChannelMessageTool {
     fn name(&self) -> &str {
-        "send_telegram"
+        "send_message"
     }
 
     fn description(&self) -> &str {
-        "Send a message to the user via Telegram. Use this to give status updates \
-         on what you're doing during ambient cycles. Keep messages concise and \
-         informative. Use Markdown formatting (bold with *text*, italic with _text_, \
-         code with `text`)."
+        "Send a message to the user via configured messaging channels (Telegram, Discord, etc.). \
+         Use this to give status updates on what you're doing during ambient cycles. \
+         Keep messages concise and informative. If no channel is specified, sends to all enabled channels."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -699,7 +698,11 @@ impl Tool for SendTelegramTool {
             "properties": {
                 "message": {
                     "type": "string",
-                    "description": "The message text to send (Markdown supported)"
+                    "description": "The message text to send"
+                },
+                "channel": {
+                    "type": "string",
+                    "description": "Optional: specific channel to send to (e.g. 'telegram', 'discord'). Omit to send to all."
                 }
             },
             "required": ["message"]
@@ -716,37 +719,51 @@ impl Tool for SendTelegramTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing required parameter: message"))?;
 
+        let channel_name = args.get("channel").and_then(|v| v.as_str());
+
         let config = crate::config::config();
-        if !config.safety.telegram_enabled {
-            return Ok(ToolOutput::new(
-                "Telegram notifications are not enabled in config.",
-            ));
-        }
+        let registry = crate::channel::ChannelRegistry::from_config(&config.safety);
 
-        let token = match config.safety.telegram_bot_token.as_ref() {
-            Some(t) => t.clone(),
-            None => {
+        if let Some(name) = channel_name {
+            match registry.find_by_name(name) {
+                Some(ch) => match ch.send(message).await {
+                    Ok(()) => Ok(ToolOutput::new(format!("Message sent via {}.", name))),
+                    Err(e) => Ok(ToolOutput::new(format!(
+                        "Failed to send via {}: {}",
+                        name, e
+                    ))),
+                },
+                None => {
+                    let available = registry.channel_names();
+                    Ok(ToolOutput::new(format!(
+                        "Channel '{}' not found. Available: {}",
+                        name,
+                        if available.is_empty() {
+                            "none configured".to_string()
+                        } else {
+                            available.join(", ")
+                        }
+                    )))
+                }
+            }
+        } else {
+            let channels = registry.send_enabled();
+            if channels.is_empty() {
                 return Ok(ToolOutput::new(
-                    "Telegram bot_token not configured.",
+                    "No messaging channels configured. Enable telegram or discord in config.",
                 ));
             }
-        };
-        let chat_id = match config.safety.telegram_chat_id.as_ref() {
-            Some(c) => c.clone(),
-            None => {
-                return Ok(ToolOutput::new(
-                    "Telegram chat_id not configured.",
-                ));
+            let mut results = Vec::new();
+            for ch in &channels {
+                match ch.send(message).await {
+                    Ok(()) => results.push(format!("✓ {}", ch.name())),
+                    Err(e) => results.push(format!("✗ {}: {}", ch.name(), e)),
+                }
             }
-        };
-
-        let client = reqwest::Client::new();
-        match crate::telegram::send_message(&client, &token, &chat_id, message).await {
-            Ok(()) => Ok(ToolOutput::new("Message sent to Telegram.")),
-            Err(e) => Ok(ToolOutput::new(format!(
-                "Failed to send Telegram message: {}",
-                e
-            ))),
+            Ok(ToolOutput::new(format!(
+                "Message sent: {}",
+                results.join(", ")
+            )))
         }
     }
 }

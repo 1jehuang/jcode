@@ -103,20 +103,22 @@ impl AmbientRunnerHandle {
         &self.inner.safety
     }
 
-    /// Inject a Telegram message into the active ambient cycle as a user message.
+    /// Inject a message from an external channel (Telegram, Discord, etc.)
+    /// into the active ambient cycle as a user message.
     /// If a cycle is running, the message goes in via soft interrupt (immediate).
     /// If no cycle is running, the message is saved as a directive and a cycle is triggered.
     /// Returns true if injected into active cycle, false if queued as directive.
-    pub async fn inject_telegram_message(&self, text: &str) -> bool {
+    pub async fn inject_message(&self, text: &str, source: &str) -> bool {
         let queue = self.inner.active_cycle_queue.read().await;
         if let Some(ref q) = *queue {
             if let Ok(mut q) = q.lock() {
                 q.push(crate::agent::SoftInterruptMessage {
-                    content: format!("[Telegram message from user]\n{}", text),
+                    content: format!("[{} message from user]\n{}", source, text),
                     urgent: false,
                 });
                 logging::info(&format!(
-                    "Telegram message injected into active ambient cycle: {}",
+                    "{} message injected into active ambient cycle: {}",
+                    source,
                     if text.len() > 60 { &text[..60] } else { text }
                 ));
                 return true;
@@ -125,9 +127,9 @@ impl AmbientRunnerHandle {
         drop(queue);
 
         // No active cycle — save as directive and trigger a wake
-        let source = format!("telegram_{}", chrono::Utc::now().timestamp());
-        if let Err(e) = ambient::add_directive(text.to_string(), source) {
-            logging::error(&format!("Failed to save Telegram directive: {}", e));
+        let source_id = format!("{}_{}", source, chrono::Utc::now().timestamp());
+        if let Err(e) = ambient::add_directive(text.to_string(), source_id) {
+            logging::error(&format!("Failed to save {} directive: {}", source, e));
         }
         self.trigger().await;
         false
@@ -295,18 +297,9 @@ impl AmbientRunnerHandle {
             logging::info("Ambient runner: IMAP reply poller spawned");
         }
 
-        // Spawn Telegram reply poller if enabled
-        if safety_config.telegram_reply_enabled
-            && safety_config.telegram_bot_token.is_some()
-            && safety_config.telegram_enabled
-        {
-            let tg_config = safety_config.clone();
-            let tg_runner = self.clone();
-            tokio::spawn(async move {
-                crate::notifications::telegram_reply_loop(tg_config, tg_runner).await;
-            });
-            logging::info("Ambient runner: Telegram reply poller spawned");
-        }
+        // Spawn reply pollers for all configured message channels (Telegram, Discord, etc.)
+        let channel_registry = crate::channel::ChannelRegistry::from_config(&safety_config);
+        channel_registry.spawn_reply_loops(&self);
 
         let amb_config = &config().ambient;
         let scheduler_config = AmbientSchedulerConfig {
