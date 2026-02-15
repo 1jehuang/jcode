@@ -12,6 +12,7 @@ use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::Stream;
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
@@ -134,6 +135,13 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Return the context window size (in tokens) for the current model.
+    /// Providers should override this to return accurate, dynamic values.
+    /// Falls back to hardcoded lookup if not overridden.
+    fn context_window(&self) -> usize {
+        context_limit_for_model(&self.model()).unwrap_or(DEFAULT_CONTEXT_LIMIT)
+    }
+
     /// Create a new provider instance with the same credentials/config and model,
     /// but independent mutable state (e.g., model selection).
     fn fork(&self) -> Arc<dyn Provider>;
@@ -200,16 +208,83 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
 /// Default context window size when model-specific data isn't known.
 pub const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
 
-/// Return the context window size in tokens for a given model, if known.
-pub fn context_limit_for_model(model: &str) -> Option<usize> {
-    let model = model.to_lowercase();
+/// Dynamic cache of model context window sizes, populated from API at startup.
+static CONTEXT_LIMIT_CACHE: std::sync::LazyLock<RwLock<HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
-    if model.starts_with("gpt-5.3-codex-spark") {
-        return Some(128_000);
+/// Look up a cached context limit for a model.
+fn get_cached_context_limit(model: &str) -> Option<usize> {
+    let cache = CONTEXT_LIMIT_CACHE.read().ok()?;
+    cache.get(model).copied()
+}
+
+/// Populate the context limit cache from API-provided model data.
+/// Called once at startup when OpenAI OAuth credentials are available.
+pub fn populate_context_limits(models: HashMap<String, usize>) {
+    if let Ok(mut cache) = CONTEXT_LIMIT_CACHE.write() {
+        for (model, limit) in models {
+            crate::logging::info(&format!(
+                "Context limit cache: {} = {}k",
+                model,
+                limit / 1000
+            ));
+            cache.insert(model, limit);
+        }
+    }
+}
+
+/// Fetch context window sizes from the Codex backend API.
+/// Returns a map of model slug -> context_window tokens.
+pub async fn fetch_openai_context_limits(
+    access_token: &str,
+) -> Result<HashMap<String, usize>> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://chatgpt.com/backend-api/codex/models?client_version=1.0.0")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "Failed to fetch model context limits: {}",
+            resp.status()
+        );
     }
 
-    if model.starts_with("gpt-5.3-codex") {
-        return Some(400_000);
+    let data: serde_json::Value = resp.json().await?;
+    let mut limits = HashMap::new();
+
+    if let Some(models) = data.get("models").and_then(|m| m.as_array()) {
+        for model in models {
+            if let (Some(slug), Some(ctx)) = (
+                model.get("slug").and_then(|s| s.as_str()),
+                model.get("context_window").and_then(|c| c.as_u64()),
+            ) {
+                limits.insert(slug.to_string(), ctx as usize);
+            }
+        }
+    }
+
+    Ok(limits)
+}
+
+/// Return the context window size in tokens for a given model, if known.
+///
+/// First checks the dynamic cache (populated from the Codex backend API at startup),
+/// then falls back to hardcoded defaults.
+pub fn context_limit_for_model(model: &str) -> Option<usize> {
+    // Check dynamic cache first (populated from API)
+    if let Some(limit) = get_cached_context_limit(model) {
+        return Some(limit);
+    }
+
+    // Hardcoded fallbacks
+    let model = model.to_lowercase();
+
+    // Spark variant has a smaller context window than the full codex model
+    if model.starts_with("gpt-5.3-codex-spark") {
+        return Some(128_000);
     }
 
     if model.starts_with("gpt-5.2-chat")
@@ -219,13 +294,9 @@ pub fn context_limit_for_model(model: &str) -> Option<usize> {
         return Some(128_000);
     }
 
-    if model.starts_with("gpt-5.2-pro")
-        || model.starts_with("gpt-5.2-codex")
-        || model.starts_with("gpt-5-codex")
-        || model.starts_with("gpt-5.2")
-        || model.starts_with("gpt-5")
-    {
-        return Some(400_000);
+    // Most GPT-5.x codex/reasoning models: 272k per Codex backend API
+    if model.starts_with("gpt-5") {
+        return Some(272_000);
     }
 
     if model.starts_with("claude-opus-4-6") || model.starts_with("claude-opus-4.6") {
@@ -345,7 +416,7 @@ impl MultiProvider {
             ActiveProvider::Claude
         };
 
-        Self {
+        let result = Self {
             claude,
             anthropic,
             openai,
@@ -355,7 +426,40 @@ impl MultiProvider {
             has_openai_creds,
             has_openrouter_creds,
             use_claude_cli,
+        };
+
+        // Spawn background fetch for dynamic context limits from Codex API
+        if has_openai_creds {
+            if let Ok(creds) = auth::codex::load_credentials() {
+                let token = creds.access_token.clone();
+                if !token.is_empty() {
+                    tokio::spawn(async move {
+                        match fetch_openai_context_limits(&token).await {
+                            Ok(limits) if !limits.is_empty() => {
+                                crate::logging::info(&format!(
+                                    "Fetched context limits for {} OpenAI models from API",
+                                    limits.len()
+                                ));
+                                populate_context_limits(limits);
+                            }
+                            Ok(_) => {
+                                crate::logging::info(
+                                    "Codex models API returned no models with context_window",
+                                );
+                            }
+                            Err(e) => {
+                                crate::logging::info(&format!(
+                                    "Failed to fetch context limits from Codex API: {}",
+                                    e
+                                ));
+                            }
+                        }
+                    });
+                }
+            }
         }
+
+        result
     }
 
     /// Create with explicit initial provider preference
@@ -897,6 +1001,30 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn context_window(&self) -> usize {
+        match self.active_provider() {
+            ActiveProvider::Claude => {
+                if let Some(ref anthropic) = self.anthropic {
+                    anthropic.context_window()
+                } else if let Some(ref claude) = self.claude {
+                    claude.context_window()
+                } else {
+                    DEFAULT_CONTEXT_LIMIT
+                }
+            }
+            ActiveProvider::OpenAI => self
+                .openai
+                .as_ref()
+                .map(|o| o.context_window())
+                .unwrap_or(DEFAULT_CONTEXT_LIMIT),
+            ActiveProvider::OpenRouter => self
+                .openrouter
+                .as_ref()
+                .map(|o| o.context_window())
+                .unwrap_or(DEFAULT_CONTEXT_LIMIT),
+        }
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         let current_model = self.model();
         let active = self.active_provider();
@@ -981,7 +1109,9 @@ mod tests {
             context_limit_for_model("gpt-5.3-codex-spark"),
             Some(128_000)
         );
-        assert_eq!(context_limit_for_model("gpt-5.3-codex"), Some(400_000));
+        assert_eq!(context_limit_for_model("gpt-5.3-codex"), Some(272_000));
+        assert_eq!(context_limit_for_model("gpt-5.2-codex"), Some(272_000));
+        assert_eq!(context_limit_for_model("gpt-5-codex"), Some(272_000));
     }
 
     #[test]
@@ -990,5 +1120,15 @@ mod tests {
             context_limit_for_model("claude-opus-4-6"),
             Some(200_000)
         );
+    }
+
+    #[test]
+    fn test_context_limit_dynamic_cache() {
+        populate_context_limits(
+            [("test-model-xyz".to_string(), 64_000)]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(context_limit_for_model("test-model-xyz"), Some(64_000));
     }
 }

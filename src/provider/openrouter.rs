@@ -1831,6 +1831,21 @@ impl Provider for OpenRouterProvider {
         true
     }
 
+    fn context_window(&self) -> usize {
+        let model_id = self.model();
+        // Try cached model data from OpenRouter API
+        let cache = self.models_cache.try_read();
+        if let Ok(cache) = cache {
+            if let Some(model) = cache.models.iter().find(|m| m.id == model_id) {
+                if let Some(ctx) = model.context_length {
+                    return ctx as usize;
+                }
+            }
+        }
+        crate::provider::context_limit_for_model(&model_id)
+            .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT)
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
             client: self.client.clone(),
