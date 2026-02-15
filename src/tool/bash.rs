@@ -93,17 +93,34 @@ impl Tool for BashTool {
         }
         let mut child = command.spawn()?;
 
-        let result = timeout(timeout_duration, async {
-            let status = child.wait().await?;
-            let mut stdout = String::new();
-            let mut stderr = String::new();
+        // Take stdout/stderr handles BEFORE waiting, to read them concurrently.
+        // Reading after wait() can deadlock if the pipe buffer fills up.
+        let stdout_handle = child.stdout.take();
+        let stderr_handle = child.stderr.take();
 
-            if let Some(mut out) = child.stdout.take() {
-                out.read_to_string(&mut stdout).await?;
-            }
-            if let Some(mut err) = child.stderr.take() {
-                err.read_to_string(&mut stderr).await?;
-            }
+        let result = timeout(timeout_duration, async {
+            let stdout_fut = async {
+                let mut buf = String::new();
+                if let Some(mut out) = stdout_handle {
+                    out.read_to_string(&mut buf).await?;
+                }
+                Ok::<_, anyhow::Error>(buf)
+            };
+            let stderr_fut = async {
+                let mut buf = String::new();
+                if let Some(mut err) = stderr_handle {
+                    err.read_to_string(&mut buf).await?;
+                }
+                Ok::<_, anyhow::Error>(buf)
+            };
+
+            // Read stdout, stderr, and wait for exit concurrently
+            let (stdout_res, stderr_res, status) =
+                tokio::join!(stdout_fut, stderr_fut, child.wait());
+
+            let stdout = stdout_res?;
+            let stderr = stderr_res?;
+            let status = status?;
 
             Ok::<_, anyhow::Error>((status, stdout, stderr))
         })
@@ -178,29 +195,48 @@ impl BashTool {
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to create output file: {}", e))?;
 
-                // Read stdout and stderr concurrently
+                // Read stdout and stderr truly concurrently using select!
+                // Sequential reads can deadlock if the unread pipe fills up.
                 let stdout = child.stdout.take();
                 let stderr = child.stderr.take();
 
-                let mut combined_output = String::new();
+                let mut stdout_lines = stdout.map(|s| BufReader::new(s).lines());
+                let mut stderr_lines = stderr.map(|s| BufReader::new(s).lines());
+                let mut stdout_done = stdout_lines.is_none();
+                let mut stderr_done = stderr_lines.is_none();
 
-                if let Some(stdout) = stdout {
-                    let mut reader = BufReader::new(stdout).lines();
-                    while let Ok(Some(line)) = reader.next_line().await {
-                        let line_with_newline = format!("{}\n", line);
-                        combined_output.push_str(&line_with_newline);
-                        file.write_all(line_with_newline.as_bytes()).await.ok();
-                        file.flush().await.ok();
-                    }
-                }
-
-                if let Some(stderr) = stderr {
-                    let mut reader = BufReader::new(stderr).lines();
-                    while let Ok(Some(line)) = reader.next_line().await {
-                        let line_with_newline = format!("[stderr] {}\n", line);
-                        combined_output.push_str(&line_with_newline);
-                        file.write_all(line_with_newline.as_bytes()).await.ok();
-                        file.flush().await.ok();
+                while !stdout_done || !stderr_done {
+                    tokio::select! {
+                        line = async {
+                            match stdout_lines.as_mut() {
+                                Some(r) => r.next_line().await,
+                                None => std::future::pending().await,
+                            }
+                        }, if !stdout_done => {
+                            match line {
+                                Ok(Some(line)) => {
+                                    let line_with_newline = format!("{}\n", line);
+                                    file.write_all(line_with_newline.as_bytes()).await.ok();
+                                    file.flush().await.ok();
+                                }
+                                _ => { stdout_done = true; }
+                            }
+                        }
+                        line = async {
+                            match stderr_lines.as_mut() {
+                                Some(r) => r.next_line().await,
+                                None => std::future::pending().await,
+                            }
+                        }, if !stderr_done => {
+                            match line {
+                                Ok(Some(line)) => {
+                                    let line_with_newline = format!("[stderr] {}\n", line);
+                                    file.write_all(line_with_newline.as_bytes()).await.ok();
+                                    file.flush().await.ok();
+                                }
+                                _ => { stderr_done = true; }
+                            }
+                        }
                     }
                 }
 
