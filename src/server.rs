@@ -8450,7 +8450,7 @@ fn do_server_reload() -> Result<()> {
     let err = ProcessCommand::new(&exe).arg("serve").exec();
 
     // exec() only returns on error
-    Err(anyhow::anyhow!("Failed to exec: {}", err))
+    Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
 }
 
 /// Server hot-reload with progress streaming to client
@@ -8580,7 +8580,7 @@ async fn do_server_reload_with_progress(
     let err = cmd.exec();
 
     // exec() only returns on error
-    Err(anyhow::anyhow!("Failed to exec: {}", err))
+    Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
 }
 
 fn provider_cli_arg(provider_name: &str) -> Option<String> {
@@ -8644,7 +8644,7 @@ async fn monitor_selfdev_signals() {
                         let err = ProcessCommand::new(&binary).arg("serve").exec();
 
                         // If we get here, exec failed
-                        crate::logging::error(&format!("Failed to exec into canary: {}", err));
+                        crate::logging::error(&format!("Failed to exec into canary {:?}: {}", binary, err));
                     }
                 }
                 // Fallback: just exit and let something else restart us
@@ -8668,7 +8668,7 @@ async fn monitor_selfdev_signals() {
 
                         let err = ProcessCommand::new(&binary).arg("serve").exec();
 
-                        crate::logging::error(&format!("Failed to exec into stable: {}", err));
+                        crate::logging::error(&format!("Failed to exec into stable {:?}: {}", binary, err));
                     }
                 }
                 std::process::exit(43);

@@ -916,7 +916,7 @@ fn hot_reload(session_id: &str) -> Result<()> {
                 .arg("--no-update")
                 .current_dir(cwd)
                 .exec();
-            return Err(anyhow::anyhow!("Failed to exec: {}", err));
+            return Err(anyhow::anyhow!("Failed to exec {:?}: {}", binary_path, err));
         } else {
             eprintln!(
                 "Warning: Migration binary not found at {:?}, falling back to local binary",
@@ -977,14 +977,34 @@ fn hot_reload(session_id: &str) -> Result<()> {
     }
 
     // Build command with --resume flag
-    let err = ProcessCommand::new(&exe)
-        .arg("--resume")
-        .arg(session_id)
-        .current_dir(cwd)
-        .exec();
+    // Retry on ENOENT in case binary is being replaced by a concurrent cargo build
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            if !exe.exists() {
+                continue;
+            }
+        }
+        let err = ProcessCommand::new(&exe)
+            .arg("--resume")
+            .arg(session_id)
+            .current_dir(&cwd)
+            .exec();
 
-    // exec() only returns on error
-    Err(anyhow::anyhow!("Failed to exec: {}", err))
+        if err.kind() == std::io::ErrorKind::NotFound && attempt < 2 {
+            crate::logging::warn(&format!(
+                "exec attempt {} failed (ENOENT) for {:?}, retrying...",
+                attempt + 1,
+                exe
+            ));
+            continue;
+        }
+        return Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err));
+    }
+    Err(anyhow::anyhow!(
+        "Failed to exec {:?}: binary not found after retries",
+        exe
+    ))
 }
 
 /// Hot-rebuild: pull, rebuild, test, and exec into new binary with session restore
@@ -1054,7 +1074,7 @@ fn hot_rebuild(session_id: &str) -> Result<()> {
         .exec();
 
     // exec() only returns on error
-    Err(anyhow::anyhow!("Failed to exec: {}", err))
+    Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
 }
 
 /// Run a debug socket command
@@ -2164,7 +2184,7 @@ fn run_auto_update() -> Result<()> {
         .arg("--no-update") // Prevent infinite update loop
         .exec();
 
-    Err(anyhow::anyhow!("Failed to exec new binary: {}", err))
+    Err(anyhow::anyhow!("Failed to exec new binary {:?}: {}", exe, err))
 }
 
 /// Run the update process (manual)
@@ -2228,7 +2248,7 @@ fn list_sessions() -> Result<()> {
                 .exec();
 
             // exec() only returns on error
-            Err(anyhow::anyhow!("Failed to exec: {}", err))
+            Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
         }
         Some(tui::session_picker::PickerResult::RestoreAllCrashed) => {
             let recovered = session::recover_crashed_sessions()?;
@@ -2386,7 +2406,7 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
         .current_dir(cwd)
         .exec();
 
-    Err(anyhow::anyhow!("Failed to exec wrapper: {}", err))
+    Err(anyhow::anyhow!("Failed to exec wrapper {:?}: {}", exe, err))
 }
 
 // Exit codes for canary wrapper communication
@@ -2616,7 +2636,7 @@ async fn run_canary_wrapper(
                 .current_dir(cwd)
                 .exec();
 
-            return Err(anyhow::anyhow!("Failed to exec: {}", err));
+            return Err(anyhow::anyhow!("Failed to exec {:?}: {}", binary, err));
         }
     }
 
