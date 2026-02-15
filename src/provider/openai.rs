@@ -1093,6 +1093,12 @@ impl Provider for OpenAIProvider {
         true
     }
 
+    fn context_window(&self) -> usize {
+        let model = self.model();
+        crate::provider::context_limit_for_model(&model)
+            .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT)
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         let model = self.model();
         Arc::new(OpenAIProvider {

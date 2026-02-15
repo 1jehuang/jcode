@@ -727,8 +727,7 @@ impl App {
         session.model = Some(provider.model());
         let display = config().display.clone();
         let features = config().features.clone();
-        let context_limit = crate::provider::context_limit_for_model(&provider.model())
-            .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT) as u64;
+        let context_limit = provider.context_window() as u64;
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let provider_clone = Arc::clone(&provider);
@@ -2410,6 +2409,23 @@ impl App {
         } else if cmd == "mermaid:stats" {
             let stats = super::mermaid::debug_stats();
             serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string())
+        } else if cmd == "mermaid:memory" {
+            let profile = super::mermaid::debug_memory_profile();
+            serde_json::to_string_pretty(&profile).unwrap_or_else(|_| "{}".to_string())
+        } else if cmd == "mermaid:memory-bench" {
+            let result = super::mermaid::debug_memory_benchmark(40);
+            serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
+        } else if cmd.starts_with("mermaid:memory-bench ") {
+            let raw_iterations = cmd
+                .strip_prefix("mermaid:memory-bench ")
+                .unwrap_or("")
+                .trim();
+            let iterations = match raw_iterations.parse::<usize>() {
+                Ok(v) => v,
+                Err(_) => return "Invalid iterations (expected integer)".to_string(),
+            };
+            let result = super::mermaid::debug_memory_benchmark(iterations);
+            serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
         } else if cmd == "mermaid:cache" {
             let entries = super::mermaid::debug_cache();
             serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string())
@@ -6660,9 +6676,8 @@ impl App {
         }
     }
 
-    fn update_context_limit_for_model(&mut self, model: &str) {
-        let limit = crate::provider::context_limit_for_model(model)
-            .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT);
+    fn update_context_limit_for_model(&mut self, _model: &str) {
+        let limit = self.provider.context_window();
         self.context_limit = limit as u64;
         self.context_warning_shown = false;
 
