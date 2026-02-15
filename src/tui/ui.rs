@@ -2082,11 +2082,14 @@ fn prepare_messages(app: &dyn TuiState, width: u16, height: u16) -> PreparedMess
         let content_height = content_lines.len();
         let input_reserve = 4;
         let available = (height as usize).saturating_sub(input_reserve);
-        let pad_top = if morph_t < 0.95 {
-            available.saturating_sub(content_height) / 2
+        let centered_pad = available.saturating_sub(content_height) / 2;
+        let slide_t = if morph_t > 0.85 {
+            ((morph_t - 0.85) / 0.15).clamp(0.0, 1.0)
         } else {
-            0
+            0.0
         };
+        let slide_ease = slide_t * slide_t * (3.0 - 2.0 * slide_t);
+        let pad_top = (centered_pad as f32 * (1.0 - slide_ease)) as usize;
 
         wrapped_lines = Vec::with_capacity(pad_top + content_height);
         for _ in 0..pad_top {
