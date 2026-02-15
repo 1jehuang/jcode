@@ -4559,7 +4559,8 @@ impl App {
             } => {
                 let exe = std::env::current_exe().unwrap_or_default();
                 let cwd = std::env::current_dir().unwrap_or_default();
-                match spawn_in_new_terminal(&exe, &new_session_id, &cwd) {
+                let socket = std::env::var("JCODE_SOCKET").ok();
+                match spawn_in_new_terminal(&exe, &new_session_id, &cwd, socket.as_deref()) {
                     Ok(true) => {
                         self.push_display_message(DisplayMessage::system(format!(
                             "✂ Split → **{}** (opened in new window)",
@@ -5116,7 +5117,16 @@ impl App {
                 self.last_stream_error = None;
             }
             Err(e) => {
-                self.handle_turn_error(e.to_string());
+                let err_str = e.to_string();
+                if is_context_limit_error(&err_str) {
+                    if self.try_auto_compact_and_retry(terminal, event_stream).await {
+                        // Successfully recovered
+                    } else {
+                        self.handle_turn_error(err_str);
+                    }
+                } else {
+                    self.handle_turn_error(err_str);
+                }
             }
         }
 
@@ -5470,6 +5480,11 @@ impl App {
     fn handle_paste(&mut self, text: String) {
         // Check if clipboard has an image (e.g., Discord copies both text/html and image/png)
         if let Some((media_type, base64_data)) = clipboard_image() {
+            let size_kb = base64_data.len() / 1024;
+            crate::logging::info(&format!(
+                "Image paste: {} ({} KB base64)",
+                media_type, size_kb
+            ));
             self.pending_images.push((media_type, base64_data));
             let n = self.pending_images.len();
             let placeholder = format!("[image {}]", n);
@@ -5478,6 +5493,12 @@ impl App {
             self.sync_model_picker_preview_from_input();
             return;
         }
+
+        crate::logging::info(&format!(
+            "Text paste: {} chars, {} lines",
+            text.len(),
+            text.lines().count()
+        ));
 
         let line_count = text.lines().count().max(1);
         if line_count < 5 {
@@ -5547,6 +5568,10 @@ impl App {
 
     fn send_action(&self, shift: bool) -> SendAction {
         if !self.is_processing {
+            return SendAction::Submit;
+        }
+        // Slash commands should always be processed immediately, not queued/interleaved
+        if self.input.trim().starts_with('/') {
             return SendAction::Submit;
         }
         if shift {
@@ -5801,6 +5826,41 @@ impl App {
                         }
                     );
 
+                    // If context is severely over limit (>150%), do hard compact first
+                    if stats.context_usage > 1.5 {
+                        match manager.hard_compact() {
+                            Ok(dropped) => {
+                                self.push_display_message(DisplayMessage {
+                                    role: "system".to_string(),
+                                    content: format!(
+                                        "{}\n\n⚡ **Emergency compaction** — dropped {} old messages.\n\
+                                        Context was at {:.0}% which is too large to summarize.\n\
+                                        Kept most recent messages. You can continue working.",
+                                        status_msg,
+                                        dropped,
+                                        stats.context_usage * 100.0
+                                    ),
+                                    tool_calls: vec![],
+                                    duration_secs: None,
+                                    title: None,
+                                    tool_data: None,
+                                });
+                            }
+                            Err(reason) => {
+                                self.push_display_message(DisplayMessage {
+                                    role: "system".to_string(),
+                                    content: format!(
+                                        "{}\n\n⚠ **Cannot compact:** {}",
+                                        status_msg, reason
+                                    ),
+                                    tool_calls: vec![],
+                                    duration_secs: None,
+                                    title: None,
+                                    tool_data: None,
+                                });
+                            }
+                        }
+                    } else {
                     match manager.force_compact(self.provider.clone()) {
                         Ok(()) => {
                             self.push_display_message(DisplayMessage {
@@ -5818,18 +5878,38 @@ impl App {
                             });
                         }
                         Err(reason) => {
-                            self.push_display_message(DisplayMessage {
-                                role: "system".to_string(),
-                                content: format!(
-                                    "{}\n\n⚠ **Cannot compact:** {}",
-                                    status_msg, reason
-                                ),
-                                tool_calls: vec![],
-                                duration_secs: None,
-                                title: None,
-                                tool_data: None,
-                            });
+                            match manager.hard_compact() {
+                                Ok(dropped) => {
+                                    self.push_display_message(DisplayMessage {
+                                        role: "system".to_string(),
+                                        content: format!(
+                                            "{}\n\n⚠ Normal compaction failed: {}\n\
+                                            ⚡ **Emergency compaction** — dropped {} old messages instead.\n\
+                                            You can continue working.",
+                                            status_msg, reason, dropped
+                                        ),
+                                        tool_calls: vec![],
+                                        duration_secs: None,
+                                        title: None,
+                                        tool_data: None,
+                                    });
+                                }
+                                Err(hard_reason) => {
+                                    self.push_display_message(DisplayMessage {
+                                        role: "system".to_string(),
+                                        content: format!(
+                                            "{}\n\n⚠ **Cannot compact:** {}\nEmergency fallback also failed: {}",
+                                            status_msg, reason, hard_reason
+                                        ),
+                                        tool_calls: vec![],
+                                        duration_secs: None,
+                                        title: None,
+                                        tool_data: None,
+                                    });
+                                }
+                            }
                         }
+                    }
                     }
                 }
                 Err(_) => {
@@ -6744,7 +6824,16 @@ impl App {
                     self.last_stream_error = None;
                 }
                 Err(e) => {
-                    self.handle_turn_error(e.to_string());
+                    let err_str = e.to_string();
+                    if is_context_limit_error(&err_str) {
+                        if self.try_auto_compact_and_retry(terminal, event_stream).await {
+                            // Successfully recovered
+                        } else {
+                            self.handle_turn_error(err_str);
+                        }
+                    } else {
+                        self.handle_turn_error(err_str);
+                    }
                 }
             }
             // Loop will check if more messages were queued during this turn
@@ -6871,12 +6960,253 @@ impl App {
     fn handle_turn_error(&mut self, error: impl Into<String>) {
         let error = error.into();
         self.last_stream_error = Some(error.clone());
-        let hint = if is_context_limit_error(&error) {
-            " Context limit likely exceeded. Run `/fix` to compact and recover."
+
+        if is_context_limit_error(&error) {
+            let recovery = self.auto_recover_context_limit();
+            let hint = match recovery {
+                Some(msg) => format!(" {}", msg),
+                None => " Context limit exceeded but auto-recovery failed. Run `/fix` to try manual recovery.".to_string(),
+            };
+            self.push_display_message(DisplayMessage::error(format!("Error: {}{}", error, hint)));
         } else {
-            " Run `/fix` to attempt recovery."
+            self.push_display_message(DisplayMessage::error(format!(
+                "Error: {} Run `/fix` to attempt recovery.",
+                error
+            )));
+        }
+    }
+
+    fn auto_recover_context_limit(&mut self) -> Option<String> {
+        if self.is_remote || !self.provider.supports_compaction() {
+            return None;
+        }
+        let compaction = self.registry.compaction();
+        let mut manager = compaction.try_write().ok()?;
+
+        let usage = manager.context_usage();
+        if usage > 1.5 {
+            match manager.hard_compact() {
+                Ok(dropped) => {
+                    return Some(format!(
+                        "⚡ Emergency compaction: dropped {} old messages (context was at {:.0}%). You can continue.",
+                        dropped,
+                        usage * 100.0
+                    ));
+                }
+                Err(reason) => {
+                    crate::logging::error(&format!(
+                        "[auto_recover] hard_compact failed: {}",
+                        reason
+                    ));
+                }
+            }
+        }
+
+        let observed_tokens = self
+            .current_stream_context_tokens()
+            .unwrap_or(self.context_limit as u64);
+        manager.update_observed_input_tokens(observed_tokens);
+
+        match manager.force_compact(self.provider.clone()) {
+            Ok(()) => Some(
+                "⚡ Auto-compaction started — summarizing old messages in background. Retry in a moment."
+                    .to_string(),
+            ),
+            Err(reason) => {
+                crate::logging::error(&format!(
+                    "[auto_recover] force_compact failed: {}",
+                    reason
+                ));
+                match manager.hard_compact() {
+                    Ok(dropped) => Some(format!(
+                        "⚡ Emergency compaction: dropped {} old messages. You can continue.",
+                        dropped
+                    )),
+                    Err(_) => None,
+                }
+            }
+        }
+    }
+
+    /// Attempt automatic compaction and retry when context limit is exceeded.
+    /// Returns true if the retry succeeded.
+    async fn try_auto_compact_and_retry(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        event_stream: &mut EventStream,
+    ) -> bool {
+        if self.is_remote || !self.provider.supports_compaction() {
+            return false;
+        }
+
+        self.push_display_message(DisplayMessage::system(
+            "⚠️ Context limit exceeded — auto-compacting and retrying...".to_string(),
+        ));
+
+        // Force the compaction manager to think we're at the limit
+        let compaction = self.registry.compaction();
+        let compact_started = match compaction.try_write() {
+            Ok(mut manager) => {
+                manager.update_observed_input_tokens(self.context_limit);
+                let usage = manager.context_usage();
+                if usage > 1.5 {
+                    match manager.hard_compact() {
+                        Ok(dropped) => {
+                            self.push_display_message(DisplayMessage::system(
+                                format!(
+                                    "⚡ Emergency compaction: dropped {} old messages (context was at {:.0}%).",
+                                    dropped,
+                                    usage * 100.0
+                                ),
+                            ));
+                            drop(manager);
+                            self.provider_session_id = None;
+                            self.session.provider_session_id = None;
+                            self.context_warning_shown = false;
+                            self.clear_streaming_render_state();
+                            self.stream_buffer.clear();
+                            self.streaming_tool_calls.clear();
+                            self.streaming_input_tokens = 0;
+                            self.streaming_output_tokens = 0;
+                            self.streaming_cache_read_tokens = None;
+                            self.streaming_cache_creation_tokens = None;
+                            self.thought_line_inserted = false;
+                            self.thinking_prefix_emitted = false;
+                            self.thinking_buffer.clear();
+                            self.status = ProcessingStatus::Sending;
+
+                            self.push_display_message(DisplayMessage::system(
+                                "✓ Context compacted. Retrying...".to_string(),
+                            ));
+                            return match self.run_turn_interactive(terminal, event_stream).await {
+                                Ok(()) => {
+                                    self.last_stream_error = None;
+                                    true
+                                }
+                                Err(e) => {
+                                    self.handle_turn_error(e.to_string());
+                                    false
+                                }
+                            };
+                        }
+                        Err(_) => false,
+                    }
+                } else {
+                    match manager.force_compact(self.provider.clone()) {
+                        Ok(()) => true,
+                        Err(_) => {
+                            match manager.hard_compact() {
+                                Ok(_) => {
+                                    drop(manager);
+                                    self.provider_session_id = None;
+                                    self.session.provider_session_id = None;
+                                    self.context_warning_shown = false;
+                                    self.clear_streaming_render_state();
+                                    self.stream_buffer.clear();
+                                    self.streaming_tool_calls.clear();
+                                    self.streaming_input_tokens = 0;
+                                    self.streaming_output_tokens = 0;
+                                    self.streaming_cache_read_tokens = None;
+                                    self.streaming_cache_creation_tokens = None;
+                                    self.thought_line_inserted = false;
+                                    self.thinking_prefix_emitted = false;
+                                    self.thinking_buffer.clear();
+                                    self.status = ProcessingStatus::Sending;
+
+                                    self.push_display_message(DisplayMessage::system(
+                                        "✓ Context compacted (emergency). Retrying...".to_string(),
+                                    ));
+                                    return match self.run_turn_interactive(terminal, event_stream).await {
+                                        Ok(()) => {
+                                            self.last_stream_error = None;
+                                            true
+                                        }
+                                        Err(e) => {
+                                            self.handle_turn_error(e.to_string());
+                                            false
+                                        }
+                                    };
+                                }
+                                Err(_) => false,
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => false,
         };
-        self.push_display_message(DisplayMessage::error(format!("Error: {}{}", error, hint)));
+
+        if !compact_started {
+            return false;
+        }
+
+        // Wait for compaction to finish (up to 60s)
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        self.status = ProcessingStatus::RunningTool("compacting context...".to_string());
+
+        loop {
+            if std::time::Instant::now() >= deadline {
+                self.push_display_message(DisplayMessage::error(
+                    "Auto-compaction timed out.".to_string(),
+                ));
+                return false;
+            }
+
+            // Redraw UI while we wait
+            let _ = terminal.draw(|frame| crate::tui::ui::draw(frame, self));
+
+            let compaction = self.registry.compaction();
+            let done = if let Ok(mut manager) = compaction.try_write() {
+                if let Some(event) = manager.poll_compaction_event() {
+                    self.handle_compaction_event(event);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if done {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        self.push_display_message(DisplayMessage::system(
+            "✓ Context compacted. Retrying...".to_string(),
+        ));
+
+        // Reset provider session since context changed
+        self.provider_session_id = None;
+        self.session.provider_session_id = None;
+        self.context_warning_shown = false;
+
+        // Clear streaming state for the retry
+        self.clear_streaming_render_state();
+        self.stream_buffer.clear();
+        self.streaming_tool_calls.clear();
+        self.streaming_input_tokens = 0;
+        self.streaming_output_tokens = 0;
+        self.streaming_cache_read_tokens = None;
+        self.streaming_cache_creation_tokens = None;
+        self.thought_line_inserted = false;
+        self.thinking_prefix_emitted = false;
+        self.thinking_buffer.clear();
+        self.status = ProcessingStatus::Sending;
+
+        // Retry the turn
+        match self.run_turn_interactive(terminal, event_stream).await {
+            Ok(()) => {
+                self.last_stream_error = None;
+                true
+            }
+            Err(e) => {
+                self.handle_turn_error(e.to_string());
+                false
+            }
+        }
     }
 
     fn run_fix_command(&mut self) {
@@ -6914,11 +7244,37 @@ impl App {
                     if let Some(tokens) = observed_tokens {
                         manager.update_observed_input_tokens(tokens);
                     }
-                    match manager.force_compact(self.provider.clone()) {
-                        Ok(()) => {
-                            actions.push("Started background context compaction.".to_string())
+                    let usage = manager.context_usage();
+                    if usage > 1.5 {
+                        match manager.hard_compact() {
+                            Ok(dropped) => {
+                                actions.push(format!(
+                                    "Emergency compaction: dropped {} old messages (context was at {:.0}%).",
+                                    dropped,
+                                    usage * 100.0
+                                ));
+                            }
+                            Err(reason) => notes.push(format!("Hard compaction failed: {}", reason)),
                         }
-                        Err(reason) => notes.push(format!("Compaction not started: {}", reason)),
+                    } else {
+                        match manager.force_compact(self.provider.clone()) {
+                            Ok(()) => {
+                                actions.push("Started background context compaction.".to_string())
+                            }
+                            Err(reason) => {
+                                match manager.hard_compact() {
+                                    Ok(dropped) => {
+                                        actions.push(format!(
+                                            "Emergency compaction: dropped {} old messages (normal compaction failed: {}).",
+                                            dropped, reason
+                                        ));
+                                    }
+                                    Err(hard_reason) => {
+                                        notes.push(format!("Compaction not started: {}. Emergency fallback: {}", reason, hard_reason));
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 Err(_) => notes.push("Could not access compaction manager (busy).".to_string()),
@@ -10846,6 +11202,7 @@ fn spawn_in_new_terminal(
     exe: &std::path::Path,
     session_id: &str,
     cwd: &std::path::Path,
+    socket: Option<&str>,
 ) -> anyhow::Result<bool> {
     use std::process::{Command, Stdio};
 
@@ -10882,6 +11239,9 @@ fn spawn_in_new_terminal(
                     .arg(exe)
                     .arg("--resume")
                     .arg(session_id);
+                if let Some(socket) = socket {
+                    cmd.arg("--socket").arg(socket);
+                }
             }
             "wezterm" => {
                 cmd.args([
@@ -10942,6 +11302,7 @@ fn clipboard_image() -> Option<(String, String)> {
             .output()
         {
             let types = String::from_utf8_lossy(&output.stdout);
+            crate::logging::info(&format!("clipboard_image: wl-paste types: {:?}", types.trim()));
             let (mime, wl_type) = if types.lines().any(|t| t.trim() == "image/png") {
                 ("image/png", "image/png")
             } else if types.lines().any(|t| t.trim() == "image/jpeg") {
