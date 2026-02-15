@@ -684,6 +684,7 @@ fn format_content_block(block: &crate::message::ContentBlock) -> Option<String> 
             Some(format!("[{}: {}]", label, content))
         }
         crate::message::ContentBlock::Reasoning { .. } => None,
+        crate::message::ContentBlock::Image { .. } => Some("[Image]".to_string()),
     }
 }
 

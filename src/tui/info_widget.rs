@@ -1289,8 +1289,9 @@ fn calculate_widget_height(
             h
         }
         WidgetKind::Tips => {
-            let tip = current_tip(inner_width);
-            let lines = wrap_tip_text(&tip.text, inner_width);
+            let effective_w = inner_width.saturating_sub(2); // 2-char indent on tip text
+            let tip = current_tip(effective_w);
+            let lines = wrap_tip_text(&tip.text, effective_w);
             (1 + lines.len() as u16) // header + wrapped text
         }
     };
@@ -3394,17 +3395,11 @@ fn all_tips() -> Vec<Tip> {
     [
         "Ctrl+J / Ctrl+K to scroll chat up and down",
         "Ctrl+U / Ctrl+D to scroll half a page at a time",
-        "/help to see all slash commands",
-        "/model to open the interactive model picker",
-        "/compact to manually compress context when running low",
-        "/clear to start a fresh conversation",
-        "Use todo_write to plan tasks — they show in the sidebar",
-        "Ctrl+C to interrupt a running response",
-        "Tab for autocomplete on slash commands",
-        "Use ```mermaid blocks to render diagrams inline",
-        "Memory persists across sessions — recall with the memory tool",
-        "@ to reference files when writing messages",
-        "Up/Down arrow to cycle through input history",
+        "```mermaid code blocks render as diagrams",
+        "Swarms form automatically when multiple sessions share a repo — they coordinate plans, share context, and track file conflicts",
+        "Memories are stored in a graph with semantic embeddings — recall finds related facts even if you use different words",
+        "Ambient mode runs background cycles while you're away — maintaining memories, compacting context, and doing proactive work",
+        "Ambient cycles can email you a summary and you can reply with directives for the next run",
     ]
     .iter()
     .map(|t| Tip {
@@ -3456,7 +3451,7 @@ fn wrap_tip_text(text: &str, width: usize) -> Vec<String> {
 }
 
 fn render_tips_widget(inner: Rect) -> Vec<Line<'static>> {
-    let w = inner.width.saturating_sub(3) as usize; // leave room for icon
+    let w = inner.width.saturating_sub(2) as usize; // 2-char indent on tip lines
     let tip = current_tip(w);
     let wrapped = wrap_tip_text(&tip.text, w);
 

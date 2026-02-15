@@ -83,6 +83,9 @@ pub fn build_cli_prompt(system: &str, messages: &[Message]) -> String {
                     out.push_str(content);
                     out.push('\n');
                 }
+                ContentBlock::Image { .. } => {
+                    out.push_str("[image]\n");
+                }
             }
         }
         out.push('\n');

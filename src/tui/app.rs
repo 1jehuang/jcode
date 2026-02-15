@@ -526,6 +526,8 @@ pub struct App {
     rebuild_requested: Option<String>,
     // Pasted content storage (displayed as placeholders, expanded on submit)
     pasted_contents: Vec<String>,
+    // Pending pasted images (media_type, base64_data) attached to next message
+    pending_images: Vec<(String, String)>,
     // Debug socket broadcast channel (if enabled)
     debug_tx: Option<tokio::sync::broadcast::Sender<super::backend::DebugEvent>>,
     // Remote provider info (set when running in remote mode)
@@ -803,6 +805,7 @@ impl App {
             reload_requested: None,
             rebuild_requested: None,
             pasted_contents: Vec::new(),
+            pending_images: Vec::new(),
             debug_tx: None,
             remote_provider_name: None,
             remote_provider_model: None,
@@ -5284,8 +5287,15 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Char('v') => {
-                    // Ctrl+V: paste from clipboard
-                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    // Ctrl+V: paste from clipboard (try image first, then text)
+                    if let Some((media_type, base64_data)) = clipboard_image() {
+                        self.pending_images.push((media_type, base64_data));
+                        let n = self.pending_images.len();
+                        let placeholder = format!("[image {}]", n);
+                        self.input.insert_str(self.cursor_pos, &placeholder);
+                        self.cursor_pos += placeholder.len();
+                        self.sync_model_picker_preview_from_input();
+                    } else if let Ok(mut clipboard) = arboard::Clipboard::new() {
                         if let Ok(text) = clipboard.get_text() {
                             self.handle_paste(text);
                         }
@@ -6588,14 +6598,28 @@ impl App {
             tool_data: None,
         });
         // Send expanded content (with actual pasted text) to model
-        self.add_provider_message(Message::user(&input));
-        self.session.add_message(
-            Role::User,
-            vec![ContentBlock::Text {
+        let images = std::mem::take(&mut self.pending_images);
+        if images.is_empty() {
+            self.add_provider_message(Message::user(&input));
+            self.session.add_message(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: input.clone(),
+                    cache_control: None,
+                }],
+            );
+        } else {
+            self.add_provider_message(Message::user_with_images(&input, images.clone()));
+            let mut blocks: Vec<ContentBlock> = images
+                .into_iter()
+                .map(|(media_type, data)| ContentBlock::Image { media_type, data })
+                .collect();
+            blocks.push(ContentBlock::Text {
                 text: input.clone(),
                 cache_control: None,
-            }],
-        );
+            });
+            self.session.add_message(Role::User, blocks);
+        }
         let _ = self.session.save();
 
         // Set up processing state - actual processing happens after UI redraws
@@ -9232,6 +9256,9 @@ impl App {
                         transcript.push_str(&format!("[Result: {}]\n", preview));
                     }
                     ContentBlock::Reasoning { .. } => {}
+                    ContentBlock::Image { .. } => {
+                        transcript.push_str("[Image]\n");
+                    }
                 }
             }
             transcript.push('\n');
@@ -10286,6 +10313,9 @@ impl super::TuiState for App {
                         ContentBlock::Reasoning { text } => {
                             asst_chars += text.len();
                         }
+                        ContentBlock::Image { data, .. } => {
+                            user_chars += data.len();
+                        }
                     }
                 }
             }
@@ -10846,6 +10876,74 @@ fn spawn_in_new_terminal(
     _cwd: &std::path::Path,
 ) -> anyhow::Result<bool> {
     Ok(false)
+}
+
+/// Try to get an image from the system clipboard.
+///
+/// Returns `Some((media_type, base64_data))` if an image is available.
+/// Uses `wl-paste` on Wayland, falls back to `arboard::get_image()`.
+fn clipboard_image() -> Option<(String, String)> {
+    use base64::Engine;
+
+    // Try wl-paste first (native Wayland - better image format support)
+    if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        if let Ok(output) = std::process::Command::new("wl-paste")
+            .arg("--list-types")
+            .output()
+        {
+            let types = String::from_utf8_lossy(&output.stdout);
+            let (mime, wl_type) = if types.lines().any(|t| t.trim() == "image/png") {
+                ("image/png", "image/png")
+            } else if types.lines().any(|t| t.trim() == "image/jpeg") {
+                ("image/jpeg", "image/jpeg")
+            } else if types.lines().any(|t| t.trim() == "image/webp") {
+                ("image/webp", "image/webp")
+            } else if types.lines().any(|t| t.trim() == "image/gif") {
+                ("image/gif", "image/gif")
+            } else {
+                ("", "")
+            };
+
+            if !mime.is_empty() {
+                if let Ok(img_output) = std::process::Command::new("wl-paste")
+                    .args(["--type", wl_type, "--no-newline"])
+                    .output()
+                {
+                    if img_output.status.success() && !img_output.stdout.is_empty() {
+                        let b64 =
+                            base64::engine::general_purpose::STANDARD.encode(&img_output.stdout);
+                        return Some((mime.to_string(), b64));
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: arboard (works on X11/XWayland)
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        if let Ok(img) = clipboard.get_image() {
+            // img.bytes is RGBA pixel data - encode as PNG
+            if let Some(png_data) = encode_rgba_as_png(img.width, img.height, &img.bytes) {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
+                return Some(("image/png".to_string(), b64));
+            }
+        }
+    }
+
+    None
+}
+
+/// Encode raw RGBA pixel data as PNG bytes
+fn encode_rgba_as_png(width: usize, height: usize, rgba: &[u8]) -> Option<Vec<u8>> {
+    use image::{ImageBuffer, RgbaImage};
+    use std::io::Cursor;
+
+    let img: RgbaImage =
+        ImageBuffer::from_raw(width as u32, height as u32, rgba.to_vec())?;
+    let mut buf = Vec::new();
+    img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+        .ok()?;
+    Some(buf)
 }
 
 #[cfg(test)]

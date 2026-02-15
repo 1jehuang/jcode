@@ -439,6 +439,7 @@ impl CompactionManager {
                 ContentBlock::Reasoning { text } => text.len(),
                 ContentBlock::ToolUse { input, .. } => input.to_string().len() + 50,
                 ContentBlock::ToolResult { content, .. } => content.len() + 20,
+                ContentBlock::Image { data, .. } => data.len(),
             })
             .sum()
     }
@@ -513,6 +514,9 @@ async fn generate_summary(
                     conversation_text.push_str(&format!("[Result: {}]\n", truncated));
                 }
                 ContentBlock::Reasoning { .. } => {}
+                ContentBlock::Image { .. } => {
+                    conversation_text.push_str("[Image]\n");
+                }
             }
         }
         conversation_text.push('\n');
