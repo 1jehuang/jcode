@@ -472,6 +472,7 @@ pub fn render_messages(session: &Session) -> Vec<RenderedMessage> {
                     });
                 }
                 ContentBlock::Reasoning { .. } => {}
+                ContentBlock::Image { .. } => {}
             }
         }
 

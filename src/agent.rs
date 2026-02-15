@@ -577,6 +577,9 @@ impl Agent {
                         transcript.push_str(&format!("[Result: {}]\n", preview));
                     }
                     ContentBlock::Reasoning { .. } => {}
+                    ContentBlock::Image { .. } => {
+                        transcript.push_str("[Image]\n");
+                    }
                 }
             }
             transcript.push('\n');
@@ -709,6 +712,9 @@ impl Agent {
                             content.clone()
                         };
                         md.push_str(&format!("**{}:**\n```\n{}\n```\n\n", label, display));
+                    }
+                    ContentBlock::Image { .. } => {
+                        md.push_str("[Image]\n\n");
                     }
                 }
             }
@@ -1243,6 +1249,9 @@ impl Agent {
                         transcript.push_str(&format!("[Result: {}]\n", preview));
                     }
                     ContentBlock::Reasoning { .. } => {}
+                    ContentBlock::Image { .. } => {
+                        transcript.push_str("[Image]\n");
+                    }
                 }
             }
             transcript.push('\n');

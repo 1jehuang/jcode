@@ -137,6 +137,7 @@ impl ClaudeProvider {
                     ContentBlock::ToolResult { content, .. } => parts.push(content.clone()),
                     ContentBlock::ToolUse { .. } => {}
                     ContentBlock::Reasoning { .. } => {}
+                    ContentBlock::Image { .. } => {}
                 }
             }
             if !parts.is_empty() {
