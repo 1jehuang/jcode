@@ -2068,44 +2068,25 @@ fn prepare_messages(app: &dyn TuiState, width: u16, height: u16) -> PreparedMess
     if startup_active {
         let elapsed = app.animation_elapsed();
         let anim_duration = super::STARTUP_ANIMATION_WINDOW.as_secs_f32();
-        let fade_t = (elapsed / (anim_duration * 0.75)).clamp(0.0, 1.0);
+        let morph_t = (elapsed / anim_duration).clamp(0.0, 1.0);
 
         let anim_lines = &startup_prepared.wrapped_lines;
         let header_lines = &header_prepared.wrapped_lines;
 
-        let content_lines: Vec<Line<'static>> = if fade_t < 0.8 {
+        let content_lines: Vec<Line<'static>> = if morph_t < 0.6 {
             anim_lines.clone()
         } else {
-            let blend = ((fade_t - 0.8) / 0.2).clamp(0.0, 1.0);
-            let dim = (blend * 255.0) as u8;
-            let mut blended = Vec::new();
-            for line in header_lines {
-                let spans: Vec<Span<'static>> = line
-                    .spans
-                    .iter()
-                    .map(|span| {
-                        let mut style = span.style;
-                        if let Some(Color::Rgb(r, g, b)) = style.fg {
-                            style.fg = Some(Color::Rgb(
-                                ((r as u16 * dim as u16) / 255) as u8,
-                                ((g as u16 * dim as u16) / 255) as u8,
-                                ((b as u16 * dim as u16) / 255) as u8,
-                            ));
-                        } else if style.fg.is_none() || matches!(style.fg, Some(Color::Reset)) {
-                            style.fg = Some(Color::Rgb(dim, dim, dim));
-                        }
-                        Span::styled(span.content.clone(), style)
-                    })
-                    .collect();
-                blended.push(Line::from(spans).alignment(line.alignment.unwrap_or(ratatui::layout::Alignment::Left)));
-            }
-            blended
+            morph_lines_to_header(anim_lines, header_lines, morph_t, width)
         };
 
         let content_height = content_lines.len();
         let input_reserve = 4;
         let available = (height as usize).saturating_sub(input_reserve);
-        let pad_top = available.saturating_sub(content_height) / 2;
+        let pad_top = if morph_t < 0.95 {
+            available.saturating_sub(content_height) / 2
+        } else {
+            0
+        };
 
         wrapped_lines = Vec::with_capacity(pad_top + content_height);
         for _ in 0..pad_top {
@@ -2144,6 +2125,169 @@ fn prepare_messages(app: &dyn TuiState, width: u16, height: u16) -> PreparedMess
         wrapped_user_indices,
         image_regions,
     }
+}
+
+fn extract_line_text(line: &Line) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+fn extract_line_styled_chars(line: &Line) -> Vec<(char, Style)> {
+    let mut chars = Vec::new();
+    for span in &line.spans {
+        for ch in span.content.chars() {
+            chars.push((ch, span.style));
+        }
+    }
+    chars
+}
+
+fn morph_lines_to_header(
+    anim_lines: &[Line<'static>],
+    header_lines: &[Line<'static>],
+    morph_t: f32,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let blend = ((morph_t - 0.6) / 0.35).clamp(0.0, 1.0);
+    let max_rows = anim_lines.len().max(header_lines.len());
+    let w = width as usize;
+
+    let mut result = Vec::with_capacity(max_rows);
+
+    let anim_row_count = anim_lines.len();
+    let header_row_count = header_lines.len();
+    let row_blend = blend * blend;
+    let target_rows = anim_row_count as f32 + (header_row_count as f32 - anim_row_count as f32) * row_blend;
+    let output_rows = target_rows.round() as usize;
+
+    for out_row in 0..output_rows {
+        let anim_row_f = if output_rows > 1 {
+            out_row as f32 / (output_rows - 1) as f32 * (anim_row_count.max(1) - 1) as f32
+        } else {
+            0.0
+        };
+        let header_row_f = if output_rows > 1 {
+            out_row as f32 / (output_rows - 1) as f32 * (header_row_count.max(1) - 1) as f32
+        } else {
+            0.0
+        };
+
+        let anim_idx = (anim_row_f.round() as usize).min(anim_row_count.saturating_sub(1));
+        let header_idx = (header_row_f.round() as usize).min(header_row_count.saturating_sub(1));
+
+        let anim_chars: Vec<(char, Style)> = if anim_idx < anim_row_count {
+            extract_line_styled_chars(&anim_lines[anim_idx])
+        } else {
+            Vec::new()
+        };
+        let header_chars: Vec<(char, Style)> = if header_idx < header_row_count {
+            extract_line_styled_chars(&header_lines[header_idx])
+        } else {
+            Vec::new()
+        };
+
+        let anim_text: String = anim_chars.iter().map(|(c,_)| *c).collect();
+        let header_text: String = header_chars.iter().map(|(c,_)| *c).collect();
+        let anim_trimmed = anim_text.trim();
+        let header_trimmed = header_text.trim();
+
+        let anim_start = anim_text.find(anim_trimmed).unwrap_or(0);
+        let header_start = header_text.find(header_trimmed).unwrap_or(0);
+
+        let anim_center = if !anim_trimmed.is_empty() {
+            anim_start as f32 + anim_trimmed.len() as f32 / 2.0
+        } else {
+            w as f32 / 2.0
+        };
+        let header_center = if !header_trimmed.is_empty() {
+            header_start as f32 + header_trimmed.len() as f32 / 2.0
+        } else {
+            w as f32 / 2.0
+        };
+
+        let center = anim_center + (header_center - anim_center) * blend;
+        let max_col = anim_chars.len().max(header_chars.len()).max(w);
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+
+        for col in 0..max_col {
+            let anim_ch = anim_chars.get(col).map(|(c,_)| *c).unwrap_or(' ');
+            let anim_style = anim_chars.get(col).map(|(_,s)| *s).unwrap_or_default();
+            let header_ch = header_chars.get(col).map(|(c,_)| *c).unwrap_or(' ');
+            let header_style = header_chars.get(col).map(|(_,s)| *s).unwrap_or_default();
+
+            let dist_from_center = ((col as f32) - center).abs() / (w as f32 / 2.0).max(1.0);
+            let flip_hash = {
+                let mut h = DefaultHasher::new();
+                out_row.hash(&mut h);
+                col.hash(&mut h);
+                (std::hash::Hasher::finish(&h) % 1000) as f32 / 1000.0
+            };
+            let flip_threshold = (0.3 + dist_from_center * 0.4 + flip_hash * 0.3).clamp(0.0, 1.0);
+
+            let (ch, style) = if blend >= flip_threshold {
+                let style_blend = ((blend - flip_threshold) / 0.15).clamp(0.0, 1.0);
+                if style_blend < 0.3 {
+                    let glitch_chars = b"@#$%&*!?~=+<>";
+                    let gi = {
+                        let mut h = DefaultHasher::new();
+                        out_row.hash(&mut h);
+                        col.hash(&mut h);
+                        ((blend * 100.0) as u32).hash(&mut h);
+                        (std::hash::Hasher::finish(&h) % glitch_chars.len() as u64) as usize
+                    };
+                    let gc = glitch_chars[gi] as char;
+                    (gc, lerp_style(anim_style, header_style, style_blend))
+                } else {
+                    (header_ch, lerp_style(anim_style, header_style, style_blend))
+                }
+            } else {
+                let fade = (1.0 - blend / flip_threshold.max(0.01)).clamp(0.0, 1.0);
+                let mut s = anim_style;
+                if let Some(Color::Rgb(r, g, b)) = s.fg {
+                    s.fg = Some(Color::Rgb(
+                        (r as f32 * fade) as u8,
+                        (g as f32 * fade) as u8,
+                        (b as f32 * fade) as u8,
+                    ));
+                }
+                (anim_ch, s)
+            };
+
+            spans.push(Span::styled(ch.to_string(), style));
+        }
+
+        let align = header_lines.get(header_idx)
+            .and_then(|l| l.alignment)
+            .or_else(|| anim_lines.get(anim_idx).and_then(|l| l.alignment))
+            .unwrap_or(ratatui::layout::Alignment::Center);
+
+        result.push(Line::from(spans).alignment(align));
+    }
+
+    result
+}
+
+fn lerp_style(from: Style, to: Style, t: f32) -> Style {
+    let fg = match (from.fg, to.fg) {
+        (Some(Color::Rgb(r1,g1,b1)), Some(Color::Rgb(r2,g2,b2))) => {
+            Some(Color::Rgb(
+                (r1 as f32 + (r2 as f32 - r1 as f32) * t) as u8,
+                (g1 as f32 + (g2 as f32 - g1 as f32) * t) as u8,
+                (b1 as f32 + (b2 as f32 - b1 as f32) * t) as u8,
+            ))
+        }
+        (Some(Color::Rgb(r,g,b)), _) => {
+            let dim = 1.0 - t;
+            Some(Color::Rgb((r as f32 * dim) as u8, (g as f32 * dim) as u8, (b as f32 * dim) as u8))
+        }
+        (_, Some(Color::Rgb(r,g,b))) => {
+            Some(Color::Rgb((r as f32 * t) as u8, (g as f32 * t) as u8, (b as f32 * t) as u8))
+        }
+        (_, to_fg) => to_fg,
+    };
+    let mut s = to;
+    s.fg = fg;
+    s
 }
 
 fn startup_animation_variant() -> usize {
