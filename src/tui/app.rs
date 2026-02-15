@@ -5239,6 +5239,25 @@ impl App {
                     self.set_status_notice(status);
                     return Ok(());
                 }
+                KeyCode::Char('v') => {
+                    // Alt+V: paste image from clipboard
+                    if let Some((media_type, base64_data)) = clipboard_image() {
+                        let size_kb = base64_data.len() / 1024;
+                        self.pending_images.push((media_type.clone(), base64_data));
+                        let n = self.pending_images.len();
+                        let placeholder = format!("[image {}]", n);
+                        self.input.insert_str(self.cursor_pos, &placeholder);
+                        self.cursor_pos += placeholder.len();
+                        self.sync_model_picker_preview_from_input();
+                        self.set_status_notice(&format!(
+                            "Pasted {} ({} KB)",
+                            media_type, size_kb
+                        ));
+                    } else {
+                        self.set_status_notice("No image in clipboard");
+                    }
+                    return Ok(());
+                }
                 _ => {}
             }
         }
@@ -5748,6 +5767,7 @@ impl App {
                      • `[` / `]` - Zoom diagram (when focused)\n\
                      • `+` / `-` - Resize diagram pane (when focused)\n\
                      • `Alt+M` - Toggle diagram pane\n\
+                     • `Alt+V` - Paste image from clipboard\n\
                      • `Ctrl+R` - Recover from missing tool outputs\n\
                      • `PageUp/Down` or `Up/Down` - Scroll history\n\
                      • `{}`/`{}` - Scroll up/down (see `/config`)\n\
