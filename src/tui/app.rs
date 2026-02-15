@@ -2219,6 +2219,7 @@ impl App {
                 SendAction::Interleave => {
                     let expanded = self.expand_paste_placeholders(&self.input.clone());
                     self.pasted_contents.clear();
+                    self.pending_images.clear();
                     self.input.clear();
                     self.cursor_pos = 0;
                     self.interleave_message = Some(expanded);
@@ -4737,6 +4738,7 @@ impl App {
                 let raw_input = std::mem::take(&mut self.input);
                 let expanded = self.expand_paste_placeholders(&raw_input);
                 self.pasted_contents.clear();
+                self.pending_images.clear();
                 self.cursor_pos = 0;
 
                 match self.send_action(true) {
@@ -4824,6 +4826,7 @@ impl App {
                     let raw_input = std::mem::take(&mut self.input);
                     let expanded = self.expand_paste_placeholders(&raw_input);
                     self.pasted_contents.clear();
+                    self.pending_images.clear();
                     self.cursor_pos = 0;
                     let trimmed = expanded.trim();
 
@@ -5271,6 +5274,7 @@ impl App {
                     self.clear_display_messages();
                     self.queued_messages.clear();
                     self.pasted_contents.clear();
+                    self.pending_images.clear();
                     self.active_skill = None;
                     let mut session = Session::create(None, None);
                     session.model = Some(self.provider.model());
@@ -5363,6 +5367,7 @@ impl App {
                         let raw_input = std::mem::take(&mut self.input);
                         let expanded = self.expand_paste_placeholders(&raw_input);
                         self.pasted_contents.clear();
+                        self.pending_images.clear();
                         self.cursor_pos = 0;
                         // Set interleave_message so streaming code can pick it up
                         self.interleave_message = Some(expanded);
@@ -5386,6 +5391,7 @@ impl App {
                             let raw_input = std::mem::take(&mut self.input);
                             let expanded = self.expand_paste_placeholders(&raw_input);
                             self.pasted_contents.clear();
+                            self.pending_images.clear();
                             self.cursor_pos = 0;
                             // Set interleave_message so streaming code can pick it up
                             self.interleave_message = Some(expanded);
@@ -5504,6 +5510,7 @@ impl App {
         let content = std::mem::take(&mut self.input);
         let expanded = self.expand_paste_placeholders(&content);
         self.pasted_contents.clear();
+        self.pending_images.clear();
         self.cursor_pos = 0;
         self.queued_messages.push(expanded);
     }
@@ -5631,6 +5638,7 @@ impl App {
         let raw_input = std::mem::take(&mut self.input);
         let input = self.expand_paste_placeholders(&raw_input);
         self.pasted_contents.clear();
+        self.pending_images.clear();
         self.cursor_pos = 0;
         self.follow_chat_bottom(); // Reset to bottom and resume auto-scroll on new input
 
@@ -5742,6 +5750,7 @@ impl App {
             self.clear_display_messages();
             self.queued_messages.clear();
             self.pasted_contents.clear();
+            self.pending_images.clear();
             self.active_skill = None;
             let mut session = Session::create(None, None);
             session.model = Some(self.provider.model());
@@ -7766,6 +7775,7 @@ impl App {
         self.clear_display_messages();
         self.queued_messages.clear();
         self.pasted_contents.clear();
+        self.pending_images.clear();
         self.active_skill = None;
         self.provider_session_id = None;
         self.session = new_session;
