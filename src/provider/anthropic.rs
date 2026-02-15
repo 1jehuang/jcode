@@ -1298,6 +1298,7 @@ mod tests {
                     text: "Hello".to_string(),
                     cache_control: None,
                 }],
+                timestamp: None,
             },
             Message {
                 role: Role::Assistant,
@@ -1317,6 +1318,7 @@ mod tests {
                         input: serde_json::json!({"file_path": "/tmp/test"}),
                     },
                 ],
+                timestamp: None,
             },
             // Missing tool_results for tool_123 and tool_456!
         ];
@@ -1366,6 +1368,7 @@ mod tests {
                     text: "Hello".to_string(),
                     cache_control: None,
                 }],
+                timestamp: None,
             },
             Message {
                 role: Role::Assistant,
@@ -1374,6 +1377,7 @@ mod tests {
                     name: "bash".to_string(),
                     input: serde_json::json!({"command": "ls"}),
                 }],
+                timestamp: None,
             },
             Message {
                 role: Role::User,
@@ -1382,6 +1386,7 @@ mod tests {
                     content: "file1.txt\nfile2.txt".to_string(),
                     is_error: Some(false),
                 }],
+                timestamp: None,
             },
         ];
 

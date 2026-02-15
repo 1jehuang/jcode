@@ -1618,6 +1618,7 @@ mod tests {
                     text: "hi".to_string(),
                     cache_control: None,
                 }],
+                timestamp: None,
             },
             ChatMessage {
                 role: Role::Assistant,
@@ -1626,6 +1627,7 @@ mod tests {
                     name: "bash".to_string(),
                     input: serde_json::json!({"command": "ls"}),
                 }],
+                timestamp: None,
             },
         ];
 
@@ -1666,6 +1668,7 @@ mod tests {
                     name: "bash".to_string(),
                     input: serde_json::json!({"command": "ls"}),
                 }],
+                timestamp: None,
             },
             ChatMessage::tool_result("call_1", "ok", false),
         ];
@@ -1698,6 +1701,7 @@ mod tests {
                     name: "bash".to_string(),
                     input: serde_json::json!({"command": "ls"}),
                 }],
+                timestamp: None,
             },
         ];
 
@@ -1743,6 +1747,7 @@ mod tests {
                     name: "bash".to_string(),
                     input: serde_json::json!({"command": "pwd"}),
                 }],
+                timestamp: None,
             },
             ChatMessage {
                 role: Role::Assistant,
@@ -1751,6 +1756,7 @@ mod tests {
                     name: "bash".to_string(),
                     input: serde_json::json!({"command": "whoami"}),
                 }],
+                timestamp: None,
             },
             ChatMessage::tool_result("call_b", "done", false),
         ];

@@ -164,6 +164,7 @@ pub trait Provider: Send + Sync {
                 text: prompt.to_string(),
                 cache_control: None,
             }],
+            timestamp: None,
         }];
 
         let response = self.complete(&messages, &[], system, None).await?;

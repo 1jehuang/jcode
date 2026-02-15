@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(dead_code)]
 
+use chrono::{Local, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Role in conversation
@@ -20,6 +21,8 @@ pub const TOOL_OUTPUT_MISSING_TEXT: &str =
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<chrono::DateTime<Utc>>,
 }
 
 /// Cache control metadata for prompt caching
@@ -72,6 +75,7 @@ impl Message {
                 text: text.to_string(),
                 cache_control: None,
             }],
+            timestamp: Some(Utc::now()),
         }
     }
 
@@ -82,6 +86,7 @@ impl Message {
                 text: text.to_string(),
                 cache_control: None,
             }],
+            timestamp: Some(Utc::now()),
         }
     }
 
@@ -93,7 +98,48 @@ impl Message {
                 content: content.to_string(),
                 is_error: if is_error { Some(true) } else { None },
             }],
+            timestamp: Some(Utc::now()),
         }
+    }
+
+    /// Format a timestamp as a compact local-time string for injection into message content.
+    pub fn format_timestamp(ts: &chrono::DateTime<Utc>) -> String {
+        let local = ts.with_timezone(&Local);
+        local.format("%H:%M:%S").to_string()
+    }
+
+    /// Return a copy of messages with timestamps injected into user-role text content.
+    /// Tool results get `[HH:MM:SS]` prepended to content.
+    /// Text messages get `[HH:MM:SS]` prepended to the first text block.
+    pub fn with_timestamps(messages: &[Message]) -> Vec<Message> {
+        messages
+            .iter()
+            .map(|msg| {
+                let Some(ts) = msg.timestamp else {
+                    return msg.clone();
+                };
+                if msg.role != Role::User {
+                    return msg.clone();
+                }
+                let tag = format!("[{}]", Self::format_timestamp(&ts));
+                let mut msg = msg.clone();
+                let mut tagged = false;
+                for block in &mut msg.content {
+                    match block {
+                        ContentBlock::Text { text, .. } if !tagged => {
+                            *text = format!("{} {}", tag, text);
+                            tagged = true;
+                        }
+                        ContentBlock::ToolResult { content, .. } if !tagged => {
+                            *content = format!("{} {}", tag, content);
+                            tagged = true;
+                        }
+                        _ => {}
+                    }
+                }
+                msg
+            })
+            .collect()
     }
 }
 

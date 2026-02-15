@@ -164,7 +164,7 @@ impl Agent {
 
     fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {
         let id = self.session.add_message(role.clone(), content.clone());
-        let message = Message { role, content };
+        let message = Message { role, content, timestamp: Some(chrono::Utc::now()) };
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
             manager.add_message(message);
@@ -1361,10 +1361,17 @@ impl Agent {
                 status: "calling API".to_string(),
             }));
 
+            let stamped;
+            let send_messages: &[Message] = if crate::config::config().features.message_timestamps {
+                stamped = Message::with_timestamps(&messages_with_memory);
+                &stamped
+            } else {
+                &messages_with_memory
+            };
             let mut stream = self
                 .provider
                 .complete_split(
-                    &messages_with_memory,
+                    send_messages,
                     &tools,
                     &split_prompt.static_part,
                     &split_prompt.dynamic_part,
@@ -1946,10 +1953,17 @@ impl Agent {
                 ));
             }
 
+            let stamped;
+            let send_messages: &[Message] = if crate::config::config().features.message_timestamps {
+                stamped = Message::with_timestamps(&messages_with_memory);
+                &stamped
+            } else {
+                &messages_with_memory
+            };
             let mut stream = self
                 .provider
                 .complete_split(
-                    &messages_with_memory,
+                    send_messages,
                     &tools,
                     &split_prompt.static_part,
                     &split_prompt.dynamic_part,
@@ -2425,10 +2439,17 @@ impl Agent {
                 ));
             }
 
+            let stamped;
+            let send_messages: &[Message] = if crate::config::config().features.message_timestamps {
+                stamped = Message::with_timestamps(&messages_with_memory);
+                &stamped
+            } else {
+                &messages_with_memory
+            };
             let mut stream = self
                 .provider
                 .complete_split(
-                    &messages_with_memory,
+                    send_messages,
                     &tools,
                     &split_prompt.static_part,
                     &split_prompt.dynamic_part,

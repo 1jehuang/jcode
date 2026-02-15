@@ -400,6 +400,7 @@ impl CompactionManager {
                 result.push(Message {
                     role: Role::User,
                     content: vec![summary_block],
+                    timestamp: None,
                 });
 
                 // Add remaining messages
@@ -573,6 +574,7 @@ mod tests {
                 text: text.to_string(),
                 cache_control: None,
             }],
+            timestamp: None,
         }
     }
 

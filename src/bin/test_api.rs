@@ -14,6 +14,7 @@ async fn main() -> anyhow::Result<()> {
             text: "Say hello in exactly 5 words.".to_string(),
             cache_control: None,
         }],
+        timestamp: None,
     }];
 
     let tools: Vec<ToolDefinition> = vec![];
