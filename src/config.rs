@@ -622,6 +622,8 @@ desktop_notifications = true
 - Desktop: {}
 - Email: {}
 - Email replies: {}
+- Telegram: {}
+- Telegram replies: {}
 
 *Edit the config file or set environment variables to customize.*
 *Environment variables (e.g., `JCODE_SCROLL_UP_KEY`) override file settings.*"#,
@@ -685,6 +687,19 @@ desktop_notifications = true
                     .email_imap_host
                     .as_deref()
                     .unwrap_or("enabled (no IMAP host)")
+            } else {
+                "disabled"
+            },
+            if self.safety.telegram_enabled {
+                self.safety
+                    .telegram_chat_id
+                    .as_deref()
+                    .unwrap_or("enabled (no chat_id)")
+            } else {
+                "disabled"
+            },
+            if self.safety.telegram_reply_enabled {
+                "enabled"
             } else {
                 "disabled"
             },
