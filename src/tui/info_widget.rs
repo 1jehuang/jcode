@@ -3440,9 +3440,13 @@ fn wrap_tip_text(text: &str, width: usize) -> Vec<String> {
             lines.push(remaining.to_string());
             break;
         }
-        let split = remaining[..width]
+        let mut boundary = width.min(remaining.len());
+        while boundary > 0 && !remaining.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        let split = remaining[..boundary]
             .rfind(' ')
-            .unwrap_or(width);
+            .unwrap_or(boundary);
         let (line, rest) = remaining.split_at(split);
         lines.push(line.to_string());
         remaining = rest.trim_start();
