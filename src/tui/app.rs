@@ -3620,27 +3620,31 @@ impl App {
         let mut redraw_period = super::redraw_interval(&self);
         let mut redraw_interval = interval(redraw_period);
         let mut reconnect_attempts = 0u32;
-        const MAX_RECONNECT_ATTEMPTS: u32 = 30;
+        let mut disconnect_msg_idx: Option<usize> = None;
+        let mut disconnect_start: Option<std::time::Instant> = None;
 
         'outer: loop {
-            // Determine which session to resume
             let session_to_resume = if reconnect_attempts == 0 {
-                // First connect: use --resume argument if provided
                 self.resume_session_id.take()
             } else {
-                // Reconnecting after server reload: restore the session we had before
                 self.remote_session_id.clone()
             };
 
-            // Connect to server (with optional session resume)
             let mut remote = match RemoteConnection::connect_with_session(
                 session_to_resume.as_deref(),
             )
             .await
             {
-                Ok(r) => r,
+                Ok(r) => {
+                    if let Some(idx) = disconnect_msg_idx.take() {
+                        if idx < self.display_messages.len() {
+                            self.display_messages.remove(idx);
+                        }
+                    }
+                    disconnect_start = None;
+                    r
+                }
                 Err(e) => {
-                    // Put session back if connect failed (for retry)
                     if reconnect_attempts == 0 && session_to_resume.is_some() {
                         self.resume_session_id = session_to_resume;
                     }
@@ -3651,62 +3655,88 @@ impl App {
                         ));
                     }
                     reconnect_attempts += 1;
-                    if reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
-                        // Build disconnect message with session resume hint
-                        let session_name = self
-                            .remote_session_id
-                            .as_ref()
-                            .and_then(|id| crate::id::extract_session_name(id))
-                            .or_else(|| {
-                                self.resume_session_id
-                                    .as_ref()
-                                    .and_then(|id| crate::id::extract_session_name(id))
-                            });
 
-                        let error_reason = format!("Connection error: {}", e);
-                        let resume_hint = if let Some(name) = session_name {
-                            format!(
-                                "\n\nTo resume this session later:\n  jcode --resume {}",
-                                name
-                            )
-                        } else {
-                            String::new()
-                        };
+                    let elapsed = disconnect_start
+                        .get_or_insert_with(std::time::Instant::now)
+                        .elapsed();
+                    let elapsed_str = if elapsed.as_secs() < 60 {
+                        format!("{}s", elapsed.as_secs())
+                    } else {
+                        format!("{}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
+                    };
 
-                        self.push_display_message(DisplayMessage::error(&format!(
-                            "Failed to reconnect after 30 seconds.\n\nReason: {}{}\n\nPress Ctrl+C to quit. You can still scroll with Ctrl+K/J.",
-                            error_reason, resume_hint
-                        )));
-                        terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
+                    let session_name = self
+                        .remote_session_id
+                        .as_ref()
+                        .and_then(|id| crate::id::extract_session_name(id))
+                        .or_else(|| {
+                            self.resume_session_id
+                                .as_ref()
+                                .and_then(|id| crate::id::extract_session_name(id))
+                        });
+                    let resume_hint = if let Some(name) = &session_name {
+                        format!("  Resume later: jcode --resume {}", name)
+                    } else {
+                        String::new()
+                    };
 
-                        // Allow scrolling while waiting for quit
-                        loop {
-                            if let Some(Ok(Event::Key(key))) = event_stream.next().await {
-                                if key.kind == KeyEventKind::Press {
-                                    if key.code == KeyCode::Char('c')
-                                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                                    {
-                                        break 'outer;
-                                    }
-                                    // Handle scroll keys in disconnected state
-                                    if let Some(amount) = self
-                                        .scroll_keys
-                                        .scroll_amount(key.code.clone(), key.modifiers)
-                                    {
-                                        if amount < 0 {
-                                            self.scroll_up((-amount) as usize);
-                                        } else {
-                                            self.scroll_down(amount as usize);
+                    let msg_content = format!(
+                        "⚡ Connection lost — retrying ({})\n  {}\n{}",
+                        elapsed_str,
+                        e,
+                        resume_hint,
+                    );
+
+                    if let Some(idx) = disconnect_msg_idx {
+                        if idx < self.display_messages.len() {
+                            self.display_messages[idx].content = msg_content;
+                        }
+                    } else {
+                        self.push_display_message(DisplayMessage {
+                            role: "system".to_string(),
+                            content: msg_content,
+                            tool_calls: Vec::new(),
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
+                        });
+                        disconnect_msg_idx = Some(self.display_messages.len() - 1);
+                    }
+                    terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
+
+                    let backoff = Duration::from_secs(
+                        (1u64 << reconnect_attempts.min(5)).min(30),
+                    );
+                    let sleep = tokio::time::sleep(backoff);
+                    tokio::pin!(sleep);
+                    loop {
+                        tokio::select! {
+                            _ = &mut sleep => break,
+                            event = event_stream.next() => {
+                                if let Some(Ok(Event::Key(key))) = event {
+                                    if key.kind == KeyEventKind::Press {
+                                        if key.code == KeyCode::Char('c')
+                                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                                        {
+                                            break 'outer;
                                         }
-                                        terminal
-                                            .draw(|frame| crate::tui::ui::draw(frame, &self))?;
+                                        if let Some(amount) = self
+                                            .scroll_keys
+                                            .scroll_amount(key.code.clone(), key.modifiers)
+                                        {
+                                            if amount < 0 {
+                                                self.scroll_up((-amount) as usize);
+                                            } else {
+                                                self.scroll_down(amount as usize);
+                                            }
+                                            terminal
+                                                .draw(|frame| crate::tui::ui::draw(frame, &self))?;
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
                     continue;
                 }
             };
@@ -3872,16 +3902,17 @@ impl App {
                     event = remote.next_event() => {
                         match event {
                             None => {
-                                // Server disconnected
                                 self.is_processing = false;
+                                disconnect_start = Some(std::time::Instant::now());
                                 self.push_display_message(DisplayMessage {
                                     role: "system".to_string(),
-                                    content: "Server disconnected. Reconnecting...".to_string(),
+                                    content: "⚡ Connection lost — reconnecting…".to_string(),
                                     tool_calls: Vec::new(),
                                     duration_secs: None,
                                     title: None,
                                     tool_data: None,
                                 });
+                                disconnect_msg_idx = Some(self.display_messages.len() - 1);
                                 terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
                                 reconnect_attempts = 1;
                                 tokio::time::sleep(Duration::from_millis(500)).await;
