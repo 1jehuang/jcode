@@ -3,7 +3,6 @@ mod ambient;
 mod ambient_runner;
 mod ambient_scheduler;
 mod auth;
-mod auto_debug;
 mod background;
 mod build;
 mod bus;
@@ -157,6 +156,28 @@ fn signal_crash_reason(sig: i32) -> String {
 #[cfg(unix)]
 fn handle_termination_signal(sig: i32) -> ! {
     mark_current_session_crashed(signal_crash_reason(sig));
+
+    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = crossterm::execute!(
+        std::io::stderr(),
+        crossterm::terminal::LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
+
+    if let Ok(guard) = CURRENT_SESSION_ID.lock() {
+        if let Some(session_id) = guard.as_ref() {
+            let session_name =
+                id::extract_session_name(session_id).unwrap_or(session_id.as_str());
+            eprintln!();
+            eprintln!(
+                "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
+                session_name
+            );
+            eprintln!("  jcode --resume {}", session_id);
+            eprintln!();
+        }
+    }
+
     std::process::exit(128 + sig);
 }
 
@@ -476,15 +497,9 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Run main logic with error handling for auto-debug
     if let Err(e) = run_main(args).await {
         let error_str = format!("{:?}", e);
         logging::error(&error_str);
-
-        // Trigger auto-debug if enabled
-        if auto_debug::is_enabled() {
-            auto_debug::analyze_error(&error_str, "main execution");
-        }
 
         // Print session recovery command if we have a session
         if let Ok(guard) = CURRENT_SESSION_ID.lock() {
