@@ -494,6 +494,12 @@ impl Registry {
             Arc::new(ambient::RequestPermissionTool::new()) as Arc<dyn Tool>,
         )
         .await;
+
+        self.register(
+            "send_telegram".to_string(),
+            Arc::new(ambient::SendTelegramTool::new()) as Arc<dyn Tool>,
+        )
+        .await;
     }
 
     /// Unregister a tool

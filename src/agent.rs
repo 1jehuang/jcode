@@ -1894,6 +1894,14 @@ impl Agent {
             if print_output {
                 println!();
             }
+
+            // Check for soft interrupts (e.g. Telegram messages) and inject as user messages
+            if let Some(content) = self.inject_soft_interrupts() {
+                logging::info(&format!(
+                    "Soft interrupt injected into headless turn ({} chars)",
+                    content.len()
+                ));
+            }
         }
 
         Ok(final_text)

@@ -210,7 +210,7 @@ impl Tool for EndAmbientCycleTool {
         if let Ok(mut state) = AmbientState::load() {
             let next_desc = if let Some(ref sched) = next_schedule {
                 let mins = sched.wake_in_minutes.unwrap_or(30);
-                format!("~{}m", mins)
+                format!("~{}", crate::ambient::format_minutes_human(mins))
             } else {
                 "system default".to_string()
             };
@@ -322,9 +322,9 @@ impl Tool for ScheduleAmbientTool {
         let when = if let Some(ref ts) = params.wake_at {
             ts.clone()
         } else if let Some(mins) = params.wake_in_minutes {
-            format!("in {} minutes", mins)
+            format!("in {}", crate::ambient::format_minutes_human(mins))
         } else {
-            "in 30 minutes (default)".to_string()
+            "in 30m (default)".to_string()
         };
 
         Ok(
@@ -665,6 +665,89 @@ fn parse_priority(s: Option<&str>) -> Priority {
         Some("low") => Priority::Low,
         Some("high") => Priority::High,
         _ => Priority::Normal,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SendTelegramTool
+// ---------------------------------------------------------------------------
+
+pub struct SendTelegramTool;
+
+impl SendTelegramTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl Tool for SendTelegramTool {
+    fn name(&self) -> &str {
+        "send_telegram"
+    }
+
+    fn description(&self) -> &str {
+        "Send a message to the user via Telegram. Use this to give status updates \
+         on what you're doing during ambient cycles. Keep messages concise and \
+         informative. Use Markdown formatting (bold with *text*, italic with _text_, \
+         code with `text`)."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The message text to send (Markdown supported)"
+                }
+            },
+            "required": ["message"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        args: Value,
+        _context: ToolContext,
+    ) -> Result<ToolOutput> {
+        let message = args
+            .get("message")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing required parameter: message"))?;
+
+        let config = crate::config::config();
+        if !config.safety.telegram_enabled {
+            return Ok(ToolOutput::new(
+                "Telegram notifications are not enabled in config.",
+            ));
+        }
+
+        let token = match config.safety.telegram_bot_token.as_ref() {
+            Some(t) => t.clone(),
+            None => {
+                return Ok(ToolOutput::new(
+                    "Telegram bot_token not configured.",
+                ));
+            }
+        };
+        let chat_id = match config.safety.telegram_chat_id.as_ref() {
+            Some(c) => c.clone(),
+            None => {
+                return Ok(ToolOutput::new(
+                    "Telegram chat_id not configured.",
+                ));
+            }
+        };
+
+        let client = reqwest::Client::new();
+        match crate::telegram::send_message(&client, &token, &chat_id, message).await {
+            Ok(()) => Ok(ToolOutput::new("Message sent to Telegram.")),
+            Err(e) => Ok(ToolOutput::new(format!(
+                "Failed to send Telegram message: {}",
+                e
+            ))),
+        }
     }
 }
 

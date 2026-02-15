@@ -638,7 +638,12 @@ fn poll_imap_once(host: &str, port: u16, user: &str, pass: &str) -> anyhow::Resu
 
 /// Run a Telegram Bot API polling loop checking for replies.
 /// Should be spawned as a tokio task alongside the ambient runner.
-pub async fn telegram_reply_loop(config: SafetyConfig) {
+/// Messages are injected directly into the active ambient agent session
+/// via soft interrupts. If no cycle is running, a new cycle is triggered.
+pub async fn telegram_reply_loop(
+    config: SafetyConfig,
+    runner: crate::ambient_runner::AmbientRunnerHandle,
+) {
     let token = match config.telegram_bot_token.as_ref() {
         Some(t) => t.clone(),
         None => {
@@ -716,25 +721,19 @@ pub async fn telegram_reply_loop(config: SafetyConfig) {
                             .await;
                         }
                     } else {
-                        // Treat as a general directive
-                        let source = format!("telegram_{}", update.update_id);
-                        if let Err(e) =
-                            crate::ambient::add_directive(trimmed.to_string(), source)
-                        {
-                            logging::error(&format!(
-                                "Failed to save Telegram directive: {}",
-                                e
-                            ));
+                        let injected = runner.inject_telegram_message(trimmed).await;
+                        let ack = if injected {
+                            format!("💬 Message sent to active session: _{}_", trimmed)
                         } else {
-                            logging::info(&format!("Telegram directive received: {}", trimmed));
-                            let _ = crate::telegram::send_message(
-                                &client,
-                                &token,
-                                &expected_chat_id,
-                                &format!("📋 Directive queued: _{}_", trimmed),
-                            )
-                            .await;
-                        }
+                            format!("📋 Message queued, waking agent: _{}_", trimmed)
+                        };
+                        let _ = crate::telegram::send_message(
+                            &client,
+                            &token,
+                            &expected_chat_id,
+                            &ack,
+                        )
+                        .await;
                     }
                 }
             }

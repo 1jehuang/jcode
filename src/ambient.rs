@@ -854,12 +854,12 @@ pub fn build_ambient_system_prompt(
     ));
     prompt.push('\n');
 
-    // --- User Directives (from email replies) ---
+    // --- User Directives (from email/Telegram replies) ---
     let pending_directives = take_pending_directives();
     if !pending_directives.is_empty() {
-        prompt.push_str("## User Directives (from email replies)\n");
+        prompt.push_str("## User Directives (from replies)\n");
         prompt.push_str(
-            "The user replied to ambient cycle emails with these instructions. \
+            "The user replied to ambient notifications with these instructions. \
              Address them as your **top priority** this cycle.\n\n",
         );
         for dir in &pending_directives {
@@ -905,7 +905,13 @@ pub fn build_ambient_system_prompt(
          - Session history — patterns in what the user works on\n\n\
          When done, you MUST call end_ambient_cycle with a summary of \
          everything you did, including compaction count. Always schedule \
-         your next wake time with context for what you plan to do next.\n",
+         your next wake time with context for what you plan to do next.\n\n\
+         ## Telegram Check-ins\n\n\
+         You have a `send_telegram` tool. Use it to keep the user informed \
+         about what you're doing. Send a brief message when you start a cycle \
+         and when you finish significant work. Keep messages short and useful — \
+         the user should be able to glance at Telegram and know what's happening \
+         without opening jcode.\n",
     );
 
     prompt
@@ -929,6 +935,30 @@ fn format_duration_rough(d: chrono::Duration) -> String {
     } else {
         let days = secs / 86400;
         format!("{}d", days)
+    }
+}
+
+/// Format a number of minutes into a human-friendly string.
+/// E.g. 5 → "5m", 90 → "1h 30m", 370 → "6h 10m", 1500 → "1d 1h"
+pub fn format_minutes_human(mins: u32) -> String {
+    if mins < 60 {
+        format!("{}m", mins)
+    } else if mins < 1440 {
+        let h = mins / 60;
+        let m = mins % 60;
+        if m > 0 {
+            format!("{}h {}m", h, m)
+        } else {
+            format!("{}h", h)
+        }
+    } else {
+        let d = mins / 1440;
+        let h = (mins % 1440) / 60;
+        if h > 0 {
+            format!("{}d {}h", d, h)
+        } else {
+            format!("{}d", d)
+        }
     }
 }
 

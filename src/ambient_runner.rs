@@ -4,7 +4,7 @@
 //! ambient cycles: scheduling, spawning agent sessions, handling results, and
 //! providing status for the TUI widget and debug socket.
 
-use crate::agent::Agent;
+use crate::agent::{Agent, SoftInterruptQueue};
 use crate::ambient::{
     self, AmbientCycleResult, AmbientLock, AmbientManager, AmbientState, AmbientStatus,
     CycleStatus, ResourceBudget,
@@ -45,6 +45,9 @@ struct AmbientRunnerInner {
     notifier: NotificationDispatcher,
     /// Number of active user sessions (for pause logic)
     active_user_sessions: RwLock<usize>,
+    /// Soft interrupt queue for the currently-running ambient agent (if any).
+    /// Telegram replies push messages here so they arrive mid-cycle.
+    active_cycle_queue: RwLock<Option<SoftInterruptQueue>>,
 }
 
 impl AmbientRunnerHandle {
@@ -60,6 +63,7 @@ impl AmbientRunnerHandle {
                 safety,
                 notifier: NotificationDispatcher::new(),
                 active_user_sessions: RwLock::new(0),
+                active_cycle_queue: RwLock::new(None),
             }),
         }
     }
@@ -97,6 +101,36 @@ impl AmbientRunnerHandle {
     /// Get a reference to the safety system (for debug socket permission commands).
     pub fn safety(&self) -> &Arc<SafetySystem> {
         &self.inner.safety
+    }
+
+    /// Inject a Telegram message into the active ambient cycle as a user message.
+    /// If a cycle is running, the message goes in via soft interrupt (immediate).
+    /// If no cycle is running, the message is saved as a directive and a cycle is triggered.
+    /// Returns true if injected into active cycle, false if queued as directive.
+    pub async fn inject_telegram_message(&self, text: &str) -> bool {
+        let queue = self.inner.active_cycle_queue.read().await;
+        if let Some(ref q) = *queue {
+            if let Ok(mut q) = q.lock() {
+                q.push(crate::agent::SoftInterruptMessage {
+                    content: format!("[Telegram message from user]\n{}", text),
+                    urgent: false,
+                });
+                logging::info(&format!(
+                    "Telegram message injected into active ambient cycle: {}",
+                    if text.len() > 60 { &text[..60] } else { text }
+                ));
+                return true;
+            }
+        }
+        drop(queue);
+
+        // No active cycle — save as directive and trigger a wake
+        let source = format!("telegram_{}", chrono::Utc::now().timestamp());
+        if let Err(e) = ambient::add_directive(text.to_string(), source) {
+            logging::error(&format!("Failed to save Telegram directive: {}", e));
+        }
+        self.trigger().await;
+        false
     }
 
     /// Manually trigger an ambient cycle (returns immediately, cycle runs async).
@@ -154,8 +188,8 @@ impl AmbientRunnerHandle {
             AmbientStatus::Running { detail } => format!("running: {}", detail),
             AmbientStatus::Scheduled { next_wake } => {
                 let until = *next_wake - Utc::now();
-                let mins = until.num_minutes().max(0);
-                format!("scheduled (in {}m)", mins)
+                let mins = until.num_minutes().max(0) as u32;
+                format!("scheduled (in {})", crate::ambient::format_minutes_human(mins))
             }
             AmbientStatus::Paused { reason } => format!("paused: {}", reason),
             AmbientStatus::Disabled => "disabled".to_string(),
@@ -267,8 +301,9 @@ impl AmbientRunnerHandle {
             && safety_config.telegram_enabled
         {
             let tg_config = safety_config.clone();
+            let tg_runner = self.clone();
             tokio::spawn(async move {
-                crate::notifications::telegram_reply_loop(tg_config).await;
+                crate::notifications::telegram_reply_loop(tg_config, tg_runner).await;
             });
             logging::info("Ambient runner: Telegram reply poller spawned");
         }
@@ -401,6 +436,12 @@ impl AmbientRunnerHandle {
             self.set_running_detail("starting cycle").await;
 
             let cycle_result = self.run_cycle(&provider).await;
+
+            // Clear the soft interrupt queue — cycle is done
+            {
+                let mut aq = self.inner.active_cycle_queue.write().await;
+                *aq = None;
+            }
 
             match cycle_result {
                 Ok(result) => {
@@ -593,6 +634,12 @@ impl AmbientRunnerHandle {
 
         // Clear any previous cycle result
         ambient_tools::take_cycle_result();
+
+        // Expose the agent's soft interrupt queue so Telegram replies can be injected mid-cycle
+        {
+            let mut aq = self.inner.active_cycle_queue.write().await;
+            *aq = Some(agent.soft_interrupt_queue());
+        }
 
         self.set_running_detail("running agent").await;
 
