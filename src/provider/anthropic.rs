@@ -369,6 +369,13 @@ impl AnthropicProvider {
                     content: content.clone(),
                     is_error: is_error.unwrap_or(false),
                 }),
+                ContentBlock::Image { media_type, data } => Some(ApiContentBlock::Image {
+                    source: ApiImageSource {
+                        kind: "base64".to_string(),
+                        media_type: media_type.clone(),
+                        data: data.clone(),
+                    },
+                }),
                 _ => None, // Skip other block types (thinking, etc.)
             })
             .collect()
@@ -1193,6 +1200,18 @@ enum ApiContentBlock {
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },
+    #[serde(rename = "image")]
+    Image {
+        source: ApiImageSource,
+    },
+}
+
+#[derive(Serialize, Clone)]
+struct ApiImageSource {
+    #[serde(rename = "type")]
+    kind: String,
+    media_type: String,
+    data: String,
 }
 
 #[derive(Serialize, Clone)]
