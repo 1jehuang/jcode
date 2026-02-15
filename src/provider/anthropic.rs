@@ -758,6 +758,11 @@ async fn stream_response(
                 is_oauth,
             );
             for stream_event in events {
+                if let StreamEvent::Error { ref message, .. } = stream_event {
+                    if is_retryable_error(&message.to_lowercase()) {
+                        anyhow::bail!("Retryable stream error: {}", message);
+                    }
+                }
                 if tx.send(Ok(stream_event)).await.is_err() {
                     return Ok(()); // Receiver dropped
                 }
@@ -802,10 +807,14 @@ fn is_retryable_error(error_str: &str) -> bool {
         || error_str.contains("unexpected eof")
         || error_str.contains("incomplete message")
         // Server errors (5xx)
+        || error_str.contains("500 internal server error")
         || error_str.contains("502 bad gateway")
         || error_str.contains("503 service unavailable")
         || error_str.contains("504 gateway timeout")
         || error_str.contains("overloaded")
+        // API-level server errors (SSE error events)
+        || error_str.contains("api_error")
+        || error_str.contains("internal server error")
 }
 
 fn is_oauth_auth_error(error_str: &str) -> bool {

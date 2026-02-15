@@ -1567,10 +1567,14 @@ fn is_retryable_error(error_str: &str) -> bool {
         || error_str.contains("stream disconnected before completion")
         || error_str.contains("falling back from websockets to https transport")
         // Server errors (5xx)
+        || error_str.contains("500 internal server error")
         || error_str.contains("502 bad gateway")
         || error_str.contains("503 service unavailable")
         || error_str.contains("504 gateway timeout")
         || error_str.contains("overloaded")
+        // API-level server errors
+        || error_str.contains("api_error")
+        || error_str.contains("internal server error")
 }
 
 fn is_websocket_fallback_notice(data: &str) -> bool {
