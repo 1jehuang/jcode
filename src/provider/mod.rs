@@ -204,6 +204,10 @@ pub const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
 pub fn context_limit_for_model(model: &str) -> Option<usize> {
     let model = model.to_lowercase();
 
+    if model.starts_with("gpt-5.3-codex-spark") {
+        return Some(128_000);
+    }
+
     if model.starts_with("gpt-5.3-codex") {
         return Some(400_000);
     }
@@ -969,5 +973,22 @@ mod tests {
     #[test]
     fn test_provider_for_model_unknown() {
         assert_eq!(provider_for_model("unknown-model"), None);
+    }
+
+    #[test]
+    fn test_context_limit_spark_vs_codex() {
+        assert_eq!(
+            context_limit_for_model("gpt-5.3-codex-spark"),
+            Some(128_000)
+        );
+        assert_eq!(context_limit_for_model("gpt-5.3-codex"), Some(400_000));
+    }
+
+    #[test]
+    fn test_context_limit_claude() {
+        assert_eq!(
+            context_limit_for_model("claude-opus-4-6"),
+            Some(200_000)
+        );
     }
 }
