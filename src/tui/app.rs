@@ -4006,9 +4006,7 @@ impl App {
                     self.status = ProcessingStatus::Streaming;
                 } else if matches!(self.status, ProcessingStatus::Thinking(_)) {
                     self.status = ProcessingStatus::Streaming;
-                } else if self.is_processing
-                    && matches!(self.status, ProcessingStatus::Idle)
-                {
+                } else if self.is_processing && matches!(self.status, ProcessingStatus::Idle) {
                     self.status = ProcessingStatus::Streaming;
                 }
                 if self.streaming_tps_start.is_none() {
@@ -4021,14 +4019,12 @@ impl App {
                 false
             }
             ServerEvent::ToolStart { id, name } => {
-                if let Some(start) = self.streaming_tps_start.take() {
-                    self.streaming_tps_elapsed += start.elapsed();
+                if self.streaming_tps_start.is_none() {
+                    self.streaming_tps_start = Some(Instant::now());
                 }
                 remote.handle_tool_start(&id, &name);
                 if matches!(name.as_str(), "memory" | "remember") {
-                    crate::memory::set_state(
-                        crate::tui::info_widget::MemoryState::Embedding,
-                    );
+                    crate::memory::set_state(crate::tui::info_widget::MemoryState::Embedding);
                 }
                 self.status = ProcessingStatus::RunningTool(name.clone());
                 self.streaming_tool_calls.push(ToolCall {
@@ -4044,6 +4040,9 @@ impl App {
                 false
             }
             ServerEvent::ToolExec { id, name } => {
+                if let Some(start) = self.streaming_tps_start.take() {
+                    self.streaming_tps_elapsed += start.elapsed();
+                }
                 // Update streaming_tool_calls with parsed input before clearing
                 let parsed_input = remote.get_current_tool_input();
                 if let Some(tc) = self.streaming_tool_calls.iter_mut().find(|tc| tc.id == id) {
@@ -7151,11 +7150,8 @@ impl App {
             (avail, method, r.provider.clone())
         }
 
-        const RECOMMENDED_MODELS: &[&str] = &[
-            "gpt-5.3-codex-spark",
-            "gpt-5.3-codex",
-            "claude-opus-4-6",
-        ];
+        const RECOMMENDED_MODELS: &[&str] =
+            &["gpt-5.3-codex-spark", "gpt-5.3-codex", "claude-opus-4-6"];
 
         let mut models: Vec<super::ModelEntry> = Vec::new();
         for name in &model_order {
@@ -7368,7 +7364,11 @@ impl App {
     /// Fuzzy match score for picker: returns Some(score) if pattern is a subsequence of text.
     /// Higher score = better match. Bonuses for consecutive chars, word boundaries.
     fn picker_fuzzy_score(pattern: &str, text: &str) -> Option<i32> {
-        let pat: Vec<char> = pattern.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+        let pat: Vec<char> = pattern
+            .to_lowercase()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
         let txt: Vec<char> = text.to_lowercase().chars().collect();
         if pat.is_empty() {
             return Some(0);
@@ -7775,8 +7775,8 @@ impl App {
                         }
                     }
                     StreamEvent::ToolUseStart { id, name } => {
-                        if let Some(start) = self.streaming_tps_start.take() {
-                            self.streaming_tps_elapsed += start.elapsed();
+                        if self.streaming_tps_start.is_none() {
+                            self.streaming_tps_start = Some(Instant::now());
                         }
                         current_tool = Some(ToolCall {
                             id,
@@ -7790,6 +7790,9 @@ impl App {
                         current_tool_input.push_str(&delta);
                     }
                     StreamEvent::ToolUseEnd => {
+                        if let Some(start) = self.streaming_tps_start.take() {
+                            self.streaming_tps_elapsed += start.elapsed();
+                        }
                         if let Some(mut tool) = current_tool.take() {
                             tool.input = serde_json::from_str(&current_tool_input)
                                 .unwrap_or(serde_json::Value::Null);
@@ -8101,9 +8104,7 @@ impl App {
             for tc in tool_calls {
                 self.status = ProcessingStatus::RunningTool(tc.name.clone());
                 if matches!(tc.name.as_str(), "memory" | "remember") {
-                    crate::memory::set_state(
-                        crate::tui::info_widget::MemoryState::Embedding,
-                    );
+                    crate::memory::set_state(crate::tui::info_widget::MemoryState::Embedding);
                 }
                 let message_id = assistant_message_id
                     .clone()
@@ -8469,8 +8470,8 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
-                                        if let Some(start) = self.streaming_tps_start.take() {
-                                            self.streaming_tps_elapsed += start.elapsed();
+                                        if self.streaming_tps_start.is_none() {
+                                            self.streaming_tps_start = Some(Instant::now());
                                         }
                                         self.broadcast_debug(super::backend::DebugEvent::ToolStart {
                                             id: id.clone(),
@@ -8504,6 +8505,9 @@ impl App {
                                         current_tool_input.push_str(&delta);
                                     }
                                     StreamEvent::ToolUseEnd => {
+                                        if let Some(start) = self.streaming_tps_start.take() {
+                                            self.streaming_tps_elapsed += start.elapsed();
+                                        }
                                         if let Some(mut tool) = current_tool.take() {
                                             tool.input = serde_json::from_str(&current_tool_input)
                                                 .unwrap_or(serde_json::Value::Null);
@@ -8821,9 +8825,7 @@ impl App {
             for tc in tool_calls {
                 self.status = ProcessingStatus::RunningTool(tc.name.clone());
                 if matches!(tc.name.as_str(), "memory" | "remember") {
-                    crate::memory::set_state(
-                        crate::tui::info_widget::MemoryState::Embedding,
-                    );
+                    crate::memory::set_state(crate::tui::info_widget::MemoryState::Embedding);
                 }
                 terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
 
