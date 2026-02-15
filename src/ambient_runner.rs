@@ -122,6 +122,25 @@ impl AmbientRunnerHandle {
         self.inner.wake_notify.notify_one();
     }
 
+    /// Start (or restart) the ambient loop. If the loop exited due to Disabled
+    /// status, this resets the state to Idle and spawns a new loop task.
+    pub async fn start(&self, provider: Arc<dyn Provider>) -> bool {
+        let already_running = *self.inner.running.read().await;
+        if already_running {
+            return false;
+        }
+        {
+            let mut state = self.inner.state.write().await;
+            state.status = AmbientStatus::Idle;
+            let _ = state.save();
+        }
+        let handle = self.clone();
+        tokio::spawn(async move {
+            handle.run_loop(provider).await;
+        });
+        true
+    }
+
     /// Get status JSON for debug socket.
     pub async fn status_json(&self) -> String {
         let state = self.inner.state.read().await;

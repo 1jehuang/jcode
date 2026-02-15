@@ -7539,6 +7539,16 @@ async fn handle_debug_client(
                             } else {
                                 Err(anyhow::anyhow!("Ambient mode is not enabled"))
                             }
+                        } else if cmd == "ambient:start" {
+                            if let Some(ref runner) = ambient_runner {
+                                if runner.start(Arc::clone(&provider)).await {
+                                    Ok("Ambient mode started".to_string())
+                                } else {
+                                    Ok("Ambient mode is already running".to_string())
+                                }
+                            } else {
+                                Err(anyhow::anyhow!("Ambient mode is not enabled in config"))
+                            }
                         } else if cmd == "ambient:help" {
                             Ok(r#"Ambient mode debug commands (ambient: prefix):
   ambient:status              - Current ambient state, cycle count, last run
@@ -7548,6 +7558,7 @@ async fn handle_debug_client(
   ambient:permissions         - List pending permission requests
   ambient:approve:<id>        - Approve a permission request
   ambient:deny:<id> [reason]  - Deny a permission request (optional reason)
+  ambient:start               - Start/restart ambient mode
   ambient:stop                - Stop ambient mode"#
                                 .to_string())
                         } else if cmd == "events:recent" || cmd.starts_with("events:recent:") {
@@ -7803,6 +7814,7 @@ AMBIENT COMMANDS (ambient: prefix):
   ambient:permissions         - List pending permission requests
   ambient:approve:<id>        - Approve a permission request
   ambient:deny:<id> [reason]  - Deny a permission request (optional reason)
+  ambient:start               - Start/restart ambient mode
   ambient:stop                - Stop ambient mode
   ambient:help                - Ambient command reference
 
