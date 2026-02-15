@@ -632,6 +632,132 @@ fn poll_imap_once(host: &str, port: u16, user: &str, pass: &str) -> anyhow::Resu
     Ok(processed)
 }
 
+// ---------------------------------------------------------------------------
+// Telegram reply polling
+// ---------------------------------------------------------------------------
+
+/// Run a Telegram Bot API polling loop checking for replies.
+/// Should be spawned as a tokio task alongside the ambient runner.
+pub async fn telegram_reply_loop(config: SafetyConfig) {
+    let token = match config.telegram_bot_token.as_ref() {
+        Some(t) => t.clone(),
+        None => {
+            logging::error("Telegram reply loop: no bot_token configured");
+            return;
+        }
+    };
+    let expected_chat_id = match config.telegram_chat_id.as_ref() {
+        Some(c) => c.clone(),
+        None => {
+            logging::error("Telegram reply loop: no chat_id configured");
+            return;
+        }
+    };
+
+    logging::info("Telegram reply loop: starting");
+
+    let client = reqwest::Client::new();
+    let mut offset: Option<i64> = None;
+
+    loop {
+        match crate::telegram::get_updates(&client, &token, offset, 30).await {
+            Ok(updates) => {
+                for update in updates {
+                    offset = Some(update.update_id + 1);
+
+                    let msg = match update.message {
+                        Some(m) => m,
+                        None => continue,
+                    };
+
+                    if msg.chat.id.to_string() != expected_chat_id {
+                        continue;
+                    }
+
+                    let text = match msg.text {
+                        Some(t) => t,
+                        None => continue,
+                    };
+
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+
+                    // Check if this is a permission reply (e.g. "approve req_abc123")
+                    if let Some(req_id) = extract_permission_id(trimmed) {
+                        let (approved, message) = parse_permission_reply(trimmed);
+                        if let Err(e) = crate::safety::record_permission_via_file(
+                            &req_id,
+                            approved,
+                            "telegram_reply",
+                            message,
+                        ) {
+                            logging::error(&format!(
+                                "Failed to record permission from Telegram for {}: {}",
+                                req_id, e
+                            ));
+                        } else {
+                            logging::info(&format!(
+                                "Permission {} via Telegram: {}",
+                                if approved { "approved" } else { "denied" },
+                                req_id
+                            ));
+                            let _ = crate::telegram::send_message(
+                                &client,
+                                &token,
+                                &expected_chat_id,
+                                &format!(
+                                    "✅ Permission {} for `{}`",
+                                    if approved { "approved" } else { "denied" },
+                                    req_id
+                                ),
+                            )
+                            .await;
+                        }
+                    } else {
+                        // Treat as a general directive
+                        let source = format!("telegram_{}", update.update_id);
+                        if let Err(e) =
+                            crate::ambient::add_directive(trimmed.to_string(), source)
+                        {
+                            logging::error(&format!(
+                                "Failed to save Telegram directive: {}",
+                                e
+                            ));
+                        } else {
+                            logging::info(&format!("Telegram directive received: {}", trimmed));
+                            let _ = crate::telegram::send_message(
+                                &client,
+                                &token,
+                                &expected_chat_id,
+                                &format!("📋 Directive queued: _{}_", trimmed),
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                logging::error(&format!("Telegram poll error: {}", e));
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+        }
+    }
+}
+
+/// Extract a permission request ID from a Telegram message.
+/// Matches patterns like "approve req_abc123" or "deny req_abc123".
+fn extract_permission_id(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    for word in lower.split_whitespace() {
+        if word.starts_with("req_") {
+            return Some(word.to_string());
+        }
+    }
+    None
+}
+
 /// Strip quoted reply lines (lines starting with ">") and email signatures.
 fn strip_quoted_reply(text: &str) -> String {
     text.lines()

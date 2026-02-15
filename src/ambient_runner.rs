@@ -261,6 +261,18 @@ impl AmbientRunnerHandle {
             logging::info("Ambient runner: IMAP reply poller spawned");
         }
 
+        // Spawn Telegram reply poller if enabled
+        if safety_config.telegram_reply_enabled
+            && safety_config.telegram_bot_token.is_some()
+            && safety_config.telegram_enabled
+        {
+            let tg_config = safety_config.clone();
+            tokio::spawn(async move {
+                crate::notifications::telegram_reply_loop(tg_config).await;
+            });
+            logging::info("Ambient runner: Telegram reply poller spawned");
+        }
+
         let amb_config = &config().ambient;
         let scheduler_config = AmbientSchedulerConfig {
             min_interval_minutes: amb_config.min_interval_minutes,
