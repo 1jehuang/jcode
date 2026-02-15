@@ -217,6 +217,28 @@ impl NotificationDispatcher {
                 });
             }
         }
+
+        // Telegram — uses DETAILED body (sent to your bot chat, private)
+        if self.config.telegram_enabled {
+            if let (Some(ref token), Some(ref chat_id)) = (
+                &self.config.telegram_bot_token,
+                &self.config.telegram_chat_id,
+            ) {
+                let client = self.client.clone();
+                let token = token.clone();
+                let chat_id = chat_id.clone();
+                let title = title.to_string();
+                let body = detailed_body.to_string();
+                tokio::spawn(async move {
+                    let text = format!("*{}*\n\n{}", title, body);
+                    if let Err(e) =
+                        crate::telegram::send_message(&client, &token, &chat_id, &text).await
+                    {
+                        logging::error(&format!("Telegram notification failed: {}", e));
+                    }
+                });
+            }
+        }
     }
 }
 

@@ -31,6 +31,7 @@ pub mod session;
 pub mod sidecar;
 pub mod skill;
 pub mod storage;
+pub mod telegram;
 pub mod todo;
 pub mod tool;
 pub mod tui;

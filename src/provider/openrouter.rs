@@ -1238,20 +1238,30 @@ impl Provider for OpenRouterProvider {
         let build_content_parts = |blocks: &[ContentBlock]| -> Vec<Value> {
             let mut parts = Vec::new();
             for block in blocks {
-                if let ContentBlock::Text {
-                    text,
-                    cache_control,
-                } = block
-                {
-                    let mut part = serde_json::json!({
-                        "type": "text",
-                        "text": text
-                    });
-                    if let Some(cache_control) = cache_control {
-                        part["cache_control"] =
-                            serde_json::to_value(cache_control).unwrap_or(Value::Null);
+                match block {
+                    ContentBlock::Text {
+                        text,
+                        cache_control,
+                    } => {
+                        let mut part = serde_json::json!({
+                            "type": "text",
+                            "text": text
+                        });
+                        if let Some(cache_control) = cache_control {
+                            part["cache_control"] =
+                                serde_json::to_value(cache_control).unwrap_or(Value::Null);
+                        }
+                        parts.push(part);
                     }
-                    parts.push(part);
+                    ContentBlock::Image { media_type, data } => {
+                        parts.push(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{};base64,{}", media_type, data)
+                            }
+                        }));
+                    }
+                    _ => {}
                 }
             }
             parts
