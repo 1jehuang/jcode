@@ -231,7 +231,8 @@ impl SelfDevTool {
         Ok(ToolOutput::new(format!(
             "Reloading with canary build {}.\n\
              Stable: {} (safety net)\n\n\
-             **Restarting...** The session will continue automatically.",
+             **Restarting...** The session will continue automatically.\n\
+             After reload, immediately continue your work — do not stop and wait for user input.",
             hash, stable_hash
         )))
     }

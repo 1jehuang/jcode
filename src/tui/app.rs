@@ -1166,11 +1166,11 @@ impl App {
                     };
                     let task_info = ctx
                         .task_context
-                        .map(|t| format!("\nYou were working on: {}", t))
+                        .map(|t| format!("\nTask context: {}", t))
                         .unwrap_or_default();
 
                     format!(
-                        "[{} complete. Previous version: {}, New version: {}.{}\nSession restored with {} turns. Continue with your task. Do not wait for user input — pick up where you left off and keep going.]",
+                        "[SYSTEM: {} succeeded. Build {} → {}.{}\nSession restored with {} turns.\nIMPORTANT: The reload is done. You MUST immediately continue your work. Do NOT ask the user what to do next. Do NOT summarize what happened. Just pick up exactly where you left off and keep going.]",
                         action,
                         ctx.version_before,
                         ctx.version_after,
@@ -1184,13 +1184,14 @@ impl App {
                         .unwrap_or_else(|_| "unknown".to_string());
 
                     format!(
-                        "[Reload complete. Build: {}, CWD: {}, Session: {} turns. Continue where you left off. Do not wait for user input — keep going.]",
+                        "[SYSTEM: Reload complete. Build: {}, CWD: {}, Session: {} turns.\nIMPORTANT: You MUST immediately continue your work. Do NOT ask the user what to do next. Just pick up exactly where you left off and keep going.]",
                         build_hash,
                         cwd,
                         total_turns
                     )
                 };
 
+                crate::logging::info(&format!("Queuing reload continuation message ({} chars)", continuation_msg.len()));
                 self.queued_messages.push(continuation_msg);
             }
         } else {
@@ -3781,11 +3782,11 @@ impl App {
                     };
                     let task_info = ctx
                         .task_context
-                        .map(|t| format!("\nYou were working on: {}", t))
+                        .map(|t| format!("\nTask context: {}", t))
                         .unwrap_or_default();
 
                     format!(
-                        "[{} complete. Previous version: {}, New version: {}.{}\nContinue with your task. Do not wait for user input — pick up where you left off and keep going.]",
+                        "[SYSTEM: {} succeeded. Build {} → {}.{}\nIMPORTANT: The reload is done. You MUST immediately continue your work. Do NOT ask the user what to do next. Do NOT summarize what happened. Just pick up exactly where you left off and keep going.]",
                         action,
                         ctx.version_before,
                         ctx.version_after,
@@ -3802,11 +3803,12 @@ impl App {
                         self.reload_info.join(", ")
                     };
                     format!(
-                        "[Reload complete. {}. CWD: {}. Session restored — continue where you left off. Do not wait for user input — keep going.]",
+                        "[SYSTEM: Reload complete. {}. CWD: {}.\nIMPORTANT: You MUST immediately continue your work. Do NOT ask the user what to do next. Just pick up exactly where you left off and keep going.]",
                         reload_summary, cwd
                     )
                 };
 
+                crate::logging::info(&format!("Queuing reload continuation message ({} chars)", continuation_msg.len()));
                 self.queued_messages.push(continuation_msg);
                 self.reload_info.clear();
             }
@@ -3841,6 +3843,7 @@ impl App {
                         // Process queued messages (e.g. reload continuation)
                         if !self.is_processing && !self.queued_messages.is_empty() {
                             let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
+                            crate::logging::info(&format!("Sending queued continuation message ({} chars)", combined.len()));
                             self.push_display_message(DisplayMessage {
                                 role: "user".to_string(),
                                 content: combined.clone(),
@@ -3857,6 +3860,8 @@ impl App {
                                 self.streaming_tps_start = None;
                                 self.streaming_tps_elapsed = Duration::ZERO;
                                 self.streaming_total_output_tokens = 0;
+                            } else {
+                                crate::logging::error("Failed to send queued continuation message");
                             }
                         }
                     }
@@ -4290,7 +4295,13 @@ impl App {
                     self.is_processing = false;
                     self.status = ProcessingStatus::Idle;
                     self.follow_chat_bottom();
-                    self.queued_messages.clear();
+                    // Only clear queued messages when switching FROM a known session.
+                    // When prev_session_id is None (initial connect / resume after reload),
+                    // preserve queued messages — they may contain reload continuation messages
+                    // that were queued before History arrived.
+                    if prev_session_id.is_some() {
+                        self.queued_messages.clear();
+                    }
                     self.interleave_message = None;
                     self.pending_soft_interrupt = None;
                     self.remote_total_tokens = None;
