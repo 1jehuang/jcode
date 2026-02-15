@@ -324,112 +324,131 @@ impl ClientApp {
     /// Run the client TUI with auto-reconnection
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         let mut event_stream = EventStream::new();
-        let mut reconnect_attempts = 0;
-        const MAX_RECONNECT_ATTEMPTS: u32 = 30; // 30 seconds max
+        let mut reconnect_attempts = 0u32;
+        let mut disconnect_msg_idx: Option<usize> = None;
+        let mut disconnect_start: Option<std::time::Instant> = None;
 
         'outer: loop {
             // Connect to server
             let stream = match self.connect().await {
                 Ok(s) => {
                     self.server_disconnected = false;
+                    if let Some(idx) = disconnect_msg_idx.take() {
+                        if idx < self.display_messages.len() {
+                            self.display_messages.remove(idx);
+                        }
+                    }
+                    disconnect_start = None;
                     s
                 }
                 Err(e) => {
                     if reconnect_attempts == 0 {
-                        // First connection attempt failed
                         return Err(anyhow::anyhow!(
                             "Failed to connect to server. Is `jcode serve` running? Error: {}",
                             e
                         ));
                     }
-                    // Reconnecting after disconnect
                     reconnect_attempts += 1;
-                    if reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
-                        // Build disconnect message with session resume hint
-                        let session_name = self
-                            .session_id
-                            .as_ref()
-                            .and_then(|id| crate::id::extract_session_name(id));
 
-                        let error_reason = format!("Connection error: {}", e);
-                        let resume_hint = if let Some(name) = session_name {
-                            format!(
-                                "\n\nTo resume this session later:\n  jcode --resume {}",
-                                name
-                            )
-                        } else {
-                            String::new()
-                        };
+                    let elapsed = disconnect_start
+                        .get_or_insert_with(std::time::Instant::now)
+                        .elapsed();
+                    let elapsed_str = if elapsed.as_secs() < 60 {
+                        format!("{}s", elapsed.as_secs())
+                    } else {
+                        format!("{}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
+                    };
 
+                    let session_name = self
+                        .session_id
+                        .as_ref()
+                        .and_then(|id| crate::id::extract_session_name(id));
+                    let resume_hint = if let Some(name) = &session_name {
+                        format!("  Resume later: jcode --resume {}", name)
+                    } else {
+                        String::new()
+                    };
+
+                    let msg_content = format!(
+                        "⚡ Connection lost — retrying ({})\n  {}\n{}",
+                        elapsed_str,
+                        e,
+                        resume_hint,
+                    );
+
+                    if let Some(idx) = disconnect_msg_idx {
+                        if idx < self.display_messages.len() {
+                            self.display_messages[idx].content = msg_content;
+                        }
+                    } else {
                         self.push_display_message(DisplayMessage {
-                            role: "error".to_string(),
-                            content: format!(
-                                "Failed to reconnect after 30 seconds.\n\nReason: {}{}\n\nPress Ctrl+C to quit. You can still scroll with Ctrl+K/J.",
-                                error_reason, resume_hint
-                            ),
+                            role: "system".to_string(),
+                            content: msg_content,
                             tool_calls: Vec::new(),
                             duration_secs: None,
                             title: None,
                             tool_data: None,
                         });
-                        terminal.draw(|frame| super::ui::draw(frame, &self))?;
+                        disconnect_msg_idx = Some(self.display_messages.len() - 1);
+                    }
+                    terminal.draw(|frame| super::ui::draw(frame, &self))?;
 
-                        // Allow scrolling while waiting for quit
-                        loop {
-                            if let Some(Ok(Event::Key(key))) = event_stream.next().await {
-                                if key.kind == KeyEventKind::Press {
-                                    if key.code == KeyCode::Char('c')
-                                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                                    {
-                                        break 'outer;
-                                    }
-                                    // Handle scroll keys (Ctrl+K/J, Alt+U/D) in disconnected state
-                                    let max_estimate = self.display_messages.len() * 100
-                                        + self.streaming_text.len();
-                                    if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                        match key.code {
-                                            KeyCode::Char('k') => {
-                                                // Scroll up one line
-                                                self.scroll_offset =
-                                                    (self.scroll_offset + 1).min(max_estimate);
-                                                terminal
-                                                    .draw(|frame| super::ui::draw(frame, &self))?;
-                                            }
-                                            KeyCode::Char('j') => {
-                                                // Scroll down one line
-                                                self.scroll_offset =
-                                                    self.scroll_offset.saturating_sub(1);
-                                                terminal
-                                                    .draw(|frame| super::ui::draw(frame, &self))?;
-                                            }
-                                            _ => {}
+                    let backoff = Duration::from_secs(
+                        (1u64 << reconnect_attempts.min(5)).min(30),
+                    );
+                    let sleep = tokio::time::sleep(backoff);
+                    tokio::pin!(sleep);
+                    loop {
+                        tokio::select! {
+                            _ = &mut sleep => break,
+                            event = event_stream.next() => {
+                                if let Some(Ok(Event::Key(key))) = event {
+                                    if key.kind == KeyEventKind::Press {
+                                        if key.code == KeyCode::Char('c')
+                                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                                        {
+                                            break 'outer;
                                         }
-                                    } else if key.modifiers.contains(KeyModifiers::ALT) {
-                                        match key.code {
-                                            KeyCode::Char('u') => {
-                                                // Scroll up half page (10 lines)
-                                                self.scroll_offset =
-                                                    (self.scroll_offset + 10).min(max_estimate);
-                                                terminal
-                                                    .draw(|frame| super::ui::draw(frame, &self))?;
+                                        let max_estimate = self.display_messages.len() * 100
+                                            + self.streaming_text.len();
+                                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                            match key.code {
+                                                KeyCode::Char('k') => {
+                                                    self.scroll_offset =
+                                                        (self.scroll_offset + 1).min(max_estimate);
+                                                    terminal
+                                                        .draw(|frame| super::ui::draw(frame, &self))?;
+                                                }
+                                                KeyCode::Char('j') => {
+                                                    self.scroll_offset =
+                                                        self.scroll_offset.saturating_sub(1);
+                                                    terminal
+                                                        .draw(|frame| super::ui::draw(frame, &self))?;
+                                                }
+                                                _ => {}
                                             }
-                                            KeyCode::Char('d') => {
-                                                // Scroll down half page (10 lines)
-                                                self.scroll_offset =
-                                                    self.scroll_offset.saturating_sub(10);
-                                                terminal
-                                                    .draw(|frame| super::ui::draw(frame, &self))?;
+                                        } else if key.modifiers.contains(KeyModifiers::ALT) {
+                                            match key.code {
+                                                KeyCode::Char('u') => {
+                                                    self.scroll_offset =
+                                                        (self.scroll_offset + 10).min(max_estimate);
+                                                    terminal
+                                                        .draw(|frame| super::ui::draw(frame, &self))?;
+                                                }
+                                                KeyCode::Char('d') => {
+                                                    self.scroll_offset =
+                                                        self.scroll_offset.saturating_sub(10);
+                                                    terminal
+                                                        .draw(|frame| super::ui::draw(frame, &self))?;
+                                                }
+                                                _ => {}
                                             }
-                                            _ => {}
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                    // Wait and retry
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    terminal.draw(|frame| super::ui::draw(frame, &self))?;
                     continue;
                 }
             };
@@ -537,17 +556,18 @@ impl ClientApp {
                     result = reader.read_line(&mut server_line) => {
                         match result {
                             Ok(0) | Err(_) => {
-                                // Server disconnected - try to reconnect
                                 self.server_disconnected = true;
                                 self.is_processing = false;
+                                disconnect_start = Some(std::time::Instant::now());
                                 self.push_display_message(DisplayMessage {
                                     role: "system".to_string(),
-                                    content: "Server disconnected. Reconnecting...".to_string(),
+                                    content: "⚡ Connection lost — reconnecting…".to_string(),
                                     tool_calls: Vec::new(),
                                     duration_secs: None,
                                     title: None,
                                     tool_data: None,
                                 });
+                                disconnect_msg_idx = Some(self.display_messages.len() - 1);
                                 terminal.draw(|frame| super::ui::draw(frame, &self))?;
                                 reconnect_attempts = 1;
                                 tokio::time::sleep(Duration::from_millis(500)).await;
