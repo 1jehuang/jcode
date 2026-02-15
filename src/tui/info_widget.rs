@@ -1292,7 +1292,7 @@ fn calculate_widget_height(
             let effective_w = inner_width.saturating_sub(2); // 2-char indent on tip text
             let tip = current_tip(effective_w);
             let lines = wrap_tip_text(&tip.text, effective_w);
-            (1 + lines.len() as u16) // header + wrapped text
+            1 + lines.len() as u16 // header + wrapped text
         }
     };
 
