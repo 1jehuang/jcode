@@ -38,6 +38,7 @@ mod telegram;
 mod todo;
 mod tool;
 mod tui;
+mod update;
 mod usage;
 mod util;
 
@@ -481,26 +482,63 @@ async fn main() -> Result<()> {
     let auto_update = args.auto_update;
 
     if check_updates {
-        // Spawn update check in background to avoid blocking startup
-        std::thread::spawn(move || {
-            if let Some(update_available) = check_for_updates() {
-                if update_available {
-                    if auto_update {
-                        eprintln!("Update available - auto-updating...");
-                        if let Err(e) = run_auto_update() {
-                            eprintln!(
-                                "Auto-update failed: {}. Continuing with current version.",
-                                e
-                            );
-                        }
-                    } else {
+        if update::is_release_build() {
+            // Release build: check GitHub Releases for newer version
+            std::thread::spawn(move || {
+                match update::check_and_maybe_update(auto_update) {
+                    update::UpdateCheckResult::UpdateAvailable {
+                        current,
+                        latest,
+                        ..
+                    } => {
                         eprintln!(
-                            "\n📦 Update available! Run `jcode update` or `/reload` to update.\n"
+                            "\n📦 Update available: {} → {}. Run `jcode update` to install.\n",
+                            current, latest
                         );
                     }
+                    update::UpdateCheckResult::UpdateInstalled { version, path } => {
+                        eprintln!(
+                            "✅ Updated to {}. Restarting from {}...",
+                            version,
+                            path.display()
+                        );
+                        // Exec into the new binary
+                        use std::os::unix::process::CommandExt;
+                        let args: Vec<String> = std::env::args().skip(1).collect();
+                        let err = ProcessCommand::new(&path)
+                            .args(&args)
+                            .arg("--no-update")
+                            .exec();
+                        eprintln!("Failed to exec new binary: {}", err);
+                    }
+                    update::UpdateCheckResult::Error(e) => {
+                        logging::info(&format!("Update check failed: {}", e));
+                    }
+                    update::UpdateCheckResult::NoUpdate => {}
                 }
-            }
-        });
+            });
+        } else {
+            // Dev build: check git remote for updates
+            std::thread::spawn(move || {
+                if let Some(update_available) = check_for_updates() {
+                    if update_available {
+                        if auto_update {
+                            eprintln!("Update available - auto-updating...");
+                            if let Err(e) = run_auto_update() {
+                                eprintln!(
+                                    "Auto-update failed: {}. Continuing with current version.",
+                                    e
+                                );
+                            }
+                        } else {
+                            eprintln!(
+                                "\n📦 Update available! Run `jcode update` or `/reload` to update.\n"
+                            );
+                        }
+                    }
+                }
+            });
+        }
     }
 
     if let Err(e) = run_main(args).await {
@@ -2375,12 +2413,34 @@ fn run_auto_update() -> Result<()> {
 
 /// Run the update process (manual)
 fn run_update() -> Result<()> {
+    if update::is_release_build() {
+        eprintln!("Checking GitHub for latest release...");
+        match update::check_for_update_blocking() {
+            Ok(Some(release)) => {
+                eprintln!(
+                    "Downloading {} → {}...",
+                    env!("JCODE_VERSION"),
+                    release.tag_name
+                );
+                let path = update::download_and_install_blocking(&release)?;
+                eprintln!("✅ Updated to {} at {}", release.tag_name, path.display());
+                eprintln!("Restart jcode to use the new version.");
+            }
+            Ok(None) => {
+                eprintln!("Already up to date ({})", env!("JCODE_VERSION"));
+            }
+            Err(e) => {
+                anyhow::bail!("Update check failed: {}", e);
+            }
+        }
+        return Ok(());
+    }
+
     let repo_dir =
         get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
     eprintln!("Updating jcode from {}...", repo_dir.display());
 
-    // Git pull
     eprintln!("Pulling latest changes...");
     let pull = ProcessCommand::new("git")
         .args(["pull"])
@@ -2391,7 +2451,6 @@ fn run_update() -> Result<()> {
         anyhow::bail!("git pull failed");
     }
 
-    // Cargo build --release
     eprintln!("Building...");
     let build = ProcessCommand::new("cargo")
         .args(["build", "--release"])
@@ -2406,7 +2465,6 @@ fn run_update() -> Result<()> {
         eprintln!("Warning: install failed: {}", e);
     }
 
-    // Get new version hash
     let hash = ProcessCommand::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .current_dir(&repo_dir)
