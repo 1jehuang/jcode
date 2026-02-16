@@ -899,6 +899,28 @@ impl App {
         &self.session.id
     }
 
+    fn update_terminal_title(&self) {
+        let session_id = if self.is_remote {
+            self.remote_session_id.as_deref().unwrap_or(&self.session.id)
+        } else {
+            &self.session.id
+        };
+        let session_name = crate::id::extract_session_name(session_id)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| session_id.to_string());
+        let icon = crate::id::session_icon(&session_name);
+        let is_canary = if self.is_remote {
+            self.remote_is_canary.unwrap_or(false)
+        } else {
+            self.session.is_canary
+        };
+        let suffix = if is_canary { " [self-dev]" } else { "" };
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::SetTitle(format!("{} jcode {}{}", icon, session_name, suffix))
+        );
+    }
+
     /// Check if there's a newer binary on disk than when we started
     /// Only returns true if the SAME binary file has been modified (e.g., via /reload)
     fn has_newer_binary(&self) -> bool {
@@ -4272,6 +4294,7 @@ impl App {
             ServerEvent::SessionId { session_id } => {
                 remote.set_session_id(session_id.clone());
                 self.remote_session_id = Some(session_id);
+                self.update_terminal_title();
                 false
             }
             ServerEvent::Reloading { .. } => {
@@ -4380,6 +4403,7 @@ impl App {
                     self.swarm_plan_items.clear();
                     self.swarm_plan_version = None;
                     self.swarm_plan_swarm_id = None;
+                    self.update_terminal_title();
                 }
                 // Store provider info for UI display
                 if let Some(name) = provider_name {

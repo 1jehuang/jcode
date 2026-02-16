@@ -1986,6 +1986,23 @@ async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
     }
     spawn_session_signal_watchers();
 
+    // Set initial terminal title (will be updated when server responds with session info)
+    if let Some(ref session_id) = resume_session {
+        let session_name = id::extract_session_name(session_id)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| session_id.clone());
+        let icon = id::session_icon(&session_name);
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::SetTitle(format!("{} jcode {}", icon, session_name))
+        );
+    } else {
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::SetTitle("jcode")
+        );
+    }
+
     // Use App in remote mode - same UI, connects to server
     let app = tui::App::new_for_remote(resume_session).await;
     let result = app.run_remote(terminal).await;
