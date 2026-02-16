@@ -146,7 +146,7 @@ pub struct SwarmEvent {
 }
 
 /// Ring buffer for recent swarm events
-const MAX_EVENT_HISTORY: usize = 500;
+const MAX_EVENT_HISTORY: usize = 5000;
 
 #[derive(Default)]
 struct ClientDebugState {
