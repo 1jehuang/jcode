@@ -5207,12 +5207,6 @@ impl App {
             modifiers,
         });
 
-        if matches!(event.code, KeyCode::Char('v') | KeyCode::Char('V')) {
-            crate::logging::info(&format!(
-                "KEY_DEBUG: code={:?} modifiers={:?} state={:?}",
-                event.code, event.modifiers, event.state
-            ));
-        }
         let _ = self.handle_key(event.code, event.modifiers);
     }
 
