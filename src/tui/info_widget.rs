@@ -3444,9 +3444,7 @@ fn wrap_tip_text(text: &str, width: usize) -> Vec<String> {
         while boundary > 0 && !remaining.is_char_boundary(boundary) {
             boundary -= 1;
         }
-        let split = remaining[..boundary]
-            .rfind(' ')
-            .unwrap_or(boundary);
+        let split = remaining[..boundary].rfind(' ').unwrap_or(boundary);
         let (line, rest) = remaining.split_at(split);
         lines.push(line.to_string());
         remaining = rest.trim_start();
@@ -3463,10 +3461,7 @@ fn render_tips_widget(inner: Rect) -> Vec<Line<'static>> {
 
     // Header line: icon + "Did you know?"
     lines.push(Line::from(vec![
-        Span::styled(
-            "💡 ",
-            Style::default().fg(Color::Rgb(255, 210, 80)),
-        ),
+        Span::styled("💡 ", Style::default().fg(Color::Rgb(255, 210, 80))),
         Span::styled(
             "Did you know?",
             Style::default()
@@ -3479,10 +3474,7 @@ fn render_tips_widget(inner: Rect) -> Vec<Line<'static>> {
     for line_text in wrapped {
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(
-                line_text,
-                Style::default().fg(Color::Rgb(160, 160, 175)),
-            ),
+            Span::styled(line_text, Style::default().fg(Color::Rgb(160, 160, 175))),
         ]));
     }
 

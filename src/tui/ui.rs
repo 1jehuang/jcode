@@ -170,7 +170,8 @@ fn render_globe(elapsed: f32, width: usize, height: usize) -> Vec<String> {
                     if is_grid {
                         let li = (lum * (LUMINANCE.len() - 1) as f32)
                             .max(0.0)
-                            .min((LUMINANCE.len() - 1) as f32) as usize;
+                            .min((LUMINANCE.len() - 1) as f32)
+                            as usize;
                         output[yp as usize][xp as usize] = LUMINANCE[li];
                     } else {
                         let li = (lum * 3.0).max(0.0).min(2.0) as usize;
@@ -182,7 +183,10 @@ fn render_globe(elapsed: f32, width: usize, height: usize) -> Vec<String> {
         }
         lat += 0.03;
     }
-    output.into_iter().map(|row| String::from_utf8(row).unwrap_or_default()).collect()
+    output
+        .into_iter()
+        .map(|row| String::from_utf8(row).unwrap_or_default())
+        .collect()
 }
 
 fn rotate_xyz(x: f32, y: f32, z: f32, ax: f32, ay: f32, az: f32) -> (f32, f32, f32) {
@@ -198,16 +202,38 @@ fn rotate_xyz(x: f32, y: f32, z: f32, ax: f32, ay: f32, az: f32) -> (f32, f32, f
     (x2, y2, z2)
 }
 
-fn project_3d(x: f32, y: f32, z: f32, width: usize, height: usize, cam_dist: f32) -> Option<(isize, isize, f32)> {
+fn project_3d(
+    x: f32,
+    y: f32,
+    z: f32,
+    width: usize,
+    height: usize,
+    cam_dist: f32,
+) -> Option<(isize, isize, f32)> {
     let d = cam_dist + z;
-    if d < 0.1 { return None; }
+    if d < 0.1 {
+        return None;
+    }
     let scale = cam_dist / d;
     let xp = (width as f32 / 2.0 + x * scale * height as f32 * 0.4) as isize;
     let yp = (height as f32 / 2.0 - y * scale * height as f32 * 0.4) as isize;
     Some((xp, yp, 1.0 / d))
 }
 
-fn draw_line_3d(output: &mut [Vec<u8>], zbuffer: &mut [Vec<f32>], x0: f32, y0: f32, z0: f32, x1: f32, y1: f32, z1: f32, width: usize, height: usize, cam_dist: f32, ch: u8) {
+fn draw_line_3d(
+    output: &mut [Vec<u8>],
+    zbuffer: &mut [Vec<f32>],
+    x0: f32,
+    y0: f32,
+    z0: f32,
+    x1: f32,
+    y1: f32,
+    z1: f32,
+    width: usize,
+    height: usize,
+    cam_dist: f32,
+    ch: u8,
+) {
     let steps = 40;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
@@ -215,7 +241,12 @@ fn draw_line_3d(output: &mut [Vec<u8>], zbuffer: &mut [Vec<f32>], x0: f32, y0: f
         let y = y0 + (y1 - y0) * t;
         let z = z0 + (z1 - z0) * t;
         if let Some((xp, yp, depth)) = project_3d(x, y, z, width, height, cam_dist) {
-            if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height && depth > zbuffer[yp as usize][xp as usize] {
+            if xp >= 0
+                && (xp as usize) < width
+                && yp >= 0
+                && (yp as usize) < height
+                && depth > zbuffer[yp as usize][xp as usize]
+            {
                 zbuffer[yp as usize][xp as usize] = depth;
                 output[yp as usize][xp as usize] = ch;
             }
@@ -230,27 +261,63 @@ fn render_cube(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     let ay = elapsed * 1.1;
     let az = elapsed * 0.3;
     let cam_dist = 5.0;
-    let verts: [(f32,f32,f32); 8] = [
-        (-1.0,-1.0,-1.0),(1.0,-1.0,-1.0),(1.0,1.0,-1.0),(-1.0,1.0,-1.0),
-        (-1.0,-1.0,1.0),(1.0,-1.0,1.0),(1.0,1.0,1.0),(-1.0,1.0,1.0),
+    let verts: [(f32, f32, f32); 8] = [
+        (-1.0, -1.0, -1.0),
+        (1.0, -1.0, -1.0),
+        (1.0, 1.0, -1.0),
+        (-1.0, 1.0, -1.0),
+        (-1.0, -1.0, 1.0),
+        (1.0, -1.0, 1.0),
+        (1.0, 1.0, 1.0),
+        (-1.0, 1.0, 1.0),
     ];
-    let edges: [(usize,usize); 12] = [
-        (0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7),
+    let edges: [(usize, usize); 12] = [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
     ];
-    let rotated: Vec<(f32,f32,f32)> = verts.iter().map(|&(x,y,z)| rotate_xyz(x,y,z,ax,ay,az)).collect();
-    for &(a,b) in &edges {
-        let (x0,y0,z0) = rotated[a];
-        let (x1,y1,z1) = rotated[b];
-        draw_line_3d(&mut output, &mut zbuffer, x0,y0,z0, x1,y1,z1, width, height, cam_dist, b'#');
+    let rotated: Vec<(f32, f32, f32)> = verts
+        .iter()
+        .map(|&(x, y, z)| rotate_xyz(x, y, z, ax, ay, az))
+        .collect();
+    for &(a, b) in &edges {
+        let (x0, y0, z0) = rotated[a];
+        let (x1, y1, z1) = rotated[b];
+        draw_line_3d(
+            &mut output,
+            &mut zbuffer,
+            x0,
+            y0,
+            z0,
+            x1,
+            y1,
+            z1,
+            width,
+            height,
+            cam_dist,
+            b'#',
+        );
     }
-    for &(x,y,z) in &rotated {
-        if let Some((xp,yp,_)) = project_3d(x,y,z,width,height,cam_dist) {
+    for &(x, y, z) in &rotated {
+        if let Some((xp, yp, _)) = project_3d(x, y, z, width, height, cam_dist) {
             if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height {
                 output[yp as usize][xp as usize] = b'@';
             }
         }
     }
-    output.into_iter().map(|row| String::from_utf8(row).unwrap_or_default()).collect()
+    output
+        .into_iter()
+        .map(|row| String::from_utf8(row).unwrap_or_default())
+        .collect()
 }
 
 fn render_mobius(elapsed: f32, width: usize, height: usize) -> Vec<String> {
@@ -268,7 +335,12 @@ fn render_mobius(elapsed: f32, width: usize, height: usize) -> Vec<String> {
             let z = v * half_u.sin();
             let (rx, ry, rz) = rotate_xyz(x, y, z, elapsed * 0.3, rot, 0.0);
             if let Some((xp, yp, depth)) = project_3d(rx, ry, rz, width, height, cam_dist) {
-                if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height && depth > zbuffer[yp as usize][xp as usize] {
+                if xp >= 0
+                    && (xp as usize) < width
+                    && yp >= 0
+                    && (yp as usize) < height
+                    && depth > zbuffer[yp as usize][xp as usize]
+                {
                     zbuffer[yp as usize][xp as usize] = depth;
                     let nx = half_u.cos() * u.cos();
                     let ny = half_u.cos() * u.sin();
@@ -283,7 +355,10 @@ fn render_mobius(elapsed: f32, width: usize, height: usize) -> Vec<String> {
         }
         u += 0.03;
     }
-    output.into_iter().map(|row| String::from_utf8(row).unwrap_or_default()).collect()
+    output
+        .into_iter()
+        .map(|row| String::from_utf8(row).unwrap_or_default())
+        .collect()
 }
 
 fn render_octahedron(elapsed: f32, width: usize, height: usize) -> Vec<String> {
@@ -294,26 +369,61 @@ fn render_octahedron(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     let az = elapsed * 0.4;
     let cam_dist = 4.5;
     let s = 1.3;
-    let verts: [(f32,f32,f32); 6] = [
-        (s,0.0,0.0),(-s,0.0,0.0),(0.0,s,0.0),(0.0,-s,0.0),(0.0,0.0,s),(0.0,0.0,-s),
+    let verts: [(f32, f32, f32); 6] = [
+        (s, 0.0, 0.0),
+        (-s, 0.0, 0.0),
+        (0.0, s, 0.0),
+        (0.0, -s, 0.0),
+        (0.0, 0.0, s),
+        (0.0, 0.0, -s),
     ];
-    let edges: [(usize,usize); 12] = [
-        (0,2),(0,3),(0,4),(0,5),(1,2),(1,3),(1,4),(1,5),(2,4),(4,3),(3,5),(5,2),
+    let edges: [(usize, usize); 12] = [
+        (0, 2),
+        (0, 3),
+        (0, 4),
+        (0, 5),
+        (1, 2),
+        (1, 3),
+        (1, 4),
+        (1, 5),
+        (2, 4),
+        (4, 3),
+        (3, 5),
+        (5, 2),
     ];
-    let rotated: Vec<(f32,f32,f32)> = verts.iter().map(|&(x,y,z)| rotate_xyz(x,y,z,ax,ay,az)).collect();
-    for &(a,b) in &edges {
-        let (x0,y0,z0) = rotated[a];
-        let (x1,y1,z1) = rotated[b];
-        draw_line_3d(&mut output, &mut zbuffer, x0,y0,z0, x1,y1,z1, width, height, cam_dist, b'=');
+    let rotated: Vec<(f32, f32, f32)> = verts
+        .iter()
+        .map(|&(x, y, z)| rotate_xyz(x, y, z, ax, ay, az))
+        .collect();
+    for &(a, b) in &edges {
+        let (x0, y0, z0) = rotated[a];
+        let (x1, y1, z1) = rotated[b];
+        draw_line_3d(
+            &mut output,
+            &mut zbuffer,
+            x0,
+            y0,
+            z0,
+            x1,
+            y1,
+            z1,
+            width,
+            height,
+            cam_dist,
+            b'=',
+        );
     }
-    for &(x,y,z) in &rotated {
-        if let Some((xp,yp,_)) = project_3d(x,y,z,width,height,cam_dist) {
+    for &(x, y, z) in &rotated {
+        if let Some((xp, yp, _)) = project_3d(x, y, z, width, height, cam_dist) {
             if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height {
                 output[yp as usize][xp as usize] = b'@';
             }
         }
     }
-    output.into_iter().map(|row| String::from_utf8(row).unwrap_or_default()).collect()
+    output
+        .into_iter()
+        .map(|row| String::from_utf8(row).unwrap_or_default())
+        .collect()
 }
 
 fn render_lorenz(elapsed: f32, width: usize, height: usize) -> Vec<String> {
@@ -351,13 +461,17 @@ fn render_lorenz(elapsed: f32, width: usize, height: usize) -> Vec<String> {
                 let age = (step - trail_start) as f32 / 3000.0;
                 let li = (age * (LUMINANCE.len() - 1) as f32) as usize;
                 let ch = LUMINANCE[li.min(LUMINANCE.len() - 1)];
-                if ch > output[yp as usize][xp as usize] || output[yp as usize][xp as usize] == b' ' {
+                if ch > output[yp as usize][xp as usize] || output[yp as usize][xp as usize] == b' '
+                {
                     output[yp as usize][xp as usize] = ch;
                 }
             }
         }
     }
-    output.into_iter().map(|row| String::from_utf8(row).unwrap_or_default()).collect()
+    output
+        .into_iter()
+        .map(|row| String::from_utf8(row).unwrap_or_default())
+        .collect()
 }
 
 fn render_dna_helix(elapsed: f32, width: usize, height: usize) -> Vec<String> {
@@ -392,7 +506,11 @@ fn render_dna_helix(elapsed: f32, width: usize, height: usize) -> Vec<String> {
             if left < width && right < width {
                 for col in left..=right {
                     if output[row][col] == b' ' {
-                        let frac = if right > left { (col - left) as f32 / (right - left) as f32 } else { 0.5 };
+                        let frac = if right > left {
+                            (col - left) as f32 / (right - left) as f32
+                        } else {
+                            0.5
+                        };
                         let d = d1 + (d2 - d1) * frac;
                         if d > zbuffer[row][col] * 0.9 {
                             output[row][col] = b'-';
@@ -402,7 +520,10 @@ fn render_dna_helix(elapsed: f32, width: usize, height: usize) -> Vec<String> {
             }
         }
     }
-    output.into_iter().map(|row| String::from_utf8(row).unwrap_or_default()).collect()
+    output
+        .into_iter()
+        .map(|row| String::from_utf8(row).unwrap_or_default())
+        .collect()
 }
 
 /// Duration of the startup fade-in animation in seconds
@@ -2159,7 +2280,8 @@ fn morph_lines_to_header(
     let anim_row_count = anim_lines.len();
     let header_row_count = header_lines.len();
     let row_blend = blend * blend;
-    let target_rows = anim_row_count as f32 + (header_row_count as f32 - anim_row_count as f32) * row_blend;
+    let target_rows =
+        anim_row_count as f32 + (header_row_count as f32 - anim_row_count as f32) * row_blend;
     let output_rows = target_rows.round() as usize;
 
     for out_row in 0..output_rows {
@@ -2188,8 +2310,8 @@ fn morph_lines_to_header(
             Vec::new()
         };
 
-        let anim_text: String = anim_chars.iter().map(|(c,_)| *c).collect();
-        let header_text: String = header_chars.iter().map(|(c,_)| *c).collect();
+        let anim_text: String = anim_chars.iter().map(|(c, _)| *c).collect();
+        let header_text: String = header_chars.iter().map(|(c, _)| *c).collect();
         let anim_trimmed = anim_text.trim();
         let header_trimmed = header_text.trim();
 
@@ -2213,10 +2335,10 @@ fn morph_lines_to_header(
         let mut spans: Vec<Span<'static>> = Vec::new();
 
         for col in 0..max_col {
-            let anim_ch = anim_chars.get(col).map(|(c,_)| *c).unwrap_or(' ');
-            let anim_style = anim_chars.get(col).map(|(_,s)| *s).unwrap_or_default();
-            let header_ch = header_chars.get(col).map(|(c,_)| *c).unwrap_or(' ');
-            let header_style = header_chars.get(col).map(|(_,s)| *s).unwrap_or_default();
+            let anim_ch = anim_chars.get(col).map(|(c, _)| *c).unwrap_or(' ');
+            let anim_style = anim_chars.get(col).map(|(_, s)| *s).unwrap_or_default();
+            let header_ch = header_chars.get(col).map(|(c, _)| *c).unwrap_or(' ');
+            let header_style = header_chars.get(col).map(|(_, s)| *s).unwrap_or_default();
 
             let dist_from_center = ((col as f32) - center).abs() / (w as f32 / 2.0).max(1.0);
             let flip_hash = {
@@ -2259,7 +2381,8 @@ fn morph_lines_to_header(
             spans.push(Span::styled(ch.to_string(), style));
         }
 
-        let align = header_lines.get(header_idx)
+        let align = header_lines
+            .get(header_idx)
             .and_then(|l| l.alignment)
             .or_else(|| anim_lines.get(anim_idx).and_then(|l| l.alignment))
             .unwrap_or(ratatui::layout::Alignment::Center);
@@ -2272,20 +2395,24 @@ fn morph_lines_to_header(
 
 fn lerp_style(from: Style, to: Style, t: f32) -> Style {
     let fg = match (from.fg, to.fg) {
-        (Some(Color::Rgb(r1,g1,b1)), Some(Color::Rgb(r2,g2,b2))) => {
+        (Some(Color::Rgb(r1, g1, b1)), Some(Color::Rgb(r2, g2, b2))) => Some(Color::Rgb(
+            (r1 as f32 + (r2 as f32 - r1 as f32) * t) as u8,
+            (g1 as f32 + (g2 as f32 - g1 as f32) * t) as u8,
+            (b1 as f32 + (b2 as f32 - b1 as f32) * t) as u8,
+        )),
+        (Some(Color::Rgb(r, g, b)), _) => {
+            let dim = 1.0 - t;
             Some(Color::Rgb(
-                (r1 as f32 + (r2 as f32 - r1 as f32) * t) as u8,
-                (g1 as f32 + (g2 as f32 - g1 as f32) * t) as u8,
-                (b1 as f32 + (b2 as f32 - b1 as f32) * t) as u8,
+                (r as f32 * dim) as u8,
+                (g as f32 * dim) as u8,
+                (b as f32 * dim) as u8,
             ))
         }
-        (Some(Color::Rgb(r,g,b)), _) => {
-            let dim = 1.0 - t;
-            Some(Color::Rgb((r as f32 * dim) as u8, (g as f32 * dim) as u8, (b as f32 * dim) as u8))
-        }
-        (_, Some(Color::Rgb(r,g,b))) => {
-            Some(Color::Rgb((r as f32 * t) as u8, (g as f32 * t) as u8, (b as f32 * t) as u8))
-        }
+        (_, Some(Color::Rgb(r, g, b))) => Some(Color::Rgb(
+            (r as f32 * t) as u8,
+            (g as f32 * t) as u8,
+            (b as f32 * t) as u8,
+        )),
         (_, to_fg) => to_fg,
     };
     let mut s = to;

@@ -511,7 +511,13 @@ impl CompactionManager {
                                     || word.starts_with("src/")
                                     || word.starts_with("./")
                                 {
-                                    let cleaned = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-');
+                                    let cleaned = word.trim_matches(|c: char| {
+                                        !c.is_alphanumeric()
+                                            && c != '/'
+                                            && c != '.'
+                                            && c != '_'
+                                            && c != '-'
+                                    });
                                     file_mentions.push(cleaned.to_string());
                                 }
                             }
@@ -631,7 +637,8 @@ async fn generate_summary(
     if conversation_text.len() + overhead > max_prompt_chars && max_prompt_chars > overhead {
         let budget = max_prompt_chars - overhead;
         conversation_text = crate::util::truncate_str(&conversation_text, budget).to_string();
-        conversation_text.push_str("\n\n... [earlier conversation truncated to fit context window]\n");
+        conversation_text
+            .push_str("\n\n... [earlier conversation truncated to fit context window]\n");
     }
 
     // Generate summary using simple completion

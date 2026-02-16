@@ -164,7 +164,11 @@ impl Agent {
 
     fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {
         let id = self.session.add_message(role.clone(), content.clone());
-        let message = Message { role, content, timestamp: Some(chrono::Utc::now()) };
+        let message = Message {
+            role,
+            content,
+            timestamp: Some(chrono::Utc::now()),
+        };
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
             manager.add_message(message);

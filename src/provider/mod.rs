@@ -236,9 +236,7 @@ pub fn populate_context_limits(models: HashMap<String, usize>) {
 
 /// Fetch context window sizes from the Codex backend API.
 /// Returns a map of model slug -> context_window tokens.
-pub async fn fetch_openai_context_limits(
-    access_token: &str,
-) -> Result<HashMap<String, usize>> {
+pub async fn fetch_openai_context_limits(access_token: &str) -> Result<HashMap<String, usize>> {
     let client = reqwest::Client::new();
     let resp = client
         .get("https://chatgpt.com/backend-api/codex/models?client_version=1.0.0")
@@ -247,10 +245,7 @@ pub async fn fetch_openai_context_limits(
         .await?;
 
     if !resp.status().is_success() {
-        anyhow::bail!(
-            "Failed to fetch model context limits: {}",
-            resp.status()
-        );
+        anyhow::bail!("Failed to fetch model context limits: {}", resp.status());
     }
 
     let data: serde_json::Value = resp.json().await?;
@@ -1117,10 +1112,7 @@ mod tests {
 
     #[test]
     fn test_context_limit_claude() {
-        assert_eq!(
-            context_limit_for_model("claude-opus-4-6"),
-            Some(200_000)
-        );
+        assert_eq!(context_limit_for_model("claude-opus-4-6"), Some(200_000));
     }
 
     #[test]

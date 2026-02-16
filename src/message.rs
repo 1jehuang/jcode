@@ -53,7 +53,9 @@ pub enum ContentBlock {
         cache_control: Option<CacheControl>,
     },
     /// Hidden reasoning content used for providers that require it (not displayed)
-    Reasoning { text: String },
+    Reasoning {
+        text: String,
+    },
     ToolUse {
         id: String,
         name: String,

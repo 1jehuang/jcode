@@ -171,9 +171,7 @@ pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
         anyhow::bail!("GitHub API error: {}", response.status());
     }
 
-    let release: GitHubRelease = response
-        .json()
-        .context("Failed to parse release info")?;
+    let release: GitHubRelease = response.json().context("Failed to parse release info")?;
 
     Ok(release)
 }
@@ -248,9 +246,7 @@ pub fn download_and_install_blocking(release: &GitHubRelease) -> Result<PathBuf>
         anyhow::bail!("Download failed: {}", response.status());
     }
 
-    let bytes = response
-        .bytes()
-        .context("Failed to read download")?;
+    let bytes = response.bytes().context("Failed to read download")?;
 
     if asset.name.ends_with(".tar.gz") {
         let cursor = std::io::Cursor::new(&bytes);
@@ -293,10 +289,7 @@ pub fn download_and_install_blocking(release: &GitHubRelease) -> Result<PathBuf>
         if let Ok(resolved) = fs::read_link(&current_stable) {
             metadata.previous_binary = Some(resolved.to_string_lossy().to_string());
         } else {
-            let backup = install_dir.join(format!(
-                "jcode-backup-{}",
-                std::process::id()
-            ));
+            let backup = install_dir.join(format!("jcode-backup-{}", std::process::id()));
             let _ = fs::copy(&current_stable, &backup);
             metadata.previous_binary = Some(backup.to_string_lossy().to_string());
         }

@@ -901,7 +901,9 @@ impl App {
 
     fn update_terminal_title(&self) {
         let session_id = if self.is_remote {
-            self.remote_session_id.as_deref().unwrap_or(&self.session.id)
+            self.remote_session_id
+                .as_deref()
+                .unwrap_or(&self.session.id)
         } else {
             &self.session.id
         };
@@ -1216,7 +1218,10 @@ impl App {
                     )
                 };
 
-                crate::logging::info(&format!("Queuing reload continuation message ({} chars)", continuation_msg.len()));
+                crate::logging::info(&format!(
+                    "Queuing reload continuation message ({} chars)",
+                    continuation_msg.len()
+                ));
                 self.queued_messages.push(continuation_msg);
             }
         } else {
@@ -3705,9 +3710,7 @@ impl App {
 
                     let msg_content = format!(
                         "⚡ Connection lost — retrying ({})\n  {}\n{}",
-                        elapsed_str,
-                        e,
-                        resume_hint,
+                        elapsed_str, e, resume_hint,
                     );
 
                     if let Some(idx) = disconnect_msg_idx {
@@ -3727,9 +3730,7 @@ impl App {
                     }
                     terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
 
-                    let backoff = Duration::from_secs(
-                        (1u64 << reconnect_attempts.min(5)).min(30),
-                    );
+                    let backoff = Duration::from_secs((1u64 << reconnect_attempts.min(5)).min(30));
                     let sleep = tokio::time::sleep(backoff);
                     tokio::pin!(sleep);
                     loop {
@@ -3865,7 +3866,10 @@ impl App {
                     )
                 };
 
-                crate::logging::info(&format!("Queuing reload continuation message ({} chars)", continuation_msg.len()));
+                crate::logging::info(&format!(
+                    "Queuing reload continuation message ({} chars)",
+                    continuation_msg.len()
+                ));
                 self.queued_messages.push(continuation_msg);
                 self.reload_info.clear();
             }
@@ -5153,7 +5157,10 @@ impl App {
             Err(e) => {
                 let err_str = e.to_string();
                 if is_context_limit_error(&err_str) {
-                    if self.try_auto_compact_and_retry(terminal, event_stream).await {
+                    if self
+                        .try_auto_compact_and_retry(terminal, event_stream)
+                        .await
+                    {
                         // Successfully recovered
                     } else {
                         self.handle_turn_error(err_str);
@@ -6765,7 +6772,11 @@ impl App {
             crate::logging::info(&format!(
                 "Submitting with {} image(s): {}",
                 images.len(),
-                images.iter().map(|(t, d)| format!("{} ({}KB)", t, d.len() / 1024)).collect::<Vec<_>>().join(", ")
+                images
+                    .iter()
+                    .map(|(t, d)| format!("{} ({}KB)", t, d.len() / 1024))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         if images.is_empty() {
@@ -6866,7 +6877,10 @@ impl App {
                 Err(e) => {
                     let err_str = e.to_string();
                     if is_context_limit_error(&err_str) {
-                        if self.try_auto_compact_and_retry(terminal, event_stream).await {
+                        if self
+                            .try_auto_compact_and_retry(terminal, event_stream)
+                            .await
+                        {
                             // Successfully recovered
                         } else {
                             self.handle_turn_error(err_str);
@@ -7134,42 +7148,41 @@ impl App {
                 } else {
                     match manager.force_compact(self.provider.clone()) {
                         Ok(()) => true,
-                        Err(_) => {
-                            match manager.hard_compact() {
-                                Ok(_) => {
-                                    drop(manager);
-                                    self.provider_session_id = None;
-                                    self.session.provider_session_id = None;
-                                    self.context_warning_shown = false;
-                                    self.clear_streaming_render_state();
-                                    self.stream_buffer.clear();
-                                    self.streaming_tool_calls.clear();
-                                    self.streaming_input_tokens = 0;
-                                    self.streaming_output_tokens = 0;
-                                    self.streaming_cache_read_tokens = None;
-                                    self.streaming_cache_creation_tokens = None;
-                                    self.thought_line_inserted = false;
-                                    self.thinking_prefix_emitted = false;
-                                    self.thinking_buffer.clear();
-                                    self.status = ProcessingStatus::Sending;
+                        Err(_) => match manager.hard_compact() {
+                            Ok(_) => {
+                                drop(manager);
+                                self.provider_session_id = None;
+                                self.session.provider_session_id = None;
+                                self.context_warning_shown = false;
+                                self.clear_streaming_render_state();
+                                self.stream_buffer.clear();
+                                self.streaming_tool_calls.clear();
+                                self.streaming_input_tokens = 0;
+                                self.streaming_output_tokens = 0;
+                                self.streaming_cache_read_tokens = None;
+                                self.streaming_cache_creation_tokens = None;
+                                self.thought_line_inserted = false;
+                                self.thinking_prefix_emitted = false;
+                                self.thinking_buffer.clear();
+                                self.status = ProcessingStatus::Sending;
 
-                                    self.push_display_message(DisplayMessage::system(
-                                        "✓ Context compacted (emergency). Retrying...".to_string(),
-                                    ));
-                                    return match self.run_turn_interactive(terminal, event_stream).await {
-                                        Ok(()) => {
-                                            self.last_stream_error = None;
-                                            true
-                                        }
-                                        Err(e) => {
-                                            self.handle_turn_error(e.to_string());
-                                            false
-                                        }
-                                    };
-                                }
-                                Err(_) => false,
+                                self.push_display_message(DisplayMessage::system(
+                                    "✓ Context compacted (emergency). Retrying...".to_string(),
+                                ));
+                                return match self.run_turn_interactive(terminal, event_stream).await
+                                {
+                                    Ok(()) => {
+                                        self.last_stream_error = None;
+                                        true
+                                    }
+                                    Err(e) => {
+                                        self.handle_turn_error(e.to_string());
+                                        false
+                                    }
+                                };
                             }
-                        }
+                            Err(_) => false,
+                        },
                     }
                 }
             }
@@ -7294,26 +7307,29 @@ impl App {
                                     usage * 100.0
                                 ));
                             }
-                            Err(reason) => notes.push(format!("Hard compaction failed: {}", reason)),
+                            Err(reason) => {
+                                notes.push(format!("Hard compaction failed: {}", reason))
+                            }
                         }
                     } else {
                         match manager.force_compact(self.provider.clone()) {
                             Ok(()) => {
                                 actions.push("Started background context compaction.".to_string())
                             }
-                            Err(reason) => {
-                                match manager.hard_compact() {
-                                    Ok(dropped) => {
-                                        actions.push(format!(
+                            Err(reason) => match manager.hard_compact() {
+                                Ok(dropped) => {
+                                    actions.push(format!(
                                             "Emergency compaction: dropped {} old messages (normal compaction failed: {}).",
                                             dropped, reason
                                         ));
-                                    }
-                                    Err(hard_reason) => {
-                                        notes.push(format!("Compaction not started: {}. Emergency fallback: {}", reason, hard_reason));
-                                    }
                                 }
-                            }
+                                Err(hard_reason) => {
+                                    notes.push(format!(
+                                        "Compaction not started: {}. Emergency fallback: {}",
+                                        reason, hard_reason
+                                    ));
+                                }
+                            },
                         }
                     }
                 }
@@ -11341,7 +11357,10 @@ fn clipboard_image() -> Option<(String, String)> {
             .output()
         {
             let types = String::from_utf8_lossy(&output.stdout);
-            crate::logging::info(&format!("clipboard_image: wl-paste types: {:?}", types.trim()));
+            crate::logging::info(&format!(
+                "clipboard_image: wl-paste types: {:?}",
+                types.trim()
+            ));
             let (mime, wl_type) = if types.lines().any(|t| t.trim() == "image/png") {
                 ("image/png", "image/png")
             } else if types.lines().any(|t| t.trim() == "image/jpeg") {
@@ -11525,8 +11544,7 @@ fn encode_rgba_as_png(width: usize, height: usize, rgba: &[u8]) -> Option<Vec<u8
     use image::{ImageBuffer, RgbaImage};
     use std::io::Cursor;
 
-    let img: RgbaImage =
-        ImageBuffer::from_raw(width as u32, height as u32, rgba.to_vec())?;
+    let img: RgbaImage = ImageBuffer::from_raw(width as u32, height as u32, rgba.to_vec())?;
     let mut buf = Vec::new();
     img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
         .ok()?;
