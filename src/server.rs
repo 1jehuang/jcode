@@ -815,8 +815,9 @@ impl Server {
                         }
                     };
 
-                    // Check if any other session in the same swarm has touched this file
-                    let previous_touches: Vec<FileAccess> = {
+                    // Only check for conflicts when someone writes/edits (reads never conflict)
+                    let is_write = matches!(touch.op, FileOp::Write | FileOp::Edit);
+                    let previous_touches: Vec<FileAccess> = if is_write {
                         let touches = file_touches.read().await;
                         if let Some(accesses) = touches.get(&path) {
                             accesses
@@ -824,15 +825,18 @@ impl Server {
                                 .filter(|a| {
                                     a.session_id != session_id
                                         && swarm_session_ids.contains(&a.session_id)
+                                        && matches!(a.op, FileOp::Write | FileOp::Edit)
                                 })
                                 .cloned()
                                 .collect()
                         } else {
                             vec![]
                         }
+                    } else {
+                        vec![]
                     };
 
-                    // If there are previous touches from swarm members, send alerts
+                    // If there are previous write conflicts from swarm members, send alerts
                     if !previous_touches.is_empty() {
                         let members = swarm_members.read().await;
                         let current_member = members.get(&session_id);
