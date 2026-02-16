@@ -843,15 +843,28 @@ impl Server {
                         let current_name = current_member.and_then(|m| m.friendly_name.clone());
                         let agent_sessions = sessions.read().await;
 
-                        // Alert the current agent about previous touches
+                        // Deduplicate previous touches by session (keep latest per agent)
+                        let mut unique_by_session: std::collections::HashMap<&str, &FileAccess> =
+                            std::collections::HashMap::new();
+                        for prev in &previous_touches {
+                            unique_by_session
+                                .entry(&prev.session_id)
+                                .and_modify(|existing| {
+                                    if prev.timestamp > existing.timestamp {
+                                        *existing = prev;
+                                    }
+                                })
+                                .or_insert(prev);
+                        }
+
+                        // Alert the current agent about previous writers (one per agent)
                         if let Some(member) = current_member {
-                            for prev in &previous_touches {
+                            for prev in unique_by_session.values() {
                                 let prev_member = members.get(&prev.session_id);
                                 let prev_name = prev_member.and_then(|m| m.friendly_name.clone());
                                 let alert_msg = format!(
-                                    "File conflict: {} ({}) - Another agent ({}) previously {} this file{}",
+                                    "⚠️ File conflict: {} — {} previously {} this file{}",
                                     path.display(),
-                                    touch.op.as_str(),
                                     prev_name.as_deref().unwrap_or(&prev.session_id[..8]),
                                     prev.op.as_str(),
                                     prev.summary
@@ -870,7 +883,6 @@ impl Server {
                                 };
                                 let _ = member.event_tx.send(notification);
 
-                                // Also push to the agent's pending alerts
                                 if let Some(agent) = agent_sessions.get(&session_id) {
                                     if let Ok(agent) = agent.try_lock() {
                                         agent.queue_soft_interrupt(alert_msg.clone(), false);
@@ -879,11 +891,16 @@ impl Server {
                             }
                         }
 
-                        // Alert previous agents about the current touch
+                        // Alert previous agents about the current touch (one per agent)
+                        let mut notified_sessions: std::collections::HashSet<&str> =
+                            std::collections::HashSet::new();
                         for prev in &previous_touches {
+                            if !notified_sessions.insert(&prev.session_id) {
+                                continue;
+                            }
                             if let Some(prev_member) = members.get(&prev.session_id) {
                                 let alert_msg = format!(
-                                    "File conflict: {} - Another agent ({}) just {} this file you previously worked with{}",
+                                    "⚠️ File conflict: {} — {} just {} this file you previously worked with{}",
                                     path.display(),
                                     current_name.as_deref().unwrap_or(&session_id[..8.min(session_id.len())]),
                                     touch.op.as_str(),
@@ -904,7 +921,6 @@ impl Server {
                                 };
                                 let _ = prev_member.event_tx.send(notification);
 
-                                // Also push to the agent's pending alerts
                                 if let Some(agent) = agent_sessions.get(&prev.session_id) {
                                     if let Ok(agent) = agent.try_lock() {
                                         agent.queue_soft_interrupt(alert_msg.clone(), false);
