@@ -302,7 +302,14 @@ pub fn save_claude_tokens(tokens: &OAuthTokens) -> Result<()> {
     };
 
     let json = serde_json::to_string_pretty(&auth)?;
-    std::fs::write(creds_dir.join("auth.json"), json)?;
+    let auth_path = creds_dir.join("auth.json");
+    std::fs::write(&auth_path, json)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600))?;
+    }
 
     Ok(())
 }

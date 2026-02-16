@@ -1,3 +1,7 @@
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod agent;
 mod ambient;
 mod ambient_runner;
@@ -221,6 +225,7 @@ enum ProviderChoice {
     /// Use `--provider claude` for the default HTTP API path.
     ClaudeSubprocess,
     Openai,
+    Openrouter,
     Cursor,
     Copilot,
     Antigravity,
@@ -233,6 +238,7 @@ impl ProviderChoice {
             Self::Claude => "claude",
             Self::ClaudeSubprocess => "claude-subprocess",
             Self::Openai => "openai",
+            Self::Openrouter => "openrouter",
             Self::Cursor => "cursor",
             Self::Copilot => "copilot",
             Self::Antigravity => "antigravity",
@@ -246,7 +252,7 @@ impl ProviderChoice {
 #[command(version = env!("JCODE_VERSION"))]
 #[command(about = "J-Code: A coding agent using Claude Max or ChatGPT Pro subscriptions")]
 struct Args {
-    /// Provider to use (claude, claude-subprocess, openai, cursor, copilot, antigravity, or auto-detect)
+    /// Provider to use (claude, claude-subprocess, openai, openrouter, cursor, copilot, antigravity, or auto-detect)
     #[arg(short, long, default_value = "auto", global = true)]
     provider: ProviderChoice,
 
@@ -730,6 +736,11 @@ async fn init_provider_and_registry(
             std::env::set_var("JCODE_ACTIVE_PROVIDER", "copilot");
             Arc::new(provider::copilot::CopilotCliProvider::new())
         }
+        ProviderChoice::Openrouter => {
+            eprintln!("Using OpenRouter provider");
+            std::env::set_var("JCODE_ACTIVE_PROVIDER", "openrouter");
+            Arc::new(provider::MultiProvider::new())
+        }
         ProviderChoice::Antigravity => {
             eprintln!("Using Antigravity CLI provider (experimental)");
             std::env::set_var("JCODE_ACTIVE_PROVIDER", "antigravity");
@@ -743,8 +754,9 @@ async fn init_provider_and_registry(
             );
             let has_claude = has_claude.unwrap_or(false);
             let has_openai = has_openai.unwrap_or(false);
+            let has_openrouter = provider::openrouter::OpenRouterProvider::has_credentials();
 
-            if has_claude || has_openai {
+            if has_claude || has_openai || has_openrouter {
                 // Use MultiProvider - it will auto-detect and allow switching
                 let multi = provider::MultiProvider::new();
                 eprintln!("Using {} (use /model to switch models)", multi.name());
@@ -756,10 +768,11 @@ async fn init_provider_and_registry(
                 eprintln!("Choose a provider:");
                 eprintln!("  1. Claude (Claude Max subscription)");
                 eprintln!("  2. OpenAI (ChatGPT Pro subscription)");
-                eprintln!("  3. Cursor");
-                eprintln!("  4. GitHub Copilot");
-                eprintln!("  5. Antigravity");
-                eprint!("\nEnter 1-5: ");
+                eprintln!("  3. OpenRouter (API key - 200+ models)");
+                eprintln!("  4. Cursor");
+                eprintln!("  5. GitHub Copilot");
+                eprintln!("  6. Antigravity");
+                eprint!("\nEnter 1-6: ");
                 io::stdout().flush()?;
 
                 let mut input = String::new();
@@ -777,16 +790,21 @@ async fn init_provider_and_registry(
                         Arc::new(provider::MultiProvider::with_preference(true))
                     }
                     "3" => {
+                        login_openrouter_flow()?;
+                        eprintln!();
+                        Arc::new(provider::MultiProvider::new())
+                    }
+                    "4" => {
                         login_cursor_flow()?;
                         eprintln!();
                         Arc::new(provider::cursor::CursorCliProvider::new())
                     }
-                    "4" => {
+                    "5" => {
                         login_copilot_flow()?;
                         eprintln!();
                         Arc::new(provider::copilot::CopilotCliProvider::new())
                     }
-                    "5" => {
+                    "6" => {
                         login_antigravity_flow()?;
                         eprintln!();
                         Arc::new(provider::antigravity::AntigravityCliProvider::new())
@@ -1776,6 +1794,9 @@ async fn run_login(choice: &ProviderChoice) -> Result<()> {
         ProviderChoice::Openai => {
             login_openai_flow().await?;
         }
+        ProviderChoice::Openrouter => {
+            login_openrouter_flow()?;
+        }
         ProviderChoice::Cursor => {
             login_cursor_flow()?;
         }
@@ -1789,10 +1810,11 @@ async fn run_login(choice: &ProviderChoice) -> Result<()> {
             eprintln!("Choose a provider to log in:");
             eprintln!("  1. Claude (Claude Max)");
             eprintln!("  2. OpenAI (ChatGPT Pro)");
-            eprintln!("  3. Cursor");
-            eprintln!("  4. GitHub Copilot");
-            eprintln!("  5. Antigravity");
-            eprint!("\nEnter 1-5: ");
+            eprintln!("  3. OpenRouter (API key - 200+ models)");
+            eprintln!("  4. Cursor");
+            eprintln!("  5. GitHub Copilot");
+            eprintln!("  6. Antigravity");
+            eprint!("\nEnter 1-6: ");
             io::stdout().flush()?;
 
             let mut input = String::new();
@@ -1800,11 +1822,12 @@ async fn run_login(choice: &ProviderChoice) -> Result<()> {
             match input.trim() {
                 "1" => login_claude_flow().await?,
                 "2" => login_openai_flow().await?,
-                "3" => login_cursor_flow()?,
-                "4" => login_copilot_flow()?,
-                "5" => login_antigravity_flow()?,
+                "3" => login_openrouter_flow()?,
+                "4" => login_cursor_flow()?,
+                "5" => login_copilot_flow()?,
+                "6" => login_antigravity_flow()?,
                 _ => anyhow::bail!(
-                    "Invalid choice. Use --provider claude|claude-subprocess|openai|cursor|copilot|antigravity"
+                    "Invalid choice. Use --provider claude|openai|openrouter|cursor|copilot|antigravity"
                 ),
             }
         }
@@ -1826,6 +1849,99 @@ async fn login_openai_flow() -> Result<()> {
     let tokens = auth::oauth::login_openai().await?;
     auth::oauth::save_openai_tokens(&tokens)?;
     eprintln!("Successfully logged in to OpenAI!");
+    Ok(())
+}
+
+fn login_openrouter_flow() -> Result<()> {
+    eprintln!("Setting up OpenRouter...");
+    eprintln!("Get your API key from: https://openrouter.ai/keys\n");
+    eprint!("Paste your OpenRouter API key: ");
+    io::stdout().flush()?;
+
+    // Disable terminal echo so the key isn't visible while typing
+    let key = read_secret_line()?;
+
+    if key.is_empty() {
+        anyhow::bail!("No API key provided.");
+    }
+
+    // Basic format validation
+    if !key.starts_with("sk-or-") {
+        eprintln!("Warning: OpenRouter API keys typically start with 'sk-or-'. Saving anyway.");
+    }
+
+    save_openrouter_key(&key)?;
+    eprintln!("\nSuccessfully saved OpenRouter API key!");
+    eprintln!("Stored at ~/.config/jcode/openrouter.env");
+    Ok(())
+}
+
+/// Read a line from stdin with echo disabled (for secrets)
+fn read_secret_line() -> Result<String> {
+    use crossterm::terminal;
+
+    // Disable echo
+    let was_raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+    if !was_raw {
+        terminal::enable_raw_mode()?;
+    }
+
+    let mut input = String::new();
+    loop {
+        if let crossterm::event::Event::Key(key_event) =
+            crossterm::event::read().context("Failed to read key input")?
+        {
+            use crossterm::event::{KeyCode, KeyModifiers};
+            match key_event.code {
+                KeyCode::Enter => {
+                    eprintln!();
+                    break;
+                }
+                KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if !was_raw {
+                        terminal::disable_raw_mode()?;
+                    }
+                    anyhow::bail!("Cancelled.");
+                }
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::Char(c) => {
+                    input.push(c);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if !was_raw {
+        terminal::disable_raw_mode()?;
+    }
+
+    Ok(input.trim().to_string())
+}
+
+/// Save OpenRouter API key to config file with restrictive permissions
+fn save_openrouter_key(key: &str) -> Result<()> {
+    let config_dir = dirs::config_dir()
+        .ok_or_else(|| anyhow::anyhow!("No config directory found"))?
+        .join("jcode");
+    std::fs::create_dir_all(&config_dir)?;
+
+    let file_path = config_dir.join("openrouter.env");
+    let content = format!("OPENROUTER_API_KEY={}\n", key);
+    std::fs::write(&file_path, &content)?;
+
+    // Set restrictive file permissions (owner read/write only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    // Also set the env var so it's immediately available this session
+    std::env::set_var("OPENROUTER_API_KEY", key);
+
     Ok(())
 }
 
