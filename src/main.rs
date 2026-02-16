@@ -171,8 +171,7 @@ fn handle_termination_signal(sig: i32) -> ! {
 
     if let Ok(guard) = CURRENT_SESSION_ID.lock() {
         if let Some(session_id) = guard.as_ref() {
-            let session_name =
-                id::extract_session_name(session_id).unwrap_or(session_id.as_str());
+            let session_name = id::extract_session_name(session_id).unwrap_or(session_id.as_str());
             eprintln!();
             eprintln!(
                 "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
@@ -487,9 +486,7 @@ async fn main() -> Result<()> {
             std::thread::spawn(move || {
                 match update::check_and_maybe_update(auto_update) {
                     update::UpdateCheckResult::UpdateAvailable {
-                        current,
-                        latest,
-                        ..
+                        current, latest, ..
                     } => {
                         eprintln!(
                             "\n📦 Update available: {} → {}. Run `jcode update` to install.\n",
@@ -2147,10 +2144,7 @@ async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
             crossterm::terminal::SetTitle(format!("{} jcode {}", icon, session_name))
         );
     } else {
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::terminal::SetTitle("jcode")
-        );
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle("jcode"));
     }
 
     // Use App in remote mode - same UI, connects to server
@@ -2205,15 +2199,9 @@ fn spawn_resume_in_new_terminal(
     #[cfg(target_os = "macos")]
     {
         candidates.extend(
-            [
-                "kitty",
-                "wezterm",
-                "alacritty",
-                "iterm2",
-                "terminal",
-            ]
-            .iter()
-            .map(|s| s.to_string()),
+            ["kitty", "wezterm", "alacritty", "iterm2", "terminal"]
+                .iter()
+                .map(|s| s.to_string()),
         );
     }
 
@@ -2289,9 +2277,12 @@ fn spawn_resume_in_new_terminal(
             "terminal" => {
                 cmd = Command::new("open");
                 cmd.args([
-                    "-a", "Terminal",
+                    "-a",
+                    "Terminal",
                     exe.to_str().unwrap_or("jcode"),
-                    "--args", "--resume", session_id,
+                    "--args",
+                    "--resume",
+                    session_id,
                 ]);
             }
             _ => continue,
@@ -2408,7 +2399,11 @@ fn run_auto_update() -> Result<()> {
         .arg("--no-update") // Prevent infinite update loop
         .exec();
 
-    Err(anyhow::anyhow!("Failed to exec new binary {:?}: {}", exe, err))
+    Err(anyhow::anyhow!(
+        "Failed to exec new binary {:?}: {}",
+        exe,
+        err
+    ))
 }
 
 /// Run the update process (manual)

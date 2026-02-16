@@ -191,7 +191,10 @@ impl AmbientRunnerHandle {
             AmbientStatus::Scheduled { next_wake } => {
                 let until = *next_wake - Utc::now();
                 let mins = until.num_minutes().max(0) as u32;
-                format!("scheduled (in {})", crate::ambient::format_minutes_human(mins))
+                format!(
+                    "scheduled (in {})",
+                    crate::ambient::format_minutes_human(mins)
+                )
             }
             AmbientStatus::Paused { reason } => format!("paused: {}", reason),
             AmbientStatus::Disabled => "disabled".to_string(),

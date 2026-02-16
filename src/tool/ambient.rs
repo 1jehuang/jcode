@@ -709,11 +709,7 @@ impl Tool for SendChannelMessageTool {
         })
     }
 
-    async fn execute(
-        &self,
-        args: Value,
-        _context: ToolContext,
-    ) -> Result<ToolOutput> {
+    async fn execute(&self, args: Value, _context: ToolContext) -> Result<ToolOutput> {
         let message = args
             .get("message")
             .and_then(|v| v.as_str())

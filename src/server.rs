@@ -1582,7 +1582,11 @@ async fn handle_client(
         }
 
         match request {
-            Request::Message { id, content, images } => {
+            Request::Message {
+                id,
+                content,
+                images,
+            } => {
                 // Check if this client is already processing
                 if client_is_processing {
                     let _ = client_event_tx.send(ServerEvent::Error {
@@ -1613,9 +1617,9 @@ async fn handle_client(
                 let done_tx = processing_done_tx.clone();
                 crate::logging::info(&format!("Processing message id={} spawning task", id));
                 processing_task = Some(tokio::spawn(async move {
-                    let result = match std::panic::AssertUnwindSafe(
-                        process_message_streaming_mpsc(agent, &content, images, tx),
-                    )
+                    let result = match std::panic::AssertUnwindSafe(process_message_streaming_mpsc(
+                        agent, &content, images, tx,
+                    ))
                     .catch_unwind()
                     .await
                     {
@@ -4445,7 +4449,9 @@ async fn process_message_streaming_mpsc(
     event_tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
     let mut agent = agent.lock().await;
-    agent.run_once_streaming_mpsc(content, images, event_tx).await
+    agent
+        .run_once_streaming_mpsc(content, images, event_tx)
+        .await
 }
 
 async fn broadcast_swarm_status(
@@ -8702,7 +8708,10 @@ async fn monitor_selfdev_signals() {
                         let err = ProcessCommand::new(&binary).arg("serve").exec();
 
                         // If we get here, exec failed
-                        crate::logging::error(&format!("Failed to exec into canary {:?}: {}", binary, err));
+                        crate::logging::error(&format!(
+                            "Failed to exec into canary {:?}: {}",
+                            binary, err
+                        ));
                     }
                 }
                 // Fallback: just exit and let something else restart us
@@ -8726,7 +8735,10 @@ async fn monitor_selfdev_signals() {
 
                         let err = ProcessCommand::new(&binary).arg("serve").exec();
 
-                        crate::logging::error(&format!("Failed to exec into stable {:?}: {}", binary, err));
+                        crate::logging::error(&format!(
+                            "Failed to exec into stable {:?}: {}",
+                            binary, err
+                        ));
                     }
                 }
                 std::process::exit(43);

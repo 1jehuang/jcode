@@ -371,9 +371,7 @@ impl ClientApp {
 
                     let msg_content = format!(
                         "⚡ Connection lost — retrying ({})\n  {}\n{}",
-                        elapsed_str,
-                        e,
-                        resume_hint,
+                        elapsed_str, e, resume_hint,
                     );
 
                     if let Some(idx) = disconnect_msg_idx {
@@ -393,9 +391,7 @@ impl ClientApp {
                     }
                     terminal.draw(|frame| super::ui::draw(frame, &self))?;
 
-                    let backoff = Duration::from_secs(
-                        (1u64 << reconnect_attempts.min(5)).min(30),
-                    );
+                    let backoff = Duration::from_secs((1u64 << reconnect_attempts.min(5)).min(30));
                     let sleep = tokio::time::sleep(backoff);
                     tokio::pin!(sleep);
                     loop {

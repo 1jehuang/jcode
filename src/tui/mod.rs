@@ -36,7 +36,10 @@ pub fn enable_keyboard_enhancement() -> bool {
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     )
     .is_ok();
-    crate::logging::info(&format!("Kitty keyboard protocol: {}", if result { "enabled" } else { "FAILED" }));
+    crate::logging::info(&format!(
+        "Kitty keyboard protocol: {}",
+        if result { "enabled" } else { "FAILED" }
+    ));
     result
 }
 

@@ -87,10 +87,7 @@ impl ChannelRegistry {
     }
 
     pub fn find_by_name(&self, name: &str) -> Option<Arc<dyn MessageChannel>> {
-        self.channels
-            .iter()
-            .find(|c| c.name() == name)
-            .cloned()
+        self.channels.iter().find(|c| c.name() == name).cloned()
     }
 
     pub fn send_enabled(&self) -> Vec<Arc<dyn MessageChannel>> {
@@ -170,9 +167,7 @@ impl MessageChannel for TelegramChannel {
                             continue;
                         }
 
-                        if let Some(req_id) =
-                            crate::notifications::extract_permission_id(trimmed)
-                        {
+                        if let Some(req_id) = crate::notifications::extract_permission_id(trimmed) {
                             let (approved, message) =
                                 crate::notifications::parse_permission_reply(trimmed);
                             if let Err(e) = crate::safety::record_permission_via_file(
@@ -247,10 +242,7 @@ impl DiscordChannel {
         }
     }
 
-    async fn poll_messages(
-        &self,
-        after: Option<&str>,
-    ) -> anyhow::Result<Vec<DiscordMessage>> {
+    async fn poll_messages(&self, after: Option<&str>) -> anyhow::Result<Vec<DiscordMessage>> {
         let mut url = format!(
             "https://discord.com/api/v10/channels/{}/messages?limit=10",
             self.channel_id
@@ -371,9 +363,7 @@ impl MessageChannel for DiscordChannel {
                             continue;
                         }
 
-                        if let Some(req_id) =
-                            crate::notifications::extract_permission_id(trimmed)
-                        {
+                        if let Some(req_id) = crate::notifications::extract_permission_id(trimmed) {
                             let (approved, message) =
                                 crate::notifications::parse_permission_reply(trimmed);
                             if let Err(e) = crate::safety::record_permission_via_file(

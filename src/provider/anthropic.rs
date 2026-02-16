@@ -1201,9 +1201,7 @@ enum ApiContentBlock {
         is_error: bool,
     },
     #[serde(rename = "image")]
-    Image {
-        source: ApiImageSource,
-    },
+    Image { source: ApiImageSource },
 }
 
 #[derive(Serialize, Clone)]
