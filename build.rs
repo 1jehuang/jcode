@@ -87,9 +87,15 @@ fn main() {
     println!("cargo:rustc-env=JCODE_GIT_TAG={}", git_tag);
     println!("cargo:rustc-env=JCODE_CHANGELOG={}", changelog);
 
+    // Forward JCODE_RELEASE_BUILD env var if set (CI sets this for release binaries)
+    if std::env::var("JCODE_RELEASE_BUILD").is_ok() {
+        println!("cargo:rustc-env=JCODE_RELEASE_BUILD=1");
+    }
+
     // Re-run if git HEAD changes
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
+    println!("cargo:rerun-if-env-changed=JCODE_RELEASE_BUILD");
 }
 
 /// Get and increment the build number stored in ~/.jcode/build_number

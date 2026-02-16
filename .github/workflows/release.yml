@@ -45,6 +45,8 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
+        env:
+          JCODE_RELEASE_BUILD: "1"
 
       - name: Package binary
         run: |

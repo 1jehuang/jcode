@@ -95,6 +95,10 @@ mail-parser = "0.9"
 # PDF parsing
 pdf-extract = "0.8"
 
+# Archive extraction (for auto-update)
+flate2 = "1"
+tar = "0.4"
+
 # Mermaid diagram rendering (stable v0.2.0 tag)
 mermaid-rs-renderer = { git = "ssh://git@github.com/1jehuang/mermaid-rs-renderer.git", tag = "v0.2.0" }
 
