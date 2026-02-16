@@ -179,10 +179,7 @@ pub fn registry_path() -> Result<PathBuf> {
 
 /// Get the socket directory path
 pub fn socket_dir() -> Result<PathBuf> {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    Ok(runtime_dir.join("jcode"))
+    Ok(crate::storage::runtime_dir().join("jcode"))
 }
 
 /// Get the socket path for a named server

@@ -4,6 +4,29 @@ use serde::Serialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Platform-aware runtime directory for sockets and ephemeral state.
+///
+/// - Linux: `$XDG_RUNTIME_DIR` (typically `/run/user/<uid>`)
+/// - macOS: `$TMPDIR` (per-user, e.g. `/var/folders/xx/.../T/`)
+/// - Fallback: `std::env::temp_dir()`
+///
+/// Can be overridden with `$JCODE_RUNTIME_DIR`.
+pub fn runtime_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("JCODE_RUNTIME_DIR") {
+        return PathBuf::from(dir);
+    }
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        return PathBuf::from(dir);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(dir) = std::env::var("TMPDIR") {
+            return PathBuf::from(dir);
+        }
+    }
+    std::env::temp_dir()
+}
+
 pub fn jcode_dir() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("JCODE_HOME") {
         return Ok(PathBuf::from(path));
