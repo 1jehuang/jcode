@@ -10751,7 +10751,25 @@ impl super::TuiState for App {
                 }
             }
         } else {
-            for msg in &self.messages {
+            let skip = if self.provider.supports_compaction() {
+                let compaction = self.registry.compaction();
+                let result = compaction.try_read().ok().map(|manager| {
+                    (manager.compacted_count(), manager.summary_chars())
+                });
+                if let Some((cc, sc)) = result {
+                    if cc > 0 && sc > 0 {
+                        user_count += 1;
+                        user_chars += sc;
+                    }
+                    cc
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+
+            for msg in self.messages.iter().skip(skip) {
                 match msg.role {
                     Role::User => user_count += 1,
                     Role::Assistant => asst_count += 1,
