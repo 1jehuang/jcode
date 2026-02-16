@@ -153,8 +153,9 @@ impl Agent {
         manager.reset();
         let budget = self.provider.context_window();
         manager.set_budget(budget);
-        for msg in &self.session.messages {
-            manager.add_message(msg.to_message());
+        // Just tell the manager how many messages exist (no cloning)
+        for _ in &self.session.messages {
+            manager.notify_message_added();
         }
         logging::info(&format!(
             "seed_compaction_from_session: seeded compaction with {} messages",
@@ -163,26 +164,23 @@ impl Agent {
     }
 
     fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {
-        let id = self.session.add_message(role.clone(), content.clone());
-        let message = Message {
-            role,
-            content,
-            timestamp: Some(chrono::Utc::now()),
-        };
+        let id = self.session.add_message(role, content);
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            manager.add_message(message);
+            manager.notify_message_added();
         }
         id
     }
 
     fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
+        // Convert session messages to provider messages (single allocation)
+        let all_messages = self.session.messages_for_provider();
         if self.provider.supports_compaction() {
             let compaction = self.registry.compaction();
             match compaction.try_write() {
                 Ok(mut manager) => {
-                    manager.maybe_start_compaction(self.provider.clone());
-                    let messages = manager.messages_for_api();
+                    manager.maybe_start_compaction_with(&all_messages, self.provider.clone());
+                    let messages = manager.messages_for_api_with(&all_messages);
                     let event = manager.take_compaction_event();
                     logging::info(&format!(
                         "messages_for_provider (compaction): returning {} messages, roles: {:?}",
@@ -199,16 +197,15 @@ impl Agent {
                 }
             };
         }
-        let messages = self.session.messages_for_provider();
         logging::info(&format!(
             "messages_for_provider (session): returning {} messages, roles: {:?}",
-            messages.len(),
-            messages
+            all_messages.len(),
+            all_messages
                 .iter()
                 .map(|m| format!("{:?}", m.role))
                 .collect::<Vec<_>>()
         ));
-        (messages, None)
+        (all_messages, None)
     }
 
     fn effective_context_tokens_from_usage(

@@ -5899,7 +5899,7 @@ impl App {
             match compaction.try_write() {
                 Ok(mut manager) => {
                     // Show current status
-                    let stats = manager.stats();
+                    let stats = manager.stats_with(&self.messages);
                     let status_msg = format!(
                         "**Context Status:**\n\
                         • Messages: {} (active), {} (total history)\n\
@@ -5920,7 +5920,7 @@ impl App {
                         }
                     );
 
-                    match manager.force_compact(self.provider.clone()) {
+                    match manager.force_compact_with(&self.messages, self.provider.clone()) {
                         Ok(()) => {
                             self.push_display_message(DisplayMessage {
                                 role: "system".to_string(),
@@ -7037,9 +7037,9 @@ impl App {
         let compaction = self.registry.compaction();
         let mut manager = compaction.try_write().ok()?;
 
-        let usage = manager.context_usage();
+        let usage = manager.context_usage_with(&self.messages);
         if usage > 1.5 {
-            match manager.hard_compact() {
+            match manager.hard_compact_with(&self.messages) {
                 Ok(dropped) => {
                     return Some(format!(
                         "⚡ Emergency compaction: dropped {} old messages (context was at {:.0}%). You can continue.",
@@ -7061,7 +7061,7 @@ impl App {
             .unwrap_or(self.context_limit as u64);
         manager.update_observed_input_tokens(observed_tokens);
 
-        match manager.force_compact(self.provider.clone()) {
+        match manager.force_compact_with(&self.messages, self.provider.clone()) {
             Ok(()) => Some(
                 "⚡ Auto-compaction started — summarizing old messages in background. Retry in a moment."
                     .to_string(),
@@ -7071,7 +7071,7 @@ impl App {
                     "[auto_recover] force_compact failed: {}",
                     reason
                 ));
-                match manager.hard_compact() {
+                match manager.hard_compact_with(&self.messages) {
                     Ok(dropped) => Some(format!(
                         "⚡ Emergency compaction: dropped {} old messages. You can continue.",
                         dropped
@@ -7102,9 +7102,9 @@ impl App {
         let compact_started = match compaction.try_write() {
             Ok(mut manager) => {
                 manager.update_observed_input_tokens(self.context_limit);
-                let usage = manager.context_usage();
+                let usage = manager.context_usage_with(&self.messages);
                 if usage > 1.5 {
-                    match manager.hard_compact() {
+                    match manager.hard_compact_with(&self.messages) {
                         Ok(dropped) => {
                             self.push_display_message(DisplayMessage::system(
                                 format!(
@@ -7146,9 +7146,9 @@ impl App {
                         Err(_) => false,
                     }
                 } else {
-                    match manager.force_compact(self.provider.clone()) {
+                    match manager.force_compact_with(&self.messages, self.provider.clone()) {
                         Ok(()) => true,
-                        Err(_) => match manager.hard_compact() {
+                        Err(_) => match manager.hard_compact_with(&self.messages) {
                             Ok(_) => {
                                 drop(manager);
                                 self.provider_session_id = None;
@@ -7297,9 +7297,9 @@ impl App {
                     if let Some(tokens) = observed_tokens {
                         manager.update_observed_input_tokens(tokens);
                     }
-                    let usage = manager.context_usage();
+                    let usage = manager.context_usage_with(&self.messages);
                     if usage > 1.5 {
-                        match manager.hard_compact() {
+                        match manager.hard_compact_with(&self.messages) {
                             Ok(dropped) => {
                                 actions.push(format!(
                                     "Emergency compaction: dropped {} old messages (context was at {:.0}%).",
@@ -7312,11 +7312,11 @@ impl App {
                             }
                         }
                     } else {
-                        match manager.force_compact(self.provider.clone()) {
+                        match manager.force_compact_with(&self.messages, self.provider.clone()) {
                             Ok(()) => {
                                 actions.push("Started background context compaction.".to_string())
                             }
-                            Err(reason) => match manager.hard_compact() {
+                            Err(reason) => match manager.hard_compact_with(&self.messages) {
                                 Ok(dropped) => {
                                     actions.push(format!(
                                             "Emergency compaction: dropped {} old messages (normal compaction failed: {}).",
@@ -7364,13 +7364,13 @@ impl App {
     }
 
     fn add_provider_message(&mut self, message: Message) {
-        self.messages.push(message.clone());
+        self.messages.push(message);
         if self.is_remote || !self.provider.supports_compaction() {
             return;
         }
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            manager.add_message(message);
+            manager.notify_message_added();
         };
     }
 
@@ -7409,8 +7409,8 @@ impl App {
         if let Ok(mut manager) = compaction.try_write() {
             manager.reset();
             manager.set_budget(self.context_limit as usize);
-            for msg in &self.messages {
-                manager.add_message(msg.clone());
+            for _ in &self.messages {
+                manager.notify_message_added();
             }
         };
     }
@@ -7422,8 +7422,8 @@ impl App {
         let compaction = self.registry.compaction();
         let result = match compaction.try_write() {
             Ok(mut manager) => {
-                manager.maybe_start_compaction(self.provider.clone());
-                let messages = manager.messages_for_api();
+                manager.maybe_start_compaction_with(&self.messages, self.provider.clone());
+                let messages = manager.messages_for_api_with(&self.messages);
                 let event = manager.take_compaction_event();
                 (messages, event)
             }
