@@ -4669,6 +4669,11 @@ impl App {
                     self.cursor_pos = start;
                     return Ok(());
                 }
+                KeyCode::Char('v') => {
+                    // Alt+V: paste image from clipboard
+                    self.paste_image_from_clipboard();
+                    return Ok(());
+                }
                 _ => {}
             }
         }
@@ -4735,6 +4740,11 @@ impl App {
                     let start = self.find_word_boundary_back();
                     self.input.drain(start..self.cursor_pos);
                     self.cursor_pos = start;
+                    return Ok(());
+                }
+                KeyCode::Char('v') => {
+                    // Ctrl+V: paste from clipboard (try image first, then text)
+                    self.paste_image_from_clipboard();
                     return Ok(());
                 }
                 KeyCode::Tab | KeyCode::Char('t') => {
@@ -5197,6 +5207,12 @@ impl App {
             modifiers,
         });
 
+        if matches!(event.code, KeyCode::Char('v') | KeyCode::Char('V')) {
+            crate::logging::info(&format!(
+                "KEY_DEBUG: code={:?} modifiers={:?} state={:?}",
+                event.code, event.modifiers, event.state
+            ));
+        }
         let _ = self.handle_key(event.code, event.modifiers);
     }
 
@@ -5265,50 +5281,7 @@ impl App {
                 }
                 KeyCode::Char('v') => {
                     // Alt+V: paste image from clipboard
-                    if let Some((media_type, base64_data)) = clipboard_image() {
-                        let size_kb = base64_data.len() / 1024;
-                        self.pending_images.push((media_type.clone(), base64_data));
-                        let n = self.pending_images.len();
-                        let placeholder = format!("[image {}]", n);
-                        self.input.insert_str(self.cursor_pos, &placeholder);
-                        self.cursor_pos += placeholder.len();
-                        self.sync_model_picker_preview_from_input();
-                        self.set_status_notice(&format!(
-                            "Pasted {} ({} KB)",
-                            media_type, size_kb
-                        ));
-                    } else if let Ok(mut cb) = arboard::Clipboard::new() {
-                        // Try clipboard text for image URL (Discord <img> tags)
-                        if let Ok(text) = cb.get_text() {
-                            if let Some(url) = extract_image_url(&text) {
-                                self.set_status_notice("Downloading image...");
-                                if let Some((media_type, base64_data)) =
-                                    download_image_url(&url)
-                                {
-                                    let size_kb = base64_data.len() / 1024;
-                                    self.pending_images
-                                        .push((media_type.clone(), base64_data));
-                                    let n = self.pending_images.len();
-                                    let placeholder = format!("[image {}]", n);
-                                    self.input.insert_str(self.cursor_pos, &placeholder);
-                                    self.cursor_pos += placeholder.len();
-                                    self.sync_model_picker_preview_from_input();
-                                    self.set_status_notice(&format!(
-                                        "Pasted {} ({} KB)",
-                                        media_type, size_kb
-                                    ));
-                                } else {
-                                    self.set_status_notice("Failed to download image");
-                                }
-                            } else {
-                                self.set_status_notice("No image in clipboard");
-                            }
-                        } else {
-                            self.set_status_notice("No image in clipboard");
-                        }
-                    } else {
-                        self.set_status_notice("No image in clipboard");
-                    }
+                    self.paste_image_from_clipboard();
                     return Ok(());
                 }
                 _ => {}
@@ -5405,18 +5378,7 @@ impl App {
                 }
                 KeyCode::Char('v') => {
                     // Ctrl+V: paste from clipboard (try image first, then text)
-                    if let Some((media_type, base64_data)) = clipboard_image() {
-                        self.pending_images.push((media_type, base64_data));
-                        let n = self.pending_images.len();
-                        let placeholder = format!("[image {}]", n);
-                        self.input.insert_str(self.cursor_pos, &placeholder);
-                        self.cursor_pos += placeholder.len();
-                        self.sync_model_picker_preview_from_input();
-                    } else if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                        if let Ok(text) = clipboard.get_text() {
-                            self.handle_paste(text);
-                        }
-                    }
+                    self.paste_image_from_clipboard();
                     return Ok(());
                 }
                 KeyCode::Tab | KeyCode::Char('t') => {
@@ -5545,6 +5507,46 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Try to paste an image from the clipboard. Checks native image data first,
+    /// then falls back to HTML clipboard for <img> URLs, then arboard text.
+    /// Used by both Ctrl+V and Alt+V handlers in both local and remote mode.
+    fn paste_image_from_clipboard(&mut self) {
+        if let Some((media_type, base64_data)) = clipboard_image() {
+            let size_kb = base64_data.len() / 1024;
+            self.pending_images.push((media_type.clone(), base64_data));
+            let n = self.pending_images.len();
+            let placeholder = format!("[image {}]", n);
+            self.input.insert_str(self.cursor_pos, &placeholder);
+            self.cursor_pos += placeholder.len();
+            self.sync_model_picker_preview_from_input();
+            self.set_status_notice(&format!("Pasted {} ({} KB)", media_type, size_kb));
+        } else if let Ok(mut cb) = arboard::Clipboard::new() {
+            if let Ok(text) = cb.get_text() {
+                if let Some(url) = extract_image_url(&text) {
+                    self.set_status_notice("Downloading image...");
+                    if let Some((media_type, base64_data)) = download_image_url(&url) {
+                        let size_kb = base64_data.len() / 1024;
+                        self.pending_images.push((media_type.clone(), base64_data));
+                        let n = self.pending_images.len();
+                        let placeholder = format!("[image {}]", n);
+                        self.input.insert_str(self.cursor_pos, &placeholder);
+                        self.cursor_pos += placeholder.len();
+                        self.sync_model_picker_preview_from_input();
+                        self.set_status_notice(&format!("Pasted {} ({} KB)", media_type, size_kb));
+                    } else {
+                        self.set_status_notice("Failed to download image");
+                    }
+                } else {
+                    self.handle_paste(text);
+                }
+            } else {
+                self.set_status_notice("No image in clipboard");
+            }
+        } else {
+            self.set_status_notice("No image in clipboard");
+        }
     }
 
     /// Queue a message to be sent later
@@ -11362,6 +11364,31 @@ fn clipboard_image() -> Option<(String, String)> {
                         let b64 =
                             base64::engine::general_purpose::STANDARD.encode(&img_output.stdout);
                         return Some((mime.to_string(), b64));
+                    }
+                }
+            }
+
+            // Fallback: check text/html for <img> tags (Discord copies HTML with image URLs)
+            if types.lines().any(|t| t.trim() == "text/html") {
+                if let Ok(html_output) = std::process::Command::new("wl-paste")
+                    .args(["--type", "text/html"])
+                    .output()
+                {
+                    if html_output.status.success() && !html_output.stdout.is_empty() {
+                        let html = String::from_utf8_lossy(&html_output.stdout);
+                        crate::logging::info(&format!(
+                            "clipboard_image: checking HTML for img tags ({} bytes)",
+                            html.len()
+                        ));
+                        if let Some(url) = extract_image_url(&html) {
+                            crate::logging::info(&format!(
+                                "clipboard_image: found image URL in HTML: {}",
+                                &url[..url.len().min(80)]
+                            ));
+                            if let Some(result) = download_image_url(&url) {
+                                return Some(result);
+                            }
+                        }
                     }
                 }
             }

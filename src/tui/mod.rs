@@ -31,11 +31,13 @@ use std::time::Duration;
 /// Returns true if successfully enabled, false if the terminal doesn't support it.
 pub fn enable_keyboard_enhancement() -> bool {
     use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
-    crossterm::execute!(
+    let result = crossterm::execute!(
         std::io::stdout(),
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     )
-    .is_ok()
+    .is_ok();
+    crate::logging::info(&format!("Kitty keyboard protocol: {}", if result { "enabled" } else { "FAILED" }));
+    result
 }
 
 /// Disable Kitty keyboard protocol, restoring default key reporting.
