@@ -29,7 +29,12 @@ pub struct HistoryMessage {
 pub enum Request {
     /// Send a message to the agent
     #[serde(rename = "message")]
-    Message { id: u64, content: String },
+    Message {
+        id: u64,
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<(String, String)>,
+    },
 
     /// Cancel current generation
     #[serde(rename = "cancel")]
@@ -726,6 +731,7 @@ mod tests {
         let req = Request::Message {
             id: 1,
             content: "hello".to_string(),
+            images: vec![],
         };
         let json = serde_json::to_string(&req).unwrap();
         let decoded: Request = serde_json::from_str(&json).unwrap();

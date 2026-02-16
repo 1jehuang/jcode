@@ -303,8 +303,21 @@ impl RemoteConnection {
     /// Send a message to the server
     /// Send a message to the server and return the request ID
     pub async fn send_message(&mut self, content: String) -> Result<u64> {
+        self.send_message_with_images(content, vec![]).await
+    }
+
+    /// Send a message with images to the server and return the request ID
+    pub async fn send_message_with_images(
+        &mut self,
+        content: String,
+        images: Vec<(String, String)>,
+    ) -> Result<u64> {
         let id = self.next_request_id;
-        let request = Request::Message { id, content };
+        let request = Request::Message {
+            id,
+            content,
+            images,
+        };
         self.next_request_id += 1;
         self.send_request(request).await?;
         Ok(id)
