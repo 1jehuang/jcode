@@ -503,6 +503,14 @@ impl CompactionManager {
         self.compacted_count
     }
 
+    /// Get the character count of the active summary (0 if none)
+    pub fn summary_chars(&self) -> usize {
+        self.active_summary
+            .as_ref()
+            .map(|s| s.text.len())
+            .unwrap_or(0)
+    }
+
     /// Get stats about current state (without message data)
     pub fn stats(&self) -> CompactionStats {
         CompactionStats {
