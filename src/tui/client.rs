@@ -1052,6 +1052,7 @@ impl ClientApp {
                         let request = Request::Message {
                             id: self.next_request_id,
                             content: input,
+                            images: vec![],
                         };
                         self.next_request_id += 1;
                         let json = serde_json::to_string(&request)? + "\n";

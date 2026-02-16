@@ -792,6 +792,7 @@ impl Agent {
     pub async fn run_once_streaming_mpsc(
         &mut self,
         user_message: &str,
+        images: Vec<(String, String)>,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
         // Inject any pending notifications before the user message
@@ -811,13 +812,23 @@ impl Agent {
             );
         }
 
-        self.add_message(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: user_message.to_string(),
-                cache_control: None,
-            }],
-        );
+        let mut blocks: Vec<ContentBlock> = images
+            .into_iter()
+            .map(|(media_type, data)| ContentBlock::Image { media_type, data })
+            .collect();
+        blocks.push(ContentBlock::Text {
+            text: user_message.to_string(),
+            cache_control: None,
+        });
+
+        if blocks.len() > 1 {
+            crate::logging::info(&format!(
+                "Agent received message with {} image(s)",
+                blocks.len() - 1
+            ));
+        }
+
+        self.add_message(Role::User, blocks);
         self.session.save()?;
         self.run_turn_streaming_mpsc(event_tx).await
     }

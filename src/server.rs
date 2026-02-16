@@ -1582,7 +1582,7 @@ async fn handle_client(
         }
 
         match request {
-            Request::Message { id, content } => {
+            Request::Message { id, content, images } => {
                 // Check if this client is already processing
                 if client_is_processing {
                     let _ = client_event_tx.send(ServerEvent::Error {
@@ -1614,7 +1614,7 @@ async fn handle_client(
                 crate::logging::info(&format!("Processing message id={} spawning task", id));
                 processing_task = Some(tokio::spawn(async move {
                     let result = match std::panic::AssertUnwindSafe(
-                        process_message_streaming_mpsc(agent, &content, tx),
+                        process_message_streaming_mpsc(agent, &content, images, tx),
                     )
                     .catch_unwind()
                     .await
@@ -2540,6 +2540,7 @@ async fn handle_client(
                 let result = process_message_streaming_mpsc(
                     Arc::clone(&agent),
                     &task,
+                    vec![],
                     client_event_tx.clone(),
                 )
                 .await;
@@ -4440,10 +4441,11 @@ async fn process_message_streaming(
 async fn process_message_streaming_mpsc(
     agent: Arc<Mutex<Agent>>,
     content: &str,
+    images: Vec<(String, String)>,
     event_tx: tokio::sync::mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
     let mut agent = agent.lock().await;
-    agent.run_once_streaming_mpsc(content, event_tx).await
+    agent.run_once_streaming_mpsc(content, images, event_tx).await
 }
 
 async fn broadcast_swarm_status(
@@ -8261,6 +8263,7 @@ impl Client {
         let request = Request::Message {
             id,
             content: content.to_string(),
+            images: vec![],
         };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;

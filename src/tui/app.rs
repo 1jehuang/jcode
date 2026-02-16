@@ -4773,7 +4773,7 @@ impl App {
                 let raw_input = std::mem::take(&mut self.input);
                 let expanded = self.expand_paste_placeholders(&raw_input);
                 self.pasted_contents.clear();
-                self.pending_images.clear();
+                let images = std::mem::take(&mut self.pending_images);
                 self.cursor_pos = 0;
 
                 match self.send_action(true) {
@@ -4788,7 +4788,7 @@ impl App {
                             tool_data: None,
                         });
                         // Send expanded content to server
-                        let msg_id = remote.send_message(expanded).await?;
+                        let msg_id = remote.send_message_with_images(expanded, images).await?;
                         self.current_message_id = Some(msg_id);
                         self.is_processing = true;
                         self.status = ProcessingStatus::Sending;
@@ -4861,7 +4861,7 @@ impl App {
                     let raw_input = std::mem::take(&mut self.input);
                     let expanded = self.expand_paste_placeholders(&raw_input);
                     self.pasted_contents.clear();
-                    self.pending_images.clear();
+                    let images = std::mem::take(&mut self.pending_images);
                     self.cursor_pos = 0;
                     let trimmed = expanded.trim();
 
@@ -5089,7 +5089,7 @@ impl App {
                                 tool_data: None,
                             });
                             // Send expanded content (with actual pasted text) to server
-                            let msg_id = remote.send_message(expanded).await?;
+                            let msg_id = remote.send_message_with_images(expanded, images).await?;
                             self.current_message_id = Some(msg_id);
                             self.is_processing = true;
                             self.status = ProcessingStatus::Sending;
