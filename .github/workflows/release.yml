@@ -44,7 +44,10 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: |
+          mkdir -p .cargo
+          echo -e '[build]\nrustc-wrapper = ""' > .cargo/config.toml
+          cargo build --release --target ${{ matrix.target }}
         env:
           JCODE_RELEASE_BUILD: "1"
 

@@ -37,6 +37,11 @@ jobs:
         with:
           key: ${{ matrix.os }}
 
+      - name: Override sccache config
+        run: |
+          mkdir -p .cargo
+          echo -e '[build]\nrustc-wrapper = ""' > .cargo/config.toml
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
@@ -57,6 +62,11 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Override sccache config
+        run: |
+          mkdir -p .cargo
+          echo -e '[build]\nrustc-wrapper = ""' > .cargo/config.toml
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
