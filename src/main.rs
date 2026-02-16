@@ -1554,12 +1554,8 @@ fn run_memory_command(cmd: MemoryCommand) -> Result<()> {
 async fn debug_list_servers() -> Result<()> {
     let mut servers = Vec::new();
 
-    // Scan XDG_RUNTIME_DIR
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+    let runtime_dir = crate::storage::runtime_dir();
 
-    // Scan /tmp as well
     let scan_dirs = vec![runtime_dir, std::path::PathBuf::from("/tmp")];
 
     for dir in scan_dirs {
@@ -2167,19 +2163,38 @@ fn spawn_resume_in_new_terminal(
             candidates.push(term);
         }
     }
-    candidates.extend(
-        [
-            "kitty",
-            "wezterm",
-            "alacritty",
-            "gnome-terminal",
-            "konsole",
-            "xterm",
-            "foot",
-        ]
-        .iter()
-        .map(|s| s.to_string()),
-    );
+
+    #[cfg(target_os = "macos")]
+    {
+        candidates.extend(
+            [
+                "kitty",
+                "wezterm",
+                "alacritty",
+                "iterm2",
+                "terminal",
+            ]
+            .iter()
+            .map(|s| s.to_string()),
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        candidates.extend(
+            [
+                "kitty",
+                "wezterm",
+                "alacritty",
+                "gnome-terminal",
+                "konsole",
+                "xterm",
+                "foot",
+            ]
+            .iter()
+            .map(|s| s.to_string()),
+        );
+    }
 
     for term in candidates {
         let mut cmd = Command::new(&term);
@@ -2219,6 +2234,27 @@ fn spawn_resume_in_new_terminal(
             }
             "foot" => {
                 cmd.args(["-e"]).arg(exe).arg("--resume").arg(session_id);
+            }
+            "iterm2" => {
+                cmd = Command::new("osascript");
+                cmd.args([
+                    "-e",
+                    &format!(
+                        r#"tell application "iTerm2"
+                            create window with default profile command "{} --resume {}"
+                        end tell"#,
+                        exe.to_string_lossy(),
+                        session_id
+                    ),
+                ]);
+            }
+            "terminal" => {
+                cmd = Command::new("open");
+                cmd.args([
+                    "-a", "Terminal",
+                    exe.to_str().unwrap_or("jcode"),
+                    "--args", "--resume", session_id,
+                ]);
             }
             _ => continue,
         }
@@ -2918,6 +2954,7 @@ mod tests {
             "claude-subprocess"
         );
         assert_eq!(ProviderChoice::Openai.as_arg_value(), "openai");
+        assert_eq!(ProviderChoice::Openrouter.as_arg_value(), "openrouter");
         assert_eq!(ProviderChoice::Cursor.as_arg_value(), "cursor");
         assert_eq!(ProviderChoice::Copilot.as_arg_value(), "copilot");
         assert_eq!(ProviderChoice::Antigravity.as_arg_value(), "antigravity");
