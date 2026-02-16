@@ -24,7 +24,17 @@ You need at least one of:
 - **Claude subscription** - Install Claude Code CLI, then run `claude` to generate OAuth credentials
 - **ChatGPT Pro/Plus subscription** - Run `codex login` to authenticate
 
+## Platform Support
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| **Linux** (x86_64, aarch64) | ✅ Fully supported | Primary development platform |
+| **macOS** (Apple Silicon & Intel) | ✅ Supported | Native builds, Homebrew available |
+| **Windows** | ⚠️ Experimental | WSL2 recommended |
+
 ## Installation
+
+### From source (all platforms)
 
 ```bash
 cargo install --path .
@@ -36,7 +46,33 @@ cargo build --release
 ./target/release/jcode
 ```
 
-Remote build/test (offload local CPU/RAM):
+### macOS via Homebrew
+
+```bash
+brew tap jcode-cli/jcode
+brew install jcode
+```
+
+### Linux
+
+After building, symlink to your PATH:
+```bash
+ln -sf $(pwd)/target/release/jcode ~/.local/bin/jcode
+```
+
+### macOS
+
+After building, add to your PATH:
+```bash
+# Apple Silicon
+ln -sf $(pwd)/target/release/jcode /usr/local/bin/jcode
+
+# Or add to PATH in your shell profile
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+ln -sf $(pwd)/target/release/jcode ~/.local/bin/jcode
+```
+
+### Remote build/test (offload local CPU/RAM)
 ```bash
 # Defaults: host=desktop, remote dir=.cache/remote-builds/jcode/jcode
 scripts/remote_build.sh --release
@@ -941,6 +977,23 @@ OpenAI/Codex OAuth credentials are stored at:
 - `~/.codex/auth.json`
 
 For provider/auth details, see `OAUTH.md`.
+
+---
+
+## macOS Notes
+
+jcode runs natively on macOS (both Apple Silicon and Intel). A few platform differences:
+
+**Socket paths:** On Linux, sockets live in `$XDG_RUNTIME_DIR` (e.g. `/run/user/1000/`). On macOS, jcode uses `$TMPDIR` (a per-user directory like `/var/folders/xx/.../T/`). Override with `$JCODE_RUNTIME_DIR` if needed.
+
+**Clipboard:** Image paste (`Alt+V`, `Ctrl+V`) uses `osascript` on macOS to read NSPasteboard, with `arboard` as fallback. Text clipboard uses `arboard` which maps to `NSPasteboard` natively.
+
+**Terminal spawning:** When resuming sessions in a new terminal, jcode tries Kitty, WezTerm, Alacritty, iTerm2, and Terminal.app on macOS. Set `$JCODE_TERMINAL` to override.
+
+**Mermaid diagrams:** Rendered via pure-Rust SVG (resvg/usvg). Font discovery uses Core Text on macOS automatically.
+
+**Optional dependencies:**
+- ImageMagick (`brew install imagemagick`) — only needed for Sixel graphics in terminals that use the Sixel protocol (most macOS terminals use Kitty or iTerm2 protocol instead)
 
 ---
 

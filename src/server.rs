@@ -258,10 +258,7 @@ pub fn socket_path() -> PathBuf {
     if let Ok(custom) = std::env::var("JCODE_SOCKET") {
         return PathBuf::from(custom);
     }
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    runtime_dir.join("jcode.sock")
+    crate::storage::runtime_dir().join("jcode.sock")
 }
 
 /// Debug socket path for testing/introspection

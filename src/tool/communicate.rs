@@ -8,10 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
 fn socket_path() -> std::path::PathBuf {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    runtime_dir.join("jcode.sock")
+    crate::storage::runtime_dir().join("jcode.sock")
 }
 
 fn send_request(request: &Value) -> Result<Value> {

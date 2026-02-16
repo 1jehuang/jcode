@@ -10443,8 +10443,7 @@ impl App {
 
     /// Get the debug socket path
     pub fn debug_socket_path() -> std::path::PathBuf {
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-        std::path::PathBuf::from(runtime_dir).join("jcode-debug.sock")
+        crate::storage::runtime_dir().join("jcode-debug.sock")
     }
 }
 
@@ -11325,7 +11324,7 @@ fn spawn_in_new_terminal(
 /// Try to get an image from the system clipboard.
 ///
 /// Returns `Some((media_type, base64_data))` if an image is available.
-/// Uses `wl-paste` on Wayland, falls back to `arboard::get_image()`.
+/// Uses `wl-paste` on Wayland, `osascript` on macOS, falls back to `arboard::get_image()`.
 fn clipboard_image() -> Option<(String, String)> {
     use base64::Engine;
 
@@ -11389,7 +11388,45 @@ fn clipboard_image() -> Option<(String, String)> {
         }
     }
 
-    // Fallback: arboard (works on X11/XWayland)
+    // macOS: use osascript to check clipboard for images and save as PNG via temp file
+    #[cfg(target_os = "macos")]
+    {
+        let temp_path = std::env::temp_dir().join("jcode_clipboard.png");
+        let script = format!(
+            r#"use framework "AppKit"
+            set pb to current application's NSPasteboard's generalPasteboard()
+            set imgClasses to current application's NSArray's arrayWithObject:(current application's NSImage)
+            if (pb's canReadObjectForClasses:imgClasses options:(missing value)) then
+                set imgList to pb's readObjectsForClasses:imgClasses options:(missing value)
+                set img to item 1 of imgList
+                set tiffData to img's TIFFRepresentation()
+                set bitmapRep to current application's NSBitmapImageRep's imageRepWithData:tiffData
+                set pngData to bitmapRep's representationUsingType:(current application's NSBitmapImageFileTypePNG) properties:(missing value)
+                pngData's writeToFile:"{}" atomically:true
+                return "ok"
+            else
+                return "none"
+            end if"#,
+            temp_path.to_string_lossy()
+        );
+        if let Ok(output) = std::process::Command::new("osascript")
+            .args(["-l", "AppleScript", "-e", &script])
+            .output()
+        {
+            let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if result == "ok" {
+                if let Ok(data) = std::fs::read(&temp_path) {
+                    let _ = std::fs::remove_file(&temp_path);
+                    if !data.is_empty() {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                        return Some(("image/png".to_string(), b64));
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: arboard (works on X11/XWayland and macOS via NSPasteboard)
     if let Ok(mut clipboard) = arboard::Clipboard::new() {
         if let Ok(img) = clipboard.get_image() {
             // img.bytes is RGBA pixel data - encode as PNG
