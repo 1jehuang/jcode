@@ -21,6 +21,9 @@ name = "jcode-harness"
 path = "src/bin/harness.rs"
 
 [dependencies]
+# Memory allocator (reduces fragmentation for long-running server)
+tikv-jemallocator = { version = "0.6", optional = true }
+
 # Async runtime
 tokio = { version = "1", features = ["full", "process"] }
 futures = "0.3"
@@ -94,6 +97,10 @@ pdf-extract = "0.8"
 
 # Mermaid diagram rendering (stable v0.2.0 tag)
 mermaid-rs-renderer = { git = "ssh://git@github.com/1jehuang/mermaid-rs-renderer.git", tag = "v0.2.0" }
+
+[features]
+default = ["jemalloc"]
+jemalloc = ["tikv-jemallocator"]
 
 [dev-dependencies]
 async-stream = "0.3"
