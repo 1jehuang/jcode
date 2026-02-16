@@ -5759,7 +5759,6 @@ impl App {
         let raw_input = std::mem::take(&mut self.input);
         let input = self.expand_paste_placeholders(&raw_input);
         self.pasted_contents.clear();
-        self.pending_images.clear();
         self.cursor_pos = 0;
         self.follow_chat_bottom(); // Reset to bottom and resume auto-scroll on new input
 
@@ -6762,6 +6761,13 @@ impl App {
         });
         // Send expanded content (with actual pasted text) to model
         let images = std::mem::take(&mut self.pending_images);
+        if !images.is_empty() {
+            crate::logging::info(&format!(
+                "Submitting with {} image(s): {}",
+                images.len(),
+                images.iter().map(|(t, d)| format!("{} ({}KB)", t, d.len() / 1024)).collect::<Vec<_>>().join(", ")
+            ));
+        }
         if images.is_empty() {
             self.add_provider_message(Message::user(&input));
             self.session.add_message(
