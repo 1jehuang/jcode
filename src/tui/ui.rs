@@ -1779,13 +1779,79 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         None
     };
 
+    // Check diagram display mode and get active diagrams early so we can
+    // determine the horizontal split before computing input width etc.
+    let diagram_mode = app.diagram_mode();
+    let diagrams = super::mermaid::get_active_diagrams();
+    let diagram_count = diagrams.len();
+    let selected_index = if diagram_count > 0 {
+        app.diagram_index().min(diagram_count - 1)
+    } else {
+        0
+    };
+    let pane_enabled = app.diagram_pane_enabled();
+    let pinned_diagram =
+        if diagram_mode == crate::config::DiagramDisplayMode::Pinned && pane_enabled {
+            diagrams.get(selected_index).cloned()
+        } else {
+            None
+        };
+    let diagram_focus = app.diagram_focus();
+    let (diagram_scroll_x, diagram_scroll_y) = app.diagram_scroll();
+
+    // Compute diagram pane width using the full terminal height so the
+    // diagram spans the entire vertical space.
+    let mut diagram_width = 0u16;
+    let mut chat_width = area.width;
+    let mut has_pinned_area = false;
+    if let Some(diagram) = pinned_diagram.as_ref() {
+        const MIN_DIAGRAM_WIDTH: u16 = 24;
+        const MIN_CHAT_WIDTH: u16 = 20;
+        let max_diagram = area.width.saturating_sub(MIN_CHAT_WIDTH);
+        if max_diagram >= MIN_DIAGRAM_WIDTH {
+            let ratio = app.diagram_pane_ratio().clamp(25, 70) as u32;
+            let ratio_cap = ((area.width as u32 * ratio) / 100) as u16;
+            let needed = estimate_pinned_diagram_pane_width(
+                diagram,
+                area.height,
+                MIN_DIAGRAM_WIDTH,
+            );
+            diagram_width = needed
+                .min(ratio_cap)
+                .max(MIN_DIAGRAM_WIDTH)
+                .min(max_diagram);
+            chat_width = area.width.saturating_sub(diagram_width);
+            has_pinned_area = diagram_width > 0 && chat_width > 0;
+        }
+    }
+
+    // Horizontal split: [chat_area | diagram_area].
+    // The diagram pane spans the full terminal height.
+    let (chat_area, diagram_area) = if has_pinned_area {
+        let chat = Rect {
+            x: area.x,
+            y: area.y,
+            width: chat_width,
+            height: area.height,
+        };
+        let diagram = Rect {
+            x: area.x + chat_width,
+            y: area.y,
+            width: diagram_width,
+            height: area.height,
+        };
+        (chat, Some(diagram))
+    } else {
+        (area, None)
+    };
+
     // Calculate pending messages (queued + interleave) for numbering and layout
     let pending_count = pending_prompt_count(app);
     let queued_height = pending_count.min(3) as u16;
 
     // Calculate input height based on content (max 10 lines visible, scrolls if more)
     let reserved_width = send_mode_reserved_width(app) as u16;
-    let available_width = area.width.saturating_sub(3 + reserved_width) as usize; // prompt + mode icon
+    let available_width = chat_area.width.saturating_sub(3 + reserved_width) as usize;
     let base_input_height = calculate_input_lines(app.input(), available_width).min(10) as u16;
     // Add 1 line for command suggestions when typing /, or for Shift+Enter hint when processing
     let suggestions = app.command_suggestions();
@@ -1806,67 +1872,12 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         .filter(|m| m.role == "user")
         .count();
 
-    let diagram_mode = app.diagram_mode();
     let total_start = Instant::now();
     if let Some(ref mut capture) = debug_capture {
         capture.render_order.push("prepare_messages".to_string());
     }
     let prep_start = Instant::now();
-    let mut prepared = prepare_messages(app, area.width, area.height);
-
-    // Check diagram display mode and get active diagrams
-    let diagrams = super::mermaid::get_active_diagrams();
-    let diagram_count = diagrams.len();
-    let selected_index = if diagram_count > 0 {
-        app.diagram_index().min(diagram_count - 1)
-    } else {
-        0
-    };
-    let pane_enabled = app.diagram_pane_enabled();
-    let pinned_diagram =
-        if diagram_mode == crate::config::DiagramDisplayMode::Pinned && pane_enabled {
-            diagrams.get(selected_index).cloned()
-        } else {
-            None
-        };
-    let diagram_focus = app.diagram_focus();
-    let (diagram_scroll_x, diagram_scroll_y) = app.diagram_scroll();
-    let message_height_budget = area
-        .height
-        .saturating_sub(1 + queued_height + picker_height + input_height)
-        .max(3);
-
-    let mut diagram_width = 0u16;
-    let mut messages_width = area.width;
-    let mut has_pinned_area = false;
-    if let Some(diagram) = pinned_diagram.as_ref() {
-        const MIN_DIAGRAM_WIDTH: u16 = 24;
-        const MIN_MESSAGES_WIDTH: u16 = 20;
-        let max_diagram = area.width.saturating_sub(MIN_MESSAGES_WIDTH);
-        if max_diagram >= MIN_DIAGRAM_WIDTH {
-            let ratio = app.diagram_pane_ratio().clamp(25, 70) as u32;
-            let ratio_cap = ((area.width as u32 * ratio) / 100) as u16;
-            let needed = estimate_pinned_diagram_pane_width(
-                diagram,
-                message_height_budget,
-                MIN_DIAGRAM_WIDTH,
-            );
-            diagram_width = needed
-                .min(ratio_cap)
-                .max(MIN_DIAGRAM_WIDTH)
-                .min(max_diagram);
-            messages_width = area.width.saturating_sub(diagram_width);
-            has_pinned_area = diagram_width > 0 && messages_width > 0;
-            if messages_width > 0 && messages_width != area.width {
-                if let Some(ref mut capture) = debug_capture {
-                    capture
-                        .render_order
-                        .push("prepare_messages_rewrap".to_string());
-                }
-                prepared = prepare_messages(app, messages_width, area.height);
-            }
-        }
-    }
+    let prepared = prepare_messages(app, chat_area.width, chat_area.height);
     if let Some(ref mut capture) = debug_capture {
         capture.image_regions = prepared
             .image_regions
@@ -1881,12 +1892,13 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let prep_elapsed = prep_start.elapsed();
     let content_height = prepared.wrapped_lines.len().max(1) as u16;
     let fixed_height = 1 + queued_height + picker_height + input_height; // status + queued + picker + input
-    let available_height = area.height;
+    let available_height = chat_area.height;
 
     // Use packed layout when content fits, scrolling layout otherwise
     let use_packed = content_height + fixed_height <= available_height;
 
     // Layout: messages (includes header), queued, status, picker, input
+    // All vertical chunks are within the chat_area (left column).
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if use_packed {
@@ -1906,7 +1918,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 Constraint::Length(input_height),  // Input
             ]
         })
-        .split(area);
+        .split(chat_area);
 
     // Capture layout info for visual debug
     if let Some(ref mut capture) = debug_capture {
@@ -1974,24 +1986,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
     let draw_start = Instant::now();
 
-    // Split messages area for pinned diagram if we have one in pinned mode
-    let (messages_area, diagram_area) = if has_pinned_area {
-        let messages = Rect {
-            x: chunks[0].x,
-            y: chunks[0].y,
-            width: messages_width,
-            height: chunks[0].height,
-        };
-        let diagram = Rect {
-            x: chunks[0].x + messages_width,
-            y: chunks[0].y,
-            width: diagram_width,
-            height: chunks[0].height,
-        };
-        (messages, Some(diagram))
-    } else {
-        (chunks[0], None)
-    };
+    // Messages area is chunks[0] within the chat column (already excludes diagram).
+    let messages_area = chunks[0];
 
     if let Some(ref mut capture) = debug_capture {
         capture.layout.messages_area = Some(messages_area.into());
@@ -2058,11 +2054,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let widget_data = app.info_widget_data();
     let mut widget_render_ms: Option<f32> = None;
     let mut placements: Vec<info_widget::WidgetPlacement> = Vec::new();
-    let widget_bounds = if has_pinned_area {
-        messages_area
-    } else {
-        chunks[0]
-    };
+    let widget_bounds = messages_area;
     if !widget_data.is_empty() {
         if let Some(ref mut capture) = debug_capture {
             capture.render_order.push("render_info_widgets".to_string());
