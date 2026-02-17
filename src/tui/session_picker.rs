@@ -645,24 +645,29 @@ impl SessionPicker {
     }
 
     fn handle_mouse_scroll(&mut self, col: u16, row: u16, kind: MouseEventKind) {
-        if let Some(preview) = self.last_preview_area {
-            if Self::point_in_rect(col, row, preview) {
-                match kind {
-                    MouseEventKind::ScrollUp => self.scroll_preview_up(),
-                    MouseEventKind::ScrollDown => self.scroll_preview_down(),
-                    _ => {}
-                }
-                return;
+        let over_preview = self
+            .last_preview_area
+            .map(|r| Self::point_in_rect(col, row, r))
+            .unwrap_or(false);
+        let over_list = self
+            .last_list_area
+            .map(|r| Self::point_in_rect(col, row, r))
+            .unwrap_or(false);
+
+        if over_preview {
+            match kind {
+                MouseEventKind::ScrollUp => self.scroll_preview_up(),
+                MouseEventKind::ScrollDown => self.scroll_preview_down(),
+                _ => {}
             }
+            return;
         }
 
-        if let Some(list) = self.last_list_area {
-            if Self::point_in_rect(col, row, list) {
-                match kind {
-                    MouseEventKind::ScrollUp => self.previous(),
-                    MouseEventKind::ScrollDown => self.next(),
-                    _ => {}
-                }
+        if over_list {
+            match kind {
+                MouseEventKind::ScrollUp => self.previous(),
+                MouseEventKind::ScrollDown => self.next(),
+                _ => {}
             }
         }
     }
@@ -1545,10 +1550,7 @@ impl SessionPicker {
         super::mermaid::init_picker();
         let keyboard_enhanced = super::enable_keyboard_enhancement();
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
-        let mouse_capture = crate::config::config().display.mouse_capture;
-        if mouse_capture {
-            crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
-        }
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
 
         let result = loop {
             terminal.draw(|frame| self.render(frame))?;
@@ -1703,9 +1705,7 @@ impl SessionPicker {
         };
 
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
-        if mouse_capture {
-            let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
-        }
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
         if keyboard_enhanced {
             super::disable_keyboard_enhancement();
         }
