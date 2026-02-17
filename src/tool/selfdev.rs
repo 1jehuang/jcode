@@ -186,11 +186,7 @@ impl SelfDevTool {
         let hash = build::current_git_hash(&repo_dir)?;
         let version_before = env!("JCODE_VERSION").to_string();
 
-        // Install this version and set as canary (stable stays as safety net)
-        build::install_version(&repo_dir, &hash)?;
-        build::update_canary_symlink(&hash)?;
-
-        // Update manifest - set as canary, keep stable unchanged
+        // Update manifest - track what we're testing
         let mut manifest = build::BuildManifest::load()?;
         let stable_hash = manifest
             .stable
@@ -245,16 +241,18 @@ impl SelfDevTool {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No canary build to promote"))?;
 
-        // Update stable symlink
+        // Copy current target/release/jcode to a versioned slot for stable
+        let repo_dir = build::get_repo_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository directory"))?;
+        build::install_version(&repo_dir, &canary_hash)?;
+
+        // Update stable symlink to the copied binary
         build::update_stable_symlink(&canary_hash)?;
 
         // Write stable version file (triggers auto-migration in other sessions)
         build::write_stable_version(&canary_hash)?;
 
-        // Clear canary symlink since it's now promoted to stable
-        build::clear_canary_symlink()?;
-
-        // Update manifest - clear all canary state
+        // Update manifest - clear canary state, set stable
         manifest.stable = Some(canary_hash.clone());
         manifest.canary = None;
         manifest.canary_session = None;

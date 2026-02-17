@@ -964,12 +964,6 @@ fn hot_reload(session_id: &str) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
     let cwd = std::env::current_dir()?;
-    let in_selfdev = std::env::var("JCODE_SELFDEV_MODE").is_ok()
-        || std::env::var("JCODE_SOCKET")
-            .ok()
-            .as_deref()
-            .map(|p| p == SELFDEV_SOCKET)
-            .unwrap_or(false);
 
     // Check if this is a migration to a specific binary (auto-migration to stable)
     if let Ok(migrate_binary) = std::env::var("JCODE_MIGRATE_BINARY") {
@@ -991,23 +985,9 @@ fn hot_reload(session_id: &str) -> Result<()> {
         }
     }
 
-    // Pick binary based on mode:
-    // - self-dev: prefer canary symlink so /reload converges to tested canary.
-    // - normal: prefer repo release binary, then PATH/current.
-    let exe = if in_selfdev {
-        crate::build::canary_binary_path()
-            .ok()
-            .filter(|p| p.exists())
-            .or_else(|| {
-                get_repo_dir().and_then(|repo_dir| {
-                    let candidate = repo_dir.join("target/release/jcode");
-                    candidate.exists().then_some(candidate)
-                })
-            })
-            .or_else(crate::build::jcode_path_in_path)
-            .or_else(|| std::env::current_exe().ok())
-            .ok_or_else(|| anyhow::anyhow!("No reloadable binary found for self-dev mode"))?
-    } else if let Some(repo_dir) = get_repo_dir() {
+    // Pick binary: prefer target/release/jcode (both selfdev and normal use this),
+    // fall back to PATH or current exe.
+    let exe = if let Some(repo_dir) = get_repo_dir() {
         let candidate = repo_dir.join("target/release/jcode");
         if candidate.exists() {
             candidate
