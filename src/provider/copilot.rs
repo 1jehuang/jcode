@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4";
-const AVAILABLE_MODELS: &[&str] = &["claude-sonnet-4", "gpt-5", "gpt-4.1"];
+const AVAILABLE_MODELS: &[&str] = &["claude-sonnet-4-6", "claude-sonnet-4", "gpt-5", "gpt-4.1"];
 
 #[derive(Clone)]
 struct CopilotInvocation {

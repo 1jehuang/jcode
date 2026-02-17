@@ -13,6 +13,8 @@ const AVAILABLE_MODELS: &[&str] = &[
     "composer-1",
     "composer-1.5",
     "gpt-5",
+    "sonnet-4-6",
+    "sonnet-4-6-thinking",
     "sonnet-4",
     "sonnet-4-thinking",
 ];
