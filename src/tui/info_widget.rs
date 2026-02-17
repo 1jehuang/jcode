@@ -1422,18 +1422,31 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
         .border_style(Style::default().fg(Color::Rgb(70, 70, 80)).dim());
 
     let inner = block.inner(rect);
-    frame.render_widget(block, rect);
 
     // Diagrams need special handling - render image instead of text
     if placement.kind == WidgetKind::Diagrams {
+        frame.render_widget(block, rect);
         render_diagrams_widget(frame, inner, data);
         return;
     }
     if placement.kind == WidgetKind::Overview {
+        // Check if overview would actually render content before drawing the border
+        let mut overview = data.clone();
+        overview.memory_info = None;
+        overview.diagrams.clear();
+        let layout = compute_page_layout(&overview, inner.width as usize, inner.height);
+        if layout.pages.is_empty() || layout.max_page_height == 0 {
+            return;
+        }
+        frame.render_widget(block, rect);
         render_overview_widget(frame, inner, data);
         return;
     }
     let lines = render_widget_content(placement.kind, data, inner);
+    if lines.is_empty() {
+        return;
+    }
+    frame.render_widget(block, rect);
     let para = Paragraph::new(lines);
     frame.render_widget(para, inner);
 }
@@ -1492,6 +1505,11 @@ fn render_overview_widget(frame: &mut Frame, inner: Rect, data: &InfoWidgetData)
     let page_index = widget_state.page_index.min(layout.pages.len() - 1);
     let page = layout.pages[page_index];
     let mut lines = render_page(page.kind, &overview, inner);
+
+    // If the page rendered no content, bail out to avoid an empty box
+    if lines.is_empty() {
+        return;
+    }
 
     if layout.show_dots && inner.height > 0 {
         let mut dots: Vec<Span<'static>> = Vec::new();

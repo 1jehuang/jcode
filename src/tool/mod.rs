@@ -362,6 +362,19 @@ impl Registry {
         }
     }
 
+    /// Estimate token count for a string (chars / 4, matching compaction heuristic)
+    fn estimate_tokens(s: &str) -> usize {
+        s.len() / 4
+    }
+
+    /// Maximum fraction of context budget a single tool output may consume.
+    /// Outputs that would push total context beyond this are truncated.
+    const CONTEXT_GUARD_THRESHOLD: f32 = 0.90;
+
+    /// Maximum fraction of context budget a single tool output may occupy.
+    /// Even if we have room, a single output shouldn't dominate the context.
+    const SINGLE_OUTPUT_MAX_FRACTION: f32 = 0.30;
+
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let tools = self.tools.read().await;
@@ -374,7 +387,100 @@ impl Registry {
         // Drop the lock before executing
         drop(tools);
 
-        tool.execute(input, ctx).await
+        let mut output = tool.execute(input, ctx).await?;
+
+        // Context overflow guard: check if this output would push us over the limit
+        output = self.guard_context_overflow(name, output).await;
+
+        Ok(output)
+    }
+
+    /// Check if a tool output would overflow the context window and truncate if needed.
+    /// Returns the (possibly truncated) output.
+    async fn guard_context_overflow(&self, tool_name: &str, output: ToolOutput) -> ToolOutput {
+        let compaction = self.compaction.read().await;
+        let budget = compaction.token_budget();
+        if budget == 0 {
+            return output;
+        }
+
+        let current_tokens = compaction.effective_token_count();
+        let output_tokens = Self::estimate_tokens(&output.output);
+
+        // Check 1: Would adding this output push us over the safety threshold?
+        let projected = current_tokens + output_tokens;
+        let threshold_tokens = (budget as f32 * Self::CONTEXT_GUARD_THRESHOLD) as usize;
+
+        // Check 2: Is this single output unreasonably large relative to budget?
+        let single_max_tokens = (budget as f32 * Self::SINGLE_OUTPUT_MAX_FRACTION) as usize;
+
+        let needs_truncation = projected > threshold_tokens || output_tokens > single_max_tokens;
+
+        if !needs_truncation {
+            return output;
+        }
+
+        // Calculate how many tokens we can afford for this output
+        let remaining = if current_tokens < threshold_tokens {
+            threshold_tokens - current_tokens
+        } else {
+            // Already over threshold — allow a small amount for the error message
+            budget / 50 // ~2% of budget for the truncation notice
+        };
+        let max_tokens = remaining.min(single_max_tokens);
+
+        // Convert token limit back to approximate character limit
+        let max_chars = max_tokens * 4;
+
+        if output.output.len() <= max_chars {
+            return output;
+        }
+
+        crate::logging::info(&format!(
+            "Context guard: truncating {} output from ~{}k to ~{}k tokens \
+             (context: {}k/{}k, {:.0}% used)",
+            tool_name,
+            output_tokens / 1000,
+            max_tokens / 1000,
+            current_tokens / 1000,
+            budget / 1000,
+            (current_tokens as f32 / budget as f32) * 100.0,
+        ));
+
+        // Truncate the output, keeping the beginning (usually most relevant)
+        let truncated = if max_chars > 200 {
+            // Keep beginning of output + truncation notice
+            let kept = &output.output[..output.output.floor_char_boundary(max_chars - 150)];
+            format!(
+                "{}\n\n⚠️ OUTPUT TRUNCATED: This tool output was {:.0}k tokens which would \
+                 exceed the context window ({:.0}k/{}k tokens used, {}k budget). \
+                 Only the first ~{:.0}k tokens are shown. Use more targeted queries \
+                 (e.g., smaller line ranges, specific grep patterns) to get the content \
+                 you need without exceeding context limits.",
+                kept,
+                output_tokens as f32 / 1000.0,
+                current_tokens as f32 / 1000.0,
+                budget / 1000,
+                budget / 1000,
+                max_tokens as f32 / 1000.0,
+            )
+        } else {
+            // Context is almost completely full — just return error
+            format!(
+                "⚠️ CONTEXT LIMIT REACHED: Cannot return this tool output (~{:.0}k tokens) \
+                 because the context window is nearly full ({:.0}k/{}k tokens). \
+                 Consider using /compact to free up space, or use more targeted queries.",
+                output_tokens as f32 / 1000.0,
+                current_tokens as f32 / 1000.0,
+                budget / 1000,
+            )
+        };
+
+        ToolOutput {
+            output: truncated,
+            title: output.title,
+            metadata: output.metadata,
+        }
     }
 
     /// Register a tool dynamically (for MCP tools, etc.)

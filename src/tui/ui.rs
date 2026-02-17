@@ -823,7 +823,7 @@ fn format_gpt_name(short: &str) -> String {
 }
 
 /// Build the auth status line with colored dots for each provider
-fn build_auth_status_line(auth: &crate::auth::AuthStatus) -> Line<'static> {
+fn build_auth_status_line(auth: &crate::auth::AuthStatus, max_width: usize) -> Line<'static> {
     use crate::auth::AuthState;
 
     const GREEN: Color = Color::Rgb(100, 200, 100); // Available
@@ -846,49 +846,63 @@ fn build_auth_status_line(auth: &crate::auth::AuthStatus) -> Line<'static> {
         }
     }
 
-    let mut spans = Vec::new();
+    // Build full-length labels
+    let anthropic_label = if auth.anthropic.has_oauth && auth.anthropic.has_api_key {
+        "anthropic(oauth+key)"
+    } else if auth.anthropic.has_oauth {
+        "anthropic(oauth)"
+    } else if auth.anthropic.has_api_key {
+        "anthropic(key)"
+    } else {
+        "anthropic"
+    };
 
-    // Anthropic (with auth method hint)
+    let openai_label = if auth.openai_has_oauth && auth.openai_has_api_key {
+        "openai(oauth+key)"
+    } else if auth.openai_has_oauth {
+        "openai(oauth)"
+    } else if auth.openai_has_api_key {
+        "openai(key)"
+    } else {
+        "openai"
+    };
+
+    // Estimate full width: "● label ● openrouter ● label"
+    let full_width = 2 + anthropic_label.len() + 3 + "openrouter".len() + 3 + openai_label.len();
+
+    // Choose short labels if full doesn't fit
+    let (anth_lbl, or_lbl, oai_lbl) = if full_width <= max_width {
+        (anthropic_label, "openrouter", openai_label)
+    } else {
+        // Short form: drop auth method details
+        ("anthropic", "openrouter", "openai")
+    };
+
+    let mut spans = Vec::new();
     spans.push(Span::styled(
         dot_char(auth.anthropic.state),
         Style::default().fg(dot_color(auth.anthropic.state)),
     ));
-    let anthropic_label = if auth.anthropic.has_oauth && auth.anthropic.has_api_key {
-        " anthropic(oauth+key) "
-    } else if auth.anthropic.has_oauth {
-        " anthropic(oauth) "
-    } else if auth.anthropic.has_api_key {
-        " anthropic(key) "
-    } else {
-        " anthropic "
-    };
     spans.push(Span::styled(
-        anthropic_label,
+        format!(" {} ", anth_lbl),
         Style::default().fg(DIM_COLOR),
     ));
-
-    // OpenRouter
     spans.push(Span::styled(
         dot_char(auth.openrouter),
         Style::default().fg(dot_color(auth.openrouter)),
     ));
-    spans.push(Span::styled(" openrouter ", Style::default().fg(DIM_COLOR)));
-
-    // OpenAI
+    spans.push(Span::styled(
+        format!(" {} ", or_lbl),
+        Style::default().fg(DIM_COLOR),
+    ));
     spans.push(Span::styled(
         dot_char(auth.openai),
         Style::default().fg(dot_color(auth.openai)),
     ));
-    let openai_label = if auth.openai_has_oauth && auth.openai_has_api_key {
-        " openai(oauth+key) "
-    } else if auth.openai_has_oauth {
-        " openai(oauth) "
-    } else if auth.openai_has_api_key {
-        " openai(key) "
-    } else {
-        " openai "
-    };
-    spans.push(Span::styled(openai_label, Style::default().fg(DIM_COLOR)));
+    spans.push(Span::styled(
+        format!(" {}", oai_lbl),
+        Style::default().fg(DIM_COLOR),
+    ));
 
     Line::from(spans)
 }
@@ -2559,8 +2573,6 @@ fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>>
     let is_remote = app.is_remote_mode();
     let server_update = app.server_update_available() == Some(true);
     let client_update = app.client_update_available();
-    let _ = width; // Reserved for future use
-
     let mut status_items: Vec<&str> = Vec::new();
     if is_remote {
         status_items.push("client");
@@ -2614,17 +2626,19 @@ fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>>
     );
 
     // Line 4: Version and build info (dim, no chroma)
+    let w = width as usize;
     let version_text = if is_running_stable_release() {
         let tag = env!("JCODE_GIT_TAG");
         if tag.is_empty() || tag.contains('-') {
-            // No exact tag match — show version with "release" label
-            format!("{} · release · built {}", semver(), build_info)
+            let full = format!("{} · release · built {}", semver(), build_info);
+            if full.chars().count() <= w { full } else { format!("{} · release", semver()) }
         } else {
-            // Exact tag (e.g., "v0.1.2") — show it
-            format!("{} · release {} · built {}", semver(), tag, build_info)
+            let full = format!("{} · release {} · built {}", semver(), tag, build_info);
+            if full.chars().count() <= w { full } else { format!("{} · {}", semver(), tag) }
         }
     } else {
-        format!("{} · built {}", semver(), build_info)
+        let full = format!("{} · built {}", semver(), build_info);
+        if full.chars().count() <= w { full } else { semver().to_string() }
     };
     let version_line =
         Line::from(Span::styled(version_text, Style::default().fg(DIM_COLOR))).alignment(align);
@@ -2677,13 +2691,22 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     };
 
     // Line: provider + model + upstream provider if available + hint to switch
+    let w = width as usize;
     let model_info = if let Some(ref provider) = upstream {
-        format!(
-            "{} · {} via {} · /model to switch",
-            provider_label, model, provider
-        )
+        let full = format!("{} · {} via {} · /model to switch", provider_label, model, provider);
+        if full.chars().count() <= w {
+            full
+        } else {
+            let short = format!("{} · {} via {}", provider_label, model, provider);
+            if short.chars().count() <= w { short } else { format!("{} · {}", provider_label, model) }
+        }
     } else {
-        format!("{} · {} · /model to switch", provider_label, model)
+        let full = format!("{} · {} · /model to switch", provider_label, model);
+        if full.chars().count() <= w {
+            full
+        } else {
+            format!("{} · {}", provider_label, model)
+        }
     };
     lines.push(
         Line::from(Span::styled(model_info, Style::default().fg(DIM_COLOR))).alignment(align),
@@ -2691,7 +2714,7 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
 
     // Line: Auth status indicators (colored dots for each provider)
     let auth = app.auth_status();
-    let auth_line = build_auth_status_line(&auth);
+    let auth_line = build_auth_status_line(&auth, w);
     if !auth_line.spans.is_empty() {
         lines.push(auth_line.alignment(align));
     }
@@ -2742,37 +2765,54 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let mcp_text = if mcps.is_empty() {
         "mcp: (none)".to_string()
     } else {
-        let mcp_parts: Vec<String> = mcps
+        let full_parts: Vec<String> = mcps
             .iter()
             .map(|(name, count)| {
                 if *count > 0 {
                     format!("{} ({} tools)", name, count)
                 } else {
-                    // count 0 means still connecting
                     format!("{} (...)", name)
                 }
             })
             .collect();
-        format!("mcp: {}", mcp_parts.join(", "))
+        let full = format!("mcp: {}", full_parts.join(", "));
+        if full.chars().count() <= w {
+            full
+        } else {
+            // Try shorter: just names with counts
+            let short_parts: Vec<String> = mcps
+                .iter()
+                .map(|(name, count)| {
+                    if *count > 0 { format!("{}({})", name, count) }
+                    else { format!("{}(…)", name) }
+                })
+                .collect();
+            let short = format!("mcp: {}", short_parts.join(" "));
+            if short.chars().count() <= w {
+                short
+            } else {
+                // Just count
+                format!("mcp: {} servers", mcps.len())
+            }
+        }
     };
     lines.push(Line::from(Span::styled(mcp_text, Style::default().fg(DIM_COLOR))).alignment(align));
 
     // Line 4: Skills (if any)
     let skills = app.available_skills();
     if !skills.is_empty() {
+        let full = format!(
+            "skills: {}",
+            skills.iter().map(|s| format!("/{}", s)).collect::<Vec<_>>().join(" ")
+        );
+        let skills_text = if full.chars().count() <= w {
+            full
+        } else {
+            format!("skills: {} loaded", skills.len())
+        };
         lines.push(
-            Line::from(Span::styled(
-                format!(
-                    "skills: {}",
-                    skills
-                        .iter()
-                        .map(|s| format!("/{}", s))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ),
-                Style::default().fg(DIM_COLOR),
-            ))
-            .alignment(align),
+            Line::from(Span::styled(skills_text, Style::default().fg(DIM_COLOR)))
+                .alignment(align),
         );
     }
 

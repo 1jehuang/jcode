@@ -30,7 +30,7 @@ const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const RESPONSES_PATH: &str = "responses";
 const DEFAULT_MODEL: &str = "gpt-5.3-codex-spark";
 const ORIGINATOR: &str = "codex_cli_rs";
-const CHATGPT_INSTRUCTIONS: &str = include_str!("../prompts/gpt-5.1-codex-max_prompt.md");
+const CHATGPT_INSTRUCTIONS: &str = include_str!("../prompts/openai_chatgpt.md");
 
 /// Maximum number of retries for transient errors
 const MAX_RETRIES: u32 = 3;
