@@ -12,8 +12,6 @@ use serde_json::{json, Value};
 #[derive(Debug, Deserialize)]
 struct SelfDevInput {
     action: String,
-    #[serde(default)]
-    message: Option<String>,
     /// Optional context for reload - what the agent is working on
     #[serde(default)]
     context: Option<String>,
@@ -105,7 +103,7 @@ impl Tool for SelfDevTool {
 
     fn description(&self) -> &str {
         "Self-development tool for working on jcode itself. Only available in self-dev mode. \
-         Actions: 'reload' (restart with built binary), 'promote' (mark build as stable), \
+         Actions: 'reload' (restart with built binary), \
          'status' (show build versions), 'rollback' (switch to stable), \
          'socket-info' (debug socket connection info), 'socket-help' (debug socket commands)."
     }
@@ -118,22 +116,16 @@ impl Tool for SelfDevTool {
                     "type": "string",
                     "enum": [
                         "reload",
-                        "promote",
                         "status",
                         "rollback",
                         "socket-info",
                         "socket-help"
                     ],
                     "description": "Action to perform: 'reload' restarts with built binary, \
-                                   'promote' marks current canary as stable, \
                                    'status' shows build versions and crash history, \
                                    'rollback' switches back to stable build, \
                                    'socket-info' returns debug socket paths and connection info, \
                                    'socket-help' shows available debug socket commands"
-                },
-                "message": {
-                    "type": "string",
-                    "description": "Optional message for promote action"
                 },
                 "context": {
                     "type": "string",
@@ -153,13 +145,12 @@ impl Tool for SelfDevTool {
 
         let result = match action.as_str() {
             "reload" => self.do_reload(params.context, &ctx.session_id).await,
-            "promote" => self.do_promote(params.message).await,
             "status" => self.do_status().await,
             "rollback" => self.do_rollback(params.context, &ctx.session_id).await,
             "socket-info" => self.do_socket_info().await,
             "socket-help" => self.do_socket_help().await,
             _ => Ok(ToolOutput::new(format!(
-                "Unknown action: {}. Use 'reload', 'promote', 'status', 'rollback', 'socket-info', or 'socket-help'.",
+                "Unknown action: {}. Use 'reload', 'status', 'rollback', 'socket-info', or 'socket-help'.",
                 action
             ))),
         };
@@ -230,42 +221,6 @@ impl SelfDevTool {
              **Restarting...** The session will continue automatically.\n\
              After reload, immediately continue your work — do not stop and wait for user input.",
             hash, stable_hash
-        )))
-    }
-
-    async fn do_promote(&self, message: Option<String>) -> Result<ToolOutput> {
-        let mut manifest = build::BuildManifest::load()?;
-
-        let canary_hash = manifest
-            .canary
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No canary build to promote"))?;
-
-        // Copy current target/release/jcode to a versioned slot for stable
-        let repo_dir = build::get_repo_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository directory"))?;
-        build::install_version(&repo_dir, &canary_hash)?;
-
-        // Update stable symlink to the copied binary
-        build::update_stable_symlink(&canary_hash)?;
-
-        // Write stable version file (triggers auto-migration in other sessions)
-        build::write_stable_version(&canary_hash)?;
-
-        // Update manifest - clear canary state, set stable
-        manifest.stable = Some(canary_hash.clone());
-        manifest.canary = None;
-        manifest.canary_session = None;
-        manifest.canary_status = None;
-        manifest.save()?;
-
-        let msg = message.unwrap_or_else(|| "Promoted to stable".to_string());
-
-        Ok(ToolOutput::new(format!(
-            "Promoted {} to stable.\n\n\
-             Other active sessions will auto-migrate to this version.\n\n\
-             Message: {}",
-            canary_hash, msg
         )))
     }
 

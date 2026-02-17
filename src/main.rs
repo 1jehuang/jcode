@@ -326,9 +326,6 @@ enum Command {
         build: bool,
     },
 
-    /// Promote current canary build to stable (other sessions will auto-migrate)
-    Promote,
-
     /// Internal: wrapper for canary process (handles crash recovery)
     #[command(hide = true)]
     CanaryWrapper {
@@ -604,9 +601,6 @@ async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::SelfDev { build }) => {
             run_self_dev(build, args.resume).await?;
-        }
-        Some(Command::Promote) => {
-            run_promote()?;
         }
         Some(Command::CanaryWrapper {
             session_id,
@@ -2845,29 +2839,6 @@ async fn run_canary_wrapper(
     );
     eprintln!("  jcode --resume {}", session_id);
     eprintln!();
-
-    Ok(())
-}
-
-/// Promote current canary to stable
-fn run_promote() -> Result<()> {
-    let mut manifest = build::BuildManifest::load()?;
-
-    let canary_hash = manifest
-        .canary
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("No canary build to promote"))?;
-
-    eprintln!("Promoting canary {} to stable...", canary_hash);
-
-    // Update symlink
-    build::update_stable_symlink(&canary_hash)?;
-
-    // Update manifest
-    manifest.promote_to_stable(&canary_hash)?;
-
-    eprintln!("✓ Build {} is now stable", canary_hash);
-    eprintln!("Other sessions will auto-migrate to this version.");
 
     Ok(())
 }

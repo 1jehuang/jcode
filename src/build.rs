@@ -181,15 +181,6 @@ impl BuildManifest {
         }
     }
 
-    /// Mark current build as stable
-    pub fn promote_to_stable(&mut self, hash: &str) -> Result<()> {
-        self.stable = Some(hash.to_string());
-        self.canary = None;
-        self.canary_session = None;
-        self.canary_status = None;
-        self.save()
-    }
-
     /// Start canary testing for a session
     pub fn start_canary(&mut self, hash: &str, session_id: &str) -> Result<()> {
         self.canary = Some(hash.to_string());
@@ -440,14 +431,6 @@ pub fn clear_migration_context(session_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Write the stable version file (triggers watchers in other sessions)
-pub fn write_stable_version(hash: &str) -> Result<()> {
-    let path = stable_version_file()?;
-    storage::ensure_dir(path.parent().unwrap())?;
-    std::fs::write(path, hash)?;
-    Ok(())
-}
-
 /// Read the current stable version
 pub fn read_stable_version() -> Result<Option<String>> {
     let path = stable_version_file()?;
@@ -497,26 +480,6 @@ pub fn install_version(repo_dir: &std::path::Path, hash: &str) -> Result<PathBuf
     Ok(dest)
 }
 
-/// Update stable symlink to point to a version
-pub fn update_stable_symlink(hash: &str) -> Result<()> {
-    let stable_dir = builds_dir()?.join("stable");
-    storage::ensure_dir(&stable_dir)?;
-
-    let link_path = stable_dir.join("jcode");
-    let target = builds_dir()?.join("versions").join(hash).join("jcode");
-
-    // Remove existing symlink/file
-    let _ = std::fs::remove_file(&link_path);
-
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&target, &link_path)?;
-
-    // Also write the version file for watchers
-    write_stable_version(hash)?;
-
-    Ok(())
-}
-
 /// Update canary symlink to point to a version
 pub fn update_canary_symlink(hash: &str) -> Result<()> {
     let canary_dir = builds_dir()?.join("canary");
@@ -553,13 +516,6 @@ pub fn update_rollback_symlink(hash: &str) -> Result<()> {
 /// Get path to rollback binary
 pub fn rollback_binary_path() -> Result<PathBuf> {
     Ok(builds_dir()?.join("rollback").join("jcode"))
-}
-
-/// Clear canary symlink (called after promotion or when canary is no longer active)
-pub fn clear_canary_symlink() -> Result<()> {
-    let link_path = builds_dir()?.join("canary").join("jcode");
-    let _ = std::fs::remove_file(&link_path);
-    Ok(())
 }
 
 /// Get path to build log file
