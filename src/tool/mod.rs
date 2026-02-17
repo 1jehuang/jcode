@@ -758,6 +758,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_context_guard_small_output_passes_through() {
+        let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(200_000)));
+        let registry = Registry {
+            tools: Arc::new(RwLock::new(HashMap::new())),
+            skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
+            compaction,
+        };
+
+        let output = ToolOutput::new("small output");
+        let result = registry.guard_context_overflow("test", output).await;
+        assert_eq!(result.output, "small output");
+    }
+
+    #[tokio::test]
+    async fn test_context_guard_truncates_huge_single_output() {
+        let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(1000)));
+        let registry = Registry {
+            tools: Arc::new(RwLock::new(HashMap::new())),
+            skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
+            compaction,
+        };
+
+        // 30% of 1000 = 300 tokens = 1200 chars max for a single output
+        // Create output that's way larger
+        let big_output = "x".repeat(8000); // 2000 tokens, well over 30% of 1000
+        let output = ToolOutput::new(big_output.clone());
+        let result = registry.guard_context_overflow("test", output).await;
+        assert!(result.output.len() < big_output.len(), "Output should be truncated");
+        assert!(
+            result.output.contains("TRUNCATED"),
+            "Should contain truncation warning"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_context_guard_truncates_when_context_nearly_full() {
+        let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(10_000)));
+        {
+            let mut mgr = compaction.write().await;
+            mgr.update_observed_input_tokens(9500); // 95% full
+        }
+        let registry = Registry {
+            tools: Arc::new(RwLock::new(HashMap::new())),
+            skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
+            compaction,
+        };
+
+        // Even a modest output should get truncated when context is 95% full
+        let output = ToolOutput::new("x".repeat(4000)); // 1000 tokens
+        let result = registry.guard_context_overflow("test", output).await;
+        assert!(
+            result.output.contains("TRUNCATED") || result.output.contains("CONTEXT LIMIT"),
+            "Should warn about context limits when nearly full"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_context_guard_zero_budget_passes_through() {
+        let compaction = Arc::new(RwLock::new(CompactionManager::new().with_budget(0)));
+        let registry = Registry {
+            tools: Arc::new(RwLock::new(HashMap::new())),
+            skills: Arc::new(RwLock::new(crate::skill::SkillRegistry::default())),
+            compaction,
+        };
+
+        let output = ToolOutput::new("x".repeat(100_000));
+        let result = registry.guard_context_overflow("test", output).await;
+        assert_eq!(result.output.len(), 100_000, "Zero budget should pass through");
+    }
+
+    #[tokio::test]
     async fn test_request_permission_is_ambient_only() {
         let provider: Arc<dyn Provider> = Arc::new(MockProvider);
         let registry = Registry::new(provider).await;
