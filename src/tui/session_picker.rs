@@ -359,6 +359,15 @@ fn format_time_ago(time: chrono::DateTime<chrono::Utc>) -> String {
     format!("{}mo ago", days / 30)
 }
 
+/// Which pane has keyboard focus
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaneFocus {
+    /// Session list (left pane) - j/k navigate sessions
+    Sessions,
+    /// Preview (right pane) - j/k scroll preview
+    Preview,
+}
+
 /// An item in the picker list - either a server header or a session
 #[derive(Clone)]
 pub enum PickerItem {
@@ -409,6 +418,8 @@ pub struct SessionPicker {
     total_session_count: usize,
     /// Hidden test session count (debug + canary)
     hidden_test_count: usize,
+    /// Which pane has keyboard focus
+    focus: PaneFocus,
 }
 
 impl SessionPicker {
@@ -453,6 +464,7 @@ impl SessionPicker {
             search_active: false,
             total_session_count,
             hidden_test_count,
+            focus: PaneFocus::Sessions,
         }
     }
 
@@ -550,6 +562,7 @@ impl SessionPicker {
             search_active: false,
             total_session_count,
             hidden_test_count,
+            focus: PaneFocus::Sessions,
         }
     }
 
@@ -1014,10 +1027,16 @@ impl SessionPicker {
         let help = if self.search_active {
             " type to filter, Esc cancel "
         } else {
-            " / search · d show all · [BATCH]=restore set · ↑↓ · Enter · q "
+            " / search · d show all · h/l focus · ↑↓ · Enter · q "
         };
 
-        const BORDER_COLOR: Color = Color::Rgb(70, 70, 70);
+        const BORDER_DIM: Color = Color::Rgb(70, 70, 70);
+        const BORDER_FOCUS: Color = Color::Rgb(130, 130, 160);
+        let border_color = if self.focus == PaneFocus::Sessions {
+            BORDER_FOCUS
+        } else {
+            BORDER_DIM
+        };
 
         let list = List::new(items)
             .block(
@@ -1029,7 +1048,7 @@ impl SessionPicker {
                         help,
                         Style::default().fg(Color::Rgb(80, 80, 80)),
                     )))
-                    .border_style(Style::default().fg(BORDER_COLOR)),
+                    .border_style(Style::default().fg(border_color)),
             )
             .highlight_style(
                 Style::default()
@@ -1048,12 +1067,17 @@ impl SessionPicker {
         const HEADER_ICON_COLOR: Color = Color::Rgb(120, 210, 230); // Teal
         const HEADER_SESSION_COLOR: Color = Color::Rgb(255, 255, 255); // White
 
+        let empty_border_color = if self.focus == PaneFocus::Preview {
+            Color::Rgb(130, 130, 160)
+        } else {
+            Color::Rgb(50, 50, 50)
+        };
         let Some(session) = self.selected_session().cloned() else {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .title(" Preview ")
-                .border_style(Style::default().fg(Color::Rgb(50, 50, 50)));
+                .border_style(Style::default().fg(empty_border_color));
             let paragraph = Paragraph::new("No session selected")
                 .block(block)
                 .style(Style::default().fg(Color::DarkGray));
@@ -1333,11 +1357,16 @@ impl SessionPicker {
             );
         }
 
+        let preview_border_color = if self.focus == PaneFocus::Preview {
+            Color::Rgb(130, 130, 160)
+        } else {
+            Color::Rgb(70, 70, 70)
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .title(" Preview ")
-            .border_style(Style::default().fg(Color::Rgb(70, 70, 70)));
+            .border_style(Style::default().fg(preview_border_color));
 
         // Pre-wrap preview lines to keep rendering and scroll bounds aligned.
         let preview_width = preview_inner_width as usize;
@@ -1590,36 +1619,60 @@ impl SessionPicker {
                             KeyCode::Char('d') => {
                                 self.toggle_test_sessions();
                             }
+                            KeyCode::Char('h') | KeyCode::Left => {
+                                self.focus = PaneFocus::Sessions;
+                            }
+                            KeyCode::Char('l') | KeyCode::Right => {
+                                self.focus = PaneFocus::Preview;
+                            }
+                            KeyCode::Tab => {
+                                self.focus = match self.focus {
+                                    PaneFocus::Sessions => PaneFocus::Preview,
+                                    PaneFocus::Preview => PaneFocus::Sessions,
+                                };
+                            }
                             KeyCode::Down => {
                                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                                     self.scroll_preview_down();
                                 } else {
-                                    self.next();
+                                    match self.focus {
+                                        PaneFocus::Sessions => self.next(),
+                                        PaneFocus::Preview => self.scroll_preview_down(),
+                                    }
                                 }
                             }
                             KeyCode::Up => {
                                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                                     self.scroll_preview_up();
                                 } else {
-                                    self.previous();
+                                    match self.focus {
+                                        PaneFocus::Sessions => self.previous(),
+                                        PaneFocus::Preview => self.scroll_preview_up(),
+                                    }
                                 }
                             }
                             KeyCode::Char('j') | KeyCode::Char('J') => {
-                                if key.modifiers.contains(KeyModifiers::SHIFT)
-                                    || matches!(key.code, KeyCode::Char('J'))
-                                {
+                                let force_preview = key.modifiers.contains(KeyModifiers::SHIFT)
+                                    || matches!(key.code, KeyCode::Char('J'));
+                                if force_preview {
                                     self.scroll_preview_down();
                                 } else {
-                                    self.next();
+                                    match self.focus {
+                                        PaneFocus::Sessions => self.next(),
+                                        PaneFocus::Preview => self.scroll_preview_down(),
+                                    }
                                 }
                             }
                             KeyCode::Char('k') | KeyCode::Char('K') => {
-                                if key.modifiers.contains(KeyModifiers::SHIFT)
-                                    || matches!(key.code, KeyCode::Char('K'))
-                                {
+                                let force_preview = key.modifiers.contains(KeyModifiers::SHIFT)
+                                    || matches!(key.code, KeyCode::Char('K'));
+                                if force_preview {
                                     self.scroll_preview_up();
                                 } else {
-                                    self.previous();
+                                    match self.focus {
+                                        PaneFocus::Sessions => self.previous(),
+                                        PaneFocus::Preview => self.scroll_preview_up(),
+                                    }
                                 }
                             }
                             KeyCode::PageDown => {
