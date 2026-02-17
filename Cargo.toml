@@ -103,7 +103,7 @@ tar = "0.4"
 mermaid-rs-renderer = { git = "ssh://git@github.com/1jehuang/mermaid-rs-renderer.git", tag = "v0.2.0" }
 
 [features]
-default = ["jemalloc"]
+default = []
 jemalloc = ["tikv-jemallocator"]
 
 [dev-dependencies]
