@@ -1,7 +1,3 @@
-#[cfg(feature = "jemalloc")]
-#[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
 mod agent;
 mod ambient;
 mod ambient_runner;
