@@ -3599,6 +3599,38 @@ fn color_to_rgb(color: Color) -> Option<[u8; 3]> {
     }
 }
 
+/// Compute a vertically-centered sub-area for a fitted image.
+///
+/// Given the available terminal `area` and the source image pixel dimensions,
+/// this calculates how many rows the image will occupy after aspect-ratio
+/// scaling and returns a `Rect` offset so the image is vertically centered.
+fn vcenter_fitted_image(area: Rect, img_w_px: u32, img_h_px: u32) -> Rect {
+    if area.width == 0 || area.height == 0 || img_w_px == 0 || img_h_px == 0 {
+        return area;
+    }
+    let (font_w, font_h) = match super::mermaid::get_font_size() {
+        Some(fs) => (fs.0 as f64, fs.1 as f64),
+        None => return area,
+    };
+
+    let area_w_px = area.width as f64 * font_w;
+    let area_h_px = area.height as f64 * font_h;
+    let scale = (area_w_px / img_w_px as f64).min(area_h_px / img_h_px as f64);
+    let fitted_h_cells = ((img_h_px as f64 * scale) / font_h).ceil() as u16;
+    let fitted_h_cells = fitted_h_cells.min(area.height);
+
+    if fitted_h_cells >= area.height {
+        return area;
+    }
+    let y_offset = (area.height - fitted_h_cells) / 2;
+    Rect {
+        x: area.x,
+        y: area.y + y_offset,
+        width: area.width,
+        height: fitted_h_cells,
+    }
+}
+
 /// Draw a pinned diagram in a dedicated pane
 fn draw_pinned_diagram(
     frame: &mut Frame,
@@ -3676,9 +3708,11 @@ fn draw_pinned_diagram(
                     false,
                 );
             } else {
+                let render_area =
+                    vcenter_fitted_image(inner, diagram.width, diagram.height);
                 rendered = super::mermaid::render_image_widget_fit(
                     diagram.hash,
-                    inner,
+                    render_area,
                     frame.buffer_mut(),
                     false,
                     false,
