@@ -4638,6 +4638,10 @@ impl App {
             }
         }
 
+        if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('m')) {
+            self.toggle_diagram_pane();
+            return Ok(());
+        }
         if let Some(direction) = self
             .model_switch_keys
             .direction_for(code.clone(), modifiers)
@@ -7041,9 +7045,18 @@ impl App {
         if usage > 1.5 {
             match manager.hard_compact_with(&self.messages) {
                 Ok(dropped) => {
+                    let post_usage = manager.context_usage_with(&self.messages);
+                    if post_usage <= 1.0 {
+                        return Some(format!(
+                            "⚡ Emergency compaction: dropped {} old messages (context was at {:.0}%). You can continue.",
+                            dropped,
+                            usage * 100.0
+                        ));
+                    }
+                    let truncated = manager.emergency_truncate_with(&mut self.messages);
                     return Some(format!(
-                        "⚡ Emergency compaction: dropped {} old messages (context was at {:.0}%). You can continue.",
-                        dropped,
+                        "⚡ Emergency compaction: dropped {} old messages and truncated {} tool result(s) (context was at {:.0}%). You can continue.",
+                        dropped, truncated,
                         usage * 100.0
                     ));
                 }
@@ -7052,6 +7065,13 @@ impl App {
                         "[auto_recover] hard_compact failed: {}",
                         reason
                     ));
+                    let truncated = manager.emergency_truncate_with(&mut self.messages);
+                    if truncated > 0 {
+                        return Some(format!(
+                            "⚡ Emergency truncation: shortened {} large tool result(s) to fit context. You can continue.",
+                            truncated
+                        ));
+                    }
                 }
             }
         }
@@ -7076,7 +7096,17 @@ impl App {
                         "⚡ Emergency compaction: dropped {} old messages. You can continue.",
                         dropped
                     )),
-                    Err(_) => None,
+                    Err(_) => {
+                        let truncated = manager.emergency_truncate_with(&mut self.messages);
+                        if truncated > 0 {
+                            Some(format!(
+                                "⚡ Emergency truncation: shortened {} large tool result(s) to fit context. You can continue.",
+                                truncated
+                            ))
+                        } else {
+                            None
+                        }
+                    }
                 }
             }
         }
@@ -7143,7 +7173,41 @@ impl App {
                                 }
                             };
                         }
-                        Err(_) => false,
+                        Err(_) => {
+                            let truncated = manager.emergency_truncate_with(&mut self.messages);
+                            if truncated > 0 {
+                                drop(manager);
+                                self.provider_session_id = None;
+                                self.session.provider_session_id = None;
+                                self.context_warning_shown = false;
+                                self.clear_streaming_render_state();
+                                self.stream_buffer.clear();
+                                self.streaming_tool_calls.clear();
+                                self.streaming_input_tokens = 0;
+                                self.streaming_output_tokens = 0;
+                                self.streaming_cache_read_tokens = None;
+                                self.streaming_cache_creation_tokens = None;
+                                self.thought_line_inserted = false;
+                                self.thinking_prefix_emitted = false;
+                                self.thinking_buffer.clear();
+                                self.status = ProcessingStatus::Sending;
+
+                                self.push_display_message(DisplayMessage::system(
+                                    format!("⚡ Emergency truncation: shortened {} large tool result(s). Retrying...", truncated),
+                                ));
+                                return match self.run_turn_interactive(terminal, event_stream).await {
+                                    Ok(()) => {
+                                        self.last_stream_error = None;
+                                        true
+                                    }
+                                    Err(e) => {
+                                        self.handle_turn_error(e.to_string());
+                                        false
+                                    }
+                                };
+                            }
+                            false
+                        }
                     }
                 } else {
                     match manager.force_compact_with(&self.messages, self.provider.clone()) {
@@ -7308,7 +7372,17 @@ impl App {
                                 ));
                             }
                             Err(reason) => {
-                                notes.push(format!("Hard compaction failed: {}", reason))
+                                notes.push(format!("Hard compaction failed: {}", reason));
+                            }
+                        }
+                        let post_usage = manager.context_usage_with(&self.messages);
+                        if post_usage > 1.0 {
+                            let truncated = manager.emergency_truncate_with(&mut self.messages);
+                            if truncated > 0 {
+                                actions.push(format!(
+                                    "Emergency truncation: shortened {} large tool result(s) to fit context.",
+                                    truncated
+                                ));
                             }
                         }
                     } else {
