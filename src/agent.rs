@@ -1631,6 +1631,16 @@ impl Agent {
                 }
             }
 
+            let api_elapsed = api_start.elapsed();
+            logging::info(&format!(
+                "API call complete in {:.2}s (input={} output={} cache_read={} cache_write={})",
+                api_elapsed.as_secs_f64(),
+                usage_input.unwrap_or(0),
+                usage_output.unwrap_or(0),
+                usage_cache_read.unwrap_or(0),
+                usage_cache_creation.unwrap_or(0),
+            ));
+
             if print_output
                 && (usage_input.is_some()
                     || usage_output.is_some()
@@ -1982,6 +1992,13 @@ impl Agent {
                 ));
             }
 
+            logging::info(&format!(
+                "API call starting: {} messages, {} tools",
+                messages_with_memory.len(),
+                tools.len()
+            ));
+            let api_start = Instant::now();
+
             let stamped;
             let send_messages: &[Message] = if crate::config::config().features.message_timestamps {
                 stamped = Message::with_timestamps(&messages_with_memory);
@@ -1999,6 +2016,11 @@ impl Agent {
                     self.provider_session_id.as_deref(),
                 )
                 .await?;
+
+            logging::info(&format!(
+                "API stream opened in {:.2}s",
+                api_start.elapsed().as_secs_f64()
+            ));
 
             let mut text_content = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -2162,6 +2184,16 @@ impl Agent {
                 }
             }
 
+            let api_elapsed = api_start.elapsed();
+            logging::info(&format!(
+                "API call complete in {:.2}s (input={} output={} cache_read={} cache_write={})",
+                api_elapsed.as_secs_f64(),
+                usage_input.unwrap_or(0),
+                usage_output.unwrap_or(0),
+                usage_cache_read.unwrap_or(0),
+                usage_cache_creation.unwrap_or(0),
+            ));
+
             // Send token usage
             if usage_input.is_some()
                 || usage_output.is_some()
@@ -2218,6 +2250,7 @@ impl Agent {
             // Injecting before tool_results would break the API requirement that
             // tool_use must be immediately followed by tool_result.
             if tool_calls.is_empty() {
+                logging::info("Turn complete - no tool calls");
                 // === INJECTION POINT B: No tools, turn complete ===
                 if let Some(content) = self.inject_soft_interrupts() {
                     let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
@@ -2230,6 +2263,11 @@ impl Agent {
                 }
                 break;
             }
+
+            logging::info(&format!(
+                "Turn has {} tool calls to execute",
+                tool_calls.len()
+            ));
 
             // If provider handles tools internally, only run native tools locally
             if self.provider.handles_tools_internally() {
@@ -2339,8 +2377,17 @@ impl Agent {
                     eprintln!("[trace] tool_exec_start name={} id={}", tc.name, tc.id);
                 }
 
+                logging::info(&format!("Tool starting: {}", tc.name));
+                let tool_start = Instant::now();
+
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
                 self.unlock_tools_if_needed(&tc.name);
+                let tool_elapsed = tool_start.elapsed();
+                logging::info(&format!(
+                    "Tool finished: {} in {:.2}s",
+                    tc.name,
+                    tool_elapsed.as_secs_f64()
+                ));
 
                 match result {
                     Ok(output) => {
@@ -2468,6 +2515,13 @@ impl Agent {
                 ));
             }
 
+            logging::info(&format!(
+                "API call starting: {} messages, {} tools",
+                messages_with_memory.len(),
+                tools.len()
+            ));
+            let api_start = Instant::now();
+
             let stamped;
             let send_messages: &[Message] = if crate::config::config().features.message_timestamps {
                 stamped = Message::with_timestamps(&messages_with_memory);
@@ -2485,6 +2539,11 @@ impl Agent {
                     self.provider_session_id.as_deref(),
                 )
                 .await?;
+
+            logging::info(&format!(
+                "API stream opened in {:.2}s",
+                api_start.elapsed().as_secs_f64()
+            ));
 
             let mut text_content = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -2645,6 +2704,16 @@ impl Agent {
                 }
             }
 
+            let api_elapsed = api_start.elapsed();
+            logging::info(&format!(
+                "API call complete in {:.2}s (input={} output={} cache_read={} cache_write={})",
+                api_elapsed.as_secs_f64(),
+                usage_input.unwrap_or(0),
+                usage_output.unwrap_or(0),
+                usage_cache_read.unwrap_or(0),
+                usage_cache_creation.unwrap_or(0),
+            ));
+
             if usage_input.is_some()
                 || usage_output.is_some()
                 || usage_cache_read.is_some()
@@ -2700,6 +2769,7 @@ impl Agent {
             // Injecting before tool_results would break the API requirement that
             // tool_use must be immediately followed by tool_result.
             if tool_calls.is_empty() {
+                logging::info("Turn complete - no tool calls");
                 // === INJECTION POINT B: No tools, turn complete ===
                 if let Some(content) = self.inject_soft_interrupts() {
                     let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
@@ -2712,6 +2782,11 @@ impl Agent {
                 }
                 break;
             }
+
+            logging::info(&format!(
+                "Turn has {} tool calls to execute",
+                tool_calls.len()
+            ));
 
             if self.provider.handles_tools_internally() {
                 tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
@@ -2818,8 +2893,17 @@ impl Agent {
                     eprintln!("[trace] tool_exec_start name={} id={}", tc.name, tc.id);
                 }
 
+                logging::info(&format!("Tool starting: {}", tc.name));
+                let tool_start = Instant::now();
+
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
                 self.unlock_tools_if_needed(&tc.name);
+                let tool_elapsed = tool_start.elapsed();
+                logging::info(&format!(
+                    "Tool finished: {} in {:.2}s",
+                    tc.name,
+                    tool_elapsed.as_secs_f64()
+                ));
 
                 match result {
                     Ok(output) => {
