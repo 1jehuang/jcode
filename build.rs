@@ -3,8 +3,12 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    // Get and increment build number (stored in ~/.jcode/build_number)
-    let build_number = increment_build_number();
+    let pkg_version = env!("CARGO_PKG_VERSION");
+    let parts: Vec<&str> = pkg_version.split('.').collect();
+    let major = parts.get(0).unwrap_or(&"0");
+    let minor = parts.get(1).unwrap_or(&"0");
+
+    let build_number = increment_build_number(major, minor);
 
     // Get git commit hash
     let output = Command::new("git")
@@ -65,12 +69,17 @@ fn main() {
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
 
-    // Build version string with auto-incremented build number
-    // Format: v0.1.47 (abc1234) or v0.1.47-dev (abc1234)
-    let version = if dirty {
-        format!("v0.1.{}-dev ({})", build_number, git_hash)
+    // Build version string:
+    //   Release: v0.2.0 (abc1234)
+    //   Dev:     v0.2.5 (abc1234)
+    //   Dirty:   v0.2.5-dirty (abc1234)
+    let is_release = std::env::var("JCODE_RELEASE_BUILD").is_ok();
+    let version = if is_release {
+        format!("v{}.{}.0 ({})", major, minor, git_hash)
+    } else if dirty {
+        format!("v{}.{}.{}-dirty ({})", major, minor, build_number, git_hash)
     } else {
-        format!("v0.1.{} ({})", build_number, git_hash)
+        format!("v{}.{}.{} ({})", major, minor, build_number, git_hash)
     };
 
     // Get actual build timestamp
@@ -95,27 +104,43 @@ fn main() {
     // Re-run if git HEAD changes
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
+    println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-env-changed=JCODE_RELEASE_BUILD");
 }
 
-/// Get and increment the build number stored in ~/.jcode/build_number
-fn increment_build_number() -> u32 {
+/// Get and increment the build number, scoped to the current major.minor version.
+/// Resets to 1 when the version in Cargo.toml is bumped.
+fn increment_build_number(major: &str, minor: &str) -> u32 {
     let jcode_dir = dirs::home_dir()
         .map(|h| h.join(".jcode"))
         .unwrap_or_else(|| PathBuf::from(".jcode"));
 
-    // Ensure directory exists
     let _ = fs::create_dir_all(&jcode_dir);
 
     let build_file = jcode_dir.join("build_number");
+    let version_file = jcode_dir.join("build_version");
 
-    // Read current build number
+    let current_version = format!("{}.{}", major, minor);
+
+    // Check if the version changed (Cargo.toml was bumped)
+    let stored_version = fs::read_to_string(&version_file)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    if stored_version != current_version {
+        // Version bumped — reset build number
+        let _ = fs::write(&version_file, &current_version);
+        let _ = fs::write(&build_file, "1");
+        return 1;
+    }
+
+    // Same version — increment
     let current = fs::read_to_string(&build_file)
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(0);
 
-    // Increment and save
     let next = current + 1;
     let _ = fs::write(&build_file, next.to_string());
 
