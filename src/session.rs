@@ -385,7 +385,17 @@ impl Session {
     pub fn save(&mut self) -> Result<()> {
         self.updated_at = Utc::now();
         let path = session_path(&self.id)?;
-        storage::write_json(&path, self)
+        let start = std::time::Instant::now();
+        let result = storage::write_json(&path, self);
+        let elapsed = start.elapsed();
+        if elapsed.as_millis() > 50 {
+            crate::logging::info(&format!(
+                "Session save slow: {:.0}ms ({} messages)",
+                elapsed.as_secs_f64() * 1000.0,
+                self.messages.len()
+            ));
+        }
+        result
     }
 
     pub fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {

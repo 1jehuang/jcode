@@ -28,6 +28,12 @@ const MANUAL_COMPACT_MIN_THRESHOLD: f32 = 0.10;
 /// Keep this many recent turns verbatim (not summarized)
 const RECENT_TURNS_TO_KEEP: usize = 10;
 
+/// Absolute minimum turns to keep during emergency compaction
+const MIN_TURNS_TO_KEEP: usize = 2;
+
+/// Max chars for a single tool result during emergency truncation
+const EMERGENCY_TOOL_RESULT_MAX_CHARS: usize = 4000;
+
 /// Approximate chars per token for estimation
 const CHARS_PER_TOKEN: usize = 4;
 
@@ -247,13 +253,21 @@ impl CompactionManager {
 
         // Snapshot messages to summarize (must clone for the async task)
         let messages_to_summarize: Vec<Message> = active[..cutoff].to_vec();
+        let msg_count = messages_to_summarize.len();
         let existing_summary = self.active_summary.clone();
 
         self.pending_cutoff = cutoff;
 
         // Spawn background task
         self.pending_task = Some(tokio::spawn(async move {
-            generate_summary(provider, messages_to_summarize, existing_summary).await
+            let start = std::time::Instant::now();
+            let result = generate_summary(provider, messages_to_summarize, existing_summary).await;
+            crate::logging::info(&format!(
+                "Compaction finished in {:.2}s ({} messages summarized)",
+                start.elapsed().as_secs_f64(),
+                msg_count,
+            ));
+            result
         }));
     }
 
@@ -302,12 +316,20 @@ impl CompactionManager {
         }
 
         let messages_to_summarize: Vec<Message> = active[..cutoff].to_vec();
+        let msg_count = messages_to_summarize.len();
         let existing_summary = self.active_summary.clone();
 
         self.pending_cutoff = cutoff;
 
         self.pending_task = Some(tokio::spawn(async move {
-            generate_summary(provider, messages_to_summarize, existing_summary).await
+            let start = std::time::Instant::now();
+            let result = generate_summary(provider, messages_to_summarize, existing_summary).await;
+            crate::logging::info(&format!(
+                "Compaction finished in {:.2}s ({} messages summarized)",
+                start.elapsed().as_secs_f64(),
+                msg_count,
+            ));
+            result
         }));
 
         Ok(())
@@ -561,21 +583,48 @@ impl CompactionManager {
 
     /// Emergency hard compaction: drop old messages without summarizing.
     /// Takes the caller's full message list to inspect content.
+    ///
+    /// When the remaining turns (after keeping `RECENT_TURNS_TO_KEEP`) still
+    /// exceed the token budget, progressively keeps fewer turns down to
+    /// `MIN_TURNS_TO_KEEP`.
     pub fn hard_compact_with(&mut self, all_messages: &[Message]) -> Result<usize, String> {
         let active = self.active_messages(all_messages);
 
-        if active.len() <= RECENT_TURNS_TO_KEEP {
+        if active.len() <= MIN_TURNS_TO_KEEP {
             return Err(format!(
                 "Not enough messages to compact (have {}, need more than {})",
                 active.len(),
-                RECENT_TURNS_TO_KEEP
+                MIN_TURNS_TO_KEEP
             ));
         }
 
         let pre_tokens = self.effective_token_count_with(all_messages) as u64;
 
-        let mut cutoff = active.len().saturating_sub(RECENT_TURNS_TO_KEEP);
-        cutoff = Self::safe_cutoff_static(active, cutoff);
+        let mut turns_to_keep = RECENT_TURNS_TO_KEEP.min(active.len().saturating_sub(1));
+        let mut cutoff;
+        loop {
+            cutoff = active.len().saturating_sub(turns_to_keep);
+            cutoff = Self::safe_cutoff_static(active, cutoff);
+
+            if cutoff > 0 {
+                let remaining: usize = active[cutoff..]
+                    .iter()
+                    .map(Self::message_char_count)
+                    .sum();
+                let remaining_tokens = remaining / CHARS_PER_TOKEN;
+                if remaining_tokens <= self.token_budget {
+                    break;
+                }
+            }
+
+            if turns_to_keep <= MIN_TURNS_TO_KEEP {
+                cutoff = active.len().saturating_sub(MIN_TURNS_TO_KEEP);
+                cutoff = Self::safe_cutoff_static(active, cutoff);
+                break;
+            }
+            turns_to_keep = (turns_to_keep / 2).max(MIN_TURNS_TO_KEEP);
+        }
+
         if cutoff == 0 {
             return Err("Cannot compact — would split tool call/result pairs".to_string());
         }
@@ -669,6 +718,46 @@ impl CompactionManager {
     /// Backward-compatible hard_compact
     pub fn hard_compact(&mut self) -> Result<usize, String> {
         Err("hard_compact requires messages — use hard_compact_with(messages)".to_string())
+    }
+
+    /// Emergency truncation: shorten large tool results in active messages.
+    ///
+    /// When hard compaction isn't sufficient (the remaining few turns are
+    /// individually too large), this truncates tool result content so the
+    /// conversation can fit within the token budget.
+    ///
+    /// Returns the number of tool results that were truncated.
+    pub fn emergency_truncate_with(&mut self, all_messages: &mut [Message]) -> usize {
+        let start = self.compacted_count.min(all_messages.len());
+        let active = &mut all_messages[start..];
+        let mut truncated = 0;
+
+        for msg in active.iter_mut() {
+            for block in msg.content.iter_mut() {
+                if let ContentBlock::ToolResult { content, .. } = block {
+                    if content.len() > EMERGENCY_TOOL_RESULT_MAX_CHARS {
+                        let original_len = content.len();
+                        let keep_head = EMERGENCY_TOOL_RESULT_MAX_CHARS / 2;
+                        let keep_tail = EMERGENCY_TOOL_RESULT_MAX_CHARS / 4;
+                        let head = &content[..keep_head];
+                        let tail_start = original_len.saturating_sub(keep_tail);
+                        let tail = &content[tail_start..];
+                        *content = format!(
+                            "{}\n\n... [{} chars truncated for context recovery] ...\n\n{}",
+                            head,
+                            original_len - keep_head - keep_tail,
+                            tail,
+                        );
+                        truncated += 1;
+                    }
+                }
+            }
+        }
+
+        if truncated > 0 {
+            self.observed_input_tokens = None;
+        }
+        truncated
     }
 }
 
