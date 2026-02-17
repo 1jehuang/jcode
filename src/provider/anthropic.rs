@@ -81,6 +81,7 @@ const RETRY_BASE_DELAY_MS: u64 = 1000;
 /// Available models
 pub const AVAILABLE_MODELS: &[&str] = &[
     "claude-opus-4-6",
+    "claude-sonnet-4-6",
     "claude-opus-4-5-20251101",
     "claude-sonnet-4-20250514",
     "claude-haiku-4-5-20241022",

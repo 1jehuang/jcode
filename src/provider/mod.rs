@@ -299,6 +299,10 @@ pub fn context_limit_for_model(model: &str) -> Option<usize> {
         return Some(200_000);
     }
 
+    if model.starts_with("claude-sonnet-4-6") || model.starts_with("claude-sonnet-4.6") {
+        return Some(200_000);
+    }
+
     if model.starts_with("claude-opus-4-5") || model.starts_with("claude-opus-4.5") {
         return Some(200_000);
     }
