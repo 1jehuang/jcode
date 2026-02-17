@@ -106,6 +106,19 @@ mermaid-rs-renderer = { git = "ssh://git@github.com/1jehuang/mermaid-rs-renderer
 default = []
 jemalloc = ["tikv-jemallocator"]
 
+[profile.release]
+lto = "thin"
+codegen-units = 16
+opt-level = 2
+debug = 0
+
+[profile.dev]
+debug = 1
+incremental = true
+
+[profile.dev.package."*"]
+opt-level = 2
+
 [dev-dependencies]
 async-stream = "0.3"
 tempfile = "3"
