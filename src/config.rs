@@ -100,6 +100,8 @@ pub struct DisplayConfig {
     pub show_thinking: bool,
     /// How to display mermaid diagrams (none/margin/pinned, default: pinned)
     pub diagram_mode: DiagramDisplayMode,
+    /// Show startup animation (default: false)
+    pub startup_animation: bool,
 }
 
 impl Default for DisplayConfig {
@@ -112,6 +114,7 @@ impl Default for DisplayConfig {
             centered: true,
             show_thinking: false,
             diagram_mode: DiagramDisplayMode::default(),
+            startup_animation: false,
         }
     }
 }
@@ -360,6 +363,11 @@ impl Config {
                 self.display.show_thinking = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_STARTUP_ANIMATION") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.startup_animation = parsed;
+            }
+        }
 
         // Features
         if let Ok(v) = std::env::var("JCODE_MEMORY_ENABLED") {
@@ -531,6 +539,9 @@ debug_socket = false
 # Show thinking/reasoning content (default: false)
 show_thinking = false
 
+# Show startup animation (default: false)
+startup_animation = false
+
 [features]
 # Memory: retrieval + extraction sidecar features
 memory = true
@@ -634,6 +645,7 @@ desktop_notifications = true
 - Queue mode: {}
 - Mouse capture: {}
 - Debug socket: {}
+- Startup animation: {}
 
 **Features:**
 - Memory: {}
@@ -677,6 +689,7 @@ desktop_notifications = true
             self.display.queue_mode,
             self.display.mouse_capture,
             self.display.debug_socket,
+            self.display.startup_animation,
             self.features.memory,
             self.features.swarm,
             self.provider

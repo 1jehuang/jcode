@@ -191,7 +191,8 @@ const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
 pub(crate) const STARTUP_ANIMATION_WINDOW: Duration = Duration::from_millis(3000);
 
 pub(crate) fn startup_animation_active(state: &dyn TuiState) -> bool {
-    state.animation_elapsed() < STARTUP_ANIMATION_WINDOW.as_secs_f32()
+    crate::config::config().display.startup_animation
+        && state.animation_elapsed() < STARTUP_ANIMATION_WINDOW.as_secs_f32()
         && !state.is_processing()
         && state.display_messages().is_empty()
         && state.streaming_text().is_empty()
