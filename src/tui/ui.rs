@@ -2196,13 +2196,23 @@ fn prepare_messages(app: &dyn TuiState, width: u16, height: u16) -> PreparedMess
         let input_reserve = 4;
         let available = (height as usize).saturating_sub(input_reserve);
         let centered_pad = available.saturating_sub(content_height) / 2;
+
+        // As the animation morphs into the header, compute the target
+        // centering pad for the header so we can smoothly converge to it
+        // instead of jumping when the animation ends.
+        let header_height = header_prepared.wrapped_lines.len();
+        let header_pad = available.saturating_sub(header_height) / 2;
+
         let slide_t = if morph_t > 0.85 {
             ((morph_t - 0.85) / 0.15).clamp(0.0, 1.0)
         } else {
             0.0
         };
         let slide_ease = slide_t * slide_t * (3.0 - 2.0 * slide_t);
-        let pad_top = (centered_pad as f32 * (1.0 - slide_ease)) as usize;
+        // Slide from animation-centered pad toward header-centered pad
+        let pad_top = (centered_pad as f32
+            + (header_pad as f32 - centered_pad as f32) * slide_ease)
+            as usize;
 
         wrapped_lines = Vec::with_capacity(pad_top + content_height);
         for _ in 0..pad_top {
@@ -2212,7 +2222,25 @@ fn prepare_messages(app: &dyn TuiState, width: u16, height: u16) -> PreparedMess
         wrapped_user_indices = Vec::new();
         image_regions = Vec::new();
     } else {
+        let is_initial_empty = app.display_messages().is_empty()
+            && !app.is_processing()
+            && app.streaming_text().is_empty();
+
         wrapped_lines = header_prepared.wrapped_lines;
+
+        if is_initial_empty {
+            let content_height = wrapped_lines.len();
+            let input_reserve = 4;
+            let available = (height as usize).saturating_sub(input_reserve);
+            let pad_top = available.saturating_sub(content_height) / 2;
+            let mut centered = Vec::with_capacity(pad_top + content_height);
+            for _ in 0..pad_top {
+                centered.push(Line::from(""));
+            }
+            centered.extend(wrapped_lines);
+            wrapped_lines = centered;
+        }
+
         let header_len = wrapped_lines.len();
         let startup_len = startup_prepared.wrapped_lines.len();
         wrapped_lines.extend(startup_prepared.wrapped_lines);
