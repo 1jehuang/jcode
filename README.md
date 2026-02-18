@@ -30,19 +30,19 @@ https://github.com/1jehuang/jcode/raw/master/jcode_demo.mp4
 
 <div align="center">
 
-| | Feature | Description |
-|---|---|---|
-| ⚡ | **Blazing Fast TUI** | Sub-millisecond rendering at 1,400+ FPS. No flicker. No lag. Ever. |
-| 🤖 | **Multi-Provider** | Claude, OpenAI, OpenRouter — 200+ models, switch on the fly |
-| 🔐 | **No API Keys Needed** | Works with your Claude Max or ChatGPT Pro subscription via OAuth |
-| 🧠 | **Persistent Memory** | Learns about you and your codebase across sessions |
-| 🐝 | **Swarm Mode** | Multiple agents coordinate in the same repo with conflict detection |
-| 🔧 | **30+ Built-in Tools** | File ops, search, web, shell, memory, sub-agents, parallel execution |
-| 🔌 | **MCP Support** | Extend with any Model Context Protocol server |
-| 🏗️ | **Server / Client** | Daemon mode with multi-client attach, session persistence |
-| 🎯 | **Sub-Agents** | Delegate tasks to specialized child agents |
-| 📦 | **Self-Updating** | Built-in self-dev mode with hot-reload and canary deploys |
-| 🪶 | **Featherweight** | ~28 MB idle client, single native binary — no runtime, no VM, no Electron |
+| Feature | Description |
+|---|---|
+| **Blazing Fast TUI** | Sub-millisecond rendering at 1,400+ FPS. No flicker. No lag. Ever. |
+| **Multi-Provider** | Claude, OpenAI, OpenRouter — 200+ models, switch on the fly |
+| **No API Keys Needed** | Works with your Claude Max or ChatGPT Pro subscription via OAuth |
+| **Persistent Memory** | Learns about you and your codebase across sessions |
+| **Swarm Mode** | Multiple agents coordinate in the same repo with conflict detection |
+| **30+ Built-in Tools** | File ops, search, web, shell, memory, sub-agents, parallel execution |
+| **MCP Support** | Extend with any Model Context Protocol server |
+| **Server / Client** | Daemon mode with multi-client attach, session persistence |
+| **Sub-Agents** | Delegate tasks to specialized child agents |
+| **Self-Updating** | Built-in self-dev mode with hot-reload and canary deploys |
+| **Featherweight** | ~28 MB idle client, single native binary — no runtime, no VM, no Electron |
 
 </div>
 
@@ -129,9 +129,9 @@ You need at least one of:
 
 | Platform | Status |
 |---|---|
-| **Linux** x86_64 / aarch64 | ✅ Fully supported |
-| **macOS** Apple Silicon & Intel | ✅ Supported |
-| **Windows** (WSL2) | ⚠️ Experimental |
+| **Linux** x86_64 / aarch64 | Fully supported |
+| **macOS** Apple Silicon & Intel | Supported |
+| **Windows** (WSL2) | Experimental |
 
 </div>
 
@@ -320,9 +320,9 @@ graph TB
     Server --> Debug["Debug Socket<br>Headless testing"]
 
     subgraph Swarm["Swarm — Same Working Directory"]
-        Fox["🦊 fox<br>(agent)"]
-        Oak["🌳 oak<br>(agent)"]
-        River["🌊 river<br>(agent)"]
+        Fox["fox<br>(agent)"]
+        Oak["oak<br>(agent)"]
+        River["river<br>(agent)"]
 
         Fox <--> Coord["Conflict Detection<br>File Touch Events<br>Shared Context"]
         Oak <--> Coord
@@ -462,7 +462,7 @@ graph TB
 
     Stable --> A["Session A<br>stable"]
     Stable --> B["Session B<br>stable"]
-    Stable --> C["Session C<br>canary 🐤"]
+    Stable --> C["Session C<br>canary"]
 
     C --> Reload["selfdev reload<br><i>Hot-restart with new binary</i>"]
     Reload -->|"crash"| Rollback["Auto-Rollback<br>to stable"]
@@ -570,7 +570,7 @@ scripts/agent_trace.sh              # Full agent smoke test
 
 <div align="center">
 
-**Built with 🦀 Rust** · **MIT License**
+**Built with Rust** · **MIT License**
 
 [GitHub](https://github.com/1jehuang/jcode) · [Report Bug](https://github.com/1jehuang/jcode/issues) · [Request Feature](https://github.com/1jehuang/jcode/issues)
 
