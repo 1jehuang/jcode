@@ -4446,36 +4446,44 @@ impl App {
                     self.thinking_buffer.clear();
                     remote.clear_pending();
                 } else if self.is_processing {
-                    crate::logging::warn(&format!(
-                        "Done id={} doesn't match current_message_id={:?} but is_processing=true, forcing idle",
-                        id, self.current_message_id
-                    ));
-                    if let Some(chunk) = self.stream_buffer.flush() {
-                        self.streaming_text.push_str(&chunk);
+                    let is_stale = self.current_message_id.map_or(false, |mid| id < mid);
+                    if is_stale {
+                        crate::logging::info(&format!(
+                            "Ignoring stale Done id={} (current_message_id={:?}), likely from Subscribe/ResumeSession",
+                            id, self.current_message_id
+                        ));
+                    } else {
+                        crate::logging::warn(&format!(
+                            "Done id={} doesn't match current_message_id={:?} but is_processing=true, forcing idle",
+                            id, self.current_message_id
+                        ));
+                        if let Some(chunk) = self.stream_buffer.flush() {
+                            self.streaming_text.push_str(&chunk);
+                        }
+                        if !self.streaming_text.is_empty() {
+                            let duration = self.processing_started.map(|s| s.elapsed().as_secs_f32());
+                            let content = self.take_streaming_text();
+                            self.push_display_message(DisplayMessage {
+                                role: "assistant".to_string(),
+                                content,
+                                tool_calls: vec![],
+                                duration_secs: duration,
+                                title: None,
+                                tool_data: None,
+                            });
+                            self.push_turn_footer(duration);
+                        }
+                        crate::tui::mermaid::clear_streaming_preview_diagram();
+                        self.is_processing = false;
+                        self.status = ProcessingStatus::Idle;
+                        self.processing_started = None;
+                        self.streaming_tool_calls.clear();
+                        self.current_message_id = None;
+                        self.thought_line_inserted = false;
+                        self.thinking_prefix_emitted = false;
+                        self.thinking_buffer.clear();
+                        remote.clear_pending();
                     }
-                    if !self.streaming_text.is_empty() {
-                        let duration = self.processing_started.map(|s| s.elapsed().as_secs_f32());
-                        let content = self.take_streaming_text();
-                        self.push_display_message(DisplayMessage {
-                            role: "assistant".to_string(),
-                            content,
-                            tool_calls: vec![],
-                            duration_secs: duration,
-                            title: None,
-                            tool_data: None,
-                        });
-                        self.push_turn_footer(duration);
-                    }
-                    crate::tui::mermaid::clear_streaming_preview_diagram();
-                    self.is_processing = false;
-                    self.status = ProcessingStatus::Idle;
-                    self.processing_started = None;
-                    self.streaming_tool_calls.clear();
-                    self.current_message_id = None;
-                    self.thought_line_inserted = false;
-                    self.thinking_prefix_emitted = false;
-                    self.thinking_buffer.clear();
-                    remote.clear_pending();
                 }
                 false
             }
@@ -4571,6 +4579,7 @@ impl App {
                 is_canary,
                 server_version,
                 server_has_update,
+                was_interrupted,
                 ..
             } => {
                 let prev_session_id = self.remote_session_id.clone();
@@ -4654,6 +4663,20 @@ impl App {
                         });
                     }
                 }
+
+                if was_interrupted == Some(true) && !self.display_messages.is_empty() {
+                    crate::logging::info("Session was interrupted mid-generation, queuing continuation");
+                    self.push_display_message(DisplayMessage::system(
+                        "⚡ Session was interrupted mid-generation. Continuing...".to_string(),
+                    ));
+                    self.queued_messages.push(
+                        "[SYSTEM: Your previous session was interrupted while you were generating a response. \
+                         The session has been restored. Please continue exactly where you left off. \
+                         Look at the conversation history to understand what you were doing and resume immediately.]"
+                            .to_string(),
+                    );
+                }
+
                 false
             }
             ServerEvent::SwarmStatus { members } => {

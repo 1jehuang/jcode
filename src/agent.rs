@@ -12,7 +12,7 @@ use crate::message::{
 };
 use crate::protocol::{HistoryMessage, ServerEvent};
 use crate::provider::{NativeToolResult, Provider};
-use crate::session::{EnvSnapshot, GitState, Session, StoredMessage};
+use crate::session::{EnvSnapshot, GitState, Session, SessionStatus, StoredMessage};
 use crate::skill::SkillRegistry;
 use crate::tool::{Registry, ToolContext};
 use anyhow::Result;
@@ -1124,14 +1124,16 @@ impl Agent {
     }
 
     /// Restore a session by ID (loads from disk)
-    pub fn restore_session(&mut self, session_id: &str) -> Result<()> {
+    pub fn restore_session(&mut self, session_id: &str) -> Result<SessionStatus> {
         let session = Session::load(session_id)?;
         logging::info(&format!(
-            "Restoring session '{}' with {} messages, provider_session_id: {:?}",
+            "Restoring session '{}' with {} messages, provider_session_id: {:?}, status: {}",
             session_id,
             session.messages.len(),
-            session.provider_session_id
+            session.provider_session_id,
+            session.status.display()
         ));
+        let previous_status = session.status.clone();
         // Restore provider_session_id for Claude CLI session resume
         self.provider_session_id = session.provider_session_id.clone();
         self.session = session;
@@ -1158,7 +1160,7 @@ impl Agent {
             "Session restored: {} messages in session",
             self.session.messages.len()
         ));
-        Ok(())
+        Ok(previous_status)
     }
 
     /// Get conversation history for sync

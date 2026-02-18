@@ -358,6 +358,12 @@ pub fn set_socket_path(path: &str) {
 /// Idle timeout for self-dev server (5 minutes)
 const IDLE_TIMEOUT_SECS: u64 = 300;
 
+/// How often to check whether the embedding model can be unloaded.
+const EMBEDDING_IDLE_CHECK_SECS: u64 = 30;
+
+/// Default embedding idle unload threshold (15 minutes).
+const EMBEDDING_IDLE_UNLOAD_DEFAULT_SECS: u64 = 15 * 60;
+
 /// Self-dev socket path (used for detection when env var isn't set)
 const SELFDEV_SOCKET: &str = "/tmp/jcode-selfdev.sock";
 
@@ -407,6 +413,14 @@ fn debug_control_allowed() -> bool {
         }
     }
     false
+}
+
+fn embedding_idle_unload_secs() -> u64 {
+    std::env::var("JCODE_EMBEDDING_IDLE_UNLOAD_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(EMBEDDING_IDLE_UNLOAD_DEFAULT_SECS)
 }
 
 fn server_update_candidate() -> Option<(PathBuf, &'static str)> {
@@ -1039,6 +1053,32 @@ impl Server {
                 ambient_handle.run_loop(ambient_provider).await;
             });
         }
+
+        // Spawn embedding idle monitor so the model can be unloaded when this
+        // server has been quiet for a while.
+        let embedding_idle_secs = embedding_idle_unload_secs();
+        tokio::spawn(async move {
+            let idle_for = std::time::Duration::from_secs(embedding_idle_secs);
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(EMBEDDING_IDLE_CHECK_SECS));
+            loop {
+                interval.tick().await;
+                let unloaded = crate::embedding::maybe_unload_if_idle(idle_for);
+                if unloaded {
+                    let stats = crate::embedding::stats();
+                    crate::logging::info(&format!(
+                        "Embedding idle monitor: model unloaded (loads={}, unloads={}, calls={}, avg_ms={})",
+                        stats.load_count,
+                        stats.unload_count,
+                        stats.embed_calls,
+                        stats
+                            .avg_embed_ms
+                            .map(|v| format!("{:.1}", v))
+                            .unwrap_or_else(|| "n/a".to_string())
+                    ));
+                }
+            }
+        });
 
         if debug_control_allowed() {
             crate::logging::info("Debug control enabled; idle timeout monitor disabled.");
@@ -2051,6 +2091,7 @@ async fn handle_client(
                     server_name: Some(server_name.clone()),
                     server_icon: Some(server_icon.clone()),
                     server_has_update: Some(server_has_newer_binary()),
+                    was_interrupted: None,
                 };
                 let json = encode_event(&event);
                 let mut w = writer.lock().await;
@@ -2117,6 +2158,11 @@ async fn handle_client(
                     (result, is_canary)
                 };
 
+                let was_interrupted = match &result {
+                    Ok(status) => matches!(status, crate::session::SessionStatus::Crashed { .. }),
+                    Err(_) => false,
+                };
+
                 if result.is_ok() && is_canary {
                     client_selfdev = true;
                     registry.register_selfdev_tools().await;
@@ -2134,7 +2180,7 @@ async fn handle_client(
                 }
 
                 match result {
-                    Ok(()) => {
+                    Ok(_prev_status) => {
                         // Update client_session_id to match the restored session
                         let old_session_id = client_session_id.clone();
                         client_session_id = session_id.clone();
@@ -2263,6 +2309,7 @@ async fn handle_client(
                             server_name: Some(server_name.clone()),
                             server_icon: Some(server_icon.clone()),
                             server_has_update: Some(server_has_newer_binary()),
+                            was_interrupted: if was_interrupted { Some(true) } else { None },
                         };
                         let json = encode_event(&event);
                         let mut w = writer.lock().await;

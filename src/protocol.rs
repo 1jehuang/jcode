@@ -485,6 +485,9 @@ pub enum ServerEvent {
         /// Whether a newer server binary is available on disk
         #[serde(skip_serializing_if = "Option::is_none")]
         server_has_update: Option<bool>,
+        /// Whether the session was interrupted mid-generation (crashed/disconnected while processing)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        was_interrupted: Option<bool>,
     },
 
     /// Server is reloading (clients should reconnect)
