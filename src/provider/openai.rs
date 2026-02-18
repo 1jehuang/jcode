@@ -134,7 +134,7 @@ pub struct OpenAIProvider {
     model: Arc<RwLock<String>>,
     prompt_cache_key: Option<String>,
     prompt_cache_retention: Option<String>,
-    reasoning_effort: Option<String>,
+    reasoning_effort: Arc<RwLock<Option<String>>>,
     transport_mode: OpenAITransportMode,
     websocket_disabled: Arc<AtomicBool>,
 }
@@ -186,7 +186,7 @@ impl OpenAIProvider {
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key,
             prompt_cache_retention,
-            reasoning_effort,
+            reasoning_effort: Arc::new(RwLock::new(reasoning_effort)),
             transport_mode,
             websocket_disabled: Arc::new(AtomicBool::new(false)),
         }
@@ -952,7 +952,7 @@ impl Provider for OpenAIProvider {
             "include": ["reasoning.encrypted_content"],
         });
 
-        if let Some(ref effort) = self.reasoning_effort {
+        if let Some(ref effort) = *self.reasoning_effort.read().await {
             request["reasoning"] = serde_json::json!({ "effort": effort });
         }
 
@@ -1107,7 +1107,22 @@ impl Provider for OpenAIProvider {
     }
 
     fn reasoning_effort(&self) -> Option<String> {
-        self.reasoning_effort.clone()
+        self.reasoning_effort.try_read().ok().and_then(|g| g.clone())
+    }
+
+    fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        let normalized = Self::normalize_reasoning_effort(effort);
+        match self.reasoning_effort.try_write() {
+            Ok(mut guard) => {
+                *guard = normalized;
+                Ok(())
+            }
+            Err(_) => Err(anyhow::anyhow!("Failed to acquire lock for reasoning effort")),
+        }
+    }
+
+    fn available_efforts(&self) -> Vec<&'static str> {
+        vec!["none", "low", "medium", "high", "xhigh"]
     }
 
     fn supports_compaction(&self) -> bool {
@@ -1128,7 +1143,7 @@ impl Provider for OpenAIProvider {
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key: self.prompt_cache_key.clone(),
             prompt_cache_retention: self.prompt_cache_retention.clone(),
-            reasoning_effort: self.reasoning_effort.clone(),
+            reasoning_effort: Arc::new(RwLock::new(self.reasoning_effort())),
             transport_mode: self.transport_mode,
             websocket_disabled: Arc::clone(&self.websocket_disabled),
         })
@@ -1419,7 +1434,12 @@ async fn stream_response_websocket(
             })?;
 
         let Some(result) = next_item else {
-            break;
+            if saw_response_completed {
+                return Ok(());
+            }
+            return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                "WebSocket stream ended before response.completed"
+            )));
         };
         saw_any_message = true;
 
@@ -1482,7 +1502,7 @@ async fn stream_response_websocket(
                     if saw_response_completed {
                         return Ok(());
                     }
-                    return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+                    return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
                         "WebSocket stream closed before response.completed"
                     )));
                 }
@@ -1502,8 +1522,6 @@ async fn stream_response_websocket(
             }
         }
     }
-
-    Ok(())
 }
 
 fn should_refresh_token(status: StatusCode, body: &str) -> bool {

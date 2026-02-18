@@ -604,6 +604,8 @@ pub struct App {
     pending_model_switch: Option<String>,
     // Keybindings for model switching
     model_switch_keys: ModelSwitchKeys,
+    // Keybindings for effort switching
+    effort_switch_keys: super::keybind::EffortSwitchKeys,
     // Keybindings for scrolling
     scroll_keys: ScrollKeys,
     // Short-lived notice for status feedback (model switch, toggle diff, etc.)
@@ -847,6 +849,7 @@ impl App {
             picker_state: None,
             pending_model_switch: None,
             model_switch_keys: super::keybind::load_model_switch_keys(),
+            effort_switch_keys: super::keybind::load_effort_switch_keys(),
             scroll_keys: super::keybind::load_scroll_keys(),
             status_notice: None,
             interleave_message: None,
@@ -4649,6 +4652,13 @@ impl App {
             remote.cycle_model(direction).await?;
             return Ok(());
         }
+        if let Some(direction) = self
+            .effort_switch_keys
+            .direction_for(code.clone(), modifiers)
+        {
+            self.cycle_effort(direction);
+            return Ok(());
+        }
         self.normalize_diagram_state();
         let diagram_available = self.diagram_available();
         if self.handle_diagram_focus_key(code.clone(), modifiers, diagram_available) {
@@ -5240,6 +5250,13 @@ impl App {
             self.cycle_model(direction);
             return Ok(());
         }
+        if let Some(direction) = self
+            .effort_switch_keys
+            .direction_for(code.clone(), modifiers)
+        {
+            self.cycle_effort(direction);
+            return Ok(());
+        }
         self.normalize_diagram_state();
         let diagram_available = self.diagram_available();
         if self.handle_diagram_focus_key(code.clone(), modifiers, diagram_available) {
@@ -5736,6 +5753,9 @@ impl App {
             "model" => {
                 "`/model`\nOpen model picker.\n\n`/model <name>`\nSwitch model.\n\n`/model <name>@<provider>`\nPin OpenRouter routing (`@auto` clears pin)."
             }
+            "effort" => {
+                "`/effort`\nShow current reasoning effort.\n\n`/effort <level>`\nSet reasoning effort (none|low|medium|high|xhigh).\n\nAlso: Alt+←/→ to cycle."
+            }
             "memory" => "`/memory [on|off|status]`\nToggle memory features for this session.",
             "remember" => {
                 "`/remember`\nExtract memories from current conversation and store them."
@@ -5825,6 +5845,8 @@ impl App {
                      • `/model` - List available models\n\
                      • `/model <name>` - Switch to a different model\n\
                      • `/model <name>@<provider>` - Pin OpenRouter provider (`@auto` clears)\n\
+                     • `/effort` - Show current reasoning effort level\n\
+                     • `/effort <level>` - Set effort (none|low|medium|high|xhigh)\n\
                      • `/memory [on|off|status]` - Toggle memory features for this session\n\
                      • `/swarm [on|off|status]` - Toggle swarm features for this session\n\
                      • `/reload` - Smart reload (client/server if newer binary exists)\n\
@@ -6573,6 +6595,66 @@ impl App {
             return;
         }
 
+        if trimmed == "/effort" {
+            let current = self.provider.reasoning_effort();
+            let efforts = self.provider.available_efforts();
+            if efforts.is_empty() {
+                self.push_display_message(DisplayMessage::system(
+                    "Reasoning effort not available for this provider.".to_string(),
+                ));
+            } else {
+                let current_label = current
+                    .as_deref()
+                    .map(effort_display_label)
+                    .unwrap_or("default");
+                let list: Vec<String> = efforts
+                    .iter()
+                    .map(|e| {
+                        if Some(e.to_string()) == current {
+                            format!("**{}** ← current", effort_display_label(e))
+                        } else {
+                            effort_display_label(e).to_string()
+                        }
+                    })
+                    .collect();
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Reasoning effort: {}\nAvailable: {}\nUse `/effort <level>` or Alt+←/→ to change.",
+                    current_label,
+                    list.join(" · ")
+                )));
+            }
+            return;
+        }
+
+        if let Some(level) = trimmed.strip_prefix("/effort ") {
+            let level = level.trim();
+            match self.provider.set_reasoning_effort(level) {
+                Ok(()) => {
+                    let new_effort = self.provider.reasoning_effort();
+                    let label = new_effort
+                        .as_deref()
+                        .map(effort_display_label)
+                        .unwrap_or("default");
+                    self.push_display_message(DisplayMessage::system(format!(
+                        "✓ Reasoning effort → {}", label
+                    )));
+                    let efforts = self.provider.available_efforts();
+                    let idx = new_effort
+                        .as_ref()
+                        .and_then(|e| efforts.iter().position(|x| *x == e.as_str()))
+                        .unwrap_or(0);
+                    let bar = effort_bar(idx, efforts.len());
+                    self.set_status_notice(format!("Effort: {} {}", label, bar));
+                }
+                Err(e) => {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Failed to set effort: {}", e
+                    )));
+                }
+            }
+            return;
+        }
+
         if trimmed == "/version" {
             let version = env!("JCODE_VERSION");
             let is_canary = if self.session.is_canary {
@@ -6939,6 +7021,57 @@ impl App {
                     e
                 )));
                 self.set_status_notice("Model switch failed");
+            }
+        }
+    }
+
+    fn cycle_effort(&mut self, direction: i8) {
+        let efforts = self.provider.available_efforts();
+        if efforts.is_empty() {
+            self.set_status_notice("Reasoning effort not available for this provider");
+            return;
+        }
+
+        let current = self.provider.reasoning_effort();
+        let current_index = current
+            .as_ref()
+            .and_then(|c| efforts.iter().position(|e| *e == c.as_str()))
+            .unwrap_or(efforts.len() - 1); // default to last (xhigh)
+
+        let len = efforts.len();
+        let next_index = if direction > 0 {
+            if current_index + 1 >= len {
+                current_index // already at max
+            } else {
+                current_index + 1
+            }
+        } else {
+            if current_index == 0 {
+                0 // already at min
+            } else {
+                current_index - 1
+            }
+        };
+
+        let next_effort = efforts[next_index];
+        if Some(next_effort.to_string()) == current {
+            let label = effort_display_label(next_effort);
+            self.set_status_notice(format!(
+                "Effort: {} (already at {})",
+                label,
+                if direction > 0 { "max" } else { "min" }
+            ));
+            return;
+        }
+
+        match self.provider.set_reasoning_effort(next_effort) {
+            Ok(()) => {
+                let label = effort_display_label(next_effort);
+                let bar = effort_bar(next_index, len);
+                self.set_status_notice(format!("Effort: {} {}", label, bar));
+            }
+            Err(e) => {
+                self.set_status_notice(format!("Effort switch failed: {}", e));
             }
         }
     }
@@ -7774,17 +7907,51 @@ impl App {
         const RECOMMENDED_MODELS: &[&str] =
             &["gpt-5.3-codex-spark", "gpt-5.3-codex", "claude-opus-4-6"];
 
+        let current_effort = self.provider.reasoning_effort();
+        let available_efforts = self.provider.available_efforts();
+        let is_openai = !available_efforts.is_empty();
+
         let mut models: Vec<super::ModelEntry> = Vec::new();
         for name in &model_order {
             let mut entry_routes = model_routes.remove(name).unwrap_or_default();
             entry_routes.sort_by_key(|r| route_sort_key(r));
-            models.push(super::ModelEntry {
-                name: name.clone(),
-                routes: entry_routes,
-                selected_route: 0,
-                is_current: *name == current_model,
-                recommended: RECOMMENDED_MODELS.contains(&name.as_str()),
-            });
+
+            let is_openai_model =
+                crate::provider::ALL_OPENAI_MODELS.contains(&name.as_str());
+
+            if is_openai_model && is_openai && !available_efforts.is_empty() {
+                for effort in &available_efforts {
+                    let effort_label = match *effort {
+                        "xhigh" => "max",
+                        "high" => "high",
+                        "medium" => "med",
+                        "low" => "low",
+                        "none" => "none",
+                        other => other,
+                    };
+                    let display_name = format!("{} ({})", name, effort_label);
+                    let is_this_current = *name == current_model
+                        && current_effort.as_deref() == Some(*effort);
+                    models.push(super::ModelEntry {
+                        name: display_name,
+                        routes: entry_routes.clone(),
+                        selected_route: 0,
+                        is_current: is_this_current,
+                        recommended: RECOMMENDED_MODELS.contains(&name.as_str())
+                            && (*effort == "xhigh" || *effort == "high"),
+                        effort: Some(effort.to_string()),
+                    });
+                }
+            } else {
+                models.push(super::ModelEntry {
+                    name: name.clone(),
+                    routes: entry_routes,
+                    selected_route: 0,
+                    is_current: *name == current_model,
+                    recommended: RECOMMENDED_MODELS.contains(&name.as_str()),
+                    effort: None,
+                });
+            }
         }
 
         // Sort models: current first, then recommended, then available, then alphabetical
@@ -7943,10 +8110,18 @@ impl App {
                         }
                     } else if route.api_method == "openrouter" {
                         entry.name.clone()
+                    } else if entry.effort.is_some() {
+                        // Effort variant: strip the " (effort)" suffix to get bare model name
+                        entry
+                            .name
+                            .rsplit_once(" (")
+                            .map(|(base, _)| base.to_string())
+                            .unwrap_or_else(|| entry.name.clone())
                     } else {
                         entry.name.clone()
                     };
 
+                    let effort = entry.effort.clone();
                     let notice = format!(
                         "Model → {} via {} ({})",
                         entry.name, route.provider, route.api_method
@@ -7958,6 +8133,9 @@ impl App {
                         self.pending_model_switch = Some(spec);
                     } else {
                         let _ = self.provider.set_model(&spec);
+                    }
+                    if let Some(effort) = effort {
+                        let _ = self.provider.set_reasoning_effort(&effort);
                     }
                     self.set_status_notice(notice);
                 }
@@ -8228,6 +8406,9 @@ impl App {
                         id: id::new_id("message"),
                         role: Role::User,
                         content: vec![tool_block],
+                        timestamp: Some(chrono::Utc::now()),
+                        tool_duration_ms: None,
+                        token_usage: None,
                     };
                     self.messages.insert(index + 1 + offset, inserted_message);
                     self.session
@@ -9996,11 +10177,20 @@ impl App {
             return vec![("/model".into(), "Open model picker")];
         }
 
+        if prefix.starts_with("/effort ") {
+            let efforts = ["none", "low", "medium", "high", "xhigh"];
+            return efforts
+                .iter()
+                .map(|e| (format!("/effort {}", e), effort_display_label(e)))
+                .collect();
+        }
+
         // Built-in commands
         let mut commands: Vec<(String, &'static str)> = vec![
             ("/help".into(), "Show help and keyboard shortcuts"),
             ("/commands".into(), "Alias for /help"),
             ("/model".into(), "List or switch models"),
+            ("/effort".into(), "Show/change reasoning effort (Alt+←/→)"),
             ("/clear".into(), "Clear conversation history"),
             ("/rewind".into(), "Rewind conversation to previous message"),
             (
@@ -11345,6 +11535,29 @@ impl super::TuiState for App {
     fn working_dir(&self) -> Option<String> {
         self.session.working_dir.clone()
     }
+}
+
+fn effort_display_label(effort: &str) -> &str {
+    match effort {
+        "xhigh" => "Max",
+        "high" => "High",
+        "medium" => "Medium",
+        "low" => "Low",
+        "none" => "None",
+        other => other,
+    }
+}
+
+fn effort_bar(index: usize, total: usize) -> String {
+    let mut bar = String::new();
+    for i in 0..total {
+        if i == index {
+            bar.push('●');
+        } else {
+            bar.push('○');
+        }
+    }
+    bar
 }
 
 /// Spawn a new terminal window that resumes a jcode session.

@@ -54,6 +54,10 @@ pub struct KeybindingsConfig {
     pub model_switch_next: String,
     /// Model switch previous key (default: "ctrl+shift+tab")
     pub model_switch_prev: String,
+    /// Effort increase key (default: "alt+right")
+    pub effort_increase: String,
+    /// Effort decrease key (default: "alt+left")
+    pub effort_decrease: String,
 }
 
 impl Default for KeybindingsConfig {
@@ -65,6 +69,8 @@ impl Default for KeybindingsConfig {
             scroll_page_down: "alt+d".to_string(),
             model_switch_next: "ctrl+tab".to_string(),
             model_switch_prev: "ctrl+shift+tab".to_string(),
+            effort_increase: "alt+right".to_string(),
+            effort_decrease: "alt+left".to_string(),
         }
     }
 }
@@ -336,6 +342,12 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_MODEL_SWITCH_PREV_KEY") {
             self.keybindings.model_switch_prev = v;
         }
+        if let Ok(v) = std::env::var("JCODE_EFFORT_INCREASE_KEY") {
+            self.keybindings.effort_increase = v;
+        }
+        if let Ok(v) = std::env::var("JCODE_EFFORT_DECREASE_KEY") {
+            self.keybindings.effort_decrease = v;
+        }
 
         // Display
         if let Ok(v) = std::env::var("JCODE_SHOW_DIFFS") {
@@ -523,6 +535,10 @@ scroll_page_down = "alt+d"
 model_switch_next = "ctrl+tab"
 model_switch_prev = "ctrl+shift+tab"
 
+# Reasoning effort switching (OpenAI models)
+effort_increase = "alt+right"
+effort_decrease = "alt+left"
+
 [display]
 # Show file diffs for edit/write operations
 show_diffs = true
@@ -639,6 +655,8 @@ desktop_notifications = true
 - Page down: `{}`
 - Model next: `{}`
 - Model prev: `{}`
+- Effort increase: `{}`
+- Effort decrease: `{}`
 
 **Display:**
 - Show diffs: {}
@@ -685,6 +703,8 @@ desktop_notifications = true
             self.keybindings.scroll_page_down,
             self.keybindings.model_switch_next,
             self.keybindings.model_switch_prev,
+            self.keybindings.effort_increase,
+            self.keybindings.effort_decrease,
             self.display.show_diffs,
             self.display.queue_mode,
             self.display.mouse_capture,

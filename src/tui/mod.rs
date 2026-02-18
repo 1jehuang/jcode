@@ -173,6 +173,7 @@ pub struct ModelEntry {
     pub selected_route: usize,
     pub is_current: bool,
     pub recommended: bool,
+    pub effort: Option<String>,
 }
 
 /// A single route to reach a model

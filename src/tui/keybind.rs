@@ -249,6 +249,57 @@ pub fn load_scroll_keys() -> ScrollKeys {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct EffortSwitchKeys {
+    pub increase: KeyBinding,
+    pub decrease: KeyBinding,
+    pub increase_label: String,
+    pub decrease_label: String,
+}
+
+impl EffortSwitchKeys {
+    pub fn direction_for(&self, code: KeyCode, modifiers: KeyModifiers) -> Option<i8> {
+        if self.increase.matches(code.clone(), modifiers) {
+            return Some(1);
+        }
+        if self.decrease.matches(code, modifiers) {
+            return Some(-1);
+        }
+        None
+    }
+}
+
+pub fn load_effort_switch_keys() -> EffortSwitchKeys {
+    let cfg = config();
+
+    let default_increase = KeyBinding {
+        code: KeyCode::Right,
+        modifiers: KeyModifiers::ALT,
+    };
+    let default_decrease = KeyBinding {
+        code: KeyCode::Left,
+        modifiers: KeyModifiers::ALT,
+    };
+
+    let (increase, increase_label) = parse_or_default(
+        &cfg.keybindings.effort_increase,
+        default_increase,
+        "Alt+Right",
+    );
+    let (decrease, decrease_label) = parse_or_default(
+        &cfg.keybindings.effort_decrease,
+        default_decrease,
+        "Alt+Left",
+    );
+
+    EffortSwitchKeys {
+        increase,
+        decrease,
+        increase_label,
+        decrease_label,
+    }
+}
+
 fn format_binding(binding: &KeyBinding) -> String {
     let mut parts: Vec<String> = Vec::new();
     if binding.modifiers.contains(KeyModifiers::CONTROL) {

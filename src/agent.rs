@@ -172,6 +172,39 @@ impl Agent {
         id
     }
 
+    fn add_message_with_duration(
+        &mut self,
+        role: Role,
+        content: Vec<ContentBlock>,
+        duration_ms: Option<u64>,
+    ) -> String {
+        let id = self
+            .session
+            .add_message_with_duration(role, content, duration_ms);
+        let compaction = self.registry.compaction();
+        if let Ok(mut manager) = compaction.try_write() {
+            manager.notify_message_added();
+        }
+        id
+    }
+
+    fn add_message_ext(
+        &mut self,
+        role: Role,
+        content: Vec<ContentBlock>,
+        duration_ms: Option<u64>,
+        token_usage: Option<crate::session::StoredTokenUsage>,
+    ) -> String {
+        let id = self
+            .session
+            .add_message_ext(role, content, duration_ms, token_usage);
+        let compaction = self.registry.compaction();
+        if let Ok(mut manager) = compaction.try_write() {
+            manager.notify_message_added();
+        }
+        id
+    }
+
     fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
         // Convert session messages to provider messages (single allocation)
         let all_messages = self.session.messages_for_provider();
@@ -293,6 +326,9 @@ impl Agent {
                         id: id::new_id("message"),
                         role: Role::User,
                         content: vec![tool_block],
+                        timestamp: Some(chrono::Utc::now()),
+                        tool_duration_ms: None,
+                        token_usage: None,
                     };
                     self.session
                         .messages
@@ -1698,7 +1734,14 @@ impl Agent {
             }
 
             let assistant_message_id = if !content_blocks.is_empty() {
-                let message_id = self.add_message(Role::Assistant, content_blocks);
+                let token_usage = Some(crate::session::StoredTokenUsage {
+                    input_tokens: self.last_usage.input_tokens,
+                    output_tokens: self.last_usage.output_tokens,
+                    cache_read_input_tokens: self.last_usage.cache_read_input_tokens,
+                    cache_creation_input_tokens: self.last_usage.cache_creation_input_tokens,
+                });
+                let message_id =
+                    self.add_message_ext(Role::Assistant, content_blocks, None, token_usage);
                 self.session.save()?;
                 Some(message_id)
             } else {
@@ -1873,13 +1916,14 @@ impl Agent {
                             println!("{}", preview.lines().next().unwrap_or("(done)"));
                         }
 
-                        self.add_message(
+                        self.add_message_with_duration(
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id,
                                 content: output.output,
                                 is_error: None,
                             }],
+                            Some(tool_elapsed.as_millis() as u64),
                         );
                         self.session.save()?;
                     }
@@ -1903,13 +1947,14 @@ impl Agent {
                         if print_output {
                             println!("{}", error_msg);
                         }
-                        self.add_message(
+                        self.add_message_with_duration(
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id,
                                 content: error_msg,
                                 is_error: Some(true),
                             }],
+                            Some(tool_elapsed.as_millis() as u64),
                         );
                         self.session.save()?;
                     }
@@ -2241,7 +2286,14 @@ impl Agent {
             }
 
             let assistant_message_id = if !content_blocks.is_empty() {
-                let message_id = self.add_message(Role::Assistant, content_blocks);
+                let token_usage = Some(crate::session::StoredTokenUsage {
+                    input_tokens: self.last_usage.input_tokens,
+                    output_tokens: self.last_usage.output_tokens,
+                    cache_read_input_tokens: self.last_usage.cache_read_input_tokens,
+                    cache_creation_input_tokens: self.last_usage.cache_creation_input_tokens,
+                });
+                let message_id =
+                    self.add_message_ext(Role::Assistant, content_blocks, None, token_usage);
                 self.session.save()?;
                 Some(message_id)
             } else {
@@ -2401,13 +2453,14 @@ impl Agent {
                             error: None,
                         });
 
-                        self.add_message(
+                        self.add_message_with_duration(
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id.clone(),
                                 content: output.output,
                                 is_error: None,
                             }],
+                            Some(tool_elapsed.as_millis() as u64),
                         );
                         self.session.save()?;
                     }
@@ -2420,13 +2473,14 @@ impl Agent {
                             error: Some(error_msg.clone()),
                         });
 
-                        self.add_message(
+                        self.add_message_with_duration(
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id.clone(),
                                 content: error_msg,
                                 is_error: Some(true),
                             }],
+                            Some(tool_elapsed.as_millis() as u64),
                         );
                         self.session.save()?;
                     }
@@ -2760,7 +2814,14 @@ impl Agent {
             }
 
             let assistant_message_id = if !content_blocks.is_empty() {
-                let message_id = self.add_message(Role::Assistant, content_blocks);
+                let token_usage = Some(crate::session::StoredTokenUsage {
+                    input_tokens: self.last_usage.input_tokens,
+                    output_tokens: self.last_usage.output_tokens,
+                    cache_read_input_tokens: self.last_usage.cache_read_input_tokens,
+                    cache_creation_input_tokens: self.last_usage.cache_creation_input_tokens,
+                });
+                let message_id =
+                    self.add_message_ext(Role::Assistant, content_blocks, None, token_usage);
                 self.session.save()?;
                 Some(message_id)
             } else {
@@ -2917,13 +2978,14 @@ impl Agent {
                             error: None,
                         });
 
-                        self.add_message(
+                        self.add_message_with_duration(
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id.clone(),
                                 content: output.output,
                                 is_error: None,
                             }],
+                            Some(tool_elapsed.as_millis() as u64),
                         );
                         self.session.save()?;
                     }
@@ -2936,13 +2998,14 @@ impl Agent {
                             error: Some(error_msg.clone()),
                         });
 
-                        self.add_message(
+                        self.add_message_with_duration(
                             Role::User,
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id.clone(),
                                 content: error_msg,
                                 is_error: Some(true),
                             }],
+                            Some(tool_elapsed.as_millis() as u64),
                         );
                         self.session.save()?;
                     }

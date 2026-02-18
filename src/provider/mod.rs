@@ -124,6 +124,18 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Set the reasoning effort level (if applicable, e.g., OpenAI)
+    fn set_reasoning_effort(&self, _effort: &str) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "This provider does not support reasoning effort"
+        ))
+    }
+
+    /// Get ordered list of available reasoning effort levels
+    fn available_efforts(&self) -> Vec<&'static str> {
+        vec![]
+    }
+
     /// Returns true if the provider executes tools internally (e.g., Claude Code CLI).
     /// When true, jcode should NOT execute tools locally - just record the tool calls.
     fn handles_tools_internally(&self) -> bool {
@@ -972,6 +984,30 @@ impl Provider for MultiProvider {
             ActiveProvider::Claude => None,
             ActiveProvider::OpenAI => self.openai.as_ref().and_then(|o| o.reasoning_effort()),
             ActiveProvider::OpenRouter => None,
+        }
+    }
+
+    fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        match self.active_provider() {
+            ActiveProvider::OpenAI => self
+                .openai
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("OpenAI provider not available"))?
+                .set_reasoning_effort(effort),
+            _ => Err(anyhow::anyhow!(
+                "Reasoning effort is only supported for OpenAI models"
+            )),
+        }
+    }
+
+    fn available_efforts(&self) -> Vec<&'static str> {
+        match self.active_provider() {
+            ActiveProvider::OpenAI => self
+                .openai
+                .as_ref()
+                .map(|o| o.available_efforts())
+                .unwrap_or_default(),
+            _ => vec![],
         }
     }
 
