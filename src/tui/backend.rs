@@ -429,6 +429,26 @@ impl RemoteConnection {
         self.session_id.as_deref()
     }
 
+    /// Create a dummy RemoteConnection for replay mode (no real server)
+    pub fn dummy() -> Self {
+        let (a, _b) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (reader, writer) = a.into_split();
+        Self {
+            reader: BufReader::new(reader),
+            writer: Arc::new(Mutex::new(writer)),
+            session_id: None,
+            next_request_id: 1,
+            provider_name: "replay".to_string(),
+            provider_model: "replay".to_string(),
+            pending_diffs: HashMap::new(),
+            current_tool_id: None,
+            current_tool_name: None,
+            current_tool_input: String::new(),
+            line_buffer: String::new(),
+            has_loaded_history: false,
+        }
+    }
+
     /// Set session ID
     pub fn set_session_id(&mut self, id: String) {
         self.session_id = Some(id);

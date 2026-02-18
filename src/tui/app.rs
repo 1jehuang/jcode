@@ -400,6 +400,7 @@ struct ScrollTestState {
     diagram_scroll_y: i32,
     diagram_pane_ratio: u8,
     diagram_pane_enabled: bool,
+    diagram_pane_position: crate::config::DiagramPanePosition,
     diagram_zoom: u8,
 }
 
@@ -549,6 +550,8 @@ pub struct App {
     current_message_id: Option<u64>,
     // Whether running in remote mode
     is_remote: bool,
+    // Whether running in replay mode (readonly playback of a saved session)
+    is_replay: bool,
     // Remember tool call ids that already have outputs
     tool_result_ids: HashSet<String>,
     // Current session ID (from server in remote mode)
@@ -596,6 +599,8 @@ pub struct App {
     diagram_pane_ratio: u8,
     // Whether the pinned diagram pane is visible
     diagram_pane_enabled: bool,
+    // Position of pinned diagram pane (side or top)
+    diagram_pane_position: crate::config::DiagramPanePosition,
     // Diagram zoom percentage (100 = normal)
     diagram_zoom: u8,
     // Interactive model/provider picker
@@ -664,6 +669,7 @@ impl ScrollTestState {
             diagram_scroll_y: app.diagram_scroll_y,
             diagram_pane_ratio: app.diagram_pane_ratio,
             diagram_pane_enabled: app.diagram_pane_enabled,
+            diagram_pane_position: app.diagram_pane_position,
             diagram_zoom: app.diagram_zoom,
         }
     }
@@ -690,6 +696,7 @@ impl ScrollTestState {
         app.diagram_scroll_y = self.diagram_scroll_y;
         app.diagram_pane_ratio = self.diagram_pane_ratio;
         app.diagram_pane_enabled = self.diagram_pane_enabled;
+        app.diagram_pane_position = self.diagram_pane_position;
         app.diagram_zoom = self.diagram_zoom;
     }
 }
@@ -820,6 +827,7 @@ impl App {
             remote_server_has_update: None,
             current_message_id: None,
             is_remote: false,
+            is_replay: false,
             tool_result_ids: HashSet::new(),
             remote_session_id: None,
             remote_sessions: Vec::new(),
@@ -845,6 +853,7 @@ impl App {
             diagram_scroll_y: 0,
             diagram_pane_ratio: 40,
             diagram_pane_enabled: true,
+            diagram_pane_position: crate::config::DiagramPanePosition::default(),
             diagram_zoom: 100,
             picker_state: None,
             pending_model_switch: None,
@@ -894,6 +903,17 @@ impl App {
         }
 
         app.resume_session_id = resume_session;
+        app
+    }
+
+    /// Create an App instance for replay mode (playing back a saved session)
+    pub async fn new_for_replay(session: crate::session::Session) -> Self {
+        let provider: Arc<dyn Provider> = Arc::new(NullProvider);
+        let registry = Registry::new(Arc::clone(&provider)).await;
+        let mut app = Self::new(provider, registry);
+        app.is_remote = true;
+        app.is_replay = true;
+        app.session = session;
         app
     }
 
@@ -1383,6 +1403,19 @@ impl App {
             "Diagram pane: OFF"
         };
         self.set_status_notice(status);
+    }
+
+    fn toggle_diagram_pane_position(&mut self) {
+        use crate::config::DiagramPanePosition;
+        self.diagram_pane_position = match self.diagram_pane_position {
+            DiagramPanePosition::Side => DiagramPanePosition::Top,
+            DiagramPanePosition::Top => DiagramPanePosition::Side,
+        };
+        let label = match self.diagram_pane_position {
+            DiagramPanePosition::Side => "side",
+            DiagramPanePosition::Top => "top",
+        };
+        self.set_status_notice(format!("Diagram pane: {}", label));
     }
 
     fn handle_diagram_ctrl_key(&mut self, code: KeyCode, diagram_available: bool) -> bool {
@@ -2282,6 +2315,7 @@ impl App {
                 "diagram_scroll": [self.diagram_scroll_x, self.diagram_scroll_y],
                 "diagram_pane_ratio": self.diagram_pane_ratio,
                 "diagram_pane_enabled": self.diagram_pane_enabled,
+                "diagram_pane_position": format!("{:?}", self.diagram_pane_position),
                 "diagram_zoom": self.diagram_zoom,
                 "diagram_count": crate::tui::mermaid::get_active_diagrams().len(),
                 "version": env!("JCODE_VERSION"),
@@ -2757,6 +2791,7 @@ impl App {
                 "diagram_scroll": [self.diagram_scroll_x, self.diagram_scroll_y],
                 "diagram_pane_ratio": self.diagram_pane_ratio,
                 "diagram_pane_enabled": self.diagram_pane_enabled,
+                "diagram_pane_position": format!("{:?}", self.diagram_pane_position),
                 "diagram_zoom": self.diagram_zoom,
                 "diagram_count": crate::tui::mermaid::get_active_diagrams().len(),
                 "remote": true,
@@ -2911,6 +2946,7 @@ impl App {
                 "model": self.provider.name(),
                 "diagram_mode": format!("{:?}", self.diagram_mode),
                 "diagram_pane_enabled": self.diagram_pane_enabled,
+                "diagram_pane_position": format!("{:?}", self.diagram_pane_position),
                 "diagram_zoom": self.diagram_zoom,
                 "version": env!("JCODE_VERSION"),
             }),
@@ -4070,6 +4106,167 @@ impl App {
         })
     }
 
+    /// Run the TUI in replay mode, playing back a timeline of events.
+    pub async fn run_replay(
+        mut self,
+        mut terminal: DefaultTerminal,
+        timeline: Vec<crate::replay::TimelineEvent>,
+        speed: f64,
+    ) -> Result<RunResult> {
+        use super::backend::RemoteConnection;
+
+        let mut event_stream = EventStream::new();
+        let mut redraw_period = super::redraw_interval(&self);
+        let mut redraw_interval = interval(redraw_period);
+        let mut remote = RemoteConnection::dummy();
+
+        let server_events = crate::replay::timeline_to_server_events(&timeline);
+
+        // Build an index mapping server_events back to their source timeline events.
+        let timeline_index_for_server: Vec<usize> = {
+            let mut map = Vec::with_capacity(server_events.len());
+            let mut se_cursor = 0;
+            for (ti, te) in timeline.iter().enumerate() {
+                let produced = crate::replay::timeline_to_server_events(std::slice::from_ref(te));
+                for _ in 0..produced.len() {
+                    if se_cursor < server_events.len() {
+                        map.push(ti);
+                        se_cursor += 1;
+                    }
+                }
+            }
+            while map.len() < server_events.len() {
+                map.push(timeline.len().saturating_sub(1));
+            }
+            map
+        };
+
+        let mut event_index: usize = 0;
+        let mut paused = false;
+        let mut replay_speed = speed;
+        let mut next_event_at: Option<tokio::time::Instant> = Some(tokio::time::Instant::now());
+
+        self.is_processing = true;
+        self.status = ProcessingStatus::Streaming;
+        self.current_message_id = Some(0);
+
+        loop {
+            let desired_redraw = super::redraw_interval(&self);
+            if desired_redraw != redraw_period {
+                redraw_period = desired_redraw;
+                redraw_interval = interval(redraw_period);
+            }
+
+            terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
+
+            if self.should_quit {
+                break;
+            }
+
+            let replay_done = event_index >= server_events.len();
+
+            tokio::select! {
+                _ = redraw_interval.tick() => {
+                    if self.stream_buffer.should_flush() {
+                        if let Some(chunk) = self.stream_buffer.flush() {
+                            self.streaming_text.push_str(&chunk);
+                        }
+                    }
+                }
+                event = event_stream.next() => {
+                    if let Some(Ok(event)) = event {
+                        match event {
+                            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                                match key.code {
+                                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                        self.should_quit = true;
+                                    }
+                                    KeyCode::Char('q') | KeyCode::Esc => {
+                                        self.should_quit = true;
+                                    }
+                                    KeyCode::Char(' ') => {
+                                        paused = !paused;
+                                        if !paused && !replay_done {
+                                            next_event_at = Some(tokio::time::Instant::now());
+                                        }
+                                    }
+                                    KeyCode::Char('+') | KeyCode::Char('=') => {
+                                        replay_speed = (replay_speed * 1.5).min(20.0);
+                                    }
+                                    KeyCode::Char('-') => {
+                                        replay_speed = (replay_speed / 1.5).max(0.1);
+                                    }
+                                    _ => {
+                                        if let Some(amount) = self
+                                            .scroll_keys
+                                            .scroll_amount(key.code.clone(), key.modifiers)
+                                        {
+                                            if amount < 0 {
+                                                self.scroll_up((-amount) as usize);
+                                            } else {
+                                                self.scroll_down(amount as usize);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Event::Mouse(mouse) => {
+                                self.handle_mouse_event(mouse);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ = async {
+                    if let Some(target) = next_event_at {
+                        tokio::time::sleep_until(target).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                }, if !paused && !replay_done => {
+                    if event_index < server_events.len() {
+                        let server_event = server_events[event_index].1.clone();
+
+                        // Check if this server event maps to a UserMessage in the timeline.
+                        let ti = timeline_index_for_server[event_index];
+                        if let crate::replay::TimelineEventKind::UserMessage { ref text } = timeline[ti].kind {
+                            let is_first = event_index == 0 || timeline_index_for_server[event_index - 1] != ti;
+                            if is_first {
+                                self.push_display_message(DisplayMessage {
+                                    role: "user".to_string(),
+                                    content: text.clone(),
+                                    tool_calls: vec![],
+                                    duration_secs: None,
+                                    title: None,
+                                    tool_data: None,
+                                });
+                            }
+                        }
+
+                        self.handle_server_event(server_event, &mut remote);
+                        event_index += 1;
+
+                        if event_index < server_events.len() {
+                            let next_delay = server_events[event_index].0;
+                            let adjusted = (next_delay as f64 / replay_speed) as u64;
+                            next_event_at = Some(tokio::time::Instant::now() + Duration::from_millis(adjusted));
+                        } else {
+                            next_event_at = None;
+                            self.is_processing = false;
+                            self.status = ProcessingStatus::Idle;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(RunResult {
+            reload_session: None,
+            rebuild_session: None,
+            exit_code: None,
+        })
+    }
+
     /// Handle a server event. Returns true if we're at a "safe point" for interleaving
     /// (after a tool completes but before the turn ends).
     fn handle_server_event(
@@ -4643,6 +4840,10 @@ impl App {
 
         if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('m')) {
             self.toggle_diagram_pane();
+            return Ok(());
+        }
+        if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('t')) {
+            self.toggle_diagram_pane_position();
             return Ok(());
         }
         if let Some(direction) = self
@@ -5241,6 +5442,10 @@ impl App {
 
         if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('m')) {
             self.toggle_diagram_pane();
+            return Ok(());
+        }
+        if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('t')) {
+            self.toggle_diagram_pane_position();
             return Ok(());
         }
         if let Some(direction) = self
@@ -5867,6 +6072,7 @@ impl App {
                      • `[` / `]` - Zoom diagram (when focused)\n\
                      • `+` / `-` - Resize diagram pane (when focused)\n\
                      • `Alt+M` - Toggle diagram pane\n\
+                     • `Alt+T` - Toggle diagram pane position (side/top)\n\
                      • `Alt+V` - Paste image from clipboard\n\
                      • `Ctrl+R` - Recover from missing tool outputs\n\
                      • `PageUp/Down` or `Up/Down` - Scroll history\n\
@@ -11523,6 +11729,10 @@ impl super::TuiState for App {
 
     fn diagram_pane_enabled(&self) -> bool {
         self.diagram_pane_enabled
+    }
+
+    fn diagram_pane_position(&self) -> crate::config::DiagramPanePosition {
+        self.diagram_pane_position
     }
 
     fn diagram_zoom(&self) -> u8 {

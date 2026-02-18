@@ -24,6 +24,7 @@ mod prompt;
 mod protocol;
 mod provider;
 mod registry;
+mod replay;
 mod safety;
 mod server;
 mod session;
@@ -370,6 +371,20 @@ enum Command {
 
     /// Review and respond to pending ambient permission requests
     Permissions,
+
+    /// Replay a saved session in the TUI
+    Replay {
+        /// Session ID, name, or path to session JSON file
+        session: String,
+
+        /// Export timeline as JSON instead of playing
+        #[arg(long)]
+        export: bool,
+
+        /// Playback speed multiplier (default: 1.0)
+        #[arg(long, default_value = "1.0")]
+        speed: f64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -626,6 +641,13 @@ async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::Permissions) => {
             tui::permissions::run_permissions()?;
+        }
+        Some(Command::Replay {
+            session,
+            export,
+            speed,
+        }) => {
+            run_replay_command(&session, export, speed).await?;
         }
         None => {
             // Auto-detect jcode repo and enable self-dev mode
@@ -2148,6 +2170,63 @@ async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
         hot_rebuild(rebuild_session_id)?;
     }
 
+    Ok(())
+}
+
+async fn run_replay_command(session_id_or_path: &str, export: bool, speed: f64) -> Result<()> {
+    let session = replay::load_session(session_id_or_path)?;
+    let timeline = replay::export_timeline(&session);
+
+    if export {
+        let json = serde_json::to_string_pretty(&timeline)?;
+        println!("{}", json);
+        return Ok(());
+    }
+
+    if timeline.is_empty() {
+        eprintln!("Session has no messages to replay.");
+        return Ok(());
+    }
+
+    let session_name = session.short_name.as_deref().unwrap_or(&session.id);
+    let icon = id::session_icon(session_name);
+    eprintln!(
+        "{} Replaying session: {} ({} events, {:.1}x speed)",
+        icon,
+        session_name,
+        timeline.len(),
+        speed
+    );
+    eprintln!("  Controls: Space=pause  +/-=speed  q=quit\n");
+
+    let terminal = init_tui_terminal()?;
+    crate::tui::mermaid::init_picker();
+    let mouse_capture = crate::config::config().display.mouse_capture;
+    let keyboard_enhanced = tui::enable_keyboard_enhancement();
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
+    if mouse_capture {
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+    }
+
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::terminal::SetTitle(format!("{} replay: {}", icon, session_name))
+    );
+
+    let app = tui::App::new_for_replay(session).await;
+    let result = app.run_replay(terminal, timeline, speed).await;
+
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
+    if mouse_capture {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    }
+    if keyboard_enhanced {
+        tui::disable_keyboard_enhancement();
+    }
+    ratatui::restore();
+    crate::tui::mermaid::clear_image_state();
+
+    result?;
     Ok(())
 }
 
