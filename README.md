@@ -16,7 +16,7 @@ all running natively in your terminal.
 
 <br>
 
-<img src="assets/demo.avif" alt="jcode demo" width="800">
+<img src="https://github.com/1jehuang/jcode/releases/download/v0.2.0/demo.avif" alt="jcode demo" width="800">
 
 <br>
 
