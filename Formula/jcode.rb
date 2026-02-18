@@ -1,13 +1,11 @@
 class Jcode < Formula
   desc "AI coding agent with TUI - uses Claude, OpenAI, or OpenRouter"
-  homepage "https://github.com/jcode-cli/jcode"
+  homepage "https://github.com/1jehuang/jcode"
   license "MIT"
-  head "https://github.com/jcode-cli/jcode.git", branch: "main"
+  head "https://github.com/1jehuang/jcode.git", branch: "master"
 
-  # Uncomment and update for versioned releases:
-  # url "https://github.com/jcode-cli/jcode/archive/refs/tags/v0.1.3.tar.gz"
-  # sha256 "PLACEHOLDER"
-  # version "0.1.3"
+  url "https://github.com/1jehuang/jcode/archive/refs/tags/v0.3.0.tar.gz"
+  version "0.3.0"
 
   depends_on "rust" => :build
 
