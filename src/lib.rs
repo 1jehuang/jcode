@@ -25,6 +25,7 @@ pub mod prompt;
 pub mod protocol;
 pub mod provider;
 pub mod registry;
+pub mod replay;
 pub mod safety;
 pub mod server;
 pub mod session;
