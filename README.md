@@ -14,6 +14,12 @@ A blazing-fast, fully autonomous AI coding agent with a gorgeous TUI,
 multi-model support, swarm coordination, persistent memory, and 30+ built-in tools —
 all running natively in your terminal.
 
+<br>
+
+https://github.com/1jehuang/jcode/raw/master/jcode_demo.mp4
+
+<br>
+
 [Features](#features) · [Install](#installation) · [Usage](#usage) · [Architecture](#architecture) · [Tools](#tools)
 
 </div>
