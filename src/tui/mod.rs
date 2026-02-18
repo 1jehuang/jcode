@@ -91,6 +91,8 @@ pub trait TuiState {
     fn is_remote_mode(&self) -> bool;
     /// Whether running in canary/self-dev mode
     fn is_canary(&self) -> bool;
+    /// Whether running in replay mode
+    fn is_replay(&self) -> bool;
     /// Whether to show diffs for edit/write tools
     fn show_diffs(&self) -> bool;
     /// Current session ID (if available)

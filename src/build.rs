@@ -32,31 +32,13 @@ pub fn get_repo_dir() -> Option<PathBuf> {
 }
 
 /// Find the best development binary in the repo.
-/// Prefers release-fast (10s incremental) over release (5min incremental).
-/// Returns the newer binary if both exist.
+/// Checks target/release (the default build output).
 pub fn find_dev_binary(repo_dir: &std::path::Path) -> Option<PathBuf> {
-    let release_fast = repo_dir.join("target/release-fast/jcode");
     let release = repo_dir.join("target/release/jcode");
-
-    let fast_exists = release_fast.exists();
-    let rel_exists = release.exists();
-
-    match (fast_exists, rel_exists) {
-        (true, true) => {
-            let fast_mtime = std::fs::metadata(&release_fast)
-                .and_then(|m| m.modified())
-                .ok();
-            let rel_mtime = std::fs::metadata(&release)
-                .and_then(|m| m.modified())
-                .ok();
-            match (fast_mtime, rel_mtime) {
-                (Some(f), Some(r)) if f >= r => Some(release_fast),
-                _ => Some(release),
-            }
-        }
-        (true, false) => Some(release_fast),
-        (false, true) => Some(release),
-        (false, false) => None,
+    if release.exists() {
+        Some(release)
+    } else {
+        None
     }
 }
 

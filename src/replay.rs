@@ -242,8 +242,20 @@ pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
     events
 }
 
-/// Convert a timeline into a sequence of (delay_ms, ServerEvent) pairs for playback.
-pub fn timeline_to_server_events(timeline: &[TimelineEvent]) -> Vec<(u64, ServerEvent)> {
+/// Replay-specific server events that don't exist in the normal protocol.
+/// These are handled specially in `run_replay`.
+#[derive(Debug, Clone)]
+pub enum ReplayEvent {
+    /// A normal server event
+    Server(ServerEvent),
+    /// User message (displayed directly, not via server event)
+    UserMessage { text: String },
+    /// Start processing state (shows thinking spinner)
+    StartProcessing,
+}
+
+/// Convert a timeline into a sequence of (delay_ms, ReplayEvent) pairs for playback.
+pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, ReplayEvent)> {
     let mut out = Vec::new();
     let mut prev_t: u64 = 0;
     let mut turn_id: u64 = 1;
@@ -254,20 +266,13 @@ pub fn timeline_to_server_events(timeline: &[TimelineEvent]) -> Vec<(u64, Server
         prev_t = event.t;
 
         match &event.kind {
-            TimelineEventKind::UserMessage { .. } => {
-                // User messages are handled by pushing to display_messages directly,
-                // not via ServerEvent. We emit a marker that the player will handle.
-                out.push((delay, ServerEvent::Done { id: turn_id }));
-                turn_id += 1;
+            TimelineEventKind::UserMessage { text } => {
+                out.push((delay, ReplayEvent::UserMessage { text: text.clone() }));
             }
-            TimelineEventKind::Thinking { duration } => {
-                // Emit a tiny text delta to trigger Streaming state, then wait
-                out.push((delay, ServerEvent::TextDelta { text: String::new() }));
-                // The thinking duration is baked into the gap before the next event
-                let _ = duration; // Duration is already encoded in the timeline gaps
+            TimelineEventKind::Thinking { .. } => {
+                out.push((delay, ReplayEvent::StartProcessing));
             }
             TimelineEventKind::StreamText { text, speed } => {
-                // Split text into chunks and emit as TextDelta events
                 let chars_per_chunk = 4; // ~1 token
                 let ms_per_chunk = if *speed > 0 { 1000 / speed } else { 12 };
                 let chunks: Vec<String> = text
@@ -279,40 +284,37 @@ pub fn timeline_to_server_events(timeline: &[TimelineEvent]) -> Vec<(u64, Server
 
                 for (i, chunk) in chunks.iter().enumerate() {
                     let chunk_delay = if i == 0 { delay } else { ms_per_chunk };
-                    out.push((chunk_delay, ServerEvent::TextDelta { text: chunk.clone() }));
+                    out.push((chunk_delay, ReplayEvent::Server(ServerEvent::TextDelta { text: chunk.clone() })));
                 }
             }
             TimelineEventKind::ToolStart { name, input } => {
                 tool_id_counter += 1;
                 let id = format!("replay_tool_{}", tool_id_counter);
 
-                // ToolStart
                 out.push((
                     delay,
-                    ServerEvent::ToolStart {
+                    ReplayEvent::Server(ServerEvent::ToolStart {
                         id: id.clone(),
                         name: name.clone(),
-                    },
+                    }),
                 ));
 
-                // Stream tool input as JSON
                 let input_str = serde_json::to_string(input).unwrap_or_default();
                 if !input_str.is_empty() && input_str != "null" {
                     out.push((
                         0,
-                        ServerEvent::ToolInput {
+                        ReplayEvent::Server(ServerEvent::ToolInput {
                             delta: input_str,
-                        },
+                        }),
                     ));
                 }
 
-                // ToolExec (transition from input streaming to execution)
                 out.push((
                     50,
-                    ServerEvent::ToolExec {
+                    ReplayEvent::Server(ServerEvent::ToolExec {
                         id: id.clone(),
                         name: name.clone(),
-                    },
+                    }),
                 ));
             }
             TimelineEventKind::ToolDone {
@@ -324,7 +326,7 @@ pub fn timeline_to_server_events(timeline: &[TimelineEvent]) -> Vec<(u64, Server
                 let id = format!("replay_tool_{}", tool_id_counter);
                 out.push((
                     delay,
-                    ServerEvent::ToolDone {
+                    ReplayEvent::Server(ServerEvent::ToolDone {
                         id,
                         name: name.clone(),
                         output: output.clone(),
@@ -333,7 +335,7 @@ pub fn timeline_to_server_events(timeline: &[TimelineEvent]) -> Vec<(u64, Server
                         } else {
                             None
                         },
-                    },
+                    }),
                 ));
             }
             TimelineEventKind::TokenUsage {
@@ -344,16 +346,16 @@ pub fn timeline_to_server_events(timeline: &[TimelineEvent]) -> Vec<(u64, Server
             } => {
                 out.push((
                     delay,
-                    ServerEvent::TokenUsage {
+                    ReplayEvent::Server(ServerEvent::TokenUsage {
                         input: *input,
                         output: *output,
                         cache_read_input: *cache_read,
                         cache_creation_input: *cache_creation,
-                    },
+                    }),
                 ));
             }
             TimelineEventKind::Done => {
-                out.push((delay, ServerEvent::Done { id: turn_id }));
+                out.push((delay, ReplayEvent::Server(ServerEvent::Done { id: turn_id })));
                 turn_id += 1;
             }
         }
@@ -465,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn test_timeline_to_server_events() {
+    fn test_timeline_to_replay_events() {
         let events = vec![
             TimelineEvent {
                 t: 0,
@@ -480,19 +482,19 @@ mod tests {
             },
         ];
 
-        let server_events = timeline_to_server_events(&events);
-        assert!(!server_events.is_empty());
+        let replay_events = timeline_to_replay_events(&events);
+        assert!(!replay_events.is_empty());
 
-        // First event should be a TextDelta
-        match &server_events[0].1 {
-            ServerEvent::TextDelta { text } => assert!(!text.is_empty()),
-            _ => panic!("Expected TextDelta"),
+        // First event should be a Server(TextDelta)
+        match &replay_events[0].1 {
+            ReplayEvent::Server(ServerEvent::TextDelta { text }) => assert!(!text.is_empty()),
+            _ => panic!("Expected Server(TextDelta)"),
         }
 
-        // Last event should be Done
-        match &server_events.last().unwrap().1 {
-            ServerEvent::Done { .. } => {}
-            _ => panic!("Expected Done"),
+        // Last event should be Server(Done)
+        match &replay_events.last().unwrap().1 {
+            ReplayEvent::Server(ServerEvent::Done { .. }) => {}
+            _ => panic!("Expected Server(Done)"),
         }
     }
 
@@ -516,20 +518,59 @@ mod tests {
             },
         ];
 
-        let server_events = timeline_to_server_events(&events);
-        // Should have: ToolStart, ToolInput, ToolExec, ToolDone
-        let types: Vec<&str> = server_events
+        let replay_events = timeline_to_replay_events(&events);
+        let types: Vec<&str> = replay_events
             .iter()
-            .map(|(_, e)| match e {
-                ServerEvent::ToolStart { .. } => "start",
-                ServerEvent::ToolInput { .. } => "input",
-                ServerEvent::ToolExec { .. } => "exec",
-                ServerEvent::ToolDone { .. } => "done",
-                _ => "other",
+            .filter_map(|(_, e)| match e {
+                ReplayEvent::Server(se) => Some(match se {
+                    ServerEvent::ToolStart { .. } => "start",
+                    ServerEvent::ToolInput { .. } => "input",
+                    ServerEvent::ToolExec { .. } => "exec",
+                    ServerEvent::ToolDone { .. } => "done",
+                    _ => "other",
+                }),
+                _ => None,
             })
             .collect();
         assert!(types.contains(&"start"));
         assert!(types.contains(&"exec"));
         assert!(types.contains(&"done"));
+    }
+
+    #[test]
+    fn test_user_message_and_thinking() {
+        let events = vec![
+            TimelineEvent {
+                t: 0,
+                kind: TimelineEventKind::UserMessage {
+                    text: "hello".to_string(),
+                },
+            },
+            TimelineEvent {
+                t: 500,
+                kind: TimelineEventKind::Thinking { duration: 800 },
+            },
+            TimelineEvent {
+                t: 1300,
+                kind: TimelineEventKind::StreamText {
+                    text: "Hi!".to_string(),
+                    speed: 80,
+                },
+            },
+        ];
+
+        let replay_events = timeline_to_replay_events(&events);
+
+        // First should be UserMessage
+        assert!(matches!(&replay_events[0].1, ReplayEvent::UserMessage { .. }));
+
+        // Second should be StartProcessing
+        assert!(matches!(&replay_events[1].1, ReplayEvent::StartProcessing));
+
+        // Third should be Server(TextDelta)
+        assert!(matches!(
+            &replay_events[2].1,
+            ReplayEvent::Server(ServerEvent::TextDelta { .. })
+        ));
     }
 }

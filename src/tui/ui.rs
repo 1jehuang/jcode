@@ -2622,7 +2622,9 @@ fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>>
     let server_update = app.server_update_available() == Some(true);
     let client_update = app.client_update_available();
     let mut status_items: Vec<&str> = Vec::new();
-    if is_remote {
+    if app.is_replay() {
+        status_items.push("replay");
+    } else if is_remote {
         status_items.push("client");
     }
     if is_canary {

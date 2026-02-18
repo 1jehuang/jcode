@@ -5711,7 +5711,7 @@ async fn execute_debug_command(
             .unwrap_or_else(|| repo_dir.join("target/release/jcode"));
         if !target_binary.exists() {
             return Err(anyhow::anyhow!(
-                "No binary found. Run 'cargo build --profile release-fast' first."
+                "No binary found at target/release/jcode. Run 'cargo build --release' first."
             ));
         }
 

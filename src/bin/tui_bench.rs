@@ -238,6 +238,10 @@ impl TuiState for BenchState {
         false
     }
 
+    fn is_replay(&self) -> bool {
+        false
+    }
+
     fn show_diffs(&self) -> bool {
         self.show_diffs
     }

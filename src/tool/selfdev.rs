@@ -168,8 +168,8 @@ impl SelfDevTool {
             .unwrap_or_else(|| repo_dir.join("target/release/jcode"));
         if !target_binary.exists() {
             return Ok(ToolOutput::new(
-                "No binary found. Run 'cargo build --profile release-fast' \
-                 (10s incremental) or 'cargo build --release' first."
+                "No binary found at target/release/jcode.\n\
+                 Run 'cargo build --release' first, then try reload again."
                     .to_string(),
             ));
         }

@@ -109,17 +109,17 @@ embeddings = ["tract-onnx", "tract-hir", "tokenizers"]
 pdf = ["pdf-extract"]
 
 [profile.release]
-lto = "thin"
-codegen-units = 16
 opt-level = 2
 debug = 0
-
-# Fast release for development iteration (no LTO, max parallelism)
-[profile.release-fast]
-inherits = "release"
-lto = false
 codegen-units = 256
 incremental = true
+
+# Full LTO release for stable/distribution builds
+[profile.release-lto]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+incremental = false
 
 [profile.dev]
 debug = 1

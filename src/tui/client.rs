@@ -1246,6 +1246,10 @@ impl TuiState for ClientApp {
         true // ClientApp is always remote mode
     }
 
+    fn is_replay(&self) -> bool {
+        false
+    }
+
     fn is_canary(&self) -> bool {
         false // Deprecated client doesn't support canary mode
     }

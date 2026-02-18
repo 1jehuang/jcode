@@ -2654,10 +2654,10 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
 
     // Only build if explicitly requested with --build flag
     if should_build {
-        eprintln!("Building (release-fast profile)...");
+        eprintln!("Building...");
 
         let build_status = ProcessCommand::new("cargo")
-            .args(["build", "--profile", "release-fast"])
+            .args(["build", "--release"])
             .current_dir(&repo_dir)
             .status()?;
 
@@ -2672,7 +2672,7 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
     if !target_binary.exists() {
         anyhow::bail!(
             "No binary found at {:?}\n\
-             Run 'cargo build --profile release-fast' first, or use 'jcode self-dev --build'.",
+             Run 'cargo build --release' first, or use 'jcode self-dev --build'.",
             target_binary
         );
     }

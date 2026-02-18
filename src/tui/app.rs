@@ -551,7 +551,7 @@ pub struct App {
     // Whether running in remote mode
     is_remote: bool,
     // Whether running in replay mode (readonly playback of a saved session)
-    is_replay: bool,
+    pub is_replay: bool,
     // Remember tool call ids that already have outputs
     tool_result_ids: HashSet<String>,
     // Current session ID (from server in remote mode)
@@ -911,9 +911,21 @@ impl App {
         let provider: Arc<dyn Provider> = Arc::new(NullProvider);
         let registry = Registry::new(Arc::clone(&provider)).await;
         let mut app = Self::new(provider, registry);
-        app.is_remote = true;
+        app.is_remote = false;
         app.is_replay = true;
+        let model_name = session.model.clone().unwrap_or_default();
+        let session_name = session.short_name.clone().unwrap_or_default();
         app.session = session;
+        if !model_name.is_empty() {
+            app.remote_provider_model = Some(model_name);
+        }
+        if !session_name.is_empty() {
+            let icon = crate::id::session_icon(&session_name);
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::SetTitle(format!("{} replay: {}", icon, session_name))
+            );
+        }
         app
     }
 
@@ -4108,41 +4120,20 @@ impl App {
         speed: f64,
     ) -> Result<RunResult> {
         use super::backend::RemoteConnection;
+        use crate::replay::ReplayEvent;
 
         let mut event_stream = EventStream::new();
         let mut redraw_period = super::redraw_interval(&self);
         let mut redraw_interval = interval(redraw_period);
         let mut remote = RemoteConnection::dummy();
 
-        let server_events = crate::replay::timeline_to_server_events(&timeline);
-
-        // Build an index mapping server_events back to their source timeline events.
-        let timeline_index_for_server: Vec<usize> = {
-            let mut map = Vec::with_capacity(server_events.len());
-            let mut se_cursor = 0;
-            for (ti, te) in timeline.iter().enumerate() {
-                let produced = crate::replay::timeline_to_server_events(std::slice::from_ref(te));
-                for _ in 0..produced.len() {
-                    if se_cursor < server_events.len() {
-                        map.push(ti);
-                        se_cursor += 1;
-                    }
-                }
-            }
-            while map.len() < server_events.len() {
-                map.push(timeline.len().saturating_sub(1));
-            }
-            map
-        };
+        let replay_events = crate::replay::timeline_to_replay_events(&timeline);
 
         let mut event_index: usize = 0;
         let mut paused = false;
         let mut replay_speed = speed;
         let mut next_event_at: Option<tokio::time::Instant> = Some(tokio::time::Instant::now());
-
-        self.is_processing = true;
-        self.status = ProcessingStatus::Streaming;
-        self.current_message_id = Some(0);
+        let mut replay_turn_id: u64 = 0;
 
         loop {
             let desired_redraw = super::redraw_interval(&self);
@@ -4157,7 +4148,7 @@ impl App {
                 break;
             }
 
-            let replay_done = event_index >= server_events.len();
+            let replay_done = event_index >= replay_events.len();
 
             tokio::select! {
                 _ = redraw_interval.tick() => {
@@ -4218,30 +4209,49 @@ impl App {
                         std::future::pending::<()>().await;
                     }
                 }, if !paused && !replay_done => {
-                    if event_index < server_events.len() {
-                        let server_event = server_events[event_index].1.clone();
+                    if event_index < replay_events.len() {
+                        let replay_event = replay_events[event_index].1.clone();
 
-                        // Check if this server event maps to a UserMessage in the timeline.
-                        let ti = timeline_index_for_server[event_index];
-                        if let crate::replay::TimelineEventKind::UserMessage { ref text } = timeline[ti].kind {
-                            let is_first = event_index == 0 || timeline_index_for_server[event_index - 1] != ti;
-                            if is_first {
+                        match replay_event {
+                            ReplayEvent::UserMessage { text } => {
                                 self.push_display_message(DisplayMessage {
                                     role: "user".to_string(),
-                                    content: text.clone(),
+                                    content: text,
                                     tool_calls: vec![],
                                     duration_secs: None,
                                     title: None,
                                     tool_data: None,
                                 });
                             }
+                            ReplayEvent::StartProcessing => {
+                                replay_turn_id += 1;
+                                self.current_message_id = Some(replay_turn_id);
+                                self.is_processing = true;
+                                self.processing_started = Some(Instant::now());
+                                self.status = ProcessingStatus::Thinking(Instant::now());
+                                self.streaming_tps_start = Some(Instant::now());
+                                self.streaming_tps_elapsed = std::time::Duration::ZERO;
+                                self.streaming_total_output_tokens = 0;
+                            }
+                            ReplayEvent::Server(server_event) => {
+                                if let crate::protocol::ServerEvent::TextDelta { ref text } = server_event {
+                                    if !text.is_empty() {
+                                        self.streaming_text.push_str(text);
+                                        if matches!(self.status, ProcessingStatus::Thinking(_)) {
+                                            self.status = ProcessingStatus::Streaming;
+                                        }
+                                        self.last_stream_activity = Some(Instant::now());
+                                    }
+                                } else {
+                                    self.handle_server_event(server_event, &mut remote);
+                                }
+                            }
                         }
 
-                        self.handle_server_event(server_event, &mut remote);
                         event_index += 1;
 
-                        if event_index < server_events.len() {
-                            let next_delay = server_events[event_index].0;
+                        if event_index < replay_events.len() {
+                            let next_delay = replay_events[event_index].0;
                             let adjusted = (next_delay as f64 / replay_speed) as u64;
                             next_event_at = Some(tokio::time::Instant::now() + Duration::from_millis(adjusted));
                         } else {
@@ -11137,6 +11147,10 @@ impl super::TuiState for App {
         } else {
             self.session.is_canary
         }
+    }
+
+    fn is_replay(&self) -> bool {
+        self.is_replay
     }
 
     fn show_diffs(&self) -> bool {
