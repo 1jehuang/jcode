@@ -109,7 +109,7 @@ embeddings = ["tract-onnx", "tract-hir", "tokenizers"]
 pdf = ["pdf-extract"]
 
 [profile.release]
-opt-level = 2
+opt-level = 1
 debug = 0
 codegen-units = 256
 incremental = true

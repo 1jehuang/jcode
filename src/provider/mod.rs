@@ -225,6 +225,11 @@ pub const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
 static CONTEXT_LIMIT_CACHE: std::sync::LazyLock<RwLock<HashMap<String, usize>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
+/// Dynamic cache of models actually available for this account (populated from Codex API).
+/// When populated, only models in this set should be offered/accepted for the OpenAI provider.
+static ACCOUNT_AVAILABLE_MODELS: std::sync::LazyLock<RwLock<Option<Vec<String>>>> =
+    std::sync::LazyLock::new(|| RwLock::new(None));
+
 /// Look up a cached context limit for a model.
 fn get_cached_context_limit(model: &str) -> Option<usize> {
     let cache = CONTEXT_LIMIT_CACHE.read().ok()?;
@@ -235,15 +240,63 @@ fn get_cached_context_limit(model: &str) -> Option<usize> {
 /// Called once at startup when OpenAI OAuth credentials are available.
 pub fn populate_context_limits(models: HashMap<String, usize>) {
     if let Ok(mut cache) = CONTEXT_LIMIT_CACHE.write() {
-        for (model, limit) in models {
+        for (model, limit) in &models {
             crate::logging::info(&format!(
                 "Context limit cache: {} = {}k",
                 model,
                 limit / 1000
             ));
-            cache.insert(model, limit);
+            cache.insert(model.clone(), *limit);
         }
     }
+}
+
+/// Populate the account-available model list (called once at startup from the Codex API).
+pub fn populate_account_models(slugs: Vec<String>) {
+    if !slugs.is_empty() {
+        if let Ok(mut available) = ACCOUNT_AVAILABLE_MODELS.write() {
+            crate::logging::info(&format!(
+                "Account available models: {}",
+                slugs.join(", ")
+            ));
+            *available = Some(slugs);
+        }
+    }
+}
+
+/// Check if a model is available for the current account.
+/// Returns None if the dynamic list hasn't been fetched yet (assume available).
+/// Returns Some(true) if the model is in the account's available list.
+/// Returns Some(false) if the model is NOT in the account's available list.
+pub fn is_model_available_for_account(model: &str) -> Option<bool> {
+    let cache = ACCOUNT_AVAILABLE_MODELS.read().ok()?;
+    match cache.as_ref() {
+        Some(models) => Some(models.iter().any(|m| m == model)),
+        None => None,
+    }
+}
+
+/// Preferred model order for fallback selection.
+/// If the desired model isn't available, we try these in order.
+const OPENAI_MODEL_PREFERENCE: &[&str] = &[
+    "gpt-5.3-codex-spark",
+    "gpt-5.3-codex",
+    "gpt-5.2-codex",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex",
+];
+
+/// Get the best available OpenAI model, falling back through the preference list.
+/// Returns None if the dynamic model list hasn't been fetched yet.
+pub fn get_best_available_openai_model() -> Option<String> {
+    let cache = ACCOUNT_AVAILABLE_MODELS.read().ok()?;
+    let models = cache.as_ref()?;
+    for preferred in OPENAI_MODEL_PREFERENCE {
+        if models.iter().any(|m| m == preferred) {
+            return Some(preferred.to_string());
+        }
+    }
+    models.first().cloned()
 }
 
 /// Fetch context window sizes from the Codex backend API.
@@ -452,7 +505,9 @@ impl MultiProvider {
                                     "Fetched context limits for {} OpenAI models from API",
                                     limits.len()
                                 ));
+                                let slugs: Vec<String> = limits.keys().cloned().collect();
                                 populate_context_limits(limits);
+                                populate_account_models(slugs);
                             }
                             Ok(_) => {
                                 crate::logging::info(
@@ -850,16 +905,19 @@ impl Provider for MultiProvider {
 
         // OpenAI models
         for model in ALL_OPENAI_MODELS {
+            let (available, detail) = if !self.has_openai_creds {
+                (false, "no credentials".to_string())
+            } else if let Some(false) = is_model_available_for_account(model) {
+                (false, "not available for your plan".to_string())
+            } else {
+                (true, String::new())
+            };
             routes.push(ModelRoute {
                 model: model.to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "api-key".to_string(),
-                available: self.has_openai_creds,
-                detail: if self.has_openai_creds {
-                    String::new()
-                } else {
-                    "no credentials".to_string()
-                },
+                available,
+                detail,
             });
         }
 

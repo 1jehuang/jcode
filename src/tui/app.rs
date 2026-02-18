@@ -8083,12 +8083,19 @@ impl App {
                         });
                     }
                 } else if crate::provider::ALL_OPENAI_MODELS.contains(&model.as_str()) {
+                    let (available, detail) = if auth.openai == crate::auth::AuthState::NotConfigured {
+                        (false, "no credentials".to_string())
+                    } else if let Some(false) = crate::provider::is_model_available_for_account(model) {
+                        (false, "not available for your plan".to_string())
+                    } else {
+                        (true, String::new())
+                    };
                     routes.push(crate::provider::ModelRoute {
                         model: model.clone(),
                         provider: "OpenAI".to_string(),
                         api_method: "api-key".to_string(),
-                        available: auth.openai != crate::auth::AuthState::NotConfigured,
-                        detail: String::new(),
+                        available,
+                        detail,
                     });
                 }
             }
@@ -8320,12 +8327,15 @@ impl App {
 
                     if !route.available {
                         let name = entry.name.clone();
-                        let provider = route.provider.clone();
-                        let api = route.api_method.clone();
+                        let detail = if route.detail.is_empty() {
+                            "not available".to_string()
+                        } else {
+                            route.detail.clone()
+                        };
                         self.picker_state = None;
                         self.set_status_notice(format!(
-                            "{} via {} ({}) — not available",
-                            name, provider, api
+                            "{} — {}",
+                            name, detail
                         ));
                         return Ok(());
                     }
@@ -12359,7 +12369,6 @@ mod tests {
         app.remote_available_models = vec![
             "gpt-5.3-codex".to_string(),
             "gpt-5.2-codex".to_string(),
-            "codex-mini-latest".to_string(),
         ];
     }
 

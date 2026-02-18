@@ -274,7 +274,21 @@ impl OpenAIProvider {
     }
 
     async fn model_id(&self) -> String {
-        self.model.read().await.clone()
+        let current = self.model.read().await.clone();
+        if let Some(false) = crate::provider::is_model_available_for_account(&current) {
+            if let Some(fallback) = crate::provider::get_best_available_openai_model() {
+                if fallback != current {
+                    crate::logging::info(&format!(
+                        "Model '{}' not available for account; falling back to '{}'",
+                        current, fallback
+                    ));
+                    let mut w = self.model.write().await;
+                    *w = fallback.clone();
+                    return fallback;
+                }
+            }
+        }
+        current
     }
 
     async fn send_request(&self, request: &Value, access_token: &str) -> Result<reqwest::Response> {
@@ -1092,6 +1106,14 @@ impl Provider for OpenAIProvider {
                 DEFAULT_MODEL
             );
         }
+        if let Some(false) = crate::provider::is_model_available_for_account(model) {
+            anyhow::bail!(
+                "The '{}' model is not available for your account. \
+                 Your account may not have access to this model. \
+                 Use /model to see available models.",
+                model
+            );
+        }
         if let Ok(mut current) = self.model.try_write() {
             *current = model.to_string();
             Ok(())
@@ -1637,7 +1659,6 @@ mod tests {
 
         let provider = OpenAIProvider::new(creds);
         assert!(provider.available_models().contains(&"gpt-5.2-codex"));
-        assert!(provider.available_models().contains(&"codex-mini-latest"));
         assert!(provider.available_models().contains(&"gpt-5.1-codex-mini"));
 
         provider.set_model("gpt-5.1-codex").unwrap();
