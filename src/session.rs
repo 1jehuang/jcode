@@ -77,6 +77,22 @@ pub struct StoredMessage {
     pub id: String,
     pub role: Role,
     pub content: Vec<ContentBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<StoredTokenUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredTokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u64>,
 }
 
 impl StoredMessage {
@@ -84,7 +100,7 @@ impl StoredMessage {
         Message {
             role: self.role.clone(),
             content: self.content.clone(),
-            timestamp: None,
+            timestamp: self.timestamp,
         }
     }
 
@@ -399,11 +415,33 @@ impl Session {
     }
 
     pub fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {
+        self.add_message_ext(role, content, None, None)
+    }
+
+    pub fn add_message_with_duration(
+        &mut self,
+        role: Role,
+        content: Vec<ContentBlock>,
+        tool_duration_ms: Option<u64>,
+    ) -> String {
+        self.add_message_ext(role, content, tool_duration_ms, None)
+    }
+
+    pub fn add_message_ext(
+        &mut self,
+        role: Role,
+        content: Vec<ContentBlock>,
+        tool_duration_ms: Option<u64>,
+        token_usage: Option<StoredTokenUsage>,
+    ) -> String {
         let id = new_id("message");
         self.messages.push(StoredMessage {
             id: id.clone(),
             role,
             content,
+            timestamp: Some(Utc::now()),
+            tool_duration_ms,
+            token_usage,
         });
         id
     }
