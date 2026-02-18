@@ -3418,6 +3418,7 @@ fn all_tips() -> Vec<Tip> {
         "Memories are stored in a graph with semantic embeddings — recall finds related facts even if you use different words",
         "Ambient mode runs background cycles while you're away — maintaining memories, compacting context, and doing proactive work",
         "Ambient cycles can email you a summary and you can reply with directives for the next run",
+        "Pro setup: Arch Linux + Kitty terminal with 'copy on select' enabled — highlight text to copy instantly, no Ctrl+C needed",
     ]
     .iter()
     .map(|t| Tip {

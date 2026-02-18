@@ -673,6 +673,10 @@ impl Agent {
         self.registry.clone()
     }
 
+    pub fn provider_messages(&self) -> Vec<Message> {
+        self.session.messages_for_provider()
+    }
+
     pub fn set_model(&mut self, model: &str) -> Result<()> {
         self.provider.set_model(model)?;
         self.session.model = Some(self.provider.model());

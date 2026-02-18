@@ -403,6 +403,15 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Trigger manual context compaction on the server
+    pub async fn compact(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        let request = Request::Compact { id };
+        self.next_request_id += 1;
+        self.send_request(request).await?;
+        Ok(id)
+    }
+
     /// Send a response for a client debug request
     pub async fn send_client_debug_response(&mut self, id: u64, output: String) -> Result<()> {
         self.send_request(Request::ClientDebugResponse { id, output })

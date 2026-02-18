@@ -180,3 +180,41 @@ impl Tool for BatchTool {
         Ok(ToolOutput::new(output))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_normalize_flat_params() {
+        let input = json!({
+            "tool_calls": [
+                {"tool": "read", "file_path": "file1.txt"},
+                {"tool": "read", "file_path": "file2.txt"}
+            ]
+        });
+
+        let normalized = normalize_batch_input(input);
+        let parsed: BatchInput = serde_json::from_value(normalized).unwrap();
+        assert_eq!(parsed.tool_calls.len(), 2);
+        assert_eq!(parsed.tool_calls[0].tool, "read");
+        let params = parsed.tool_calls[0].parameters.as_ref().unwrap();
+        assert_eq!(params["file_path"], "file1.txt");
+    }
+
+    #[test]
+    fn test_normalize_already_nested() {
+        let input = json!({
+            "tool_calls": [
+                {"tool": "read", "parameters": {"file_path": "file1.txt"}}
+            ]
+        });
+
+        let normalized = normalize_batch_input(input);
+        let parsed: BatchInput = serde_json::from_value(normalized).unwrap();
+        assert_eq!(parsed.tool_calls.len(), 1);
+        let params = parsed.tool_calls[0].parameters.as_ref().unwrap();
+        assert_eq!(params["file_path"], "file1.txt");
+    }
+}

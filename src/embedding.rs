@@ -5,7 +5,8 @@
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
 use tract_hir::prelude::*;
 use tract_onnx::prelude::*;
@@ -23,8 +24,10 @@ const MODEL_URL: &str =
 const TOKENIZER_URL: &str =
     "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
 
-/// Global cached model (loaded once, reused)
-static EMBEDDER: OnceLock<Result<Embedder, String>> = OnceLock::new();
+/// Global embedder cache and runtime stats.
+///
+/// This is process-wide: all server sessions share one embedding model.
+static EMBEDDER_CACHE: OnceLock<Mutex<EmbedderCache>> = OnceLock::new();
 
 /// Embedding vector type
 pub type EmbeddingVec = Vec<f32>;
@@ -33,6 +36,59 @@ pub type EmbeddingVec = Vec<f32>;
 pub struct Embedder {
     model: SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>,
     tokenizer: Tokenizer,
+}
+
+struct EmbedderCache {
+    embedder: Option<Arc<Embedder>>,
+    load_error: Option<String>,
+    loaded_at: Option<Instant>,
+    last_used_at: Option<Instant>,
+    load_count: u64,
+    unload_count: u64,
+    embed_calls: u64,
+    embed_failures: u64,
+    total_embed_ms: u64,
+}
+
+impl Default for EmbedderCache {
+    fn default() -> Self {
+        Self {
+            embedder: None,
+            load_error: None,
+            loaded_at: None,
+            last_used_at: None,
+            load_count: 0,
+            unload_count: 0,
+            embed_calls: 0,
+            embed_failures: 0,
+            total_embed_ms: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbedderStats {
+    pub loaded: bool,
+    pub load_count: u64,
+    pub unload_count: u64,
+    pub embed_calls: u64,
+    pub embed_failures: u64,
+    pub total_embed_ms: u64,
+    pub avg_embed_ms: Option<f64>,
+    pub idle_secs: Option<u64>,
+    pub loaded_secs: Option<u64>,
+}
+
+fn embedder_cache() -> &'static Mutex<EmbedderCache> {
+    EMBEDDER_CACHE.get_or_init(|| Mutex::new(EmbedderCache::default()))
+}
+
+fn saturating_u64_from_u128(value: u128) -> u64 {
+    if value > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        value as u64
+    }
 }
 
 impl Embedder {
@@ -120,7 +176,7 @@ impl Embedder {
             let mut embedding = vec![0f32; hidden_dim];
 
             // Count non-padded tokens for proper averaging
-            let valid_tokens = len;
+            let valid_tokens = len.min(seq_len);
 
             for i in 0..valid_tokens {
                 for j in 0..hidden_dim {
@@ -130,7 +186,7 @@ impl Embedder {
 
             // Average
             for val in &mut embedding {
-                *val /= valid_tokens as f32;
+                *val /= valid_tokens.max(1) as f32;
             }
 
             // L2 normalize
@@ -154,17 +210,141 @@ impl Embedder {
     }
 }
 
-/// Get or create the global embedder instance
-pub fn get_embedder() -> Result<&'static Embedder> {
-    EMBEDDER
-        .get_or_init(|| Embedder::load().map_err(|e| e.to_string()))
-        .as_ref()
-        .map_err(|e| anyhow::anyhow!("{}", e))
+/// Get or create the global embedder instance.
+///
+/// Returns an `Arc` so callers can keep using the model even if an idle
+/// unload happens concurrently in the background.
+pub fn get_embedder() -> Result<Arc<Embedder>> {
+    let mut cache = embedder_cache()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Embedder cache lock poisoned"))?;
+
+    cache.last_used_at = Some(Instant::now());
+
+    if let Some(embedder) = cache.embedder.as_ref() {
+        return Ok(Arc::clone(embedder));
+    }
+
+    if let Some(err) = cache.load_error.as_ref() {
+        return Err(anyhow::anyhow!("{}", err));
+    }
+
+    let loaded = match Embedder::load() {
+        Ok(embedder) => Arc::new(embedder),
+        Err(e) => {
+            let msg = e.to_string();
+            cache.load_error = Some(msg.clone());
+            return Err(anyhow::anyhow!(msg));
+        }
+    };
+
+    cache.embedder = Some(Arc::clone(&loaded));
+    cache.load_error = None;
+    cache.load_count = cache.load_count.saturating_add(1);
+    let now = Instant::now();
+    cache.loaded_at = Some(now);
+    cache.last_used_at = Some(now);
+
+    crate::logging::info("Embedding model loaded into memory");
+    Ok(loaded)
 }
 
 /// Generate embedding for text using the global embedder
 pub fn embed(text: &str) -> Result<EmbeddingVec> {
-    get_embedder()?.embed(text)
+    let embedder = get_embedder()?;
+    let started = Instant::now();
+    let result = embedder.embed(text);
+    let elapsed_ms = saturating_u64_from_u128(started.elapsed().as_millis());
+
+    if let Ok(mut cache) = embedder_cache().lock() {
+        cache.embed_calls = cache.embed_calls.saturating_add(1);
+        cache.total_embed_ms = cache.total_embed_ms.saturating_add(elapsed_ms);
+        cache.last_used_at = Some(Instant::now());
+        if result.is_err() {
+            cache.embed_failures = cache.embed_failures.saturating_add(1);
+        }
+    }
+
+    result
+}
+
+/// Unload the embedding model if it has been idle for at least `idle_for`.
+///
+/// Returns `true` when an unload occurred.
+pub fn maybe_unload_if_idle(idle_for: Duration) -> bool {
+    let mut unloaded = false;
+    let mut idle_secs = 0u64;
+
+    if let Ok(mut cache) = embedder_cache().lock() {
+        if cache.embedder.is_none() {
+            return false;
+        }
+
+        let Some(last_used) = cache.last_used_at else {
+            return false;
+        };
+
+        let idle = last_used.elapsed();
+        if idle >= idle_for {
+            cache.embedder = None;
+            cache.loaded_at = None;
+            cache.unload_count = cache.unload_count.saturating_add(1);
+            unloaded = true;
+            idle_secs = idle.as_secs();
+        }
+    }
+
+    if unloaded {
+        crate::logging::info(&format!(
+            "Unloaded embedding model after {}s idle",
+            idle_secs
+        ));
+    }
+
+    unloaded
+}
+
+/// Snapshot runtime statistics for the global embedder cache.
+pub fn stats() -> EmbedderStats {
+    let now = Instant::now();
+    match embedder_cache().lock() {
+        Ok(cache) => {
+            let avg_embed_ms = if cache.embed_calls == 0 {
+                None
+            } else {
+                Some(cache.total_embed_ms as f64 / cache.embed_calls as f64)
+            };
+            let idle_secs = cache
+                .last_used_at
+                .map(|last| now.saturating_duration_since(last).as_secs());
+            let loaded_secs = cache
+                .loaded_at
+                .map(|loaded| now.saturating_duration_since(loaded).as_secs());
+
+            EmbedderStats {
+                loaded: cache.embedder.is_some(),
+                load_count: cache.load_count,
+                unload_count: cache.unload_count,
+                embed_calls: cache.embed_calls,
+                embed_failures: cache.embed_failures,
+                total_embed_ms: cache.total_embed_ms,
+                avg_embed_ms,
+                idle_secs,
+                loaded_secs,
+            }
+        }
+        Err(_) => EmbedderStats {
+            loaded: false,
+            load_count: 0,
+            unload_count: 0,
+            embed_calls: 0,
+            embed_failures: 0,
+            total_embed_ms: 0,
+            avg_embed_ms: None,
+            idle_secs: None,
+            loaded_secs: None,
+        },
+    }
 }
 
 /// Compute cosine similarity between two embeddings
@@ -306,5 +486,10 @@ mod tests {
         let results = find_similar(&query, &candidates, 0.5, 10);
         assert_eq!(results.len(), 2); // Only identical and similar pass threshold
         assert_eq!(results[0].0, 0); // First result is identical
+    }
+
+    #[test]
+    fn test_idle_unload_noop_when_not_loaded() {
+        assert!(!maybe_unload_if_idle(Duration::from_secs(1)));
     }
 }

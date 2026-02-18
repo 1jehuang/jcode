@@ -125,6 +125,10 @@ pub enum Request {
     #[serde(rename = "split")]
     Split { id: u64 },
 
+    /// Trigger manual context compaction
+    #[serde(rename = "compact")]
+    Compact { id: u64 },
+
     // === Agent-to-agent communication ===
     /// Register as an external agent
     #[serde(rename = "agent_register")]
@@ -581,6 +585,16 @@ pub enum ServerEvent {
         new_session_id: String,
         new_session_name: String,
     },
+
+    /// Response to compact request — context compaction status
+    #[serde(rename = "compact_result")]
+    CompactResult {
+        id: u64,
+        /// Human-readable status message
+        message: String,
+        /// Whether compaction was started successfully
+        success: bool,
+    },
 }
 
 /// Summary of a tool call for the comm_summary response
@@ -685,6 +699,7 @@ impl Request {
             Request::SetModel { id, .. } => *id,
             Request::SetFeature { id, .. } => *id,
             Request::Split { id } => *id,
+            Request::Compact { id } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,
             Request::AgentCapabilities { id } => *id,

@@ -4838,6 +4838,18 @@ impl App {
                 }
                 false
             }
+            ServerEvent::CompactResult {
+                message, success, ..
+            } => {
+                if success {
+                    self.push_display_message(DisplayMessage::system(message));
+                    self.set_status_notice("📦 Compaction started");
+                } else {
+                    self.push_display_message(DisplayMessage::system(message));
+                    self.set_status_notice("Compaction failed");
+                }
+                false
+            }
             _ => false,
         }
     }
@@ -5109,6 +5121,30 @@ impl App {
                     self.cursor_pos = 0;
                     let trimmed = expanded.trim();
 
+                    // Handle /help - local command, no server needed
+                    if let Some(topic) = trimmed
+                        .strip_prefix("/help ")
+                        .or_else(|| trimmed.strip_prefix("/? "))
+                    {
+                        if let Some(help) = self.command_help(topic) {
+                            self.push_display_message(DisplayMessage::system(help));
+                        } else {
+                            self.push_display_message(DisplayMessage::error(format!(
+                                "Unknown command '{}'. Use `/help` to list commands.",
+                                topic.trim()
+                            )));
+                        }
+                        return Ok(());
+                    }
+
+                    if trimmed == "/help" || trimmed == "/?" || trimmed == "/commands" {
+                        self.follow_chat_bottom();
+                        self.input = trimmed.to_string();
+                        self.cursor_pos = self.input.len();
+                        self.submit_input();
+                        return Ok(());
+                    }
+
                     // Handle /reload - smart reload: client and/or server if newer binary exists
                     if trimmed == "/reload" {
                         let client_needs_reload = self.has_newer_binary();
@@ -5317,6 +5353,14 @@ impl App {
                             "Splitting session...".to_string(),
                         ));
                         remote.split().await?;
+                        return Ok(());
+                    }
+
+                    if trimmed == "/compact" {
+                        self.push_display_message(DisplayMessage::system(
+                            "Requesting compaction...".to_string(),
+                        ));
+                        remote.compact().await?;
                         return Ok(());
                     }
 
