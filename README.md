@@ -11,7 +11,7 @@
 [![Built with Rust](https://img.shields.io/badge/Built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
 A blazing-fast, fully autonomous AI coding agent with a gorgeous TUI,
-multi-model support, swarm coordination, persistent memory, and 30+ built-in tools —
+multi-model support, swarm coordination, persistent memory, and 30+ built-in tools -
 all running natively in your terminal.
 
 <br>
@@ -33,7 +33,7 @@ https://github.com/1jehuang/jcode/raw/master/jcode_demo.mp4
 | Feature | Description |
 |---|---|
 | **Blazing Fast TUI** | Sub-millisecond rendering at 1,400+ FPS. No flicker. No lag. Ever. |
-| **Multi-Provider** | Claude, OpenAI, OpenRouter — 200+ models, switch on the fly |
+| **Multi-Provider** | Claude, OpenAI, OpenRouter - 200+ models, switch on the fly |
 | **No API Keys Needed** | Works with your Claude Max or ChatGPT Pro subscription via OAuth |
 | **Persistent Memory** | Learns about you and your codebase across sessions |
 | **Swarm Mode** | Multiple agents coordinate in the same repo with conflict detection |
@@ -42,7 +42,7 @@ https://github.com/1jehuang/jcode/raw/master/jcode_demo.mp4
 | **Server / Client** | Daemon mode with multi-client attach, session persistence |
 | **Sub-Agents** | Delegate tasks to specialized child agents |
 | **Self-Updating** | Built-in self-dev mode with hot-reload and canary deploys |
-| **Featherweight** | ~28 MB idle client, single native binary — no runtime, no VM, no Electron |
+| **Featherweight** | ~28 MB idle client, single native binary - no runtime, no VM, no Electron |
 
 </div>
 
@@ -76,7 +76,7 @@ as a single compiled binary that sips resources.
 </div>
 
 > **Real-world proof:** Right now on the dev machine there are **10+ jcode sessions**
-> running simultaneously — clients, servers, sub-agents — all totaling less memory
+> running simultaneously - clients, servers, sub-agents - all totaling less memory
 > than a single Electron app window.
 
 The secret is Rust. No garbage collector pausing your UI. No JS event loop
@@ -144,7 +144,7 @@ You need at least one of:
 </div>
 
 ```bash
-# Launch the TUI (default — connects to server or starts one)
+# Launch the TUI (default - connects to server or starts one)
 jcode
 
 # Run a single command non-interactively
@@ -174,7 +174,7 @@ jcode --resume fox
 
 ## Tools
 
-30+ tools available out of the box — and extensible via MCP.
+30+ tools available out of the box - and extensible via MCP.
 
 | Category | Tools | Description |
 |---|---|---|
@@ -260,7 +260,7 @@ graph TB
 **Key Design:**
 - `MultiProvider` detects available credentials at startup
 - Seamless runtime switching between providers with `/model` command
-- Claude direct API with OAuth — no API key needed with a subscription
+- Claude direct API with OAuth - no API key needed with a subscription
 - OpenRouter gives access to 200+ models from all major providers
 
 </details>
@@ -319,7 +319,7 @@ graph TB
     Server --> C3["Client 3<br>External"]
     Server --> Debug["Debug Socket<br>Headless testing"]
 
-    subgraph Swarm["Swarm — Same Working Directory"]
+    subgraph Swarm["Swarm - Same Working Directory"]
         Fox["fox<br>(agent)"]
         Oak["oak<br>(agent)"]
         River["river<br>(agent)"]
@@ -375,10 +375,10 @@ graph LR
 *Measured with 200 conversation turns, full markdown + syntax highlighting, 120×40 terminal.*
 
 **Key UI Components:**
-- **InfoWidget** — floating panel showing model, context usage, todos, session count
-- **Session Picker** — interactive split-pane browser with conversation previews
-- **Mermaid Diagrams** — rendered natively as inline images (Sixel/Kitty/iTerm2 protocols)
-- **Visual Debug** — frame-by-frame capture for debugging rendering
+- **InfoWidget** - floating panel showing model, context usage, todos, session count
+- **Session Picker** - interactive split-pane browser with conversation previews
+- **Mermaid Diagrams** - rendered natively as inline images (Sixel/Kitty/iTerm2 protocols)
+- **Visual Debug** - frame-by-frame capture for debugging rendering
 
 </details>
 
@@ -409,7 +409,7 @@ graph TB
 
 **Compaction:** When context approaches the token limit, older turns are summarized in the background while recent turns are kept verbatim. Full history is always available for RAG search.
 
-**Memory Categories:** `Fact` · `Preference` · `Entity` · `Correction` — with semantic search, graph traversal, and automatic extraction at session end.
+**Memory Categories:** `Fact` · `Preference` · `Entity` · `Correction` - with semantic search, graph traversal, and automatic extraction at session end.
 
 </details>
 
@@ -474,7 +474,7 @@ graph TB
     style Promote fill:#10b981,color:#fff
 ```
 
-jcode can develop itself — edit code, build, hot-reload, and test in-place. If the canary crashes, it auto-rolls back to the last stable binary and wakes with crash context.
+jcode can develop itself - edit code, build, hot-reload, and test in-place. If the canary crashes, it auto-rolls back to the last stable binary and wakes with crash context.
 
 </details>
 
