@@ -340,6 +340,10 @@ impl TuiState for BenchState {
         true
     }
 
+    fn diagram_pane_position(&self) -> jcode::config::DiagramPanePosition {
+        jcode::config::DiagramPanePosition::default()
+    }
+
     fn diagram_zoom(&self) -> u8 {
         100
     }

@@ -1490,6 +1490,10 @@ impl TuiState for ClientApp {
         true
     }
 
+    fn diagram_pane_position(&self) -> crate::config::DiagramPanePosition {
+        crate::config::DiagramPanePosition::default()
+    }
+
     fn diagram_zoom(&self) -> u8 {
         100
     }

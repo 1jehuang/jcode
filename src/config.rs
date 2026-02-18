@@ -88,6 +88,14 @@ pub enum DiagramDisplayMode {
     Pinned,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagramPanePosition {
+    #[default]
+    Side,
+    Top,
+}
+
 /// Display/UI configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

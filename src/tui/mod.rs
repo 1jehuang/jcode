@@ -140,6 +140,8 @@ pub trait TuiState {
     fn diagram_pane_ratio(&self) -> u8;
     /// Whether the pinned diagram pane is visible
     fn diagram_pane_enabled(&self) -> bool;
+    /// Position of pinned diagram pane (side or top)
+    fn diagram_pane_position(&self) -> crate::config::DiagramPanePosition;
     /// Diagram zoom percentage (100 = normal)
     fn diagram_zoom(&self) -> u8;
     /// Interactive model/provider picker state (shown as inline row above input)
