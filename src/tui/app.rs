@@ -9581,7 +9581,12 @@ impl App {
                         // Listen for subagent status updates
                         bus_event = bus_receiver.recv() => {
                             if let Ok(BusEvent::SubagentStatus(status)) = bus_event {
-                                self.subagent_status = Some(status.status);
+                                let display = if let Some(model) = &status.model {
+                                    format!("{} · {}", status.status, model)
+                                } else {
+                                    status.status
+                                };
+                                self.subagent_status = Some(display);
                             }
                         }
                         // Redraw periodically

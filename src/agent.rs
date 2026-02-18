@@ -1380,6 +1380,7 @@ impl Agent {
             Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
                 session_id: self.session.id.clone(),
                 status: "calling API".to_string(),
+                model: Some(self.provider.model()),
             }));
 
             let stamped;
@@ -1408,6 +1409,7 @@ impl Agent {
             Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
                 session_id: self.session.id.clone(),
                 status: "streaming".to_string(),
+                model: Some(self.provider.model()),
             }));
 
             let mut text_content = String::new();
@@ -1833,6 +1835,7 @@ impl Agent {
                 Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
                     session_id: self.session.id.clone(),
                     status: format!("running {}", tc.name),
+                    model: Some(self.provider.model()),
                 }));
 
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;

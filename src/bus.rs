@@ -58,6 +58,7 @@ pub struct ToolSummary {
 pub struct SubagentStatus {
     pub session_id: String,
     pub status: String, // e.g., "calling API", "running grep", "streaming"
+    pub model: Option<String>,
 }
 
 /// Type of file operation for swarm awareness
