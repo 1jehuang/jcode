@@ -2648,15 +2648,16 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
         session.id.clone()
     };
 
-    // Use target/release/jcode as the binary
-    let target_binary = repo_dir.join("target/release/jcode");
+    // Use best available binary: prefer release-fast (10s incremental) over release (5min)
+    let target_binary = build::find_dev_binary(&repo_dir)
+        .unwrap_or_else(|| repo_dir.join("target/release/jcode"));
 
     // Only build if explicitly requested with --build flag
     if should_build {
-        eprintln!("Building release version...");
+        eprintln!("Building (release-fast profile)...");
 
         let build_status = ProcessCommand::new("cargo")
-            .args(["build", "--release"])
+            .args(["build", "--profile", "release-fast"])
             .current_dir(&repo_dir)
             .status()?;
 
@@ -2671,7 +2672,7 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
     if !target_binary.exists() {
         anyhow::bail!(
             "No binary found at {:?}\n\
-             Run 'cargo build --release' first, or use 'jcode self-dev --build'.",
+             Run 'cargo build --profile release-fast' first, or use 'jcode self-dev --build'.",
             target_binary
         );
     }

@@ -5707,10 +5707,11 @@ async fn execute_debug_command(
         let repo_dir = crate::build::get_repo_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository directory"))?;
 
-        let target_binary = repo_dir.join("target/release/jcode");
+        let target_binary = crate::build::find_dev_binary(&repo_dir)
+            .unwrap_or_else(|| repo_dir.join("target/release/jcode"));
         if !target_binary.exists() {
             return Err(anyhow::anyhow!(
-                "No binary found at target/release/jcode. Run 'cargo build --release' first."
+                "No binary found. Run 'cargo build --profile release-fast' first."
             ));
         }
 

@@ -3219,6 +3219,50 @@ pub(crate) fn render_tool_message(
 
     lines.push(Line::from(tool_line));
 
+    // Expand batch sub-calls as individual tool lines
+    if tc.name == "batch" {
+        if let Some(calls) = tc.input.get("tool_calls").and_then(|v| v.as_array()) {
+            // Parse the result content to determine per-sub-call success/error
+            let sub_results = parse_batch_sub_results(&msg.content);
+
+            for (i, call) in calls.iter().enumerate() {
+                let raw_name = call
+                    .get("tool")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let display_name = resolve_display_tool_name(raw_name);
+                let params = call
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+                let sub_tc = ToolCall {
+                    id: String::new(),
+                    name: display_name.to_string(),
+                    input: params,
+                    intent: None,
+                };
+                let sub_summary = get_tool_summary(&sub_tc);
+
+                let sub_errored = sub_results
+                    .get(i)
+                    .copied()
+                    .unwrap_or(false);
+                let (sub_icon, sub_icon_color) = if sub_errored {
+                    ("✗", Color::Rgb(220, 100, 100))
+                } else {
+                    ("✓", Color::Rgb(100, 180, 100))
+                };
+
+                lines.push(Line::from(vec![
+                    Span::styled(format!("    {} ", sub_icon), Style::default().fg(sub_icon_color)),
+                    Span::styled(display_name.to_string(), Style::default().fg(TOOL_COLOR)),
+                    Span::styled(format!(" {}", sub_summary), Style::default().fg(DIM_COLOR)),
+                ]));
+            }
+        }
+    }
+
     // Show diff output for editing tools with syntax highlighting
     if show_diffs && is_edit_tool {
         // Extract file extension for syntax highlighting
@@ -5428,6 +5472,54 @@ fn render_diff_line_with_highlights(
     Line::from(spans)
 }
 
+/// Map provider-side tool names to internal display names.
+/// Mirrors `Registry::resolve_tool_name` so the TUI shows friendly names.
+fn resolve_display_tool_name(name: &str) -> &str {
+    match name {
+        "task" | "task_runner" => "subagent",
+        "shell_exec" => "bash",
+        "file_read" => "read",
+        "file_write" => "write",
+        "file_edit" => "edit",
+        "file_glob" => "glob",
+        "file_grep" => "grep",
+        "todo_read" => "todoread",
+        "todo_write" => "todowrite",
+        other => other,
+    }
+}
+
+/// Parse batch result content to determine per-sub-call success/error.
+/// Returns a Vec<bool> where `true` means that sub-call errored.
+/// The batch output format is:
+///   --- [1] tool_name ---
+///   <output or Error: ...>
+///   --- [2] tool_name ---
+///   ...
+fn parse_batch_sub_results(content: &str) -> Vec<bool> {
+    let mut results = Vec::new();
+    let mut current_errored = false;
+    let mut in_section = false;
+
+    for line in content.lines() {
+        if line.starts_with("--- [") && line.ends_with(" ---") {
+            if in_section {
+                results.push(current_errored);
+            }
+            in_section = true;
+            current_errored = false;
+        } else if in_section
+            && (line.starts_with("Error:") || line.starts_with("error:") || line.starts_with("Failed:"))
+        {
+            current_errored = true;
+        }
+    }
+    if in_section {
+        results.push(current_errored);
+    }
+    results
+}
+
 /// Extract a brief summary from a tool call input (file path, command, etc.)
 fn get_tool_summary(tool: &ToolCall) -> String {
     let truncate = |s: &str, max: usize| {
@@ -5746,35 +5838,13 @@ fn get_tool_summary(tool: &ToolCall) -> String {
             }
         }
         "batch" => {
-            let calls = tool.input.get("tool_calls").and_then(|v| v.as_array());
-            if let Some(calls) = calls {
-                let mut counts: Vec<(String, usize)> = Vec::new();
-                for call in calls {
-                    let name = call
-                        .get("tool")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?")
-                        .to_string();
-                    if let Some(entry) = counts.iter_mut().find(|(n, _)| *n == name) {
-                        entry.1 += 1;
-                    } else {
-                        counts.push((name, 1));
-                    }
-                }
-                let parts: Vec<String> = counts
-                    .iter()
-                    .map(|(name, count)| {
-                        if *count > 1 {
-                            format!("{} ×{}", name, count)
-                        } else {
-                            name.clone()
-                        }
-                    })
-                    .collect();
-                parts.join(", ")
-            } else {
-                "0 tools".to_string()
-            }
+            let count = tool
+                .input
+                .get("tool_calls")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            format!("{} calls", count)
         }
         "subagent" => {
             let desc = tool

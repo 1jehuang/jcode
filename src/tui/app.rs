@@ -3985,7 +3985,7 @@ impl App {
                                 continue 'outer;
                             }
                             Some(server_event) => {
-                                let at_safe_point = if let crate::protocol::ServerEvent::ClientDebugRequest {
+                                if let crate::protocol::ServerEvent::ClientDebugRequest {
                                     id,
                                     command,
                                 } = server_event
@@ -3993,30 +3993,24 @@ impl App {
                                     let output =
                                         self.handle_debug_command_remote(&command, &mut remote).await;
                                     let _ = remote.send_client_debug_response(id, output).await;
-                                    // Fall through to process queued messages (don't continue)
-                                    false
                                 } else {
-                                    self.handle_server_event(server_event, &mut remote)
-                                };
+                                    let _ = self.handle_server_event(server_event, &mut remote);
+                                }
 
                                 // Process pending interleave or queued messages
-                                // If processing: only send interleave via soft interrupt at safe points
+                                // If processing: send any buffered interleave immediately as soft interrupt
                                 // If not processing: send interleave or queued messages directly
                                 if self.is_processing {
-                                    if at_safe_point && self.pending_soft_interrupt.is_none() {
-                                        // Use soft interrupt - no cancel, message injected at next safe point
+                                    if self.interleave_message.is_some() && self.pending_soft_interrupt.is_none() {
+                                        // Flush any leftover interleave buffer (e.g. from debug commands)
                                         if let Some(interleave_msg) = self.interleave_message.take() {
                                             if !interleave_msg.trim().is_empty() {
-                                                // Store as pending - will be added to display_messages when injected
-                                                // This keeps it in the queue preview area until actually sent
                                                 let msg_clone = interleave_msg.clone();
-                                                // Send soft interrupt to server
                                                 if let Err(e) = remote.soft_interrupt(interleave_msg, false).await {
                                                     self.push_display_message(DisplayMessage::error(format!(
                                                         "Failed to queue soft interrupt: {}", e
                                                     )));
                                                 } else {
-                                                    // Only mark as pending if send succeeded
                                                     self.pending_soft_interrupt = Some(msg_clone);
                                                 }
                                             }
@@ -5023,9 +5017,7 @@ impl App {
                         self.queued_messages.push(expanded);
                     }
                     SendAction::Interleave => {
-                        // Keep interleave in pending queue UI until we reach a safe point.
-                        self.interleave_message = Some(expanded);
-                        self.set_status_notice("⏭ Interleave queued");
+                        self.send_interleave_now(expanded, remote).await;
                     }
                 }
             }
@@ -5324,9 +5316,7 @@ impl App {
                             self.queued_messages.push(expanded);
                         }
                         SendAction::Interleave => {
-                            // Keep interleave in pending queue UI until we reach a safe point.
-                            self.interleave_message = Some(expanded);
-                            self.set_status_notice("⏭ Interleave queued");
+                            self.send_interleave_now(expanded, remote).await;
                         }
                     }
                 }
@@ -5863,6 +5853,28 @@ impl App {
         self.pending_images.clear();
         self.cursor_pos = 0;
         self.queued_messages.push(expanded);
+    }
+
+    /// Send an interleave message immediately to the server as a soft interrupt.
+    /// Skips the intermediate buffer stage — goes directly to pending_soft_interrupt.
+    async fn send_interleave_now(
+        &mut self,
+        content: String,
+        remote: &mut super::backend::RemoteConnection,
+    ) {
+        if content.trim().is_empty() {
+            return;
+        }
+        let msg_clone = content.clone();
+        if let Err(e) = remote.soft_interrupt(content, false).await {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Failed to send interleave: {}",
+                e
+            )));
+        } else {
+            self.pending_soft_interrupt = Some(msg_clone);
+            self.set_status_notice("⏭ Interleave sent");
+        }
     }
 
     /// Retrieve the newest pending unsent message into the input for editing.

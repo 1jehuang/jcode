@@ -57,10 +57,10 @@ chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 urlencoding = "2"        # URL encoding for web search
 
-# Embeddings (local inference) - pure Rust, no external deps
-tract-onnx = "0.21"      # ONNX model loading
-tract-hir = "0.21"       # High-level IR for inference
-tokenizers = { version = "0.21", default-features = false, features = ["onig"] }  # BERT tokenizer
+# Embeddings (local inference) - behind feature flag (163 crates, slow to compile)
+tract-onnx = { version = "0.21", optional = true }
+tract-hir = { version = "0.21", optional = true }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"], optional = true }
 
 # OAuth
 base64 = "0.22"
@@ -79,7 +79,7 @@ ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 arboard = "3"              # Clipboard support
 ratatui-image = { version = "4", default-features = false, features = ["crossterm"] }
-image = "0.25"             # Image loading for ratatui-image
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }  # Only PNG/JPEG (skip avif/rav1e, exr, gif, tiff, etc)
 
 # Markdown & syntax highlighting
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
@@ -92,8 +92,8 @@ imap = "2"
 native-tls = "0.2"
 mail-parser = "0.9"
 
-# PDF parsing
-pdf-extract = "0.8"
+# PDF parsing (behind feature flag - 56 crates)
+pdf-extract = { version = "0.8", optional = true }
 
 # Archive extraction (for auto-update)
 flate2 = "1"
@@ -103,8 +103,10 @@ tar = "0.4"
 mermaid-rs-renderer = { git = "ssh://git@github.com/1jehuang/mermaid-rs-renderer.git", tag = "v0.2.0" }
 
 [features]
-default = []
+default = ["embeddings", "pdf"]
 jemalloc = ["tikv-jemallocator"]
+embeddings = ["tract-onnx", "tract-hir", "tokenizers"]
+pdf = ["pdf-extract"]
 
 [profile.release]
 lto = "thin"
@@ -112,12 +114,19 @@ codegen-units = 16
 opt-level = 2
 debug = 0
 
+# Fast release for development iteration (no LTO, max parallelism)
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 256
+incremental = true
+
 [profile.dev]
 debug = 1
 incremental = true
 
 [profile.dev.package."*"]
-opt-level = 2
+opt-level = 1
 
 [dev-dependencies]
 async-stream = "0.3"
