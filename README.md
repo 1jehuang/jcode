@@ -14,12 +14,6 @@ A blazing-fast, fully autonomous AI coding agent with a gorgeous TUI,
 multi-model support, swarm coordination, persistent memory, and 30+ built-in tools —
 all running natively in your terminal.
 
-<br>
-
-<img src="docs/screenshots/demo-fullscreen.png" alt="jcode in action" width="800">
-
-<br>
-
 [Features](#features) · [Install](#installation) · [Usage](#usage) · [Architecture](#architecture) · [Tools](#tools)
 
 </div>
@@ -48,9 +42,9 @@ all running natively in your terminal.
 
 ---
 
-## Performance & Resource Efficiency
-
 <div align="center">
+
+## Performance & Resource Efficiency
 
 *A single native binary. No Node.js. No Electron. No Python. Just Rust.*
 
@@ -85,23 +79,7 @@ to native code with `jemalloc` for memory-efficient long-running sessions.
 
 ---
 
-## Demo
-
 <div align="center">
-
-<img src="docs/screenshots/demo-floating.png" alt="Floating window mode" width="700">
-
-*Floating window with the info widget showing context usage, todos, and session info*
-
-<br>
-
-<img src="docs/screenshots/demo-command-palette.png" alt="Session picker" width="400">
-
-*Interactive session picker with conversation previews*
-
-</div>
-
----
 
 ## Installation
 
@@ -141,8 +119,6 @@ You need at least one of:
 | **OpenRouter** | Set `OPENROUTER_API_KEY=sk-or-v1-...` |
 | **Direct API Key** | Set `ANTHROPIC_API_KEY=sk-ant-...` |
 
-<div align="center">
-
 ### Platform Support
 
 | Platform | Status |
@@ -155,7 +131,11 @@ You need at least one of:
 
 ---
 
+<div align="center">
+
 ## Usage
+
+</div>
 
 ```bash
 # Launch the TUI (default — connects to server or starts one)
@@ -184,13 +164,11 @@ jcode --resume fox
 
 ---
 
-## Tools
-
 <div align="center">
 
-30+ tools available out of the box — and extensible via MCP.
+## Tools
 
-</div>
+30+ tools available out of the box — and extensible via MCP.
 
 | Category | Tools | Description |
 |---|---|---|
@@ -202,9 +180,15 @@ jcode --resume fox
 | **Coordination** | `communicate` `todo_read` `todo_write` | Inter-agent messaging, task tracking |
 | **Meta** | `mcp` `skill` `selfdev` | MCP servers, skill loading, self-development |
 
+</div>
+
 ---
 
+<div align="center">
+
 ## Architecture
+
+</div>
 
 <details>
 <summary><strong>High-Level Overview</strong></summary>
@@ -532,6 +516,8 @@ graph TB
 
 ---
 
+<div align="center">
+
 ## Environment Variables
 
 | Variable | Description |
@@ -542,9 +528,15 @@ graph TB
 | `JCODE_OPENROUTER_MODEL` | Override default OpenRouter model |
 | `JCODE_ANTHROPIC_DEBUG` | Log API request payloads |
 
+</div>
+
 ---
 
+<div align="center">
+
 ## macOS Notes
+
+</div>
 
 jcode runs natively on macOS (Apple Silicon & Intel). Key differences:
 
@@ -555,7 +547,11 @@ jcode runs natively on macOS (Apple Silicon & Intel). Key differences:
 
 ---
 
+<div align="center">
+
 ## Testing
+
+</div>
 
 ```bash
 cargo test                          # All tests
