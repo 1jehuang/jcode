@@ -192,6 +192,7 @@ pub struct StateSnapshot {
     pub diagram_scroll_y: i32,
     pub diagram_pane_ratio: u8,
     pub diagram_pane_enabled: bool,
+    pub diagram_pane_position: Option<String>,
     pub diagram_zoom: u8,
 }
 

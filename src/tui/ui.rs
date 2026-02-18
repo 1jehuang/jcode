@@ -1780,6 +1780,30 @@ fn estimate_pinned_diagram_pane_width(
     )
 }
 
+fn estimate_pinned_diagram_pane_height(
+    diagram: &info_widget::DiagramInfo,
+    pane_width: u16,
+    min_height: u16,
+) -> u16 {
+    const PANE_BORDER: u32 = 2;
+    let inner_width = pane_width.saturating_sub(PANE_BORDER as u16).max(1) as u32;
+    let (cell_w, cell_h) = super::mermaid::get_font_size().unwrap_or((8, 16));
+    let cell_w = cell_w.max(1) as u32;
+    let cell_h = cell_h.max(1) as u32;
+
+    let image_w_cells = div_ceil_u32(diagram.width.max(1), cell_w);
+    let image_h_cells = div_ceil_u32(diagram.height.max(1), cell_h);
+    let fit_h_cells = if image_w_cells > inner_width {
+        div_ceil_u32(image_h_cells.saturating_mul(inner_width), image_w_cells)
+    } else {
+        image_h_cells
+    }
+    .max(1);
+
+    let pane_height = fit_h_cells.saturating_add(PANE_BORDER);
+    pane_height.max(min_height as u32).min(u16::MAX as u32) as u16
+}
+
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let area = frame.area().intersection(*frame.buffer_mut().area());
     if area.width == 0 || area.height == 0 {
@@ -1804,6 +1828,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         0
     };
     let pane_enabled = app.diagram_pane_enabled();
+    let pane_position = app.diagram_pane_position();
     let pinned_diagram =
         if diagram_mode == crate::config::DiagramDisplayMode::Pinned && pane_enabled {
             diagrams.get(selected_index).cloned()
@@ -1813,48 +1838,69 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let diagram_focus = app.diagram_focus();
     let (diagram_scroll_x, diagram_scroll_y) = app.diagram_scroll();
 
-    // Compute diagram pane width using the full terminal height so the
-    // diagram spans the entire vertical space.
-    let mut diagram_width = 0u16;
-    let mut chat_width = area.width;
+    // Compute layout depending on pane position (Side = right column, Top = above chat).
     let mut has_pinned_area = false;
-    if let Some(diagram) = pinned_diagram.as_ref() {
-        const MIN_DIAGRAM_WIDTH: u16 = 24;
-        const MIN_CHAT_WIDTH: u16 = 20;
-        let max_diagram = area.width.saturating_sub(MIN_CHAT_WIDTH);
-        if max_diagram >= MIN_DIAGRAM_WIDTH {
-            let ratio = app.diagram_pane_ratio().clamp(25, 70) as u32;
-            let ratio_cap = ((area.width as u32 * ratio) / 100) as u16;
-            let needed = estimate_pinned_diagram_pane_width(
-                diagram,
-                area.height,
-                MIN_DIAGRAM_WIDTH,
-            );
-            diagram_width = needed
-                .min(ratio_cap)
-                .max(MIN_DIAGRAM_WIDTH)
-                .min(max_diagram);
-            chat_width = area.width.saturating_sub(diagram_width);
-            has_pinned_area = diagram_width > 0 && chat_width > 0;
+    let (chat_area, diagram_area) = if let Some(diagram) = pinned_diagram.as_ref() {
+        match pane_position {
+            crate::config::DiagramPanePosition::Side => {
+                const MIN_DIAGRAM_WIDTH: u16 = 24;
+                const MIN_CHAT_WIDTH: u16 = 20;
+                let max_diagram = area.width.saturating_sub(MIN_CHAT_WIDTH);
+                if max_diagram >= MIN_DIAGRAM_WIDTH {
+                    let ratio = app.diagram_pane_ratio().clamp(25, 70) as u32;
+                    let ratio_cap = ((area.width as u32 * ratio) / 100) as u16;
+                    let needed = estimate_pinned_diagram_pane_width(
+                        diagram,
+                        area.height,
+                        MIN_DIAGRAM_WIDTH,
+                    );
+                    let diagram_width = needed
+                        .min(ratio_cap)
+                        .max(MIN_DIAGRAM_WIDTH)
+                        .min(max_diagram);
+                    let chat_width = area.width.saturating_sub(diagram_width);
+                    has_pinned_area = diagram_width > 0 && chat_width > 0;
+                    if has_pinned_area {
+                        let chat = Rect { x: area.x, y: area.y, width: chat_width, height: area.height };
+                        let diag = Rect { x: area.x + chat_width, y: area.y, width: diagram_width, height: area.height };
+                        (chat, Some(diag))
+                    } else {
+                        (area, None)
+                    }
+                } else {
+                    (area, None)
+                }
+            }
+            crate::config::DiagramPanePosition::Top => {
+                const MIN_DIAGRAM_HEIGHT: u16 = 6;
+                const MIN_CHAT_HEIGHT: u16 = 8;
+                let max_diagram = area.height.saturating_sub(MIN_CHAT_HEIGHT);
+                if max_diagram >= MIN_DIAGRAM_HEIGHT {
+                    let ratio = app.diagram_pane_ratio().clamp(20, 60) as u32;
+                    let ratio_cap = ((area.height as u32 * ratio) / 100) as u16;
+                    let needed = estimate_pinned_diagram_pane_height(
+                        diagram,
+                        area.width,
+                        MIN_DIAGRAM_HEIGHT,
+                    );
+                    let diagram_height = needed
+                        .min(ratio_cap)
+                        .max(MIN_DIAGRAM_HEIGHT)
+                        .min(max_diagram);
+                    let chat_height = area.height.saturating_sub(diagram_height);
+                    has_pinned_area = diagram_height > 0 && chat_height > 0;
+                    if has_pinned_area {
+                        let diag = Rect { x: area.x, y: area.y, width: area.width, height: diagram_height };
+                        let chat = Rect { x: area.x, y: area.y + diagram_height, width: area.width, height: chat_height };
+                        (chat, Some(diag))
+                    } else {
+                        (area, None)
+                    }
+                } else {
+                    (area, None)
+                }
+            }
         }
-    }
-
-    // Horizontal split: [chat_area | diagram_area].
-    // The diagram pane spans the full terminal height.
-    let (chat_area, diagram_area) = if has_pinned_area {
-        let chat = Rect {
-            x: area.x,
-            y: area.y,
-            width: chat_width,
-            height: area.height,
-        };
-        let diagram = Rect {
-            x: area.x + chat_width,
-            y: area.y,
-            width: diagram_width,
-            height: area.height,
-        };
-        (chat, Some(diagram))
     } else {
         (area, None)
     };
@@ -1966,6 +2012,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         capture.state.diagram_scroll_y = diagram_scroll_y;
         capture.state.diagram_pane_ratio = app.diagram_pane_ratio();
         capture.state.diagram_pane_enabled = app.diagram_pane_enabled();
+        capture.state.diagram_pane_position = Some(format!("{:?}", app.diagram_pane_position()));
         capture.state.diagram_zoom = app.diagram_zoom();
 
         // Capture rendered content
@@ -2026,6 +2073,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             diagram_scroll_x,
             diagram_scroll_y,
             app.diagram_zoom(),
+            pane_position,
         );
     }
 
@@ -3631,6 +3679,43 @@ fn vcenter_fitted_image(area: Rect, img_w_px: u32, img_h_px: u32) -> Rect {
     }
 }
 
+/// Check if a diagram is a poor fit for the current pane position.
+/// Returns true when the aspect ratio makes the diagram poorly utilized.
+fn is_diagram_poor_fit(
+    diagram: &info_widget::DiagramInfo,
+    area: Rect,
+    position: crate::config::DiagramPanePosition,
+) -> bool {
+    if diagram.width == 0 || diagram.height == 0 || area.width < 5 || area.height < 3 {
+        return false;
+    }
+    let (cell_w, cell_h) = super::mermaid::get_font_size().unwrap_or((8, 16));
+    let cell_w = cell_w.max(1) as f64;
+    let cell_h = cell_h.max(1) as f64;
+    let inner_w = area.width.saturating_sub(2).max(1) as f64 * cell_w;
+    let inner_h = area.height.saturating_sub(2).max(1) as f64 * cell_h;
+    let img_w = diagram.width as f64;
+    let img_h = diagram.height as f64;
+    let aspect = img_w / img_h.max(1.0);
+
+    match position {
+        crate::config::DiagramPanePosition::Side => {
+            let scale = (inner_w / img_w).min(inner_h / img_h);
+            let used_w = img_w * scale;
+            let used_h = img_h * scale;
+            let utilization = (used_w * used_h) / (inner_w * inner_h);
+            aspect > 2.0 && utilization < 0.35
+        }
+        crate::config::DiagramPanePosition::Top => {
+            let scale = (inner_w / img_w).min(inner_h / img_h);
+            let used_w = img_w * scale;
+            let used_h = img_h * scale;
+            let utilization = (used_w * used_h) / (inner_w * inner_h);
+            aspect < 0.5 && utilization < 0.35
+        }
+    }
+}
+
 /// Draw a pinned diagram in a dedicated pane
 fn draw_pinned_diagram(
     frame: &mut Frame,
@@ -3642,6 +3727,7 @@ fn draw_pinned_diagram(
     scroll_x: i32,
     scroll_y: i32,
     zoom_percent: u8,
+    pane_position: crate::config::DiagramPanePosition,
 ) {
     use ratatui::widgets::{BorderType, Clear, Paragraph, Wrap};
 
@@ -3682,6 +3768,18 @@ fn draw_pinned_diagram(
         " Alt+M toggle",
         Style::default().fg(DIM_COLOR),
     ));
+
+    let poor_fit = is_diagram_poor_fit(diagram, area, pane_position);
+    if poor_fit {
+        let hint = match pane_position {
+            crate::config::DiagramPanePosition::Side => " Alt+T \u{21c4} top",
+            crate::config::DiagramPanePosition::Top => " Alt+T \u{21c4} side",
+        };
+        title_parts.push(Span::styled(
+            hint,
+            Style::default().fg(ACCENT_COLOR).add_modifier(ratatui::style::Modifier::BOLD),
+        ));
+    }
 
     // Draw border with title
     let block = Block::default()
