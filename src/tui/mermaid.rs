@@ -32,11 +32,17 @@ use std::fs;
 use std::hash::{Hash as _, Hasher};
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Instant;
 
 const DEFAULT_RENDER_WIDTH: u32 = 1600;
 const DEFAULT_RENDER_HEIGHT: u32 = 1200;
+
+/// When true, mermaid placeholders include image hashes even without a
+/// terminal image protocol (used by the video export pipeline so it can
+/// embed cached PNGs into the SVG frames).
+static VIDEO_EXPORT_MODE: AtomicBool = AtomicBool::new(false);
 
 /// Global picker for terminal capability detection
 /// Initialized once on first use
@@ -1128,11 +1134,38 @@ pub fn init_picker() {
 
 /// Get the current protocol type (for debugging/display)
 pub fn protocol_type() -> Option<ProtocolType> {
-    PICKER.get().and_then(|p| p.map(|p| p.protocol_type()))
+    let real = PICKER.get().and_then(|p| p.map(|p| p.protocol_type()));
+    if real.is_some() {
+        return real;
+    }
+    if VIDEO_EXPORT_MODE.load(Ordering::Relaxed) {
+        Some(ProtocolType::Halfblocks)
+    } else {
+        None
+    }
 }
 
 pub fn image_protocol_available() -> bool {
-    PICKER.get().and_then(|p| *p).is_some()
+    PICKER.get().and_then(|p| *p).is_some() || VIDEO_EXPORT_MODE.load(Ordering::Relaxed)
+}
+
+/// Enable video-export mode: mermaid images produce hash-placeholder lines
+/// even without a real terminal image protocol.
+pub fn set_video_export_mode(enabled: bool) {
+    VIDEO_EXPORT_MODE.store(enabled, Ordering::Relaxed);
+}
+
+/// Check if video export mode is active.
+pub fn is_video_export_mode() -> bool {
+    VIDEO_EXPORT_MODE.load(Ordering::Relaxed)
+}
+
+/// Look up a cached PNG for the given mermaid content hash.
+/// Returns (path, width, height) if a cached render exists on disk.
+pub fn get_cached_png(hash: u64) -> Option<(PathBuf, u32, u32)> {
+    let mut cache = RENDER_CACHE.lock().ok()?;
+    let diagram = cache.get(hash, None)?;
+    Some((diagram.path, diagram.width, diagram.height))
 }
 
 fn has_render_error(hash: u64) -> bool {
@@ -1728,6 +1761,13 @@ pub fn render_image_widget(
     centered: bool,
     crop_top: bool,
 ) -> u16 {
+    // In video export mode, skip terminal image protocol rendering.
+    // The placeholder marker stays in the buffer so the SVG pipeline
+    // can detect it and embed the cached PNG directly.
+    if VIDEO_EXPORT_MODE.load(Ordering::Relaxed) {
+        return area.height;
+    }
+
     let buf_area = *buf.area();
     let area = area.intersection(buf_area);
 
@@ -1903,6 +1943,10 @@ pub fn render_image_widget_fit(
     centered: bool,
     draw_border: bool,
 ) -> u16 {
+    if VIDEO_EXPORT_MODE.load(Ordering::Relaxed) {
+        return area.height;
+    }
+
     let buf_area = *buf.area();
     let area = area.intersection(buf_area);
 
@@ -2059,6 +2103,10 @@ pub fn render_image_widget_viewport(
     zoom_percent: u8,
     draw_border: bool,
 ) -> u16 {
+    if VIDEO_EXPORT_MODE.load(Ordering::Relaxed) {
+        return area.height;
+    }
+
     let buf_area = *buf.area();
     let area = area.intersection(buf_area);
 
@@ -2269,8 +2317,10 @@ pub fn result_to_content(result: RenderResult, max_width: Option<usize>) -> Merm
             height,
             ..
         } => {
-            // Check if we have picker/protocol support
-            if PICKER.get().and_then(|p| *p).is_some() {
+            // Check if we have picker/protocol support (or video export mode)
+            if PICKER.get().and_then(|p| *p).is_some()
+                || VIDEO_EXPORT_MODE.load(Ordering::Relaxed)
+            {
                 let max_w = max_width.map(|w| w as u16).unwrap_or(80);
                 let estimated_height = estimate_image_height(width, height, max_w);
                 MermaidContent::Image {
@@ -2278,7 +2328,6 @@ pub fn result_to_content(result: RenderResult, max_width: Option<usize>) -> Merm
                     estimated_height,
                 }
             } else {
-                // No image protocol support, fall back to placeholder
                 MermaidContent::Lines(image_placeholder_lines(width, height))
             }
         }
@@ -2347,6 +2396,31 @@ pub fn parse_image_placeholder(line: &Line<'_>) -> Option<u64> {
         }
     }
     None
+}
+
+/// Write a mermaid image marker into a buffer area (for video export mode).
+/// This allows the SVG pipeline to detect the region and embed the cached PNG.
+pub fn write_video_export_marker(hash: u64, area: Rect, buf: &mut Buffer) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let invisible = Style::default().fg(Color::Black).bg(Color::Black);
+    // Use printable marker characters that won't break SVG XML
+    let marker = format!("JMERMAID:{:016x}:END", hash);
+    // Write marker on the first row
+    let y = area.y;
+    for (i, ch) in marker.chars().enumerate() {
+        let x = area.x + i as u16;
+        if x < area.x + area.width {
+            buf[(x, y)].set_char(ch).set_style(invisible);
+        }
+    }
+    // Clear remaining rows (empty for region detection)
+    for row in (area.y + 1)..(area.y + area.height) {
+        for col in area.x..(area.x + area.width) {
+            buf[(col, row)].set_char(' ').set_style(invisible);
+        }
+    }
 }
 
 /// Create placeholder lines for when image protocols aren't available

@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
+use base64::Engine;
 use ratatui::buffer::Buffer;
 use ratatui::style::Color;
+
 use std::path::{Path, PathBuf};
 
 use crate::replay::TimelineEvent;
@@ -53,6 +55,7 @@ pub async fn export_video(
     height: u16,
     fps: u32,
 ) -> Result<()> {
+    crate::tui::mermaid::set_video_export_mode(true);
     let app = crate::tui::App::new_for_replay(session.clone()).await;
 
     let (font_family, font_size) = get_terminal_font();
@@ -64,6 +67,8 @@ pub async fn export_video(
     let frames = app
         .run_headless_replay(timeline, speed, width, height, fps)
         .await?;
+
+    crate::tui::mermaid::set_video_export_mode(false);
 
     let font_px = font_size * 96.0 / 72.0;
     let cell_w = (font_px * 0.6).ceil() as u32;
@@ -288,6 +293,122 @@ fn indexed_color_to_hex(idx: u8) -> String {
     .to_string()
 }
 
+/// A mermaid image region found in the buffer
+#[allow(dead_code)]
+struct MermaidRegion {
+    /// Row where the marker is
+    start_row: u16,
+    /// Number of rows the image occupies (marker + empty rows)
+    height: u16,
+    /// The mermaid content hash
+    hash: u64,
+    /// Path to the cached PNG
+    png_path: PathBuf,
+    /// Image pixel width
+    img_width: u32,
+    /// Image pixel height
+    img_height: u32,
+    /// Column offset where the border indicator starts
+    x_offset: u16,
+}
+
+/// Scan a buffer for mermaid image placeholder markers.
+/// Detects both inline markers (\x00MERMAID_IMAGE:hash\x00) and
+/// video export markers (JMERMAID:hash:END).
+fn find_mermaid_regions(buf: &Buffer) -> Vec<MermaidRegion> {
+    let width = buf.area.width;
+    let height = buf.area.height;
+    let mut regions = Vec::new();
+
+    for y in 0..height {
+        // Build row text while tracking byte-offset-to-column mapping
+        let mut row_text = String::new();
+        let mut byte_to_col: Vec<u16> = Vec::new();
+        for x in 0..width {
+            let sym = buf[(x, y)].symbol();
+            for _ in 0..sym.len() {
+                byte_to_col.push(x);
+            }
+            row_text.push_str(sym);
+        }
+
+        // Try both marker formats
+        let (hash, marker_byte_pos) = if let Some(start) = row_text.find("\x00MERMAID_IMAGE:") {
+            let after = start + "\x00MERMAID_IMAGE:".len();
+            let h = row_text[after..].find('\x00').and_then(|end| {
+                u64::from_str_radix(&row_text[after..after + end], 16).ok()
+            });
+            (h, Some(start))
+        } else if let Some(start) = row_text.find("JMERMAID:") {
+            let after = start + "JMERMAID:".len();
+            let h = row_text[after..].find(":END").and_then(|end| {
+                u64::from_str_radix(&row_text[after..after + end], 16).ok()
+            });
+            (h, Some(start))
+        } else {
+            (None, None)
+        };
+
+        if let Some(hash) = hash {
+            // Convert byte offset to cell column using the mapping
+            let marker_x = marker_byte_pos
+                .and_then(|bp| byte_to_col.get(bp).copied())
+                .unwrap_or(0);
+
+            // Determine the right boundary of the region.
+            // For JMERMAID markers, find the end of the marker text to infer the pane width.
+            // The marker is written into the inner area of a bordered block, so the region
+            // extends from marker_x to approximately the right border (which has non-space chars).
+            // We find the last non-space character on the marker row as the boundary.
+            let region_right = {
+                let mut rx = width;
+                // Scan backwards to find the inner boundary (skip border chars)
+                while rx > marker_x + 1 {
+                    rx -= 1;
+                    let s = buf[(rx, y)].symbol();
+                    if s != " " && !s.is_empty() && !s.starts_with("JMERMAID") {
+                        // This is likely a border char - the inner region is to the left of it
+                        break;
+                    }
+                }
+                rx // right boundary (exclusive) — the border column
+            };
+
+            // Count consecutive empty rows below for image height
+            let mut region_height = 1u16;
+            for y2 in (y + 1)..height {
+                let mut empty = true;
+                for x in marker_x..region_right {
+                    let s = buf[(x, y2)].symbol();
+                    if s != " " && !s.is_empty() {
+                        empty = false;
+                        break;
+                    }
+                }
+                if empty {
+                    region_height += 1;
+                } else {
+                    break;
+                }
+            }
+
+            // Look up cached PNG
+            if let Some((png_path, img_w, img_h)) = crate::tui::mermaid::get_cached_png(hash) {
+                regions.push(MermaidRegion {
+                    start_row: y,
+                    height: region_height,
+                    hash,
+                    png_path,
+                    img_width: img_w,
+                    img_height: img_h,
+                    x_offset: marker_x,
+                });
+            }
+        }
+    }
+    regions
+}
+
 fn buffer_to_svg(
     buf: &Buffer,
     font_family: &str,
@@ -300,9 +421,22 @@ fn buffer_to_svg(
     let img_w = cell_w * width as u32;
     let img_h = cell_h * height as u32;
 
+    // Find mermaid image regions
+    let mermaid_regions = find_mermaid_regions(buf);
+    // Track which cell ranges to skip (row -> (start_x, end_x))
+    let mut skip_ranges: std::collections::HashMap<u16, Vec<(u16, u16)>> = std::collections::HashMap::new();
+    for region in &mermaid_regions {
+        for r in region.start_row..(region.start_row + region.height) {
+            skip_ranges
+                .entry(r)
+                .or_default()
+                .push((region.x_offset, width));
+        }
+    }
+
     let mut svg = String::with_capacity(img_w as usize * img_h as usize / 4);
     svg.push_str(&format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{}" height="{}" viewBox="0 0 {} {}">"##,
         img_w, img_h, img_w, img_h
     ));
 
@@ -322,9 +456,23 @@ fn buffer_to_svg(
     // Render cells: batch adjacent cells with same bg color into rectangles,
     // then render text on top
     for y in 0..height {
+        // Check if this row has mermaid skip ranges
+        let skip = skip_ranges.get(&y);
+        let should_skip_cell = |x: u16| -> bool {
+            if let Some(ranges) = skip {
+                ranges.iter().any(|(sx, ex)| x >= *sx && x < *ex)
+            } else {
+                false
+            }
+        };
+
         // Background rectangles (batch runs of same bg color)
         let mut x = 0u16;
         while x < width {
+            if should_skip_cell(x) {
+                x += 1;
+                continue;
+            }
             let cell = &buf[(x, y)];
             let bg = color_to_bg_hex(cell.bg);
             if bg == "#000000" {
@@ -332,7 +480,7 @@ fn buffer_to_svg(
                 continue;
             }
             let start_x = x;
-            while x < width && color_to_bg_hex(buf[(x, y)].bg) == bg {
+            while x < width && !should_skip_cell(x) && color_to_bg_hex(buf[(x, y)].bg) == bg {
                 x += 1;
             }
             svg.push_str(&format!(
@@ -345,38 +493,69 @@ fn buffer_to_svg(
             ));
         }
 
-        // Text (batch runs of same fg/style)
+        // Text and box-drawing characters
         x = 0;
         while x < width {
+            if should_skip_cell(x) {
+                x += 1;
+                continue;
+            }
             let cell = &buf[(x, y)];
             let sym = cell.symbol();
             if sym == " " || sym.is_empty() {
                 x += 1;
                 continue;
             }
+            if sym.contains('\x00') {
+                x += 1;
+                continue;
+            }
+
+            // Check if this is a box-drawing character
+            let first_char = sym.chars().next().unwrap_or(' ');
+            if is_box_drawing(first_char) {
+                let fg = color_to_hex(cell.fg);
+                if let Some(fragment) = box_drawing_to_svg(
+                    first_char,
+                    x as u32 * cell_w,
+                    y as u32 * cell_h,
+                    cell_w,
+                    cell_h,
+                    &fg,
+                ) {
+                    svg.push_str(&fragment);
+                }
+                x += 1;
+                continue;
+            }
+
             let fg = color_to_hex(cell.fg);
             let bold = cell.modifier.contains(ratatui::style::Modifier::BOLD);
 
-            // Batch consecutive chars with same style
+            // Batch consecutive non-box-drawing chars with same style
             let start_x = x;
             let mut text_run = String::new();
-            while x < width {
+            while x < width && !should_skip_cell(x) {
                 let c = &buf[(x, y)];
+                let s = c.symbol();
+                if s.is_empty() || s.contains('\x00') {
+                    x += 1;
+                    continue;
+                }
+                // Stop batching if we hit a box-drawing char
+                let ch = s.chars().next().unwrap_or(' ');
+                if is_box_drawing(ch) {
+                    break;
+                }
                 if color_to_hex(c.fg) != fg
                     || c.modifier.contains(ratatui::style::Modifier::BOLD) != bold
                 {
                     break;
                 }
-                let s = c.symbol();
-                if s.is_empty() {
-                    x += 1;
-                    continue;
-                }
                 text_run.push_str(s);
                 x += 1;
             }
 
-            // Trim trailing spaces
             let trimmed = text_run.trim_end();
             if trimmed.is_empty() {
                 continue;
@@ -396,6 +575,42 @@ fn buffer_to_svg(
         }
     }
 
+    // Embed mermaid PNG images
+    for region in &mermaid_regions {
+        if let Ok(png_data) = std::fs::read(&region.png_path) {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
+
+            // Calculate image placement within the region
+            let region_x = region.x_offset as u32 * cell_w;
+            let region_y = region.start_row as u32 * cell_h;
+            let region_w = (width as u32 - region.x_offset as u32) * cell_w;
+            let region_h = region.height as u32 * cell_h;
+
+            // Scale image to fit within the region while preserving aspect ratio
+            let aspect = region.img_width as f64 / region.img_height as f64;
+            let (draw_w, draw_h) = if region_w as f64 / region_h as f64 > aspect {
+                // Region is wider than image aspect — fit by height
+                let h = region_h;
+                let w = (h as f64 * aspect) as u32;
+                (w, h)
+            } else {
+                // Region is taller than image aspect — fit by width
+                let w = region_w;
+                let h = (w as f64 / aspect) as u32;
+                (w, h)
+            };
+
+            // Center the image within the region
+            let draw_x = region_x + (region_w.saturating_sub(draw_w)) / 2;
+            let draw_y = region_y + (region_h.saturating_sub(draw_h)) / 2;
+
+            svg.push_str(&format!(
+                r#"<image x="{}" y="{}" width="{}" height="{}" href="data:image/png;base64,{}"/>"#,
+                draw_x, draw_y, draw_w, draw_h, b64
+            ));
+        }
+    }
+
     svg.push_str("</svg>");
     svg
 }
@@ -406,6 +621,185 @@ fn xml_escape(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+}
+
+fn is_box_drawing(ch: char) -> bool {
+    ('\u{2500}'..='\u{257F}').contains(&ch)
+        || ('\u{2580}'..='\u{259F}').contains(&ch) // block elements
+}
+
+/// Render a single box-drawing character as SVG path/line elements.
+/// Returns Some(svg_fragment) if the character is handled, None otherwise.
+fn box_drawing_to_svg(
+    ch: char,
+    px: u32,
+    py: u32,
+    cw: u32,
+    ch_h: u32,
+    color: &str,
+) -> Option<String> {
+    let cx = px + cw / 2;
+    let cy = py + ch_h / 2;
+    let b = py + ch_h;
+    let right = px + cw;
+
+    // Line thickness
+    let t = 1.5_f64;
+    let t2 = 2.5_f64; // thick/double
+
+    // Helper: horizontal and vertical line segments
+    // For each box-drawing char, we draw lines from center to edges
+    // L=left, R=right, U=up, D=down
+    let (left, right_seg, up, down, thick) = match ch {
+        // Light lines
+        '─' => (true, true, false, false, false),
+        '│' => (false, false, true, true, false),
+        '┌' => (false, true, false, true, false),
+        '┐' => (true, false, false, true, false),
+        '└' => (false, true, true, false, false),
+        '┘' => (true, false, true, false, false),
+        '├' => (false, true, true, true, false),
+        '┤' => (true, false, true, true, false),
+        '┬' => (true, true, false, true, false),
+        '┴' => (true, true, true, false, false),
+        '┼' => (true, true, true, true, false),
+        // Rounded corners
+        '╭' => {
+            // Rounded top-left: arc from center-bottom to center-right
+            return Some(format!(
+                r#"<path d="M {cx},{b} L {cx},{cy} Q {cx},{py} {right},{py}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
+                cx = cx, b = b, cy = cy, py = py, right = right, color = color, t = t
+            ));
+        }
+        '╮' => {
+            // Rounded top-right: arc from center-left to center-bottom
+            return Some(format!(
+                r#"<path d="M {px},{py} Q {cx},{py} {cx},{cy} L {cx},{b}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
+                px = px, py = py, cx = cx, cy = cy, b = b, color = color, t = t
+            ));
+        }
+        '╰' => {
+            // Rounded bottom-left: arc from center-top to center-right
+            return Some(format!(
+                r#"<path d="M {cx},{py} L {cx},{cy} Q {cx},{b} {right},{b}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
+                cx = cx, py = py, cy = cy, b = b, right = right, color = color, t = t
+            ));
+        }
+        '╯' => {
+            // Rounded bottom-right: arc from center-left to center-top
+            return Some(format!(
+                r#"<path d="M {px},{b} Q {cx},{b} {cx},{cy} L {cx},{py}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
+                px = px, b = b, cx = cx, cy = cy, py = py, color = color, t = t
+            ));
+        }
+        // Heavy lines
+        '━' => (true, true, false, false, true),
+        '┃' => (false, false, true, true, true),
+        '┏' => (false, true, false, true, true),
+        '┓' => (true, false, false, true, true),
+        '┗' => (false, true, true, false, true),
+        '┛' => (true, false, true, false, true),
+        '┣' => (false, true, true, true, true),
+        '┫' => (true, false, true, true, true),
+        '┳' => (true, true, false, true, true),
+        '┻' => (true, true, true, false, true),
+        '╋' => (true, true, true, true, true),
+        // Double lines
+        '═' => {
+            let g = 1u32;
+            return Some(format!(
+                concat!(
+                    r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#,
+                    r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#,
+                ),
+                px, cy - g, right, cy - g, color, t,
+                px, cy + g, right, cy + g, color, t,
+            ));
+        }
+        '║' => {
+            let g = 1u32;
+            return Some(format!(
+                concat!(
+                    r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#,
+                    r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#,
+                ),
+                cx - g, py, cx - g, b, color, t,
+                cx + g, py, cx + g, b, color, t,
+            ));
+        }
+        // Block elements
+        '█' => {
+            return Some(format!(
+                r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#,
+                px, py, cw, ch_h, color
+            ));
+        }
+        '▀' => {
+            return Some(format!(
+                r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#,
+                px, py, cw, ch_h / 2, color
+            ));
+        }
+        '▄' => {
+            return Some(format!(
+                r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#,
+                px, py + ch_h / 2, cw, ch_h / 2, color
+            ));
+        }
+        '▌' => {
+            return Some(format!(
+                r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#,
+                px, py, cw / 2, ch_h, color
+            ));
+        }
+        '▐' => {
+            return Some(format!(
+                r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#,
+                px + cw / 2, py, cw / 2, ch_h, color
+            ));
+        }
+        '░' | '▒' | '▓' => {
+            let opacity = match ch {
+                '░' => 0.25,
+                '▒' => 0.50,
+                '▓' => 0.75,
+                _ => 0.5,
+            };
+            return Some(format!(
+                r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}" opacity="{}"/>"#,
+                px, py, cw, ch_h, color, opacity
+            ));
+        }
+        _ => return None,
+    };
+
+    let stroke_w = if thick { t2 } else { t };
+    let mut svg = String::new();
+    if left {
+        svg.push_str(&format!(
+            r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}" stroke-linecap="round"/>"#,
+            px, cy, cx, cy, color, stroke_w
+        ));
+    }
+    if right_seg {
+        svg.push_str(&format!(
+            r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}" stroke-linecap="round"/>"#,
+            cx, cy, right, cy, color, stroke_w
+        ));
+    }
+    if up {
+        svg.push_str(&format!(
+            r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}" stroke-linecap="round"/>"#,
+            cx, py, cx, cy, color, stroke_w
+        ));
+    }
+    if down {
+        svg.push_str(&format!(
+            r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}" stroke-linecap="round"/>"#,
+            cx, cy, cx, b, color, stroke_w
+        ));
+    }
+    Some(svg)
 }
 
 

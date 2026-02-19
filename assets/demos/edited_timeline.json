@@ -1,0 +1,393 @@
+[
+  {
+    "t": 1500,
+    "event": "user_message",
+    "text": "make me a simple flowchart. "
+  },
+  {
+    "t": 8383,
+    "event": "thinking",
+    "duration": 800
+  },
+  {
+    "t": 10022,
+    "event": "stream_text",
+    "text": "\n\n```mermaid\nflowchart TD\n    A[Start] --> B{Decision?}\n    B -->|Yes| C[Do Something]\n    B -->|No| D[Do Something Else]\n    C --> E[Process Result]\n    D --> E\n    E --> F{Another Check?}\n    F -->|Yes| B\n    F -->|No| G[End]\n```",
+    "speed": 80
+  },
+  {
+    "t": 11500,
+    "event": "token_usage",
+    "input": 447,
+    "output": 96,
+    "cache_read": 6487,
+    "cache_creation": 8560
+  },
+  {
+    "t": 11500,
+    "event": "done"
+  },
+  {
+    "t": 14500,
+    "event": "user_message",
+    "text": "epxlore this codebase, and then make just a simple diagram of the memory arhcitecutre"
+  },
+  {
+    "t": 18318,
+    "event": "thinking",
+    "duration": 800
+  },
+  {
+    "t": 18931,
+    "event": "stream_text",
+    "text": "\n\nLet me explore the memory-related code in this codebase first.",
+    "speed": 80
+  },
+  {
+    "t": 19085,
+    "event": "token_usage",
+    "input": 37,
+    "output": 156,
+    "cache_read": 15047,
+    "cache_creation": 541
+  },
+  {
+    "t": 19085,
+    "event": "tool_start",
+    "name": "batch",
+    "input": {
+      "tool_calls": [
+        {
+          "parameters": {
+            "include": "*.rs",
+            "path": "src/",
+            "pattern": "mod memory|pub struct Memory|memory"
+          },
+          "tool": "file_grep"
+        },
+        {
+          "parameters": {
+            "path": "src/"
+          },
+          "tool": "ls"
+        },
+        {
+          "parameters": {
+            "pattern": "src/**/*memory*"
+          },
+          "tool": "file_glob"
+        }
+      ]
+    }
+  },
+  {
+    "t": 19238,
+    "event": "tool_done",
+    "name": "batch",
+    "output": "--- [1] file_grep ---\nFound 100 matches for 'mod memory|pub struct Memory|memory'\n\nprovider/anthropic.rs:\n  1055:         // Dynamic content - NOT cached (date, git status, memory)\n\nprovider/openrouter.rs:\n   400: /// In-memory cache\n   612:     /// In-memory cache of per-model endpoint data\n   979:         // Check in-memory cache first\n  1024:         // Update in-memory cache\n  1036:         // Clear in-memory cache\n  1058:         // Check in-memory cache\n  1111:         // Update in-memo...",
+    "is_error": false
+  },
+  {
+    "t": 22045,
+    "event": "thinking",
+    "duration": 800
+  },
+  {
+    "t": 22659,
+    "event": "token_usage",
+    "input": 814,
+    "output": 211,
+    "cache_read": 15588,
+    "cache_creation": 188
+  },
+  {
+    "t": 22659,
+    "event": "tool_start",
+    "name": "batch",
+    "input": {
+      "tool_calls": [
+        {
+          "parameters": {
+            "file_path": "src/memory.rs",
+            "limit": 120
+          },
+          "tool": "file_read"
+        },
+        {
+          "parameters": {
+            "file_path": "src/memory_graph.rs",
+            "limit": 120
+          },
+          "tool": "file_read"
+        },
+        {
+          "parameters": {
+            "file_path": "src/memory_agent.rs",
+            "limit": 120
+          },
+          "tool": "file_read"
+        },
+        {
+          "parameters": {
+            "file_path": "src/tool/memory.rs",
+            "limit": 120
+          },
+          "tool": "file_read"
+        },
+        {
+          "parameters": {
+            "file_path": "src/tool/remember.rs",
+            "limit": 80
+          },
+          "tool": "file_read"
+        }
+      ]
+    }
+  },
+  {
+    "t": 22812,
+    "event": "tool_done",
+    "name": "batch",
+    "output": "--- [1] file_read ---\n    1\t//! Memory system for cross-session learning\n    2\t//!\n    3\t//! Provides persistent memory that survives across sessions, organized by:\n    4\t//! - Project (per working directory)\n    5\t//! - Global (user-level preferences)\n    6\t//!\n    7\t//! Integrates with the Haiku sidecar for relevance verification and extraction.\n    8\t\n    9\tuse crate::memory_graph::{EdgeKind, MemoryGraph, GRAPH_VERSION};\n   10\tuse crate::sidecar::HaikuSidecar;\n   11\tuse crate::storage;\n   ...",
+    "is_error": false
+  },
+  {
+    "t": 25459,
+    "event": "thinking",
+    "duration": 800
+  },
+  {
+    "t": 26072,
+    "event": "token_usage",
+    "input": 1840,
+    "output": 252,
+    "cache_read": 15776,
+    "cache_creation": 1025
+  },
+  {
+    "t": 26072,
+    "event": "tool_start",
+    "name": "batch",
+    "input": {
+      "tool_calls": [
+        {
+          "parameters": {
+            "file_path": "src/memory.rs",
+            "limit": 200,
+            "offset": 120
+          },
+          "tool": "file_read"
+        },
+        {
+          "parameters": {
+            "file_path": "src/memory_graph.rs",
+            "limit": 150,
+            "offset": 120
+          },
+          "tool": "file_read"
+        },
+        {
+          "parameters": {
+            "file_path": "src/memory_agent.rs",
+            "limit": 150,
+            "offset": 120
+          },
+          "tool": "file_read"
+        },
+        {
+          "parameters": {
+            "include": "*.rs",
+            "path": "src/",
+            "pattern": "pub struct.*Embed|mod embedding|pub fn embed"
+          },
+          "tool": "file_grep"
+        },
+        {
+          "parameters": {
+            "include": "*.rs",
+            "path": "src/",
+            "pattern": "HaikuSidecar|mod sidecar"
+          },
+          "tool": "file_grep"
+        }
+      ]
+    }
+  },
+  {
+    "t": 26225,
+    "event": "tool_done",
+    "name": "batch",
+    "output": "--- [1] file_read ---\n  121\t        .map(str::trim)\n  122\t        .filter(|line| !line.is_empty())\n  123\t        .collect::<Vec<_>>()\n  124\t        .join(\"\\n\")\n  125\t        .to_lowercase()\n  126\t}\n  127\t\n  128\t/// Take pending memory if available and fresh\n  129\tpub fn take_pending_memory() -> Option<PendingMemory> {\n  130\t    if let Ok(mut guard) = PENDING_MEMORY.lock() {\n  131\t        if let Some(pending) = guard.take() {\n  132\t            if !pending.is_fresh() {\n  133\t                ret...",
+    "is_error": false
+  },
+  {
+    "t": 28363,
+    "event": "thinking",
+    "duration": 800
+  },
+  {
+    "t": 28977,
+    "event": "token_usage",
+    "input": 1606,
+    "output": 194,
+    "cache_read": 16801,
+    "cache_creation": 2092
+  },
+  {
+    "t": 28977,
+    "event": "tool_start",
+    "name": "batch",
+    "input": {
+      "tool_calls": [
+        {
+          "parameters": {
+            "file_path": "src/embedding.rs",
+            "limit": 80
+          },
+          "tool": "file_read"
+        },
+        {
+          "parameters": {
+            "file_path": "src/sidecar.rs",
+            "limit": 80
+          },
+          "tool": "file_read"
+        },
+        {
+          "parameters": {
+            "file_path": "src/memory.rs",
+            "limit": 200,
+            "offset": 300
+          },
+          "tool": "file_read"
+        },
+        {
+          "parameters": {
+            "include": "*.rs",
+            "path": "src/",
+            "pattern": "struct MemoryManager|impl MemoryManager"
+          },
+          "tool": "file_grep"
+        }
+      ]
+    }
+  },
+  {
+    "t": 29130,
+    "event": "tool_done",
+    "name": "batch",
+    "output": "--- [1] file_read ---\n    1\t//! Local embedding generation using all-MiniLM-L6-v2\n    2\t//!\n    3\t//! Provides fast, free, consistent embeddings for memory similarity search.\n    4\t//! Uses tract for pure-Rust ONNX inference (no external dependencies).\n    5\t\n    6\tuse anyhow::{Context, Result};\n    7\tuse std::path::PathBuf;\n    8\tuse std::sync::{Arc, Mutex, OnceLock};\n    9\tuse std::time::{Duration, Instant};\n   10\tuse tokenizers::Tokenizer;\n   11\tuse tract_hir::prelude::*;\n   12\tuse tract_o...",
+    "is_error": false
+  },
+  {
+    "t": 31410,
+    "event": "thinking",
+    "duration": 800
+  },
+  {
+    "t": 32024,
+    "event": "token_usage",
+    "input": 1190,
+    "output": 167,
+    "cache_read": 18893,
+    "cache_creation": 1800
+  },
+  {
+    "t": 32024,
+    "event": "tool_start",
+    "name": "batch",
+    "input": {
+      "tool_calls": [
+        {
+          "parameters": {
+            "file_path": "src/memory.rs",
+            "limit": 150,
+            "offset": 870
+          },
+          "tool": "file_read"
+        },
+        {
+          "parameters": {
+            "file_path": "src/memory_agent.rs",
+            "limit": 200,
+            "offset": 150
+          },
+          "tool": "file_read"
+        },
+        {
+          "parameters": {
+            "include": "*.rs",
+            "path": "src/",
+            "pattern": "MemoryStore|struct.*Store"
+          },
+          "tool": "file_grep"
+        }
+      ]
+    }
+  },
+  {
+    "t": 32177,
+    "event": "tool_done",
+    "name": "batch",
+    "output": "--- [1] file_read ---\n  871\t    project_dir: Option<PathBuf>,\n  872\t    /// When true, use isolated test storage instead of real memory\n  873\t    test_mode: bool,\n  874\t}\n  875\t\n  876\timpl MemoryManager {\n  877\t    pub fn new() -> Self {\n  878\t        Self {\n  879\t            project_dir: None,\n  880\t            test_mode: false,\n  881\t        }\n  882\t    }\n  883\t\n  884\t    /// Create a memory manager in test mode (isolated storage)\n  885\t    pub fn new_test() -> Self {\n  886\t        Self {\n ...",
+    "is_error": false
+  },
+  {
+    "t": 33733,
+    "event": "thinking",
+    "duration": 800
+  },
+  {
+    "t": 34346,
+    "event": "token_usage",
+    "input": 1077,
+    "output": 93,
+    "cache_read": 20693,
+    "cache_creation": 1357
+  },
+  {
+    "t": 34346,
+    "event": "tool_start",
+    "name": "read",
+    "input": {
+      "file_path": "src/memory.rs",
+      "limit": 80,
+      "offset": 570
+    }
+  },
+  {
+    "t": 34500,
+    "event": "tool_done",
+    "name": "read",
+    "output": "  571\t            \"entity\" => MemoryCategory::Entity,\n  572\t            \"correction\" => MemoryCategory::Correction,\n  573\t            other => MemoryCategory::Custom(other.to_string()),\n  574\t        })\n  575\t    }\n  576\t}\n  577\t\n  578\t#[derive(Debug, Clone, Serialize, Deserialize, Default)]\n  579\tpub struct MemoryStore {\n  580\t    pub entries: Vec<MemoryEntry>,\n  581\t    #[serde(default)]\n  582\t    pub metadata: HashMap<String, String>,\n  583\t}\n  584\t\n  585\timpl MemoryStore {\n  586\t    pub f...",
+    "is_error": false
+  },
+  {
+    "t": 37500,
+    "event": "user_message",
+    "text": "a very simplifed version of it "
+  },
+  {
+    "t": 47652,
+    "event": "thinking",
+    "duration": 800
+  },
+  {
+    "t": 48497,
+    "event": "stream_text",
+    "text": "\n\n```mermaid\nflowchart TD\n    A[\"\ud83e\udde0 Memory Tool\\n(agent-facing API)\"]\n    B[\"\ud83d\udcdd Remember Tool\\n(simple notes)\"]\n\n    A --> C[\"MemoryManager\\n(project + global scope)\"]\n    B --> D[\"NoteStore\\n(JSON file per project)\"]\n\n    C --> E[\"MemoryStore\\n(entries, categories, tags)\"]\n    C --> F[\"MemoryGraph\\n(edges, clusters, BFS traversal)\"]\n\n    E --> G[\"\ud83d\udcbe JSON Files\\n~/.jcode/memory/\"]\n    F --> G\n\n    H[\"\ud83e\udd16 Memory Agent\\n(background async)\"] --> C\n    H --> I[\"Embedder\\n(all-MiniLM-L6-v2, local ONNX)\"]\n    H --> J[\"Haiku Sidecar\\n(relevance checks via LLM)\"]\n\n    I -->|similarity search| F\n    J -->|decide what's relevant| K[\"PENDING_MEMORY\\n(injected into system prompt)\"]\n\n    K -->|surfaces memories| L[\"Main Agent\"]\n    L -->|context updates| H\n\n    style A fill:#4a9eff,color:#fff\n    style B fill:#4a9eff,color:#fff\n    style H fill:#ff9f43,color:#fff\n    style G fill:#2ecc71,color:#fff\n    style L fill:#9b59b6,color:#fff\n```\n\nThe main agent talks to the **Memory Agent** in the background. The memory agent uses **local embeddings** for similarity search and a **Haiku sidecar** (cheap LLM) to judge relevance, then injects relevant memories into the system prompt for the main agent to see.",
+    "speed": 80
+  },
+  {
+    "t": 52500,
+    "event": "token_usage",
+    "input": 1115,
+    "output": 427,
+    "cache_read": 22050,
+    "cache_creation": 1170
+  },
+  {
+    "t": 52500,
+    "event": "done"
+  }
+]
