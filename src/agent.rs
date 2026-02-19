@@ -343,7 +343,6 @@ impl Agent {
 
         if repaired > 0 {
             let _ = self.session.save();
-            self.seed_compaction_from_session();
             self.cache_tracker.reset();
             self.locked_tools = None;
         }
