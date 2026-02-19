@@ -1665,7 +1665,10 @@ fn profile_enabled() -> bool {
 }
 
 fn record_profile(prepare: Duration, draw: Duration, total: Duration) {
-    let mut state = profile_state().lock().unwrap();
+    let mut state = match profile_state().lock() {
+        Ok(s) => s,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     state.frames += 1;
     state.prepare += prepare;
     state.draw += draw;
@@ -2925,7 +2928,15 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> PreparedMessages {
         diagram_mode: app.diagram_mode(),
     };
 
-    let mut cache = body_cache().lock().unwrap();
+    let mut cache = match body_cache().lock() {
+        Ok(c) => c,
+        Err(poisoned) => {
+            let mut c = poisoned.into_inner();
+            c.key = None;
+            c.prepared = None;
+            c
+        }
+    };
     if cache.key.as_ref() == Some(&key) {
         if let Some(prepared) = cache.prepared.clone() {
             return prepared;
@@ -3139,7 +3150,10 @@ where
         diagram_mode: crate::config::config().display.diagram_mode,
     };
 
-    let mut cache = message_cache().lock().unwrap();
+    let mut cache = match message_cache().lock() {
+        Ok(c) => c,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     if let Some(lines) = cache.get(&key) {
         return lines;
     }
@@ -5524,11 +5538,10 @@ fn parse_batch_sub_results(content: &str) -> Vec<bool> {
 
 /// Extract a brief summary from a tool call input (file path, command, etc.)
 fn get_tool_summary(tool: &ToolCall) -> String {
-    let truncate = |s: &str, max: usize| {
-        if s.len() > max {
-            format!("{}...", &s[..max])
-        } else {
-            s.to_string()
+    let truncate = |s: &str, max_chars: usize| {
+        match s.char_indices().nth(max_chars) {
+            Some((byte_idx, _)) => format!("{}...", &s[..byte_idx]),
+            None => s.to_string(),
         }
     };
 
