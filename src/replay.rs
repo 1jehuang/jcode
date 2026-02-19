@@ -260,6 +260,7 @@ pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, Replay
     let mut prev_t: u64 = 0;
     let mut turn_id: u64 = 1;
     let mut tool_id_counter: u64 = 0;
+    let mut pending_tool_ids: Vec<String> = Vec::new();
 
     for event in timeline {
         let delay = event.t.saturating_sub(prev_t);
@@ -290,6 +291,7 @@ pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, Replay
             TimelineEventKind::ToolStart { name, input } => {
                 tool_id_counter += 1;
                 let id = format!("replay_tool_{}", tool_id_counter);
+                pending_tool_ids.push(id.clone());
 
                 out.push((
                     delay,
@@ -322,8 +324,10 @@ pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, Replay
                 output,
                 is_error,
             } => {
-                tool_id_counter += 1;
-                let id = format!("replay_tool_{}", tool_id_counter);
+                let id = pending_tool_ids.pop().unwrap_or_else(|| {
+                    tool_id_counter += 1;
+                    format!("replay_tool_{}", tool_id_counter)
+                });
                 out.push((
                     delay,
                     ReplayEvent::Server(ServerEvent::ToolDone {
@@ -572,5 +576,97 @@ mod tests {
             &replay_events[2].1,
             ReplayEvent::Server(ServerEvent::TextDelta { .. })
         ));
+    }
+
+    #[test]
+    fn test_tool_ids_match_between_start_and_done() {
+        let events = vec![
+            TimelineEvent {
+                t: 0,
+                kind: TimelineEventKind::ToolStart {
+                    name: "file_read".to_string(),
+                    input: serde_json::json!({"file_path": "/tmp/test.rs"}),
+                },
+            },
+            TimelineEvent {
+                t: 500,
+                kind: TimelineEventKind::ToolDone {
+                    name: "file_read".to_string(),
+                    output: "fn main() {}".to_string(),
+                    is_error: false,
+                },
+            },
+        ];
+
+        let replay_events = timeline_to_replay_events(&events);
+
+        let start_id = replay_events.iter().find_map(|(_, e)| match e {
+            ReplayEvent::Server(ServerEvent::ToolStart { id, .. }) => Some(id.clone()),
+            _ => None,
+        });
+        let exec_id = replay_events.iter().find_map(|(_, e)| match e {
+            ReplayEvent::Server(ServerEvent::ToolExec { id, .. }) => Some(id.clone()),
+            _ => None,
+        });
+        let done_id = replay_events.iter().find_map(|(_, e)| match e {
+            ReplayEvent::Server(ServerEvent::ToolDone { id, .. }) => Some(id.clone()),
+            _ => None,
+        });
+
+        assert!(start_id.is_some(), "Should have ToolStart");
+        assert_eq!(start_id, exec_id, "ToolStart and ToolExec IDs must match");
+        assert_eq!(start_id, done_id, "ToolStart and ToolDone IDs must match");
+    }
+
+    #[test]
+    fn test_batch_tool_input_preserved() {
+        let batch_input = serde_json::json!({
+            "tool_calls": [
+                {"tool": "file_read", "parameters": {"file_path": "/tmp/a.rs"}},
+                {"tool": "file_read", "parameters": {"file_path": "/tmp/b.rs"}},
+                {"tool": "file_grep", "parameters": {"pattern": "foo"}},
+            ]
+        });
+
+        let events = vec![
+            TimelineEvent {
+                t: 0,
+                kind: TimelineEventKind::ToolStart {
+                    name: "batch".to_string(),
+                    input: batch_input.clone(),
+                },
+            },
+            TimelineEvent {
+                t: 1000,
+                kind: TimelineEventKind::ToolDone {
+                    name: "batch".to_string(),
+                    output: "--- [1] file_read ---\nok\n--- [2] file_read ---\nok\n--- [3] file_grep ---\nok".to_string(),
+                    is_error: false,
+                },
+            },
+        ];
+
+        let replay_events = timeline_to_replay_events(&events);
+
+        // Verify the ToolInput delta contains the batch input
+        let input_delta = replay_events.iter().find_map(|(_, e)| match e {
+            ReplayEvent::Server(ServerEvent::ToolInput { delta }) => Some(delta.clone()),
+            _ => None,
+        });
+        assert!(input_delta.is_some(), "Should have ToolInput with batch params");
+        let parsed: serde_json::Value = serde_json::from_str(&input_delta.unwrap()).unwrap();
+        let tool_calls = parsed.get("tool_calls").and_then(|v| v.as_array());
+        assert_eq!(tool_calls.map(|a| a.len()), Some(3), "Batch should have 3 tool calls");
+
+        // Verify IDs match
+        let start_id = replay_events.iter().find_map(|(_, e)| match e {
+            ReplayEvent::Server(ServerEvent::ToolStart { id, .. }) => Some(id.clone()),
+            _ => None,
+        });
+        let done_id = replay_events.iter().find_map(|(_, e)| match e {
+            ReplayEvent::Server(ServerEvent::ToolDone { id, .. }) => Some(id.clone()),
+            _ => None,
+        });
+        assert_eq!(start_id, done_id, "Batch ToolStart and ToolDone IDs must match");
     }
 }
