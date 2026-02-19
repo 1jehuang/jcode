@@ -22,6 +22,10 @@ const DEFAULT_TOKEN_BUDGET: usize = 200_000;
 /// Trigger compaction at this percentage of budget
 const COMPACTION_THRESHOLD: f32 = 0.80;
 
+/// If context is above this threshold when compaction starts, do a synchronous
+/// hard-compact (drop old messages) so the API call doesn't fail.
+const CRITICAL_THRESHOLD: f32 = 0.95;
+
 /// Minimum threshold for manual compaction (can compact at any time above this)
 const MANUAL_COMPACT_MIN_THRESHOLD: f32 = 0.10;
 
@@ -269,6 +273,44 @@ impl CompactionManager {
             ));
             result
         }));
+    }
+
+    /// Start background compaction AND, if context is critically full (>=95%),
+    /// perform an immediate hard-compact so the next API call doesn't fail.
+    /// Returns true if a hard compact was applied (caller should rebuild messages).
+    pub fn maybe_compact_with_guard(
+        &mut self,
+        all_messages: &[Message],
+        provider: Arc<dyn Provider>,
+    ) -> bool {
+        self.maybe_start_compaction_with(all_messages, provider);
+
+        let usage = self.context_usage_with(all_messages);
+        if usage >= CRITICAL_THRESHOLD {
+            crate::logging::warn(&format!(
+                "[compaction] Context at {:.1}% (critical threshold {:.0}%) — performing synchronous hard compact",
+                usage * 100.0,
+                CRITICAL_THRESHOLD * 100.0,
+            ));
+            match self.hard_compact_with(all_messages) {
+                Ok(dropped) => {
+                    let post_usage = self.context_usage_with(all_messages);
+                    crate::logging::info(&format!(
+                        "[compaction] Hard compact dropped {} messages, context now at {:.1}%",
+                        dropped,
+                        post_usage * 100.0,
+                    ));
+                    return true;
+                }
+                Err(reason) => {
+                    crate::logging::error(&format!(
+                        "[compaction] Hard compact failed at critical threshold: {}",
+                        reason
+                    ));
+                }
+            }
+        }
+        false
     }
 
     /// Backward-compatible wrapper

@@ -221,7 +221,7 @@ impl Agent {
             let compaction = self.registry.compaction();
             match compaction.try_write() {
                 Ok(mut manager) => {
-                    manager.maybe_start_compaction_with(&all_messages, self.provider.clone());
+                    manager.maybe_compact_with_guard(&all_messages, self.provider.clone());
                     let messages = manager.messages_for_api_with(&all_messages);
                     let event = manager.take_compaction_event();
                     logging::info(&format!(
