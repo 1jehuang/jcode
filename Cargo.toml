@@ -22,7 +22,7 @@ path = "src/bin/harness.rs"
 
 [dependencies]
 # Memory allocator (reduces fragmentation for long-running server)
-tikv-jemallocator = { version = "0.6", optional = true }
+tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"], optional = true }
 
 # Async runtime
 tokio = { version = "1", features = ["full", "process"] }

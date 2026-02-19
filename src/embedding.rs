@@ -299,6 +299,21 @@ pub fn maybe_unload_if_idle(idle_for: Duration) -> bool {
             "Unloaded embedding model after {}s idle",
             idle_secs
         ));
+
+        // When not using jemalloc, ask glibc to return freed pages to the OS.
+        // Without this, glibc keeps the ~100 MB of model memory in its arenas
+        // even after the model is dropped.
+        #[cfg(all(target_os = "linux", not(feature = "jemalloc")))]
+        {
+            extern "C" {
+                fn malloc_trim(pad: usize) -> i32;
+            }
+            let trimmed = unsafe { malloc_trim(0) };
+            crate::logging::info(&format!(
+                "malloc_trim after model unload: {}",
+                if trimmed == 1 { "released pages" } else { "no pages to release" }
+            ));
+        }
     }
 
     unloaded
