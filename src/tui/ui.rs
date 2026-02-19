@@ -1506,8 +1506,8 @@ fn format_status_for_debug(app: &dyn TuiState) -> String {
             }
         }
         ProcessingStatus::Sending => "Sending...".to_string(),
-        ProcessingStatus::Thinking(start) => {
-            let elapsed = start.elapsed().as_secs_f32();
+        ProcessingStatus::Thinking(_start) => {
+            let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
             format!("Thinking... ({:.1}s)", elapsed)
         }
         ProcessingStatus::Streaming => {
@@ -3796,7 +3796,7 @@ fn draw_pinned_diagram(
     }
 
     let border_color = if focused { ACCENT_COLOR } else { DIM_COLOR };
-    let mut title_parts = vec![Span::styled(" diagram ", Style::default().fg(TOOL_COLOR))];
+    let mut title_parts = vec![Span::styled(" pinned ", Style::default().fg(TOOL_COLOR))];
     if total > 0 {
         title_parts.push(Span::styled(
             format!("{}/{}", index + 1, total),
@@ -3816,7 +3816,7 @@ fn draw_pinned_diagram(
     }
     if total > 1 {
         title_parts.push(Span::styled(
-            " Ctrl+Left/Right",
+            " Ctrl+1-9",
             Style::default().fg(DIM_COLOR),
         ));
     }
@@ -4401,8 +4401,8 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
                 }
                 Line::from(spans)
             }
-            ProcessingStatus::Thinking(start) => {
-                let thinking_elapsed = start.elapsed().as_secs_f32();
+            ProcessingStatus::Thinking(_start) => {
+                let thinking_elapsed = elapsed;
                 let mut spans = vec![
                     Span::styled(spinner, Style::default().fg(AI_COLOR)),
                     Span::styled(

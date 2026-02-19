@@ -552,6 +552,10 @@ pub struct App {
     is_remote: bool,
     // Whether running in replay mode (readonly playback of a saved session)
     pub is_replay: bool,
+    /// Override for elapsed time during headless video replay.
+    pub replay_elapsed_override: Option<Duration>,
+    /// Sim-time at which processing started (video replay only)
+    replay_processing_started_ms: Option<f64>,
     // Remember tool call ids that already have outputs
     tool_result_ids: HashSet<String>,
     // Current session ID (from server in remote mode)
@@ -828,6 +832,8 @@ impl App {
             current_message_id: None,
             is_remote: false,
             is_replay: false,
+            replay_elapsed_override: None,
+            replay_processing_started_ms: None,
             tool_result_ids: HashSet::new(),
             remote_session_id: None,
             remote_sessions: Vec::new(),
@@ -915,10 +921,29 @@ impl App {
         app.is_replay = true;
         let model_name = session.model.clone().unwrap_or_default();
         let session_name = session.short_name.clone().unwrap_or_default();
+
+        // Set provider/model info so status widgets show correct values
+        let effective_model = if model_name.is_empty() {
+            // Try to infer model from message content (e.g., usage events)
+            // Default to a sensible value for demo purposes
+            "claude-sonnet-4-20250514".to_string()
+        } else {
+            model_name
+        };
+        app.remote_provider_model = Some(effective_model.clone());
+        // Infer provider name from model string
+        let provider_name = if effective_model.contains("claude") || effective_model.contains("opus") || effective_model.contains("sonnet") || effective_model.contains("haiku") {
+            "anthropic"
+        } else if effective_model.contains("gpt") || effective_model.contains("o1") || effective_model.contains("o3") || effective_model.contains("o4") {
+            "openai"
+        } else if effective_model.contains('/') {
+            "openrouter"
+        } else {
+            "claude"
+        };
+        app.remote_provider_name = Some(provider_name.to_string());
+
         app.session = session;
-        if !model_name.is_empty() {
-            app.remote_provider_model = Some(model_name);
-        }
         if !session_name.is_empty() {
             let icon = crate::id::session_icon(&session_name);
             let _ = crossterm::execute!(
@@ -1451,8 +1476,23 @@ impl App {
                 self.set_diagram_focus(true);
                 true
             }
+            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+                let idx = (c as u32 - '1' as u32) as usize;
+                self.jump_diagram(idx);
+                true
+            }
             _ => false,
         }
+    }
+
+    fn jump_diagram(&mut self, index: usize) {
+        let total = crate::tui::mermaid::get_active_diagrams().len();
+        if total == 0 { return; }
+        let target = index.min(total - 1);
+        self.diagram_index = target;
+        self.diagram_scroll_x = 0;
+        self.diagram_scroll_y = 0;
+        self.set_status_notice(format!("Pinned {}/{}", target + 1, total));
     }
 
     fn handle_diagram_focus_key(
@@ -4340,6 +4380,7 @@ impl App {
                         self.is_processing = true;
                         self.processing_started = Some(Instant::now());
                         self.status = ProcessingStatus::Thinking(Instant::now());
+                        self.replay_processing_started_ms = Some(sim_time_ms);
                     }
                     ReplayEvent::Server(server_event) => {
                         if let crate::protocol::ServerEvent::TextDelta { ref text } = server_event {
@@ -4358,6 +4399,14 @@ impl App {
             }
 
             if sim_time_ms >= next_frame_at {
+                // Update replay elapsed override so status bar shows sim-time
+                if let Some(start_ms) = self.replay_processing_started_ms {
+                    let elapsed_ms = (sim_time_ms - start_ms).max(0.0);
+                    self.replay_elapsed_override =
+                        Some(Duration::from_millis(elapsed_ms as u64));
+                } else {
+                    self.replay_elapsed_override = None;
+                }
                 terminal.draw(|f| crate::tui::render_frame(f, &self))?;
                 frames.push((sim_time_ms / 1000.0, terminal.backend().buffer().clone()));
                 next_frame_at = sim_time_ms + frame_duration_ms;
@@ -4545,6 +4594,8 @@ impl App {
                     self.is_processing = false;
                     self.status = ProcessingStatus::Idle;
                     self.processing_started = None;
+                    self.replay_processing_started_ms = None;
+                    self.replay_elapsed_override = None;
                     self.streaming_tool_calls.clear();
                     self.current_message_id = None;
                     self.thought_line_inserted = false;
@@ -4583,6 +4634,8 @@ impl App {
                         self.is_processing = false;
                         self.status = ProcessingStatus::Idle;
                         self.processing_started = None;
+                        self.replay_processing_started_ms = None;
+                        self.replay_elapsed_override = None;
                         self.streaming_tool_calls.clear();
                         self.current_message_id = None;
                         self.thought_line_inserted = false;
@@ -4705,6 +4758,8 @@ impl App {
                     self.streaming_cache_read_tokens = None;
                     self.streaming_cache_creation_tokens = None;
                     self.processing_started = None;
+                    self.replay_processing_started_ms = None;
+                    self.replay_elapsed_override = None;
                     self.streaming_tps_start = None;
                     self.streaming_tps_elapsed = Duration::ZERO;
                     self.streaming_total_output_tokens = 0;
@@ -5075,6 +5130,13 @@ impl App {
                 return Ok(());
             }
             match code {
+                KeyCode::Char('b') => {
+                    if matches!(self.status, ProcessingStatus::RunningTool(_)) {
+                        remote.background_tool().await?;
+                        self.set_status_notice("Moving tool to background...");
+                        return Ok(());
+                    }
+                }
                 KeyCode::Char('c') | KeyCode::Char('d') => {
                     self.handle_quit_request();
                     return Ok(());
@@ -10913,6 +10975,9 @@ impl App {
     }
 
     pub fn elapsed(&self) -> Option<Duration> {
+        if let Some(d) = self.replay_elapsed_override {
+            return Some(d);
+        }
         self.processing_started.map(|t| t.elapsed())
     }
 
@@ -11316,6 +11381,9 @@ impl super::TuiState for App {
     }
 
     fn elapsed(&self) -> Option<std::time::Duration> {
+        if let Some(d) = self.replay_elapsed_override {
+            return Some(d);
+        }
         self.processing_started.map(|t| t.elapsed())
     }
 
@@ -11593,7 +11661,7 @@ impl super::TuiState for App {
             None
         };
 
-        let (model, reasoning_effort) = if self.is_remote {
+        let (model, reasoning_effort) = if self.is_remote || self.is_replay {
             (self.remote_provider_model.clone(), None)
         } else {
             (
@@ -11882,7 +11950,7 @@ impl super::TuiState for App {
             background_info,
             usage_info,
             tokens_per_second,
-            provider_name: if self.is_remote {
+            provider_name: if self.is_remote || self.is_replay {
                 self.remote_provider_name
                     .clone()
                     .or_else(|| Some(self.provider.name().to_string()))
