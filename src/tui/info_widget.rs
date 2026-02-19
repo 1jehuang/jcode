@@ -677,6 +677,9 @@ pub struct InfoWidgetData {
     pub diagrams: Vec<DiagramInfo>,
     /// Ambient mode status
     pub ambient_info: Option<AmbientWidgetData>,
+    /// Actual API-reported context tokens (from last streaming response)
+    /// When available, this is more accurate than the char-based estimate in context_info
+    pub observed_context_tokens: Option<u64>,
 }
 
 impl InfoWidgetData {
@@ -1848,11 +1851,14 @@ fn render_context_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
     let Some(info) = &data.context_info else {
         return Vec::new();
     };
-    if info.total_chars == 0 {
+    if info.total_chars == 0 && data.observed_context_tokens.is_none() {
         return Vec::new();
     }
 
-    let used_tokens = info.estimated_tokens();
+    let used_tokens = data
+        .observed_context_tokens
+        .map(|t| t as usize)
+        .unwrap_or_else(|| info.estimated_tokens());
     let limit_tokens = data.context_limit.unwrap_or(DEFAULT_CONTEXT_LIMIT).max(1);
     let used_pct = ((used_tokens as f64 / limit_tokens as f64) * 100.0)
         .round()
@@ -4717,7 +4723,7 @@ fn render_context_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'stat
     let Some(info) = &data.context_info else {
         return Vec::new();
     };
-    if info.total_chars == 0 {
+    if info.total_chars == 0 && data.observed_context_tokens.is_none() {
         return Vec::new();
     }
 
@@ -4727,7 +4733,10 @@ fn render_context_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'stat
         Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
     )]));
 
-    let used_tokens = info.estimated_tokens();
+    let used_tokens = data
+        .observed_context_tokens
+        .map(|t| t as usize)
+        .unwrap_or_else(|| info.estimated_tokens());
     let limit_tokens = data.context_limit.unwrap_or(DEFAULT_CONTEXT_LIMIT).max(1);
     let used_str = format_token_k(used_tokens);
     let limit_str = format_token_k(limit_tokens);
@@ -4768,11 +4777,14 @@ fn render_context_compact(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'stati
     let Some(info) = &data.context_info else {
         return Vec::new();
     };
-    if info.total_chars == 0 {
+    if info.total_chars == 0 && data.observed_context_tokens.is_none() {
         return Vec::new();
     }
 
-    let used_tokens = info.estimated_tokens();
+    let used_tokens = data
+        .observed_context_tokens
+        .map(|t| t as usize)
+        .unwrap_or_else(|| info.estimated_tokens());
     let limit_tokens = data.context_limit.unwrap_or(DEFAULT_CONTEXT_LIMIT).max(1);
     let used_pct = ((used_tokens as f64 / limit_tokens as f64) * 100.0)
         .round()

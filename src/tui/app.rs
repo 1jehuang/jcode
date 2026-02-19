@@ -7474,8 +7474,13 @@ impl App {
         }
     }
 
-    fn update_context_limit_for_model(&mut self, _model: &str) {
-        let limit = self.provider.context_window();
+    fn update_context_limit_for_model(&mut self, model: &str) {
+        let limit = if self.is_remote {
+            crate::provider::context_limit_for_model(model)
+                .unwrap_or(self.provider.context_window())
+        } else {
+            self.provider.context_window()
+        };
         self.context_limit = limit as u64;
         self.context_warning_shown = false;
 
@@ -11896,6 +11901,7 @@ impl super::TuiState for App {
             } else {
                 None
             },
+            observed_context_tokens: self.current_stream_context_tokens(),
         }
     }
 
