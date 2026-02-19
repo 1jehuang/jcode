@@ -4271,6 +4271,118 @@ impl App {
         })
     }
 
+    /// Run replay headlessly, rendering each frame to an in-memory buffer.
+    /// Returns a list of (timestamp_secs, ansi_frame) pairs for asciicast export.
+    pub async fn run_headless_replay(
+        mut self,
+        timeline: &[crate::replay::TimelineEvent],
+        speed: f64,
+        width: u16,
+        height: u16,
+        fps: u32,
+    ) -> Result<Vec<(f64, String)>> {
+        use crate::replay::ReplayEvent;
+        use ratatui::backend::TestBackend;
+
+        let replay_events = crate::replay::timeline_to_replay_events(timeline);
+        if replay_events.is_empty() {
+            anyhow::bail!("No replay events to export");
+        }
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend)?;
+        let mut remote = super::backend::RemoteConnection::dummy();
+
+        let frame_duration_ms: f64 = 1000.0 / fps as f64;
+        let mut cast_events: Vec<(f64, String)> = Vec::new();
+        let mut sim_time_ms: f64 = 0.0;
+        let mut next_frame_at: f64 = 0.0;
+
+        // Calculate total duration
+        let total_duration_ms: f64 = replay_events.iter().map(|(d, _)| *d as f64 / speed).sum();
+
+        // Build a schedule: (absolute_time_ms, event_ref)
+        let mut event_schedule: Vec<(f64, &ReplayEvent)> = Vec::new();
+        {
+            let mut abs_time: f64 = 0.0;
+            for (delay_ms, evt) in &replay_events {
+                abs_time += *delay_ms as f64 / speed;
+                event_schedule.push((abs_time, evt));
+            }
+        }
+
+        let mut event_cursor: usize = 0;
+
+        // Capture initial frame
+        terminal.draw(|f| crate::tui::render_frame(f, &self))?;
+        cast_events.push((0.0, crate::video_export::buffer_to_ansi(terminal.backend().buffer())));
+
+        let progress_interval = (total_duration_ms / 20.0).max(1000.0);
+        let mut next_progress = progress_interval;
+
+        while sim_time_ms <= total_duration_ms + frame_duration_ms {
+            // Process all events that should have fired by sim_time_ms
+            while event_cursor < event_schedule.len()
+                && event_schedule[event_cursor].0 <= sim_time_ms
+            {
+                let (_t, event) = event_schedule[event_cursor];
+                match event {
+                    ReplayEvent::UserMessage { text } => {
+                        self.push_display_message(DisplayMessage {
+                            role: "user".to_string(),
+                            content: text.clone(),
+                            tool_calls: vec![],
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
+                        });
+                    }
+                    ReplayEvent::StartProcessing => {
+                        self.is_processing = true;
+                        self.processing_started = Some(Instant::now());
+                        self.status = ProcessingStatus::Thinking(Instant::now());
+                    }
+                    ReplayEvent::Server(server_event) => {
+                        if let crate::protocol::ServerEvent::TextDelta { ref text } = server_event {
+                            if !text.is_empty() {
+                                self.streaming_text.push_str(text);
+                                if matches!(self.status, ProcessingStatus::Thinking(_)) {
+                                    self.status = ProcessingStatus::Streaming;
+                                }
+                            }
+                        } else {
+                            self.handle_server_event(server_event.clone(), &mut remote);
+                        }
+                    }
+                }
+                event_cursor += 1;
+            }
+
+            // Render frame at current time
+            if sim_time_ms >= next_frame_at {
+                terminal.draw(|f| crate::tui::render_frame(f, &self))?;
+                cast_events.push((
+                    sim_time_ms / 1000.0,
+                    crate::video_export::buffer_to_ansi(terminal.backend().buffer()),
+                ));
+                next_frame_at = sim_time_ms + frame_duration_ms;
+            }
+
+            // Progress reporting
+            if sim_time_ms >= next_progress {
+                let pct = (sim_time_ms / total_duration_ms * 100.0).min(100.0);
+                eprint!("\r  Rendering... {:.0}%", pct);
+                next_progress += progress_interval;
+            }
+
+            sim_time_ms += frame_duration_ms;
+        }
+
+        eprintln!("\r  Rendering... 100%  ({} frames captured)", cast_events.len());
+
+        Ok(cast_events)
+    }
+
     /// Handle a server event. Returns true if we're at a "safe point" for interleaving
     /// (after a tool completes but before the turn ends).
     fn handle_server_event(

@@ -38,6 +38,7 @@ mod tui;
 mod update;
 mod usage;
 mod util;
+mod video_export;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -388,6 +389,22 @@ enum Command {
         /// Path to an edited timeline JSON file (overrides session timing)
         #[arg(long)]
         timeline: Option<String>,
+
+        /// Export as video file (mp4, gif, or cast)
+        #[arg(long)]
+        video: Option<String>,
+
+        /// Video width in columns (default: 120)
+        #[arg(long, default_value = "120")]
+        cols: u16,
+
+        /// Video height in rows (default: 40)
+        #[arg(long, default_value = "40")]
+        rows: u16,
+
+        /// Video frames per second (default: 10)
+        #[arg(long, default_value = "10")]
+        fps: u32,
     },
 }
 
@@ -651,8 +668,12 @@ async fn run_main(mut args: Args) -> Result<()> {
             export,
             speed,
             timeline,
+            video,
+            cols,
+            rows,
+            fps,
         }) => {
-            run_replay_command(&session, export, speed, timeline.as_deref()).await?;
+            run_replay_command(&session, export, speed, timeline.as_deref(), video.as_deref(), cols, rows, fps).await?;
         }
         None => {
             // Auto-detect jcode repo and enable self-dev mode
@@ -2183,6 +2204,10 @@ async fn run_replay_command(
     export: bool,
     speed: f64,
     timeline_path: Option<&str>,
+    video_output: Option<&str>,
+    cols: u16,
+    rows: u16,
+    fps: u32,
 ) -> Result<()> {
     let session = replay::load_session(session_id_or_path)?;
 
@@ -2209,6 +2234,19 @@ async fn run_replay_command(
 
     let session_name = session.short_name.as_deref().unwrap_or(&session.id);
     let icon = id::session_icon(session_name);
+
+    // Video export mode
+    if let Some(output) = video_output {
+        let output_path = std::path::Path::new(output);
+        eprintln!(
+            "{} Exporting session: {} ({} events)",
+            icon, session_name, timeline.len()
+        );
+        video_export::export_video(&session, &timeline, speed, output_path, cols, rows, fps)
+            .await?;
+        return Ok(());
+    }
+
     eprintln!(
         "{} Replaying session: {} ({} events, {:.1}x speed)",
         icon,
