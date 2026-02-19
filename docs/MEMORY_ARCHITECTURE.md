@@ -3,7 +3,7 @@
 > **Status:** Implemented (Core), Planned (Graph-Based Hybrid)
 > **Updated:** 2026-01-27
 
-Local embeddings + Haiku sidecar are implemented and running in production. This document describes both the current implementation and the planned graph-based hybrid architecture.
+Local embeddings + lightweight sidecar (GPT-5.3 Codex Spark) are implemented and running in production. This document describes both the current implementation and the planned graph-based hybrid architecture.
 
 ## Overview
 
@@ -32,7 +32,7 @@ graph TB
         EMB[Embedder<br/>all-MiniLM-L6-v2]
         SR[Similarity Search]
         CR[Cascade Retrieval]
-        HC[Haiku Sidecar]
+        HC[Sidecar<br/>GPT-5.3 Codex Spark]
     end
 
     subgraph "Memory Graph"
@@ -174,7 +174,7 @@ User-defined or automatically inferred labels.
 **Sources:**
 - User explicitly tags: `memory { action: "remember", tags: ["rust", "auth"] }`
 - Inferred from context (file paths, topics, entities)
-- Extracted by Haiku during end-of-session processing
+- Extracted by sidecar during end-of-session processing
 
 **Examples:**
 - `#project:jcode` - Project-specific
@@ -209,7 +209,7 @@ Explicit relationships between memories.
 
 **Discovery:**
 - Contradiction detection on write
-- Haiku sidecar identifies relationships during verification
+- Sidecar identifies relationships during verification
 - User can explicitly link memories
 
 ---
@@ -224,7 +224,7 @@ sequenceDiagram
     participant E as Embedder
     participant S as Similarity Search
     participant G as Graph BFS
-    participant H as Haiku Sidecar
+    participant H as Sidecar (Codex Spark)
     participant R as Results
 
     C->>E: Current context
@@ -493,7 +493,7 @@ graph LR
         R1[Context Embedding]
         R2[Similarity Search]
         R3[Cascade BFS]
-        R4[Haiku Verify]
+        R4[Sidecar Verify]
         R5[Serve to Agent]
     end
 
@@ -518,7 +518,7 @@ graph LR
 **Available Context:**
 - Current context embedding
 - All memories that were retrieved (initial hits + BFS expansion)
-- Which memories passed Haiku verification (actually relevant)
+- Which memories passed sidecar verification (actually relevant)
 - Which were rejected (retrieved but not relevant)
 - Co-occurrence patterns (memories that appear together)
 
@@ -622,7 +622,7 @@ sequenceDiagram
     participant MEM as Memory Agent<br/>Background Task
     participant EMB as Embedder
     participant GR as Graph Store
-    participant HC as Haiku Sidecar
+    participant HC as Sidecar (Codex Spark)
 
     Note over MA,MEM: Turn N
 
@@ -714,7 +714,7 @@ memory { action: "tag", id: "...", tags: ["new", "tags"] }
 
 ### Phase 3: Memory Agent ✅
 - [x] Async channel communication
-- [x] Haiku sidecar for relevance verification
+- [x] Lightweight sidecar for relevance verification (currently GPT-5.3 Codex Spark)
 - [x] Topic change detection
 - [x] Surfaced memory tracking
 

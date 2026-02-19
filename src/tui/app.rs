@@ -8040,7 +8040,22 @@ impl App {
         let compaction = self.registry.compaction();
         let result = match compaction.try_write() {
             Ok(mut manager) => {
-                manager.ensure_context_fits(&self.messages, self.provider.clone());
+                let action = manager.ensure_context_fits(&self.messages, self.provider.clone());
+                match action {
+                    crate::compaction::CompactionAction::BackgroundStarted => {
+                        self.push_display_message(DisplayMessage::system(
+                            "📦 Context above 80% — summarizing older messages in background..."
+                                .to_string(),
+                        ));
+                    }
+                    crate::compaction::CompactionAction::HardCompacted(dropped) => {
+                        self.push_display_message(DisplayMessage::system(format!(
+                            "📦 Context critically full — dropped {} old messages to fit.",
+                            dropped,
+                        )));
+                    }
+                    crate::compaction::CompactionAction::None => {}
+                }
                 let messages = manager.messages_for_api_with(&self.messages);
                 let event = manager.take_compaction_event();
                 (messages, event)
@@ -11910,6 +11925,15 @@ impl super::TuiState for App {
                 None
             },
             observed_context_tokens: self.current_stream_context_tokens(),
+            is_compacting: if !self.is_remote && self.provider.supports_compaction() {
+                let compaction = self.registry.compaction();
+                compaction
+                    .try_read()
+                    .map(|m| m.is_compacting())
+                    .unwrap_or(false)
+            } else {
+                false
+            },
         }
     }
 

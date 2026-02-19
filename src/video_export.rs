@@ -511,10 +511,30 @@ fn buffer_to_svg(
                 continue;
             }
 
-            // Check if this is a box-drawing character
             let first_char = sym.chars().next().unwrap_or(' ');
             if is_box_drawing(first_char) {
                 let fg = color_to_hex(cell.fg);
+
+                // Batch consecutive horizontal line chars (─, ━) into single lines
+                if first_char == '─' || first_char == '━' {
+                    let start_x = x;
+                    let thick = first_char == '━';
+                    while x < width && !should_skip_cell(x) {
+                        let c = buf[(x, y)].symbol().chars().next().unwrap_or(' ');
+                        if c != first_char || color_to_hex(buf[(x, y)].fg) != fg {
+                            break;
+                        }
+                        x += 1;
+                    }
+                    let stroke_w = if thick { 2.5 } else { 1.5 };
+                    let cy = y as u32 * cell_h + cell_h / 2;
+                    svg.push_str(&format!(
+                        r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#,
+                        start_x as u32 * cell_w, cy, x as u32 * cell_w, cy, fg, stroke_w
+                    ));
+                    continue;
+                }
+
                 if let Some(fragment) = box_drawing_to_svg(
                     first_char,
                     x as u32 * cell_w,
@@ -663,33 +683,39 @@ fn box_drawing_to_svg(
         '┬' => (true, true, false, true, false),
         '┴' => (true, true, true, false, false),
         '┼' => (true, true, true, true, false),
-        // Rounded corners
+        // Rounded corners — quarter-circle arcs connecting to adjacent ─ and │ cells
+        // Uses SVG arc (A) for perfect quarter circles
+        // Each corner draws: straight segment → arc → straight segment
         '╭' => {
-            // Rounded top-left: arc from center-bottom to center-right
+            // Top-left: goes right and down
+            let r = cw.min(ch_h) / 2;
             return Some(format!(
-                r#"<path d="M {cx},{b} L {cx},{cy} Q {cx},{py} {right},{py}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
-                cx = cx, b = b, cy = cy, py = py, right = right, color = color, t = t
+                r#"<path d="M {right},{cy} L {arcx},{cy} A {r},{r} 0 0 0 {cx},{arcy} L {cx},{b}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
+                right = right, cy = cy, arcx = cx + r, r = r, cx = cx, arcy = cy + r, b = b, color = color, t = t
             ));
         }
         '╮' => {
-            // Rounded top-right: arc from center-left to center-bottom
+            // Top-right: goes left and down
+            let r = cw.min(ch_h) / 2;
             return Some(format!(
-                r#"<path d="M {px},{py} Q {cx},{py} {cx},{cy} L {cx},{b}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
-                px = px, py = py, cx = cx, cy = cy, b = b, color = color, t = t
+                r#"<path d="M {px},{cy} L {arcx},{cy} A {r},{r} 0 0 1 {cx},{arcy} L {cx},{b}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
+                px = px, cy = cy, arcx = cx - r, r = r, cx = cx, arcy = cy + r, b = b, color = color, t = t
             ));
         }
         '╰' => {
-            // Rounded bottom-left: arc from center-top to center-right
+            // Bottom-left: goes up and right
+            let r = cw.min(ch_h) / 2;
             return Some(format!(
-                r#"<path d="M {cx},{py} L {cx},{cy} Q {cx},{b} {right},{b}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
-                cx = cx, py = py, cy = cy, b = b, right = right, color = color, t = t
+                r#"<path d="M {cx},{py} L {cx},{arcy} A {r},{r} 0 0 0 {arcx},{cy} L {right},{cy}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
+                cx = cx, py = py, arcy = cy - r, r = r, arcx = cx + r, cy = cy, right = right, color = color, t = t
             ));
         }
         '╯' => {
-            // Rounded bottom-right: arc from center-left to center-top
+            // Bottom-right: goes up and left
+            let r = cw.min(ch_h) / 2;
             return Some(format!(
-                r#"<path d="M {px},{b} Q {cx},{b} {cx},{cy} L {cx},{py}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
-                px = px, b = b, cx = cx, cy = cy, py = py, color = color, t = t
+                r#"<path d="M {cx},{py} L {cx},{arcy} A {r},{r} 0 0 1 {arcx},{cy} L {px},{cy}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
+                cx = cx, py = py, arcy = cy - r, r = r, arcx = cx - r, cy = cy, px = px, color = color, t = t
             ));
         }
         // Heavy lines

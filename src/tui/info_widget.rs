@@ -680,6 +680,8 @@ pub struct InfoWidgetData {
     /// Actual API-reported context tokens (from last streaming response)
     /// When available, this is more accurate than the char-based estimate in context_info
     pub observed_context_tokens: Option<u64>,
+    /// Whether background compaction is currently in progress
+    pub is_compacting: bool,
 }
 
 impl InfoWidgetData {
@@ -4729,8 +4731,13 @@ fn render_context_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'stat
     }
 
     let mut lines: Vec<Line> = Vec::new();
+    let header = if data.is_compacting {
+        "Context 📦 compacting..."
+    } else {
+        "Context"
+    };
     lines.push(Line::from(vec![Span::styled(
-        "Context",
+        header,
         Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
     )]));
 
@@ -4792,8 +4799,14 @@ fn render_context_compact(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'stati
         .clamp(0.0, 100.0) as u8;
     let left_pct = 100u8.saturating_sub(used_pct);
 
+    let label = if data.is_compacting {
+        "Context📦"
+    } else {
+        "Context"
+    };
+
     vec![render_labeled_bar(
-        "Context",
+        label,
         used_pct,
         left_pct,
         None,

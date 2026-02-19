@@ -1,4 +1,5 @@
 use super::{Tool, ToolContext, ToolOutput};
+use base64::Engine as _;
 use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
 use crate::tui::image::{display_image, ImageDisplayParams, ImageProtocol};
 use anyhow::Result;
@@ -212,20 +213,14 @@ fn is_image_file(path: &Path) -> bool {
     }
 }
 
-/// Handle reading an image file - display in terminal if supported
+/// Handle reading an image file - display in terminal if supported AND return base64 for model vision
 fn handle_image_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
     let protocol = ImageProtocol::detect();
 
-    // Get file size for metadata
-    let metadata = std::fs::metadata(path)?;
-    let file_size = metadata.len();
+    let data = std::fs::read(path)?;
+    let file_size = data.len() as u64;
 
-    // Try to get image dimensions
-    let dimensions = if let Ok(data) = std::fs::read(path) {
-        get_image_dimensions_from_data(&data)
-    } else {
-        None
-    };
+    let dimensions = get_image_dimensions_from_data(&data);
 
     let dim_str = dimensions
         .map(|(w, h)| format!("{}x{}", w, h))
@@ -239,31 +234,61 @@ fn handle_image_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
         format!("{:.1} MB", file_size as f64 / 1024.0 / 1024.0)
     };
 
-    // Display image in terminal if supported
+    let mut terminal_displayed = false;
     if protocol.is_supported() {
         let params = ImageDisplayParams::from_terminal();
         match display_image(path, &params) {
             Ok(true) => {
-                return Ok(ToolOutput::new(format!(
-                    "Image: {} ({})\nDimensions: {}\nDisplayed in terminal using {:?} protocol",
-                    file_path, size_str, dim_str, protocol
-                )));
+                terminal_displayed = true;
             }
-            Ok(false) => {
-                // Fall through to text output
-            }
+            Ok(false) => {}
             Err(e) => {
                 crate::logging::info(&format!("Warning: Failed to display image: {}", e));
-                // Fall through to text output
             }
         }
     }
 
-    // Fallback: return metadata about the image
-    Ok(ToolOutput::new(format!(
-        "Image: {} ({})\nDimensions: {}\nTerminal does not support inline images (try Kitty or iTerm2)",
-        file_path, size_str, dim_str
-    )))
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let media_type = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        _ => "image/png",
+    };
+
+    const MAX_IMAGE_SIZE: u64 = 20 * 1024 * 1024;
+    let mut output = if file_size <= MAX_IMAGE_SIZE {
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
+        let display_note = if terminal_displayed {
+            "Displayed in terminal. "
+        } else {
+            ""
+        };
+        ToolOutput::new(format!(
+            "Image: {} ({})\nDimensions: {}\n{}Image sent to model for vision analysis.",
+            file_path, size_str, dim_str, display_note
+        ))
+        .with_labeled_image(media_type, b64, file_path.to_string())
+    } else {
+        let display_note = if terminal_displayed {
+            "\nDisplayed in terminal."
+        } else {
+            ""
+        };
+        ToolOutput::new(format!(
+            "Image: {} ({})\nDimensions: {}\nImage too large for vision (max 20MB).{}",
+            file_path, size_str, dim_str, display_note
+        ))
+    };
+
+    output = output.with_title(format!("📷 {}", file_path));
+    Ok(output)
 }
 
 /// Get image dimensions from raw data (duplicated from tui::image for convenience)

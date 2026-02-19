@@ -66,6 +66,18 @@ pub struct CompactionEvent {
     pub pre_tokens: Option<u64>,
 }
 
+/// What happened when ensure_context_fits was called
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompactionAction {
+    /// Nothing needed — context is fine
+    None,
+    /// Background summarization started (context 80-95%)
+    BackgroundStarted,
+    /// Emergency hard compact performed (context >= 95%)
+    /// Contains number of messages dropped
+    HardCompacted(usize),
+}
+
 /// Result from background compaction task
 struct CompactionResult {
     summary: String,
@@ -280,13 +292,14 @@ impl CompactionManager {
     /// Starts background compaction if above 80%. If context is critically full
     /// (>=95%), also performs an immediate hard-compact (drops old messages) so
     /// the next API call doesn't fail with "prompt too long".
-    /// Returns true if a hard compact was applied.
     pub fn ensure_context_fits(
         &mut self,
         all_messages: &[Message],
         provider: Arc<dyn Provider>,
-    ) -> bool {
+    ) -> CompactionAction {
+        let was_compacting = self.is_compacting();
         self.maybe_start_compaction_with(all_messages, provider);
+        let bg_started = !was_compacting && self.is_compacting();
 
         let usage = self.context_usage_with(all_messages);
         if usage >= CRITICAL_THRESHOLD {
@@ -303,7 +316,7 @@ impl CompactionManager {
                         dropped,
                         post_usage * 100.0,
                     ));
-                    return true;
+                    return CompactionAction::HardCompacted(dropped);
                 }
                 Err(reason) => {
                     crate::logging::error(&format!(
@@ -313,7 +326,12 @@ impl CompactionManager {
                 }
             }
         }
-        false
+
+        if bg_started {
+            CompactionAction::BackgroundStarted
+        } else {
+            CompactionAction::None
+        }
     }
 
     /// Backward-compatible wrapper
@@ -1086,8 +1104,8 @@ mod tests {
         manager.update_observed_input_tokens(5_000);
 
         let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
-        let hard_compacted = manager.ensure_context_fits(&messages, provider);
-        assert!(!hard_compacted, "should NOT hard-compact below 80%");
+        let action = manager.ensure_context_fits(&messages, provider);
+        assert_eq!(action, CompactionAction::None, "should do nothing below 80%");
         assert!(!manager.is_compacting(), "should NOT start background compaction below 80%");
         assert_eq!(manager.compacted_count, 0);
     }
@@ -1104,8 +1122,8 @@ mod tests {
         manager.update_observed_input_tokens(850);
 
         let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
-        let hard_compacted = manager.ensure_context_fits(&messages, provider);
-        assert!(!hard_compacted, "should NOT hard-compact between 80-95%");
+        let action = manager.ensure_context_fits(&messages, provider);
+        assert_eq!(action, CompactionAction::BackgroundStarted, "should start background compaction at 85%");
         assert!(manager.is_compacting(), "SHOULD start background compaction at 85%");
         assert_eq!(manager.compacted_count, 0, "compacted_count should stay 0 (no hard compact)");
     }
@@ -1125,8 +1143,8 @@ mod tests {
         manager.update_observed_input_tokens(960);
 
         let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
-        let hard_compacted = manager.ensure_context_fits(&messages, provider);
-        assert!(hard_compacted, "SHOULD hard-compact at 96%");
+        let action = manager.ensure_context_fits(&messages, provider);
+        assert!(matches!(action, CompactionAction::HardCompacted(_)), "SHOULD hard-compact at 96%");
         assert!(manager.compacted_count > 0, "compacted_count should increase after hard compact");
         assert!(manager.active_summary.is_some(), "should have an emergency summary");
     }
@@ -1146,8 +1164,8 @@ mod tests {
         manager.update_observed_input_tokens(1_050);
 
         let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
-        let hard_compacted = manager.ensure_context_fits(&messages, provider);
-        assert!(hard_compacted, "MUST hard-compact when over 100%");
+        let action = manager.ensure_context_fits(&messages, provider);
+        assert!(matches!(action, CompactionAction::HardCompacted(_)), "MUST hard-compact when over 100%");
 
         let api_messages = manager.messages_for_api_with(&messages);
         assert!(api_messages.len() < messages.len(), "API messages should be fewer after hard compact");

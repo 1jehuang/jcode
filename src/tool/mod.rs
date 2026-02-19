@@ -48,6 +48,14 @@ pub struct ToolOutput {
     pub output: String,
     pub title: Option<String>,
     pub metadata: Option<Value>,
+    pub images: Vec<ToolImage>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolImage {
+    pub media_type: String,
+    pub data: String,
+    pub label: Option<String>,
 }
 
 impl ToolOutput {
@@ -56,6 +64,7 @@ impl ToolOutput {
             output: output.into(),
             title: None,
             metadata: None,
+            images: Vec::new(),
         }
     }
 
@@ -66,6 +75,29 @@ impl ToolOutput {
 
     pub fn with_metadata(mut self, metadata: Value) -> Self {
         self.metadata = Some(metadata);
+        self
+    }
+
+    pub fn with_image(mut self, media_type: impl Into<String>, data: impl Into<String>) -> Self {
+        self.images.push(ToolImage {
+            media_type: media_type.into(),
+            data: data.into(),
+            label: None,
+        });
+        self
+    }
+
+    pub fn with_labeled_image(
+        mut self,
+        media_type: impl Into<String>,
+        data: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Self {
+        self.images.push(ToolImage {
+            media_type: media_type.into(),
+            data: data.into(),
+            label: Some(label.into()),
+        });
         self
     }
 }
@@ -480,6 +512,7 @@ impl Registry {
             output: truncated,
             title: output.title,
             metadata: output.metadata,
+            images: output.images,
         }
     }
 

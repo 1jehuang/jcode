@@ -28,6 +28,24 @@ use tokio::sync::{broadcast, mpsc};
 
 const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
 
+fn tool_output_to_content_blocks(
+    tool_use_id: String,
+    output: crate::tool::ToolOutput,
+) -> Vec<ContentBlock> {
+    let mut blocks = vec![ContentBlock::ToolResult {
+        tool_use_id,
+        content: output.output,
+        is_error: None,
+    }];
+    for img in output.images {
+        blocks.push(ContentBlock::Image {
+            media_type: img.media_type,
+            data: img.data,
+        });
+    }
+    blocks
+}
+
 /// A soft interrupt message queued for injection at the next safe point
 #[derive(Debug, Clone)]
 pub struct SoftInterruptMessage {
@@ -221,7 +239,19 @@ impl Agent {
             let compaction = self.registry.compaction();
             match compaction.try_write() {
                 Ok(mut manager) => {
-                    manager.ensure_context_fits(&all_messages, self.provider.clone());
+                    let action = manager.ensure_context_fits(&all_messages, self.provider.clone());
+                    match action {
+                        crate::compaction::CompactionAction::BackgroundStarted => {
+                            logging::info("Background compaction started (context above 80%)");
+                        }
+                        crate::compaction::CompactionAction::HardCompacted(dropped) => {
+                            logging::warn(&format!(
+                                "Emergency hard compact: dropped {} messages (context was critical)",
+                                dropped
+                            ));
+                        }
+                        crate::compaction::CompactionAction::None => {}
+                    }
                     let messages = manager.messages_for_api_with(&all_messages);
                     let event = manager.take_compaction_event();
                     logging::info(&format!(
@@ -1936,13 +1966,10 @@ impl Agent {
                             println!("{}", preview.lines().next().unwrap_or("(done)"));
                         }
 
+                        let blocks = tool_output_to_content_blocks(tc.id, output);
                         self.add_message_with_duration(
                             Role::User,
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id,
-                                content: output.output,
-                                is_error: None,
-                            }],
+                            blocks,
                             Some(tool_elapsed.as_millis() as u64),
                         );
                         self.session.save()?;
@@ -2473,13 +2500,10 @@ impl Agent {
                             error: None,
                         });
 
+                        let blocks = tool_output_to_content_blocks(tc.id.clone(), output);
                         self.add_message_with_duration(
                             Role::User,
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id.clone(),
-                                content: output.output,
-                                is_error: None,
-                            }],
+                            blocks,
                             Some(tool_elapsed.as_millis() as u64),
                         );
                         self.session.save()?;
@@ -3035,13 +3059,10 @@ impl Agent {
                                 error: None,
                             });
 
+                            let blocks = tool_output_to_content_blocks(tc.id.clone(), output);
                             self.add_message_with_duration(
                                 Role::User,
-                                vec![ContentBlock::ToolResult {
-                                    tool_use_id: tc.id.clone(),
-                                    content: output.output,
-                                    is_error: None,
-                                }],
+                                blocks,
                                 Some(tool_elapsed.as_millis() as u64),
                             );
                             self.session.save()?;
