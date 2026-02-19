@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use ratatui::buffer::Buffer;
 use ratatui::style::Color;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::replay::TimelineEvent;
@@ -66,85 +65,22 @@ pub async fn export_video(
         .run_headless_replay(timeline, speed, width, height, fps)
         .await?;
 
-    let ext = output_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("mp4");
+    let font_px = font_size * 96.0 / 72.0;
+    let cell_w = (font_px * 0.6).ceil() as u32;
+    let cell_h = (font_px * 1.2).ceil() as u32;
 
-    if ext == "cast" {
-        write_asciicast(
-            output_path,
-            width,
-            height,
-            &frames
-                .iter()
-                .map(|(t, buf)| (*t, buffer_to_ansi(buf)))
-                .collect::<Vec<_>>(),
-        )?;
-        eprintln!("  Output: {}", output_path.display());
-        return Ok(());
-    }
-
-    // SVG → PNG → ffmpeg pipeline (high quality, uses local font)
-    let rsvg = find_command("rsvg-convert");
-    let ffmpeg = find_command("ffmpeg");
-
-    if ext == "gif" {
-        // For GIF, use agg if available (it handles GIF optimization well)
-        if let Some(_agg) = find_command("agg") {
-            let cast_path = output_path.with_extension("cast");
-            let ansi_frames: Vec<(f64, String)> = frames
-                .iter()
-                .map(|(t, buf)| (*t, buffer_to_ansi(buf)))
-                .collect();
-            write_asciicast(&cast_path, width, height, &ansi_frames)?;
-            convert_asciicast_to_gif(&cast_path, output_path, &font_family, font_size).await?;
-            let _ = std::fs::remove_file(&cast_path);
-            return Ok(());
-        }
-    }
-
-    // Primary pipeline: SVG frames → PNG → ffmpeg
-    if rsvg.is_some() && ffmpeg.is_some() {
-        let cell_w = (font_size * 0.6).ceil() as u32;
-        let cell_h = (font_size * 1.4).ceil() as u32;
-
-        render_svg_pipeline(
-            &frames,
-            output_path,
-            width,
-            height,
-            fps,
-            &font_family,
-            font_size,
-            cell_w,
-            cell_h,
-        )
-        .await?;
-        return Ok(());
-    }
-
-    // Fallback: asciicast → agg → ffmpeg
-    if let Some(_agg) = find_command("agg") {
-        let cast_path = output_path.with_extension("cast");
-        let ansi_frames: Vec<(f64, String)> = frames
-            .iter()
-            .map(|(t, buf)| (*t, buffer_to_ansi(buf)))
-            .collect();
-        write_asciicast(&cast_path, width, height, &ansi_frames)?;
-        let gif_path = output_path.with_extension("gif");
-        convert_asciicast_to_gif(&cast_path, &gif_path, &font_family, font_size).await?;
-        convert_gif_to_video(&gif_path, output_path).await?;
-        let _ = std::fs::remove_file(&cast_path);
-        let _ = std::fs::remove_file(&gif_path);
-        return Ok(());
-    }
-
-    anyhow::bail!(
-        "No rendering tools found. Install one of:\n  \
-         - rsvg-convert + ffmpeg (best quality)\n  \
-         - agg + ffmpeg (cargo install --git https://github.com/asciinema/agg)"
-    );
+    render_svg_pipeline(
+        &frames,
+        output_path,
+        width,
+        height,
+        fps,
+        &font_family,
+        font_size,
+        cell_w,
+        cell_h,
+    )
+    .await
 }
 
 async fn render_svg_pipeline(
@@ -326,7 +262,7 @@ fn color_to_hex(color: Color) -> String {
 
 fn color_to_bg_hex(color: Color) -> String {
     match color {
-        Color::Reset => "#1e1e2e".to_string(), // Dark background
+        Color::Reset => "#000000".to_string(),
         _ => color_to_hex(color),
     }
 }
@@ -344,11 +280,10 @@ fn indexed_color_to_hex(idx: u8) -> String {
             let b = (idx % 6) * 51;
             return format!("#{:02x}{:02x}{:02x}", r, g, b);
         }
-        232..=255 => {
+        232.. => {
             let v = 8 + (idx - 232) * 10;
             return format!("#{:02x}{:02x}{:02x}", v, v, v);
         }
-        _ => "#d4d4d4",
     }
     .to_string()
 }
@@ -373,15 +308,15 @@ fn buffer_to_svg(
 
     // Background
     svg.push_str(&format!(
-        r##"<rect width="{}" height="{}" fill="#1e1e2e"/>"##,
+        r##"<rect width="{}" height="{}" fill="#000000"/>"##,
         img_w, img_h
     ));
 
-    // Font style
+    let font_px = font_size * 96.0 / 72.0;
     svg.push_str(&format!(
-        r##"<style>text {{ font-family: "{}", monospace; font-size: {}px; dominant-baseline: text-before-edge; }}</style>"##,
+        r##"<style>text {{ font-family: "{}", monospace; font-size: {:.1}px; dominant-baseline: text-before-edge; }}</style>"##,
         xml_escape(font_family),
-        font_size
+        font_px
     ));
 
     // Render cells: batch adjacent cells with same bg color into rectangles,
@@ -392,7 +327,7 @@ fn buffer_to_svg(
         while x < width {
             let cell = &buf[(x, y)];
             let bg = color_to_bg_hex(cell.bg);
-            if bg == "#1e1e2e" {
+            if bg == "#000000" {
                 x += 1;
                 continue;
             }
@@ -473,182 +408,4 @@ fn xml_escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-// Keep buffer_to_ansi public for headless replay (used by run_headless_replay)
-pub fn buffer_to_ansi(buf: &Buffer) -> String {
-    let mut output = String::new();
-    let width = buf.area.width;
-    let height = buf.area.height;
 
-    for y in 0..height {
-        if y > 0 {
-            output.push_str("\r\n");
-        }
-
-        let mut prev_fg: Option<Color> = None;
-        let mut prev_bg: Option<Color> = None;
-        let mut prev_bold = false;
-        let mut prev_dim = false;
-
-        for x in 0..width {
-            let cell = &buf[(x, y)];
-            let fg = cell.fg;
-            let bg = cell.bg;
-            let bold = cell.modifier.contains(ratatui::style::Modifier::BOLD);
-            let dim = cell.modifier.contains(ratatui::style::Modifier::DIM);
-
-            let need_style =
-                prev_fg != Some(fg) || prev_bg != Some(bg) || prev_bold != bold || prev_dim != dim;
-
-            if need_style {
-                output.push_str("\x1b[0m");
-                if bold {
-                    output.push_str("\x1b[1m");
-                }
-                if dim {
-                    output.push_str("\x1b[2m");
-                }
-                push_fg_ansi(&mut output, fg);
-                push_bg_ansi(&mut output, bg);
-                prev_fg = Some(fg);
-                prev_bg = Some(bg);
-                prev_bold = bold;
-                prev_dim = dim;
-            }
-
-            output.push_str(cell.symbol());
-        }
-    }
-
-    output.push_str("\x1b[0m");
-    output
-}
-
-fn push_fg_ansi(out: &mut String, color: Color) {
-    match color {
-        Color::Reset => {}
-        Color::Black => out.push_str("\x1b[30m"),
-        Color::Red => out.push_str("\x1b[31m"),
-        Color::Green => out.push_str("\x1b[32m"),
-        Color::Yellow => out.push_str("\x1b[33m"),
-        Color::Blue => out.push_str("\x1b[34m"),
-        Color::Magenta => out.push_str("\x1b[35m"),
-        Color::Cyan => out.push_str("\x1b[36m"),
-        Color::Gray => out.push_str("\x1b[37m"),
-        Color::DarkGray => out.push_str("\x1b[90m"),
-        Color::LightRed => out.push_str("\x1b[91m"),
-        Color::LightGreen => out.push_str("\x1b[92m"),
-        Color::LightYellow => out.push_str("\x1b[93m"),
-        Color::LightBlue => out.push_str("\x1b[94m"),
-        Color::LightMagenta => out.push_str("\x1b[95m"),
-        Color::LightCyan => out.push_str("\x1b[96m"),
-        Color::White => out.push_str("\x1b[97m"),
-        Color::Rgb(r, g, b) => out.push_str(&format!("\x1b[38;2;{};{};{}m", r, g, b)),
-        Color::Indexed(i) => out.push_str(&format!("\x1b[38;5;{}m", i)),
-    }
-}
-
-fn push_bg_ansi(out: &mut String, color: Color) {
-    match color {
-        Color::Reset => {}
-        Color::Black => out.push_str("\x1b[40m"),
-        Color::Red => out.push_str("\x1b[41m"),
-        Color::Green => out.push_str("\x1b[42m"),
-        Color::Yellow => out.push_str("\x1b[43m"),
-        Color::Blue => out.push_str("\x1b[44m"),
-        Color::Magenta => out.push_str("\x1b[45m"),
-        Color::Cyan => out.push_str("\x1b[46m"),
-        Color::Gray => out.push_str("\x1b[47m"),
-        Color::DarkGray => out.push_str("\x1b[100m"),
-        Color::LightRed => out.push_str("\x1b[101m"),
-        Color::LightGreen => out.push_str("\x1b[102m"),
-        Color::LightYellow => out.push_str("\x1b[103m"),
-        Color::LightBlue => out.push_str("\x1b[104m"),
-        Color::LightMagenta => out.push_str("\x1b[105m"),
-        Color::LightCyan => out.push_str("\x1b[106m"),
-        Color::White => out.push_str("\x1b[107m"),
-        Color::Rgb(r, g, b) => out.push_str(&format!("\x1b[48;2;{};{};{}m", r, g, b)),
-        Color::Indexed(i) => out.push_str(&format!("\x1b[48;5;{}m", i)),
-    }
-}
-
-fn write_asciicast(
-    path: &Path,
-    width: u16,
-    height: u16,
-    events: &[(f64, String)],
-) -> Result<()> {
-    let mut file = std::fs::File::create(path)
-        .with_context(|| format!("Failed to create {}", path.display()))?;
-
-    let header = serde_json::json!({
-        "version": 2,
-        "width": width,
-        "height": height,
-        "timestamp": chrono::Utc::now().timestamp(),
-        "env": { "SHELL": "/bin/bash", "TERM": "xterm-256color" },
-        "title": "jcode replay"
-    });
-    writeln!(file, "{}", serde_json::to_string(&header)?)?;
-
-    let mut prev_output = String::new();
-    for (time, output) in events {
-        if *output == prev_output {
-            continue;
-        }
-        let full_output = format!("\x1b[H\x1b[2J{}", output);
-        writeln!(file, "{}", serde_json::to_string(&serde_json::json!([time, "o", full_output]))?)?;
-        prev_output = output.clone();
-    }
-    Ok(())
-}
-
-async fn convert_asciicast_to_gif(
-    asciicast_path: &Path,
-    gif_path: &Path,
-    font_family: &str,
-    font_size: f64,
-) -> Result<()> {
-    let agg_path = find_command("agg").context("agg not found")?;
-
-    eprintln!("  Converting asciicast → GIF (font: {})...", font_family);
-    let status = tokio::process::Command::new(&agg_path)
-        .arg(asciicast_path)
-        .arg(gif_path)
-        .arg("--font-family")
-        .arg(font_family)
-        .arg("--font-size")
-        .arg((font_size as u32).to_string())
-        .arg("--speed")
-        .arg("1")
-        .status()
-        .await
-        .context("Failed to run agg")?;
-
-    if !status.success() {
-        anyhow::bail!("agg failed");
-    }
-    eprintln!("  Output: {}", gif_path.display());
-    Ok(())
-}
-
-async fn convert_gif_to_video(gif_path: &Path, output_path: &Path) -> Result<()> {
-    let ffmpeg = find_command("ffmpeg").context("ffmpeg not found")?;
-    let ext = output_path.extension().and_then(|e| e.to_str()).unwrap_or("mp4");
-
-    eprintln!("  Converting GIF → {}...", ext.to_uppercase());
-    let status = tokio::process::Command::new(&ffmpeg)
-        .arg("-y").arg("-i").arg(gif_path)
-        .arg("-movflags").arg("faststart")
-        .arg("-pix_fmt").arg("yuv420p")
-        .arg("-vf").arg("scale=trunc(iw/2)*2:trunc(ih/2)*2")
-        .arg(output_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status().await.context("Failed to run ffmpeg")?;
-
-    if !status.success() {
-        anyhow::bail!("ffmpeg failed");
-    }
-    eprintln!("  Output: {}", output_path.display());
-    Ok(())
-}
