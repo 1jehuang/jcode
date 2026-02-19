@@ -194,7 +194,13 @@ pub trait Provider: Send + Sync {
 }
 
 /// Available models (shown in /model list)
-pub const ALL_CLAUDE_MODELS: &[&str] = &["claude-opus-4-6", "claude-opus-4-5-20251101"];
+pub const ALL_CLAUDE_MODELS: &[&str] = &[
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-opus-4-5-20251101",
+    "claude-sonnet-4-20250514",
+    "claude-haiku-4-5-20241022",
+];
 
 pub const ALL_OPENAI_MODELS: &[&str] = &[
     "codex-mini-latest",
@@ -361,11 +367,11 @@ pub fn context_limit_for_model(model: &str) -> Option<usize> {
     }
 
     if model.starts_with("claude-opus-4-6") || model.starts_with("claude-opus-4.6") {
-        return Some(200_000);
+        return Some(1_048_576);
     }
 
     if model.starts_with("claude-sonnet-4-6") || model.starts_with("claude-sonnet-4.6") {
-        return Some(200_000);
+        return Some(1_048_576);
     }
 
     if model.starts_with("claude-opus-4-5") || model.starts_with("claude-opus-4.5") {
@@ -1210,7 +1216,8 @@ mod tests {
 
     #[test]
     fn test_context_limit_claude() {
-        assert_eq!(context_limit_for_model("claude-opus-4-6"), Some(200_000));
+        assert_eq!(context_limit_for_model("claude-opus-4-6"), Some(1_048_576));
+        assert_eq!(context_limit_for_model("claude-sonnet-4-6"), Some(1_048_576));
     }
 
     #[test]

@@ -27,7 +27,8 @@ const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
 const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/1.0.0";
 
 /// Beta headers required for OAuth
-const OAUTH_BETA_HEADERS: &str = "oauth-2025-04-20,claude-code-20250219,prompt-caching-2024-07-31";
+const OAUTH_BETA_HEADERS: &str =
+    "oauth-2025-04-20,claude-code-20250219,prompt-caching-2024-07-31,context-1m-2025-08-07";
 
 /// Default model
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
@@ -722,10 +723,13 @@ async fn stream_response(
             .header("anthropic-beta", OAUTH_BETA_HEADERS);
     } else {
         // Direct API keys use x-api-key
-        // Include prompt-caching beta header for cache_control support
+        // Include prompt-caching and context-1m beta headers
         req = req
             .header("x-api-key", &token)
-            .header("anthropic-beta", "prompt-caching-2024-07-31");
+            .header(
+                "anthropic-beta",
+                "prompt-caching-2024-07-31,context-1m-2025-08-07",
+            );
     }
 
     let response = req
