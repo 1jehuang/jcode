@@ -4272,7 +4272,7 @@ impl App {
     }
 
     /// Run replay headlessly, rendering each frame to an in-memory buffer.
-    /// Returns a list of (timestamp_secs, ansi_frame) pairs for asciicast export.
+    /// Returns a list of (timestamp_secs, Buffer) pairs for video export.
     pub async fn run_headless_replay(
         mut self,
         timeline: &[crate::replay::TimelineEvent],
@@ -4280,7 +4280,7 @@ impl App {
         width: u16,
         height: u16,
         fps: u32,
-    ) -> Result<Vec<(f64, String)>> {
+    ) -> Result<Vec<(f64, ratatui::buffer::Buffer)>> {
         use crate::replay::ReplayEvent;
         use ratatui::backend::TestBackend;
 
@@ -4294,14 +4294,12 @@ impl App {
         let mut remote = super::backend::RemoteConnection::dummy();
 
         let frame_duration_ms: f64 = 1000.0 / fps as f64;
-        let mut cast_events: Vec<(f64, String)> = Vec::new();
+        let mut frames: Vec<(f64, ratatui::buffer::Buffer)> = Vec::new();
         let mut sim_time_ms: f64 = 0.0;
         let mut next_frame_at: f64 = 0.0;
 
-        // Calculate total duration
         let total_duration_ms: f64 = replay_events.iter().map(|(d, _)| *d as f64 / speed).sum();
 
-        // Build a schedule: (absolute_time_ms, event_ref)
         let mut event_schedule: Vec<(f64, &ReplayEvent)> = Vec::new();
         {
             let mut abs_time: f64 = 0.0;
@@ -4313,15 +4311,13 @@ impl App {
 
         let mut event_cursor: usize = 0;
 
-        // Capture initial frame
         terminal.draw(|f| crate::tui::render_frame(f, &self))?;
-        cast_events.push((0.0, crate::video_export::buffer_to_ansi(terminal.backend().buffer())));
+        frames.push((0.0, terminal.backend().buffer().clone()));
 
         let progress_interval = (total_duration_ms / 20.0).max(1000.0);
         let mut next_progress = progress_interval;
 
         while sim_time_ms <= total_duration_ms + frame_duration_ms {
-            // Process all events that should have fired by sim_time_ms
             while event_cursor < event_schedule.len()
                 && event_schedule[event_cursor].0 <= sim_time_ms
             {
@@ -4358,17 +4354,12 @@ impl App {
                 event_cursor += 1;
             }
 
-            // Render frame at current time
             if sim_time_ms >= next_frame_at {
                 terminal.draw(|f| crate::tui::render_frame(f, &self))?;
-                cast_events.push((
-                    sim_time_ms / 1000.0,
-                    crate::video_export::buffer_to_ansi(terminal.backend().buffer()),
-                ));
+                frames.push((sim_time_ms / 1000.0, terminal.backend().buffer().clone()));
                 next_frame_at = sim_time_ms + frame_duration_ms;
             }
 
-            // Progress reporting
             if sim_time_ms >= next_progress {
                 let pct = (sim_time_ms / total_duration_ms * 100.0).min(100.0);
                 eprint!("\r  Rendering... {:.0}%", pct);
@@ -4378,9 +4369,9 @@ impl App {
             sim_time_ms += frame_duration_ms;
         }
 
-        eprintln!("\r  Rendering... 100%  ({} frames captured)", cast_events.len());
+        eprintln!("\r  Rendering... 100%  ({} frames captured)", frames.len());
 
-        Ok(cast_events)
+        Ok(frames)
     }
 
     /// Handle a server event. Returns true if we're at a "safe point" for interleaving
