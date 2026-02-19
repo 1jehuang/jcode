@@ -43,6 +43,7 @@ all running natively in your terminal.
 | **Sub-Agents** | Delegate tasks to specialized child agents |
 | **Self-Updating** | Built-in self-dev mode with hot-reload and canary deploys |
 | **Featherweight** | ~28 MB idle client, single native binary - no runtime, no VM, no Electron |
+| **OpenClaw** | Always-on ambient agent — gardens memory, does proactive work, responds via Telegram |
 
 </div>
 
@@ -517,6 +518,168 @@ graph TB
 ```
 
 **~92,000 lines of Rust** across 106 source files.
+
+</details>
+
+---
+
+<div align="center">
+
+## OpenClaw — Ambient Mode
+
+</div>
+
+OpenClaw is jcode's always-on autonomous agent. When you're not actively coding, it runs in the background — gardening your memory graph, doing proactive work, and staying reachable via Telegram.
+
+Think of it like a brain consolidating memories during sleep: it merges duplicates, resolves contradictions, verifies stale facts against your codebase, and extracts missed context from crashed sessions.
+
+**Key capabilities:**
+
+- **Memory gardening** — consolidates duplicates, prunes dead memories, discovers new relationships, backfills embeddings
+- **Proactive work** — analyzes recent sessions and git history to identify useful tasks you'd appreciate being surprised by
+- **Telegram integration** — sends status updates and accepts directives mid-cycle via bot replies
+- **Self-scheduling** — the agent decides when to wake next, constrained by adaptive resource limits that never starve interactive sessions
+- **Safety-first** — code changes go on worktree branches with permission requests; conservative by default
+
+<details>
+<summary><strong>Ambient Cycle Architecture</strong></summary>
+
+<br>
+
+```mermaid
+graph TB
+    subgraph "Scheduling Layer"
+        EV[Event Triggers<br/>session close, crash, git push]
+        TM[Timer<br/>agent-scheduled wake]
+        RC[Resource Calculator<br/>adaptive interval]
+        SQ[(Scheduled Queue<br/>persistent)]
+    end
+
+    subgraph "Ambient Agent"
+        QC[Check Queue]
+        SC[Scout<br/>memories + sessions + git]
+        GD[Garden<br/>consolidate + prune + verify]
+        WK[Work<br/>proactive tasks]
+        SA[schedule_ambient tool<br/>set next wake + context]
+    end
+
+    subgraph "Resource Awareness"
+        UH[Usage History<br/>rolling window]
+        RL[Rate Limits<br/>per provider]
+        AU[Ambient Usage<br/>current window]
+        AC[Active Sessions<br/>user activity]
+    end
+
+    EV -->|wake early| RC
+    TM -->|scheduled wake| RC
+    RC -->|"gate: safe to run?"| QC
+    SQ -->|pending items| QC
+    QC --> SC
+    SC --> GD
+    SC --> WK
+    SA -->|next wake + context| SQ
+    SA -->|proposed interval| RC
+
+    UH --> RC
+    RL --> RC
+    AU --> RC
+    AC --> RC
+
+    style EV fill:#fff3e0
+    style TM fill:#fff3e0
+    style RC fill:#ffcdd2
+    style SQ fill:#e3f2fd
+    style QC fill:#e8f5e9
+    style SC fill:#e8f5e9
+    style GD fill:#e8f5e9
+    style WK fill:#e8f5e9
+```
+
+</details>
+
+<details>
+<summary><strong>Two-Layer Memory Consolidation</strong></summary>
+
+<br>
+
+Memory consolidation happens at two levels — fast inline checks during sessions, and deep graph-wide passes during ambient cycles:
+
+```mermaid
+graph LR
+    subgraph "Layer 1: Sidecar (every turn, fast)"
+        S1[Memory retrieved<br/>for relevance check]
+        S2{New memory<br/>similar to existing?}
+        S3[Reinforce existing<br/>+ breadcrumb]
+        S4[Create new memory]
+        S5[Supersede if<br/>contradicts]
+    end
+
+    subgraph "Layer 2: Ambient Garden (background, deep)"
+        A1[Full graph scan]
+        A2[Cross-session<br/>dedup]
+        A3[Fact verification<br/>against codebase]
+        A4[Retroactive<br/>session extraction]
+        A5[Prune dead<br/>memories]
+        A6[Relationship<br/>discovery]
+    end
+
+    S1 --> S2
+    S2 -->|yes| S3
+    S2 -->|no| S4
+    S2 -->|contradicts| S5
+
+    A1 --> A2
+    A1 --> A3
+    A1 --> A4
+    A1 --> A5
+    A1 --> A6
+
+    style S1 fill:#e8f5e9
+    style S2 fill:#e8f5e9
+    style S3 fill:#e8f5e9
+    style S4 fill:#e8f5e9
+    style S5 fill:#e8f5e9
+    style A1 fill:#e3f2fd
+    style A2 fill:#e3f2fd
+    style A3 fill:#e3f2fd
+    style A4 fill:#e3f2fd
+    style A5 fill:#e3f2fd
+    style A6 fill:#e3f2fd
+```
+
+</details>
+
+<details>
+<summary><strong>Provider Selection & Scheduling</strong></summary>
+
+<br>
+
+OpenClaw prefers subscription-based providers (OAuth) so ambient cycles never burn API credits silently:
+
+```mermaid
+graph TD
+    START[Ambient Mode Start] --> CHECK1{OpenAI OAuth<br/>available?}
+    CHECK1 -->|yes| OAI[Use OpenAI<br/>strongest available]
+    CHECK1 -->|no| CHECK2{Anthropic OAuth<br/>available?}
+    CHECK2 -->|yes| ANT[Use Anthropic<br/>strongest available]
+    CHECK2 -->|no| CHECK3{API key or OpenRouter +<br/>config opt-in?}
+    CHECK3 -->|yes| API[Use API/OpenRouter<br/>with budget cap]
+    CHECK3 -->|no| DISABLED[Ambient mode disabled<br/>no provider available]
+
+    style OAI fill:#e8f5e9
+    style ANT fill:#fff3e0
+    style API fill:#ffcdd2
+    style DISABLED fill:#f5f5f5
+```
+
+The system adapts scheduling based on rate limit headers, user activity, and budget:
+
+| Condition | Behavior |
+|-----------|----------|
+| User is active | Pause or throttle heavily |
+| User idle for hours | Run more frequently |
+| Hit a rate limit | Exponential backoff |
+| Approaching end of window with budget left | Squeeze in extra cycles |
 
 </details>
 
