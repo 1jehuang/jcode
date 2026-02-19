@@ -1389,6 +1389,10 @@ async fn handle_client(
     // This allows queueing interrupts while the agent is processing
     let soft_interrupt_queue = new_agent.soft_interrupt_queue();
 
+    // Get a handle to the background tool signal BEFORE wrapping in Mutex
+    // This allows signaling "move to background" while the agent is processing
+    let background_tool_signal = new_agent.background_tool_signal();
+
     let agent = Arc::new(Mutex::new(new_agent));
     {
         let mut sessions_guard = sessions.write().await;
@@ -1750,6 +1754,12 @@ async fn handle_client(
                 if let Ok(mut q) = soft_interrupt_queue.lock() {
                     q.push(crate::agent::SoftInterruptMessage { content, urgent });
                 }
+                let _ = client_event_tx.send(ServerEvent::Ack { id });
+            }
+
+            Request::BackgroundTool { id } => {
+                // Signal the agent to move the currently executing tool to background
+                background_tool_signal.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = client_event_tx.send(ServerEvent::Ack { id });
             }
 

@@ -229,6 +229,128 @@ impl BackgroundTaskManager {
         }
     }
 
+    /// Adopt an already-spawned task as a background task.
+    /// Used when the user moves a currently-executing tool to background via Alt+B.
+    /// The `handle` is an already-running tokio task; we just register it for tracking
+    /// and wire up completion notifications.
+    pub async fn adopt(
+        &self,
+        tool_name: &str,
+        session_id: &str,
+        handle: JoinHandle<Result<crate::tool::ToolOutput>>,
+    ) -> BackgroundTaskInfo {
+        let task_id = Self::generate_task_id();
+        let output_path = self.output_dir.join(format!("{}.output", task_id));
+        let status_path = self.output_dir.join(format!("{}.status.json", task_id));
+
+        let initial_status = TaskStatusFile {
+            task_id: task_id.clone(),
+            tool_name: tool_name.to_string(),
+            session_id: session_id.to_string(),
+            status: BackgroundTaskStatus::Running,
+            exit_code: None,
+            error: None,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            completed_at: None,
+            duration_secs: None,
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&initial_status) {
+            let _ = std::fs::write(&status_path, json);
+        }
+
+        let output_path_clone = output_path.clone();
+        let status_path_clone = status_path.clone();
+        let task_id_clone = task_id.clone();
+        let tool_name_owned = tool_name.to_string();
+        let session_id_owned = session_id.to_string();
+        let started_at = Instant::now();
+
+        let wrapper_handle = tokio::spawn(async move {
+            let tool_result = handle.await;
+            let duration_secs = started_at.elapsed().as_secs_f64();
+
+            let (status, exit_code, error, output_text) = match tool_result {
+                Ok(Ok(output)) => {
+                    (BackgroundTaskStatus::Completed, Some(0), None, output.output)
+                }
+                Ok(Err(e)) => (
+                    BackgroundTaskStatus::Failed,
+                    None,
+                    Some(e.to_string()),
+                    e.to_string(),
+                ),
+                Err(e) => (
+                    BackgroundTaskStatus::Failed,
+                    None,
+                    Some(e.to_string()),
+                    format!("Task panicked: {}", e),
+                ),
+            };
+
+            if let Ok(mut file) = File::create(&output_path_clone).await {
+                let _ = file.write_all(output_text.as_bytes()).await;
+            }
+
+            let final_status = TaskStatusFile {
+                task_id: task_id_clone.clone(),
+                tool_name: tool_name_owned.clone(),
+                session_id: session_id_owned.clone(),
+                status: status.clone(),
+                exit_code,
+                error: error.clone(),
+                started_at: chrono::Utc::now().to_rfc3339(),
+                completed_at: Some(chrono::Utc::now().to_rfc3339()),
+                duration_secs: Some(duration_secs),
+            };
+            if let Ok(json) = serde_json::to_string_pretty(&final_status) {
+                let _ = tokio::fs::write(&status_path_clone, json).await;
+            }
+
+            let output_preview = if output_text.len() > 500 {
+                format!("{}...", crate::util::truncate_str(&output_text, 500))
+            } else {
+                output_text
+            };
+
+            Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
+                task_id: task_id_clone,
+                tool_name: tool_name_owned,
+                session_id: session_id_owned,
+                status,
+                exit_code,
+                output_preview,
+                output_file: output_path_clone,
+                duration_secs,
+            }));
+
+            Ok(TaskResult {
+                exit_code,
+                error,
+            })
+        });
+
+        let running_task = RunningTask {
+            task_id: task_id.clone(),
+            tool_name: tool_name.to_string(),
+            session_id: session_id.to_string(),
+            output_path: output_path.clone(),
+            status_path: status_path.clone(),
+            started_at,
+            handle: wrapper_handle,
+        };
+
+        self.tasks
+            .write()
+            .await
+            .insert(task_id.clone(), running_task);
+
+        BackgroundTaskInfo {
+            task_id,
+            output_file: output_path,
+            status_file: status_path,
+        }
+    }
+
     /// List all tasks (both running and completed from disk)
     pub async fn list(&self) -> Vec<TaskStatusFile> {
         let mut results = Vec::new();

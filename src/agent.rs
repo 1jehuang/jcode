@@ -39,6 +39,11 @@ pub struct SoftInterruptMessage {
 /// Thread-safe soft interrupt queue that can be accessed without holding the agent lock
 pub type SoftInterruptQueue = Arc<std::sync::Mutex<Vec<SoftInterruptMessage>>>;
 
+/// Signal to move the currently executing tool to background.
+/// Set by the server when the client sends BackgroundTool request.
+/// Uses std::sync so it can be set without async from outside the agent lock.
+pub type BackgroundToolSignal = Arc<std::sync::atomic::AtomicBool>;
+
 /// Token usage from the last API request
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct TokenUsage {
@@ -64,6 +69,8 @@ pub struct Agent {
     /// Soft interrupt queue: messages to inject at next safe point without cancelling
     /// Uses std::sync::Mutex so it can be accessed without async, even while agent is processing
     soft_interrupt_queue: SoftInterruptQueue,
+    /// Signal from client to move the currently executing tool to background
+    background_tool_signal: BackgroundToolSignal,
     /// Client-side cache tracking for detecting append-only violations
     cache_tracker: CacheTracker,
     /// Last token usage from API request (for debug socket queries)
@@ -92,6 +99,7 @@ impl Agent {
             last_upstream_provider: None,
             pending_alerts: Vec::new(),
             soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+            background_tool_signal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cache_tracker: CacheTracker::new(),
             last_usage: TokenUsage::default(),
             locked_tools: None,
@@ -122,6 +130,7 @@ impl Agent {
             last_upstream_provider: None,
             pending_alerts: Vec::new(),
             soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+            background_tool_signal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cache_tracker: CacheTracker::new(),
             last_usage: TokenUsage::default(),
             locked_tools: None,
@@ -372,6 +381,12 @@ impl Agent {
     /// The server can use this to queue interrupts without holding the agent lock.
     pub fn soft_interrupt_queue(&self) -> SoftInterruptQueue {
         Arc::clone(&self.soft_interrupt_queue)
+    }
+
+    /// Get a handle to the background tool signal.
+    /// The server can use this to signal "move tool to background" without holding the agent lock.
+    pub fn background_tool_signal(&self) -> BackgroundToolSignal {
+        Arc::clone(&self.background_tool_signal)
     }
 
     /// Check if there are pending soft interrupts
@@ -2965,55 +2980,131 @@ impl Agent {
                 logging::info(&format!("Tool starting: {}", tc.name));
                 let tool_start = Instant::now();
 
-                let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
+                // Spawn tool in its own task so we can detach it to background on Alt+B
+                let registry_clone = self.registry.clone();
+                let tool_name_for_spawn = tc.name.clone();
+                let tool_input_for_spawn = tc.input.clone();
+                let tool_handle = tokio::spawn(async move {
+                    registry_clone.execute(&tool_name_for_spawn, tool_input_for_spawn, ctx).await
+                });
+
+                // Reset background signal before waiting
+                self.background_tool_signal.store(false, std::sync::atomic::Ordering::SeqCst);
+
+                // Wait for tool completion OR background signal from user (Alt+B)
+                let bg_signal = Arc::clone(&self.background_tool_signal);
+                let tool_result;
+                let mut tool_handle = tool_handle;
+                tokio::select! {
+                    biased;
+                    res = &mut tool_handle => {
+                        tool_result = Some(match res {
+                            Ok(r) => r,
+                            Err(e) => Err(anyhow::anyhow!("Tool task panicked: {}", e)),
+                        });
+                    }
+                    _ = async {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            if bg_signal.load(std::sync::atomic::Ordering::SeqCst) {
+                                break;
+                            }
+                        }
+                    } => {
+                        tool_result = None;
+                    }
+                };
+
                 self.unlock_tools_if_needed(&tc.name);
                 let tool_elapsed = tool_start.elapsed();
-                logging::info(&format!(
-                    "Tool finished: {} in {:.2}s",
-                    tc.name,
-                    tool_elapsed.as_secs_f64()
-                ));
 
-                match result {
-                    Ok(output) => {
-                        let _ = event_tx.send(ServerEvent::ToolDone {
-                            id: tc.id.clone(),
-                            name: tc.name.clone(),
-                            output: output.output.clone(),
-                            error: None,
-                        });
+                if let Some(result) = tool_result {
+                    // Normal tool completion
+                    logging::info(&format!(
+                        "Tool finished: {} in {:.2}s",
+                        tc.name,
+                        tool_elapsed.as_secs_f64()
+                    ));
 
-                        self.add_message_with_duration(
-                            Role::User,
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id.clone(),
-                                content: output.output,
-                                is_error: None,
-                            }],
-                            Some(tool_elapsed.as_millis() as u64),
-                        );
-                        self.session.save()?;
+                    match result {
+                        Ok(output) => {
+                            let _ = event_tx.send(ServerEvent::ToolDone {
+                                id: tc.id.clone(),
+                                name: tc.name.clone(),
+                                output: output.output.clone(),
+                                error: None,
+                            });
+
+                            self.add_message_with_duration(
+                                Role::User,
+                                vec![ContentBlock::ToolResult {
+                                    tool_use_id: tc.id.clone(),
+                                    content: output.output,
+                                    is_error: None,
+                                }],
+                                Some(tool_elapsed.as_millis() as u64),
+                            );
+                            self.session.save()?;
+                        }
+                        Err(e) => {
+                            let error_msg = format!("Error: {}", e);
+                            let _ = event_tx.send(ServerEvent::ToolDone {
+                                id: tc.id.clone(),
+                                name: tc.name.clone(),
+                                output: error_msg.clone(),
+                                error: Some(error_msg.clone()),
+                            });
+
+                            self.add_message_with_duration(
+                                Role::User,
+                                vec![ContentBlock::ToolResult {
+                                    tool_use_id: tc.id.clone(),
+                                    content: error_msg,
+                                    is_error: Some(true),
+                                }],
+                                Some(tool_elapsed.as_millis() as u64),
+                            );
+                            self.session.save()?;
+                        }
                     }
-                    Err(e) => {
-                        let error_msg = format!("Error: {}", e);
-                        let _ = event_tx.send(ServerEvent::ToolDone {
-                            id: tc.id.clone(),
-                            name: tc.name.clone(),
-                            output: error_msg.clone(),
-                            error: Some(error_msg.clone()),
-                        });
+                } else {
+                    // User pressed Alt+B — move tool to background
+                    logging::info(&format!(
+                        "Tool '{}' moved to background after {:.1}s",
+                        tc.name,
+                        tool_elapsed.as_secs_f64()
+                    ));
 
-                        self.add_message_with_duration(
-                            Role::User,
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id: tc.id.clone(),
-                                content: error_msg,
-                                is_error: Some(true),
-                            }],
-                            Some(tool_elapsed.as_millis() as u64),
-                        );
-                        self.session.save()?;
-                    }
+                    let bg_info = crate::background::global()
+                        .adopt(&tc.name, &self.session.id, tool_handle)
+                        .await;
+
+                    let bg_msg = format!(
+                        "Tool '{}' was moved to background by the user (task_id: {}). \
+                         Use the `bg` tool with action 'status' or 'output' to check on it.",
+                        tc.name,
+                        bg_info.task_id
+                    );
+
+                    let _ = event_tx.send(ServerEvent::ToolDone {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        output: bg_msg.clone(),
+                        error: None,
+                    });
+
+                    self.add_message_with_duration(
+                        Role::User,
+                        vec![ContentBlock::ToolResult {
+                            tool_use_id: tc.id.clone(),
+                            content: bg_msg,
+                            is_error: None,
+                        }],
+                        Some(tool_elapsed.as_millis() as u64),
+                    );
+                    self.session.save()?;
+
+                    self.background_tool_signal.store(false, std::sync::atomic::Ordering::SeqCst);
                 }
 
                 // NOTE: We do NOT inject between tools (non-urgent) because that would

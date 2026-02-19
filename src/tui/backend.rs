@@ -382,6 +382,15 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Move the currently executing tool to background
+    pub async fn background_tool(&mut self) -> Result<()> {
+        let request = Request::BackgroundTool {
+            id: self.next_request_id,
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
     /// Queue a soft interrupt message to be injected at the next safe point
     /// This doesn't cancel anything - the message is naturally incorporated
     pub async fn soft_interrupt(&mut self, content: String, urgent: bool) -> Result<()> {

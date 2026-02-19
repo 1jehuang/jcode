@@ -40,6 +40,10 @@ pub enum Request {
     #[serde(rename = "cancel")]
     Cancel { id: u64 },
 
+    /// Move the currently executing tool to background
+    #[serde(rename = "background_tool")]
+    BackgroundTool { id: u64 },
+
     /// Soft interrupt: inject message at next safe point without cancelling
     #[serde(rename = "soft_interrupt")]
     SoftInterrupt {
@@ -684,6 +688,7 @@ impl Request {
         match self {
             Request::Message { id, .. } => *id,
             Request::Cancel { id } => *id,
+            Request::BackgroundTool { id } => *id,
             Request::SoftInterrupt { id, .. } => *id,
             Request::Clear { id } => *id,
             Request::Ping { id } => *id,

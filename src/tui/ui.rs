@@ -3878,7 +3878,9 @@ fn draw_pinned_diagram(
             }
         }
 
-        if rendered == 0 {
+        if rendered > 0 && super::mermaid::is_video_export_mode() {
+            super::mermaid::write_video_export_marker(diagram.hash, inner, frame.buffer_mut());
+        } else if rendered == 0 {
             frame.render_widget(Clear, inner);
             let placeholder =
                 super::mermaid::diagram_placeholder_lines(diagram.width, diagram.height);
@@ -4525,6 +4527,11 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
                         Style::default().fg(Color::Rgb(255, 193, 7)),
                     ));
                 }
+
+                spans.push(Span::styled(
+                    " · Alt+B bg",
+                    Style::default().fg(Color::Rgb(100, 100, 100)),
+                ));
 
                 if !queued_suffix.is_empty() {
                     spans.push(Span::styled(

@@ -4310,6 +4310,7 @@ impl App {
         }
 
         let mut event_cursor: usize = 0;
+        let mut replay_turn_id: u64 = 0;
 
         terminal.draw(|f| crate::tui::render_frame(f, &self))?;
         frames.push((0.0, terminal.backend().buffer().clone()));
@@ -4334,6 +4335,8 @@ impl App {
                         });
                     }
                     ReplayEvent::StartProcessing => {
+                        replay_turn_id += 1;
+                        self.current_message_id = Some(replay_turn_id);
                         self.is_processing = true;
                         self.processing_started = Some(Instant::now());
                         self.status = ProcessingStatus::Thinking(Instant::now());
@@ -5012,6 +5015,11 @@ impl App {
         if modifiers.contains(KeyModifiers::ALT) {
             match code {
                 KeyCode::Char('b') => {
+                    if matches!(self.status, ProcessingStatus::RunningTool(_)) {
+                        remote.background_tool().await?;
+                        self.set_status_notice("Moving tool to background...");
+                        return Ok(());
+                    }
                     self.cursor_pos = self.find_word_boundary_back();
                     return Ok(());
                 }
