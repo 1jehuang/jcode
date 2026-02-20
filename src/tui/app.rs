@@ -5127,6 +5127,10 @@ impl App {
                 return self.handle_picker_key(code, modifiers);
             }
         }
+        // Preview-mode picker: arrow keys navigate without leaving preview
+        if self.handle_picker_preview_key(&code, modifiers)? {
+            return Ok(());
+        }
 
         if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('m')) {
             self.toggle_diagram_pane();
@@ -5342,6 +5346,16 @@ impl App {
                 }
             }
             return Ok(());
+        }
+
+        // When the model picker preview is visible, arrow keys navigate the picker list
+        if self.picker_state.as_ref().map(|p| p.preview).unwrap_or(false) {
+            match code {
+                KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+                    return self.handle_picker_key(code, modifiers);
+                }
+                _ => {}
+            }
         }
 
         // Regular keys
@@ -5682,7 +5696,11 @@ impl App {
                 self.scroll_down(dec);
             }
             KeyCode::Esc => {
-                if self.is_processing {
+                if self.picker_state.as_ref().map(|p| p.preview).unwrap_or(false) {
+                    self.picker_state = None;
+                    self.input.clear();
+                    self.cursor_pos = 0;
+                } else if self.is_processing {
                     remote.cancel().await?;
                     self.set_status_notice("Interrupting...");
                 } else {
@@ -5780,6 +5798,10 @@ impl App {
             if !picker.preview {
                 return self.handle_picker_key(code, modifiers);
             }
+        }
+        // Preview-mode picker: arrow keys navigate without leaving preview
+        if self.handle_picker_preview_key(&code, modifiers)? {
+            return Ok(());
         }
 
         if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('m')) {
@@ -6003,6 +6025,16 @@ impl App {
             return Ok(());
         }
 
+        // When the model picker preview is visible, arrow keys navigate the picker list
+        if self.picker_state.as_ref().map(|p| p.preview).unwrap_or(false) {
+            match code {
+                KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+                    return self.handle_picker_key(code, modifiers);
+                }
+                _ => {}
+            }
+        }
+
         match code {
             KeyCode::Enter => {
                 if self.activate_model_picker_from_preview() {
@@ -6071,7 +6103,11 @@ impl App {
                 self.scroll_down(dec);
             }
             KeyCode::Esc => {
-                if self.is_processing {
+                if self.picker_state.as_ref().map(|p| p.preview).unwrap_or(false) {
+                    self.picker_state = None;
+                    self.input.clear();
+                    self.cursor_pos = 0;
+                } else if self.is_processing {
                     // Interrupt generation
                     self.cancel_requested = true;
                     self.interleave_message = None;
@@ -8764,18 +8800,14 @@ impl App {
             return false;
         }
 
-        let Some(filter) = Self::model_picker_preview_filter(&self.input) else {
-            return false;
-        };
-
+        // Clear preview flag so handle_picker_key treats it as a full picker
         if let Some(ref mut picker) = self.picker_state {
             picker.preview = false;
-            picker.column = 0;
-            picker.filter = filter;
-            Self::apply_picker_filter(picker);
         }
         self.input.clear();
         self.cursor_pos = 0;
+        // Delegate to picker Enter handler which confirms the selection
+        let _ = self.handle_picker_key(KeyCode::Enter, KeyModifiers::NONE);
         true
     }
 
@@ -8985,6 +9017,68 @@ impl App {
         });
         self.input.clear();
         self.cursor_pos = 0;
+    }
+
+    /// Handle arrow/navigation keys when picker is in preview mode.
+    /// Returns Ok(true) if the key was handled, Ok(false) to fall through.
+    fn handle_picker_preview_key(&mut self, code: &KeyCode, modifiers: KeyModifiers) -> Result<bool> {
+        let is_preview = self
+            .picker_state
+            .as_ref()
+            .map_or(false, |p| p.preview);
+        if !is_preview {
+            return Ok(false);
+        }
+        match code {
+            KeyCode::Down => {
+                let picker = self.picker_state.as_mut().unwrap();
+                let max = picker.filtered.len().saturating_sub(1);
+                picker.selected = (picker.selected + 1).min(max);
+                Ok(true)
+            }
+            KeyCode::Up => {
+                let picker = self.picker_state.as_mut().unwrap();
+                picker.selected = picker.selected.saturating_sub(1);
+                Ok(true)
+            }
+            KeyCode::PageDown => {
+                let picker = self.picker_state.as_mut().unwrap();
+                let max = picker.filtered.len().saturating_sub(1);
+                picker.selected = (picker.selected + 5).min(max);
+                Ok(true)
+            }
+            KeyCode::PageUp => {
+                let picker = self.picker_state.as_mut().unwrap();
+                picker.selected = picker.selected.saturating_sub(5);
+                Ok(true)
+            }
+            KeyCode::Enter => {
+                // Select the highlighted model directly from preview.
+                // Promote to full picker at column=2 so the existing Enter
+                // handler performs the confirmation logic.
+                if let Some(ref mut picker) = self.picker_state {
+                    if picker.filtered.is_empty() {
+                        self.picker_state = None;
+                        self.input.clear();
+                        self.cursor_pos = 0;
+                        return Ok(true);
+                    }
+                    picker.preview = false;
+                    picker.column = 2;
+                }
+                self.input.clear();
+                self.cursor_pos = 0;
+                self.handle_picker_key(KeyCode::Enter, modifiers)?;
+                Ok(true)
+            }
+            KeyCode::Esc => {
+                self.picker_state = None;
+                self.input.clear();
+                self.cursor_pos = 0;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// Handle keyboard input when picker is active
