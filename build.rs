@@ -74,8 +74,9 @@ fn main() {
     //   Dev:     v0.2.5 (abc1234)
     //   Dirty:   v0.2.5-dirty (abc1234)
     let is_release = std::env::var("JCODE_RELEASE_BUILD").is_ok();
+    let patch = parts.get(2).unwrap_or(&"0");
     let version = if is_release {
-        format!("v{}.{}.0 ({})", major, minor, git_hash)
+        format!("v{}.{}.{} ({})", major, minor, patch, git_hash)
     } else if dirty {
         format!("v{}.{}.{}-dirty ({})", major, minor, build_number, git_hash)
     } else {
