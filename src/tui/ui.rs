@@ -4883,12 +4883,12 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let variant = idle_animation_variant();
     match variant {
         0 => sample_donut(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
-        1 => sample_cube(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
-        2 => sample_sphere(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
-        _ => sample_knot(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
+        1 => sample_knot(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
+        2 => sample_spring(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
+        _ => sample_dna(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
     }
 
-    let time_hue = elapsed * 15.0;
+    let time_hue = elapsed * 30.0;
     let centered = app.centered_mode();
     let align = if centered {
         ratatui::layout::Alignment::Center
@@ -4931,7 +4931,7 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                         let dx = col as f32 - cx_f;
                         let dy = (row as f32 - cy_f) * 2.0;
                         let angle = dy.atan2(dx).to_degrees();
-                        let hue = (time_hue + angle + t * 60.0) % 360.0;
+                        let hue = (time_hue + angle * 0.5 + t * 40.0) % 360.0;
                         let hue = if hue < 0.0 { hue + 360.0 } else { hue };
 
                         let sat = 0.5 + t * 0.4;
@@ -5022,7 +5022,7 @@ fn idle_animation_variant() -> usize {
     })
 }
 
-fn sample_cube(
+fn sample_spring(
     elapsed: f32,
     sw: usize,
     sh: usize,
@@ -5030,51 +5030,153 @@ fn sample_cube(
     lum_map: &mut [f32],
     z_buf: &mut [f32],
 ) {
-    let ax = elapsed * 0.7;
-    let ay = elapsed * 0.5;
-    let az = elapsed * 0.3;
-    let cam_dist = 5.0f32;
+    let rot_y = elapsed * 0.5;
+    let rot_x = elapsed * 0.2;
+    let cam_dist = 8.0f32;
     let aspect = 0.5;
-    let scale_base = (sw as f32).min(sh as f32 / aspect) * 0.3;
-    let s = 1.0f32;
+    let scale_base = (sw as f32).min(sh as f32 / aspect) * 0.22;
+    let tube_r = 0.3f32;
+    let coil_r = 1.2f32;
+    let coils = 5.0f32;
+    let stretch = 3.0f32;
 
-    let faces: [([f32; 3], [f32; 3], [f32; 3], [f32; 3]); 6] = [
-        ([-s,-s,-s], [ s,-s,-s], [ s, s,-s], [-s, s,-s]),
-        ([-s,-s, s], [ s,-s, s], [ s, s, s], [-s, s, s]),
-        ([-s,-s,-s], [-s,-s, s], [-s, s, s], [-s, s,-s]),
-        ([ s,-s,-s], [ s,-s, s], [ s, s, s], [ s, s,-s]),
-        ([-s,-s,-s], [ s,-s,-s], [ s,-s, s], [-s,-s, s]),
-        ([-s, s,-s], [ s, s,-s], [ s, s, s], [-s, s, s]),
-    ];
-    let normals: [[f32; 3]; 6] = [
-        [0.0, 0.0, -1.0], [0.0, 0.0, 1.0],
-        [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0],
-        [0.0, -1.0, 0.0], [0.0, 1.0, 0.0],
-    ];
+    let mut t: f32 = -coils * std::f32::consts::PI;
+    let t_end = coils * std::f32::consts::PI;
+    while t < t_end {
+        let hx = coil_r * t.cos();
+        let hy = (t / (coils * std::f32::consts::PI)) * stretch;
+        let hz = coil_r * t.sin();
 
-    let steps = 40usize;
-    for (face_idx, (p0, p1, p2, p3)) in faces.iter().enumerate() {
-        let (rnx, rny, rnz) = rotate_xyz(
-            normals[face_idx][0], normals[face_idx][1], normals[face_idx][2],
-            ax, ay, az,
-        );
-        if rnz < -0.1 { continue; }
-        let face_lum = (rnx * 0.4 + rny * 0.5 + rnz * 0.3).clamp(-1.0, 1.0);
+        let dt = 0.01f32;
+        let t2 = t + dt;
+        let dx = coil_r * t2.cos() - hx;
+        let dy = (t2 / (coils * std::f32::consts::PI)) * stretch - hy;
+        let dz = coil_r * t2.sin() - hz;
+        let dl = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
+        let tx = dx / dl;
+        let ty = dy / dl;
+        let tz = dz / dl;
 
-        for iu in 0..=steps {
-            let u = iu as f32 / steps as f32;
-            for iv in 0..=steps {
-                let v = iv as f32 / steps as f32;
-                let x = p0[0] * (1.0-u) * (1.0-v) + p1[0] * u * (1.0-v)
-                      + p2[0] * u * v + p3[0] * (1.0-u) * v;
-                let y = p0[1] * (1.0-u) * (1.0-v) + p1[1] * u * (1.0-v)
-                      + p2[1] * u * v + p3[1] * (1.0-u) * v;
-                let z = p0[2] * (1.0-u) * (1.0-v) + p1[2] * u * (1.0-v)
-                      + p2[2] * u * v + p3[2] * (1.0-u) * v;
+        let (bx, by, bz) = {
+            let up = if tx.abs() < 0.9 { (1.0f32, 0.0, 0.0) } else { (0.0, 1.0, 0.0) };
+            let bx = ty * up.2 - tz * up.1;
+            let by = tz * up.0 - tx * up.2;
+            let bz = tx * up.1 - ty * up.0;
+            let bl = (bx * bx + by * by + bz * bz).sqrt().max(0.001);
+            (bx / bl, by / bl, bz / bl)
+        };
+        let nx = by * tz - bz * ty;
+        let ny = bz * tx - bx * tz;
+        let nz = bx * ty - by * tx;
 
-                let (rx, ry, rz) = rotate_xyz(x, y, z, ax, ay, az);
+        let mut phi: f32 = 0.0;
+        while phi < std::f32::consts::TAU {
+            let cp = phi.cos();
+            let sp = phi.sin();
+            let px = hx + tube_r * (cp * nx + sp * bx);
+            let py = hy + tube_r * (cp * ny + sp * by);
+            let pz = hz + tube_r * (cp * nz + sp * bz);
+
+            let sn_x = cp * nx + sp * bx;
+            let sn_y = cp * ny + sp * by;
+            let sn_z = cp * nz + sp * bz;
+
+            let (rx, ry, rz) = rotate_xyz(px, py, pz, rot_x, rot_y, 0.0);
+            let d = cam_dist + rz;
+            if d < 0.1 {
+                phi += 0.1;
+                continue;
+            }
+            let proj = cam_dist / d;
+            let xp = (sw as f32 / 2.0 + rx * proj * scale_base) as isize;
+            let yp = (sh as f32 / 2.0 - ry * proj * scale_base * aspect) as isize;
+            let depth = 1.0 / d;
+
+            if xp >= 0 && (xp as usize) < sw && yp >= 0 && (yp as usize) < sh {
+                let idx = yp as usize * sw + xp as usize;
+                if depth > z_buf[idx] {
+                    z_buf[idx] = depth;
+                    let (rnx, rny, _) = rotate_xyz(sn_x, sn_y, sn_z, rot_x, rot_y, 0.0);
+                    let lum = (rnx * 0.4 + rny * 0.5 + 0.3).clamp(-1.0, 1.0);
+                    lum_map[idx] = lum;
+                    hit[idx] = true;
+                }
+            }
+            phi += 0.1;
+        }
+        t += 0.01;
+    }
+}
+
+fn sample_dna(
+    elapsed: f32,
+    sw: usize,
+    sh: usize,
+    hit: &mut [bool],
+    lum_map: &mut [f32],
+    z_buf: &mut [f32],
+) {
+    let rot_y = elapsed * 0.4;
+    let rot_x = elapsed * 0.15;
+    let cam_dist = 8.0f32;
+    let aspect = 0.5;
+    let scale_base = (sw as f32).min(sh as f32 / aspect) * 0.22;
+    let tube_r = 0.2f32;
+    let helix_r = 1.0f32;
+    let twist = 2.5f32;
+    let stretch = 3.5f32;
+
+    for strand in 0..2 {
+        let phase = strand as f32 * std::f32::consts::PI;
+        let mut t: f32 = -std::f32::consts::PI * twist;
+        let t_end = std::f32::consts::PI * twist;
+        while t < t_end {
+            let angle = t + phase;
+            let hx = helix_r * angle.cos();
+            let hy = (t / (twist * std::f32::consts::PI)) * stretch;
+            let hz = helix_r * angle.sin();
+
+            let dt = 0.01f32;
+            let t2 = t + dt;
+            let angle2 = t2 + phase;
+            let dx = helix_r * angle2.cos() - hx;
+            let dy = (t2 / (twist * std::f32::consts::PI)) * stretch - hy;
+            let dz = helix_r * angle2.sin() - hz;
+            let dl = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
+            let ttx = dx / dl;
+            let tty = dy / dl;
+            let ttz = dz / dl;
+
+            let (bx, by, bz) = {
+                let up = if ttx.abs() < 0.9 { (1.0f32, 0.0, 0.0) } else { (0.0, 1.0, 0.0) };
+                let bx = tty * up.2 - ttz * up.1;
+                let by = ttz * up.0 - ttx * up.2;
+                let bz = ttx * up.1 - tty * up.0;
+                let bl = (bx * bx + by * by + bz * bz).sqrt().max(0.001);
+                (bx / bl, by / bl, bz / bl)
+            };
+            let nx = by * ttz - bz * tty;
+            let ny = bz * ttx - bx * ttz;
+            let nz = bx * tty - by * ttx;
+
+            let mut phi: f32 = 0.0;
+            while phi < std::f32::consts::TAU {
+                let cp = phi.cos();
+                let sp = phi.sin();
+                let px = hx + tube_r * (cp * nx + sp * bx);
+                let py = hy + tube_r * (cp * ny + sp * by);
+                let pz = hz + tube_r * (cp * nz + sp * bz);
+
+                let sn_x = cp * nx + sp * bx;
+                let sn_y = cp * ny + sp * by;
+                let sn_z = cp * nz + sp * bz;
+
+                let (rx, ry, rz) = rotate_xyz(px, py, pz, rot_x, rot_y, 0.0);
                 let d = cam_dist + rz;
-                if d < 0.1 { continue; }
+                if d < 0.1 {
+                    phi += 0.12;
+                    continue;
+                }
                 let proj = cam_dist / d;
                 let xp = (sw as f32 / 2.0 + rx * proj * scale_base) as isize;
                 let yp = (sh as f32 / 2.0 - ry * proj * scale_base * aspect) as isize;
@@ -5084,74 +5186,70 @@ fn sample_cube(
                     let idx = yp as usize * sw + xp as usize;
                     if depth > z_buf[idx] {
                         z_buf[idx] = depth;
-                        lum_map[idx] = face_lum;
+                        let (rnx, rny, _) = rotate_xyz(sn_x, sn_y, sn_z, rot_x, rot_y, 0.0);
+                        let lum = (rnx * 0.4 + rny * 0.5 + 0.3).clamp(-1.0, 1.0);
+                        lum_map[idx] = lum;
                         hit[idx] = true;
                     }
                 }
+                phi += 0.12;
             }
+            t += 0.012;
         }
     }
-}
 
-fn sample_sphere(
-    elapsed: f32,
-    sw: usize,
-    sh: usize,
-    hit: &mut [bool],
-    lum_map: &mut [f32],
-    z_buf: &mut [f32],
-) {
-    let rot_y = elapsed * 0.6;
-    let rot_x = elapsed * 0.25;
-    let cos_ry = rot_y.cos();
-    let sin_ry = rot_y.sin();
-    let cos_rx = rot_x.cos();
-    let sin_rx = rot_x.sin();
+    // Rungs connecting the two strands
+    let rung_step = std::f32::consts::PI * 0.4;
+    let mut t: f32 = -std::f32::consts::PI * twist + rung_step * 0.5;
+    let t_end = std::f32::consts::PI * twist;
+    let rung_r = 0.1f32;
+    while t < t_end {
+        let a1 = t;
+        let a2 = t + std::f32::consts::PI;
+        let y_pos = (t / (twist * std::f32::consts::PI)) * stretch;
 
-    let aspect = 0.5;
-    let radius = (sw as f32).min(sh as f32 / aspect) * 0.4;
-    let cx = sw as f32 / 2.0;
-    let cy = sh as f32 / 2.0;
+        let p1x = helix_r * a1.cos();
+        let p1z = helix_r * a1.sin();
+        let p2x = helix_r * a2.cos();
+        let p2z = helix_r * a2.sin();
 
-    let mut lat: f32 = -std::f32::consts::FRAC_PI_2;
-    while lat < std::f32::consts::FRAC_PI_2 {
-        let cos_lat = lat.cos();
-        let sin_lat = lat.sin();
-        let mut lon: f32 = 0.0;
-        while lon < std::f32::consts::TAU {
-            let cos_lon = lon.cos();
-            let sin_lon = lon.sin();
+        let steps = 20;
+        for i in 0..=steps {
+            let frac = i as f32 / steps as f32;
+            let rx_pos = p1x + (p2x - p1x) * frac;
+            let rz_pos = p1z + (p2z - p1z) * frac;
 
-            let nx = cos_lat * sin_lon;
-            let ny = sin_lat;
-            let nz = cos_lat * cos_lon;
+            let mut phi: f32 = 0.0;
+            while phi < std::f32::consts::TAU {
+                let cp = phi.cos();
+                let sp = phi.sin();
+                let px = rx_pos + rung_r * cp;
+                let py = y_pos + rung_r * sp;
+                let pz = rz_pos;
 
-            let rx = nx * cos_ry + nz * sin_ry;
-            let rz_temp = -nx * sin_ry + nz * cos_ry;
-            let ry = ny * cos_rx - rz_temp * sin_rx;
-            let rz = ny * sin_rx + rz_temp * cos_rx;
-
-            if rz < -0.05 {
-                lon += 0.015;
-                continue;
-            }
-
-            let xp = (cx + rx * radius) as isize;
-            let yp = (cy - ry * radius * aspect) as isize;
-            let depth = rz + 1.0;
-
-            if xp >= 0 && (xp as usize) < sw && yp >= 0 && (yp as usize) < sh {
-                let idx = yp as usize * sw + xp as usize;
-                if depth > z_buf[idx] {
-                    z_buf[idx] = depth;
-                    let lum = (rx * 0.4 + ry * 0.5 + rz * 0.3).clamp(-1.0, 1.0);
-                    lum_map[idx] = lum;
-                    hit[idx] = true;
+                let (rx, ry, rz) = rotate_xyz(px, py, pz, rot_x, rot_y, 0.0);
+                let d = cam_dist + rz;
+                if d < 0.1 {
+                    phi += 0.3;
+                    continue;
                 }
+                let proj = cam_dist / d;
+                let xp = (sw as f32 / 2.0 + rx * proj * scale_base) as isize;
+                let yp = (sh as f32 / 2.0 - ry * proj * scale_base * aspect) as isize;
+                let depth = 1.0 / d;
+
+                if xp >= 0 && (xp as usize) < sw && yp >= 0 && (yp as usize) < sh {
+                    let idx = yp as usize * sw + xp as usize;
+                    if depth > z_buf[idx] {
+                        z_buf[idx] = depth;
+                        lum_map[idx] = 0.2;
+                        hit[idx] = true;
+                    }
+                }
+                phi += 0.3;
             }
-            lon += 0.015;
         }
-        lat += 0.015;
+        t += rung_step;
     }
 }
 
