@@ -135,40 +135,60 @@ async fn render_svg_pipeline(
         frames.len()
     );
 
-    // Render unique SVGs and convert to PNG
+    // Render unique SVGs and convert to PNG (parallel with concurrency limit)
     let png_dir = tmp_dir.join("png");
     std::fs::create_dir_all(&png_dir)?;
 
+    // Write all SVGs first
+    let mut svg_paths = Vec::new();
     for (i, (_, buf)) in unique_frames.iter().enumerate() {
         let svg = buffer_to_svg(buf, font_family, font_size, cell_w, cell_h);
         let svg_path = tmp_dir.join(format!("frame_{:06}.svg", i));
         std::fs::write(&svg_path, &svg)?;
+        svg_paths.push(svg_path);
+    }
 
-        let png_path = png_dir.join(format!("unique_{:06}.png", i));
-        let status = tokio::process::Command::new(&rsvg)
-            .arg("--width")
-            .arg(img_w.to_string())
-            .arg("--height")
-            .arg(img_h.to_string())
-            .arg("--output")
-            .arg(&png_path)
-            .arg(&svg_path)
-            .status()
-            .await
-            .context("Failed to run rsvg-convert")?;
+    // Convert SVG→PNG in parallel batches
+    let concurrency = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(8);
+    let total_unique = unique_frames.len();
+    let rendered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-        if !status.success() {
-            anyhow::bail!("rsvg-convert failed on frame {}", i);
+    for chunk in svg_paths.chunks(concurrency) {
+        let mut handles = Vec::new();
+        for (chunk_offset, svg_path) in chunk.iter().enumerate() {
+            let idx = rendered.load(std::sync::atomic::Ordering::Relaxed) + chunk_offset;
+            let png_path = png_dir.join(format!("unique_{:06}.png", idx));
+            let rsvg = rsvg.clone();
+            let svg_path = svg_path.clone();
+            let img_w = img_w;
+            let img_h = img_h;
+            handles.push(tokio::spawn(async move {
+                let status = tokio::process::Command::new(&rsvg)
+                    .arg("--width")
+                    .arg(img_w.to_string())
+                    .arg("--height")
+                    .arg(img_h.to_string())
+                    .arg("--output")
+                    .arg(&png_path)
+                    .arg(&svg_path)
+                    .status()
+                    .await;
+                let _ = std::fs::remove_file(&svg_path);
+                status
+            }));
         }
-
-        let _ = std::fs::remove_file(&svg_path);
-
-        if (i + 1) % 20 == 0 || i + 1 == unique_frames.len() {
-            eprint!(
-                "\r  Rendering SVG... {}/{}",
-                i + 1,
-                unique_frames.len()
-            );
+        for handle in handles {
+            let status = handle.await?.context("Failed to run rsvg-convert")?;
+            if !status.success() {
+                anyhow::bail!("rsvg-convert failed");
+            }
+            let done = rendered.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if done % 20 == 0 || done == total_unique {
+                eprint!("\r  Rendering SVG... {}/{}", done, total_unique);
+            }
         }
     }
     eprintln!();
@@ -200,7 +220,11 @@ async fn render_svg_pipeline(
         .arg("-crf")
         .arg("18")
         .arg("-preset")
-        .arg("medium")
+        .arg("slow")
+        .arg("-tune")
+        .arg("animation")
+        .arg("-r")
+        .arg(fps.to_string())
         .arg("-movflags")
         .arg("faststart")
         .arg("-vf")

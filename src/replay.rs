@@ -420,6 +420,115 @@ fn extract_text(blocks: &[ContentBlock]) -> String {
     text
 }
 
+/// Auto-edit a timeline for demo-quality pacing.
+///
+/// Compresses dead time so the replay feels snappy:
+/// - Tool call execution (tool_start → tool_done): capped to `tool_max_ms`
+/// - Gaps between turns (done → next user_message): capped to `gap_max_ms`
+/// - Thinking duration: capped to `think_max_ms`
+/// - Streaming text and everything else: preserved as-is
+pub fn auto_edit_timeline(timeline: &[TimelineEvent], opts: &AutoEditOpts) -> Vec<TimelineEvent> {
+    if timeline.is_empty() {
+        return vec![];
+    }
+
+    let mut out: Vec<TimelineEvent> = Vec::with_capacity(timeline.len());
+    let mut time_shift: i64 = 0; // accumulated shift (negative = earlier)
+
+    // Track tool nesting for compressing tool_start→tool_done spans
+    let mut tool_depth: u32 = 0;
+    let mut tool_span_start_t: Option<u64> = None;
+
+    // Track done→user_message gaps
+    let mut last_done_t: Option<u64> = None;
+
+    for event in timeline {
+        let orig_t = event.t;
+        let mut new_t = (orig_t as i64 + time_shift).max(0) as u64;
+
+        match &event.kind {
+            TimelineEventKind::Thinking { duration } => {
+                // Clamp the gap before thinking
+                if let Some(done_t) = last_done_t.take() {
+                    let gap = orig_t.saturating_sub(done_t);
+                    if gap > opts.gap_max_ms {
+                        time_shift -= (gap - opts.gap_max_ms) as i64;
+                        new_t = (orig_t as i64 + time_shift).max(0) as u64;
+                    }
+                }
+
+                let clamped = (*duration).min(opts.think_max_ms);
+                out.push(TimelineEvent {
+                    t: new_t,
+                    kind: TimelineEventKind::Thinking {
+                        duration: clamped,
+                    },
+                });
+                continue;
+            }
+            TimelineEventKind::UserMessage { .. } => {
+                // Compress gap after last done
+                if let Some(done_t) = last_done_t.take() {
+                    let gap = orig_t.saturating_sub(done_t);
+                    if gap > opts.gap_max_ms {
+                        time_shift -= (gap - opts.gap_max_ms) as i64;
+                        new_t = (orig_t as i64 + time_shift).max(0) as u64;
+                    }
+                }
+            }
+            TimelineEventKind::ToolStart { .. } => {
+                if tool_depth == 0 {
+                    tool_span_start_t = Some(orig_t);
+                }
+                tool_depth += 1;
+            }
+            TimelineEventKind::ToolDone { .. } => {
+                tool_depth = tool_depth.saturating_sub(1);
+                if tool_depth == 0 {
+                    if let Some(start_t) = tool_span_start_t.take() {
+                        let span = orig_t.saturating_sub(start_t);
+                        if span > opts.tool_max_ms {
+                            time_shift -= (span - opts.tool_max_ms) as i64;
+                            new_t = (orig_t as i64 + time_shift).max(0) as u64;
+                        }
+                    }
+                }
+            }
+            TimelineEventKind::Done => {
+                last_done_t = Some(orig_t);
+            }
+            _ => {}
+        }
+
+        out.push(TimelineEvent {
+            t: new_t,
+            kind: event.kind.clone(),
+        });
+    }
+
+    out
+}
+
+/// Options for [`auto_edit_timeline`].
+pub struct AutoEditOpts {
+    /// Max ms for a tool_start→tool_done span (default: 800)
+    pub tool_max_ms: u64,
+    /// Max ms gap between done→next user_message (default: 2000)
+    pub gap_max_ms: u64,
+    /// Max ms for thinking duration (default: 1200)
+    pub think_max_ms: u64,
+}
+
+impl Default for AutoEditOpts {
+    fn default() -> Self {
+        Self {
+            tool_max_ms: 800,
+            gap_max_ms: 2000,
+            think_max_ms: 1200,
+        }
+    }
+}
+
 fn truncate_for_timeline(s: &str) -> String {
     if s.len() > 500 {
         format!("{}...", &s[..497])
@@ -668,5 +777,99 @@ mod tests {
             _ => None,
         });
         assert_eq!(start_id, done_id, "Batch ToolStart and ToolDone IDs must match");
+    }
+
+    #[test]
+    fn test_auto_edit_compresses_tool_spans() {
+        let events = vec![
+            TimelineEvent { t: 0, kind: TimelineEventKind::UserMessage { text: "hi".into() } },
+            TimelineEvent { t: 500, kind: TimelineEventKind::Thinking { duration: 800 } },
+            TimelineEvent { t: 1300, kind: TimelineEventKind::StreamText { text: "Let me check.".into(), speed: 80 } },
+            TimelineEvent { t: 2000, kind: TimelineEventKind::ToolStart { name: "file_read".into(), input: serde_json::json!({}) } },
+            TimelineEvent { t: 12000, kind: TimelineEventKind::ToolDone { name: "file_read".into(), output: "ok".into(), is_error: false } },
+            TimelineEvent { t: 13000, kind: TimelineEventKind::StreamText { text: "Done!".into(), speed: 80 } },
+            TimelineEvent { t: 14000, kind: TimelineEventKind::Done },
+        ];
+
+        let opts = AutoEditOpts { tool_max_ms: 800, gap_max_ms: 2000, think_max_ms: 1200 };
+        let edited = auto_edit_timeline(&events, &opts);
+
+        assert_eq!(edited.len(), events.len());
+
+        let tool_start_t = edited[3].t;
+        let tool_done_t = edited[4].t;
+        let tool_span = tool_done_t - tool_start_t;
+        assert!(tool_span <= 800, "Tool span should be compressed to ≤800ms, got {tool_span}ms");
+
+        assert!(edited[5].t > tool_done_t, "Events after tool_done should still be ordered");
+    }
+
+    #[test]
+    fn test_auto_edit_compresses_inter_prompt_gaps() {
+        let events = vec![
+            TimelineEvent { t: 0, kind: TimelineEventKind::UserMessage { text: "first".into() } },
+            TimelineEvent { t: 500, kind: TimelineEventKind::Thinking { duration: 800 } },
+            TimelineEvent { t: 1500, kind: TimelineEventKind::StreamText { text: "response".into(), speed: 80 } },
+            TimelineEvent { t: 2000, kind: TimelineEventKind::Done },
+            TimelineEvent { t: 30000, kind: TimelineEventKind::UserMessage { text: "second".into() } },
+            TimelineEvent { t: 30500, kind: TimelineEventKind::Thinking { duration: 800 } },
+            TimelineEvent { t: 31500, kind: TimelineEventKind::StreamText { text: "response2".into(), speed: 80 } },
+            TimelineEvent { t: 32000, kind: TimelineEventKind::Done },
+        ];
+
+        let opts = AutoEditOpts::default();
+        let edited = auto_edit_timeline(&events, &opts);
+
+        let done_t = edited[3].t;
+        let next_user_t = edited[4].t;
+        let gap = next_user_t - done_t;
+        assert!(gap <= 2000, "Gap between turns should be compressed to ≤2000ms, got {gap}ms");
+
+        let total_original = events.last().unwrap().t;
+        let total_edited = edited.last().unwrap().t;
+        assert!(total_edited < total_original, "Total time should be shorter: {total_edited} < {total_original}");
+    }
+
+    #[test]
+    fn test_auto_edit_clamps_thinking() {
+        let events = vec![
+            TimelineEvent { t: 0, kind: TimelineEventKind::UserMessage { text: "hi".into() } },
+            TimelineEvent { t: 500, kind: TimelineEventKind::Thinking { duration: 5000 } },
+            TimelineEvent { t: 5500, kind: TimelineEventKind::StreamText { text: "ok".into(), speed: 80 } },
+        ];
+
+        let opts = AutoEditOpts { think_max_ms: 1200, ..Default::default() };
+        let edited = auto_edit_timeline(&events, &opts);
+
+        match &edited[1].kind {
+            TimelineEventKind::Thinking { duration } => {
+                assert_eq!(*duration, 1200, "Thinking should be clamped to 1200ms");
+            }
+            _ => panic!("Expected Thinking event"),
+        }
+    }
+
+    #[test]
+    fn test_auto_edit_preserves_already_fast_timeline() {
+        let events = vec![
+            TimelineEvent { t: 0, kind: TimelineEventKind::UserMessage { text: "hi".into() } },
+            TimelineEvent { t: 200, kind: TimelineEventKind::Thinking { duration: 500 } },
+            TimelineEvent { t: 700, kind: TimelineEventKind::StreamText { text: "hello!".into(), speed: 80 } },
+            TimelineEvent { t: 900, kind: TimelineEventKind::Done },
+            TimelineEvent { t: 1500, kind: TimelineEventKind::UserMessage { text: "bye".into() } },
+        ];
+
+        let opts = AutoEditOpts::default();
+        let edited = auto_edit_timeline(&events, &opts);
+
+        for (orig, ed) in events.iter().zip(edited.iter()) {
+            assert_eq!(orig.t, ed.t, "Fast timeline should not be modified");
+        }
+    }
+
+    #[test]
+    fn test_auto_edit_empty_timeline() {
+        let edited = auto_edit_timeline(&[], &AutoEditOpts::default());
+        assert!(edited.is_empty());
     }
 }

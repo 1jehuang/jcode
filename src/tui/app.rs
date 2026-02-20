@@ -4418,13 +4418,10 @@ impl App {
             }
 
             if sim_time_ms >= next_frame_at {
-                // Update replay elapsed override so status bar shows sim-time
-                // Quantize to 500ms for better frame deduplication
                 if let Some(start_ms) = self.replay_processing_started_ms {
                     let elapsed_ms = (sim_time_ms - start_ms).max(0.0);
-                    let quantized = (elapsed_ms / 500.0).round() as u64 * 500;
                     self.replay_elapsed_override =
-                        Some(Duration::from_millis(quantized));
+                        Some(Duration::from_millis(elapsed_ms as u64));
                 } else {
                     self.replay_elapsed_override = None;
                 }

@@ -406,6 +406,10 @@ enum Command {
         #[arg(long)]
         timeline: Option<String>,
 
+        /// Auto-edit timeline: compress tool call wait times and gaps between prompts
+        #[arg(long)]
+        auto_edit: bool,
+
         /// Export as video file (mp4, gif, or cast)
         #[arg(long)]
         video: Option<String>,
@@ -418,8 +422,8 @@ enum Command {
         #[arg(long, default_value = "40")]
         rows: u16,
 
-        /// Video frames per second (default: 10)
-        #[arg(long, default_value = "10")]
+        /// Video frames per second (default: 60)
+        #[arg(long, default_value = "60")]
         fps: u32,
     },
 }
@@ -684,12 +688,13 @@ async fn run_main(mut args: Args) -> Result<()> {
             export,
             speed,
             timeline,
+            auto_edit,
             video,
             cols,
             rows,
             fps,
         }) => {
-            run_replay_command(&session, export, speed, timeline.as_deref(), video.as_deref(), cols, rows, fps).await?;
+            run_replay_command(&session, export, auto_edit, speed, timeline.as_deref(), video.as_deref(), cols, rows, fps).await?;
         }
         None => {
             // Auto-detect jcode repo and enable self-dev mode
@@ -2218,6 +2223,7 @@ async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
 async fn run_replay_command(
     session_id_or_path: &str,
     export: bool,
+    auto_edit: bool,
     speed: f64,
     timeline_path: Option<&str>,
     video_output: Option<&str>,
@@ -2227,14 +2233,7 @@ async fn run_replay_command(
 ) -> Result<()> {
     let session = replay::load_session(session_id_or_path)?;
 
-    if export {
-        let timeline = replay::export_timeline(&session);
-        let json = serde_json::to_string_pretty(&timeline)?;
-        println!("{}", json);
-        return Ok(());
-    }
-
-    let timeline = if let Some(path) = timeline_path {
+    let mut timeline = if let Some(path) = timeline_path {
         let data = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read timeline file: {}", path))?;
         serde_json::from_str::<Vec<replay::TimelineEvent>>(&data)
@@ -2242,6 +2241,16 @@ async fn run_replay_command(
     } else {
         replay::export_timeline(&session)
     };
+
+    if auto_edit {
+        timeline = replay::auto_edit_timeline(&timeline, &replay::AutoEditOpts::default());
+    }
+
+    if export {
+        let json = serde_json::to_string_pretty(&timeline)?;
+        println!("{}", json);
+        return Ok(());
+    }
 
     if timeline.is_empty() {
         eprintln!("Session has no messages to replay.");
