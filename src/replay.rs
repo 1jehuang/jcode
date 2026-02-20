@@ -805,7 +805,7 @@ mod tests {
             TimelineEvent { t: 14000, kind: TimelineEventKind::Done },
         ];
 
-        let opts = AutoEditOpts { tool_max_ms: 800, gap_max_ms: 2000, think_max_ms: 1200 };
+        let opts = AutoEditOpts { tool_max_ms: 800, gap_max_ms: 2000, think_max_ms: 1200, response_delay_max_ms: 1000 };
         let edited = auto_edit_timeline(&events, &opts);
 
         assert_eq!(edited.len(), events.len());
