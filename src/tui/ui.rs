@@ -4888,17 +4888,13 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         _ => sample_dna(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
     }
 
-    let time_hue = elapsed * 40.0;
-    let wave_speed = elapsed * 2.5;
+    let time_hue = elapsed * 12.0;
     let centered = app.centered_mode();
     let align = if centered {
         ratatui::layout::Alignment::Center
     } else {
         ratatui::layout::Alignment::Left
     };
-
-    let cx = cw as f32 * 0.5;
-    let cy = ch as f32 * 0.5;
 
     let lines: Vec<Line<'static>> = (0..ch)
         .map(|row| {
@@ -4929,17 +4925,11 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                         let t = (avg_lum + 1.0) * 0.5;
                         let ch = shape_char_3x3(pattern, t);
 
-                        let dx = col as f32 - cx;
-                        let dy = (row as f32 - cy) * 2.0;
-                        let dist = (dx * dx + dy * dy).sqrt();
-                        let wave = (dist * 0.3 - wave_speed).sin() * 0.5 + 0.5;
-
-                        let hue = (time_hue + wave * 120.0 + t * 40.0) % 360.0;
+                        let hue = (time_hue + t * 160.0) % 360.0;
                         let hue = if hue < 0.0 { hue + 360.0 } else { hue };
 
-                        let sat = 0.6 + wave * 0.15 + t * 0.2;
-                        let sat = sat.min(1.0);
-                        let val = (0.12 + t * t * 0.88) * (0.6 + coverage * 0.4);
+                        let sat = 0.5 + t * 0.4;
+                        let val = (0.10 + t * t * 0.90) * (0.55 + coverage * 0.45);
                         let (r, g, b) = hsv_to_rgb(hue, sat, val);
                         Span::styled(
                             String::from(ch),
