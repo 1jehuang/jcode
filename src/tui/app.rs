@@ -12773,7 +12773,7 @@ mod tests {
     }
 
     #[test]
-    fn test_model_picker_preview_enter_opens_interactive_picker() {
+    fn test_model_picker_preview_enter_selects_model() {
         let mut app = create_test_app();
         configure_test_remote_models(&mut app);
 
@@ -12784,14 +12784,54 @@ mod tests {
         app.handle_key(KeyCode::Enter, KeyModifiers::empty())
             .unwrap();
 
+        // Enter from preview mode selects the model and closes the picker
+        assert!(app.picker_state.is_none());
+        assert!(app.input().is_empty());
+        assert_eq!(app.cursor_pos(), 0);
+    }
+
+    #[test]
+    fn test_model_picker_preview_arrow_keys_navigate() {
+        let mut app = create_test_app();
+        configure_test_remote_models(&mut app);
+
+        // Type /model to open preview
+        for c in "/model".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+
         let picker = app
             .picker_state
             .as_ref()
-            .expect("model picker should remain open");
-        assert!(!picker.preview);
-        assert_eq!(picker.filter, "g52c");
-        assert!(app.input().is_empty());
-        assert_eq!(app.cursor_pos(), 0);
+            .expect("model picker preview should be open");
+        assert!(picker.preview);
+        let initial_selected = picker.selected;
+
+        // Down arrow should navigate in preview mode
+        app.handle_key(KeyCode::Down, KeyModifiers::empty())
+            .unwrap();
+
+        let picker = app
+            .picker_state
+            .as_ref()
+            .expect("picker should still be open");
+        assert!(picker.preview, "should remain in preview mode");
+        assert_eq!(picker.selected, initial_selected + 1);
+
+        // Up arrow should navigate back
+        app.handle_key(KeyCode::Up, KeyModifiers::empty())
+            .unwrap();
+
+        let picker = app
+            .picker_state
+            .as_ref()
+            .expect("picker should still be open");
+        assert!(picker.preview, "should remain in preview mode");
+        assert_eq!(picker.selected, initial_selected);
+
+        // Input should be preserved
+        assert_eq!(app.input(), "/model");
     }
 
     #[test]
