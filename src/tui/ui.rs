@@ -1954,7 +1954,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
     let prep_elapsed = prep_start.elapsed();
     let content_height = prepared.wrapped_lines.len().max(1) as u16;
-    let donut_height: u16 = if app.is_processing() { 14 } else { 0 };
+    let show_donut = app.display_messages().is_empty()
+        && !app.is_processing()
+        && app.streaming_text().is_empty()
+        && app.queued_messages().is_empty();
+    let donut_height: u16 = if show_donut { 14 } else { 0 };
     let fixed_height = 1 + queued_height + picker_height + input_height + donut_height; // status + queued + picker + input + donut
     let available_height = chat_area.height;
 
@@ -4862,7 +4866,7 @@ fn draw_donut_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         return;
     }
 
-    let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
+    let elapsed = app.animation_elapsed();
 
     let donut_w = (area.width as usize).min(60);
     let donut_h = area.height as usize;

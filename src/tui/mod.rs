@@ -208,11 +208,19 @@ pub(crate) fn startup_animation_active(state: &dyn TuiState) -> bool {
         && state.picker_state().is_none()
 }
 
+pub(crate) fn idle_donut_active(state: &dyn TuiState) -> bool {
+    state.display_messages().is_empty()
+        && !state.is_processing()
+        && state.streaming_text().is_empty()
+        && state.queued_messages().is_empty()
+}
+
 pub(crate) fn should_animate(state: &dyn TuiState) -> bool {
     state.is_processing()
         || state.status_notice().is_some()
         || state.rate_limit_remaining().is_some()
         || startup_animation_active(state)
+        || idle_donut_active(state)
 }
 
 pub(crate) fn redraw_interval(state: &dyn TuiState) -> Duration {
