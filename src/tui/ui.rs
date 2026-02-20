@@ -4888,7 +4888,7 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         _ => sample_dna(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
     }
 
-    let time_hue = elapsed * 12.0;
+    let time_hue = elapsed * 40.0;
     let centered = app.centered_mode();
     let align = if centered {
         ratatui::layout::Alignment::Center
