@@ -60,11 +60,24 @@ mkdir -p "$INSTALL_DIR"
 mv "$tmpdir/$ARTIFACT" "$INSTALL_DIR/jcode"
 chmod +x "$INSTALL_DIR/jcode"
 
+if [ "$(uname -s)" = "Darwin" ]; then
+  xattr -d com.apple.quarantine "$INSTALL_DIR/jcode" 2>/dev/null || true
+fi
+
 PATH_LINE="export PATH=\"$INSTALL_DIR:\$PATH\""
 
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
   added_to=""
-  for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+
+  if [ "$(uname -s)" = "Darwin" ]; then
+    RC_FILES="$HOME/.zshrc $HOME/.zprofile $HOME/.bash_profile $HOME/.profile"
+    DEFAULT_RC="$HOME/.zshrc"
+  else
+    RC_FILES="$HOME/.bashrc $HOME/.zshrc $HOME/.bash_profile $HOME/.profile"
+    DEFAULT_RC="$HOME/.bashrc"
+  fi
+
+  for rc in $RC_FILES; do
     if [ -f "$rc" ]; then
       if ! grep -qF "$INSTALL_DIR" "$rc" 2>/dev/null; then
         printf '\n# Added by jcode installer\n%s\n' "$PATH_LINE" >> "$rc"
@@ -74,9 +87,8 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
   done
 
   if [ -z "$added_to" ]; then
-    # No rc files found — create .profile
-    printf '# Added by jcode installer\n%s\n' "$PATH_LINE" >> "$HOME/.profile"
-    added_to=" $HOME/.profile"
+    printf '# Added by jcode installer\n%s\n' "$PATH_LINE" >> "$DEFAULT_RC"
+    added_to=" $DEFAULT_RC"
   fi
 
   info "Added $INSTALL_DIR to PATH in:$added_to"
