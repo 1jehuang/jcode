@@ -1965,27 +1965,27 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Use packed layout when content fits, scrolling layout otherwise
     let use_packed = content_height + fixed_height <= available_height;
 
-    // Layout: donut, messages (includes header), queued, status, picker, input
+    // Layout: messages (includes header), queued, status, picker, input, donut
     // All vertical chunks are within the chat_area (left column).
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if use_packed {
             vec![
-                Constraint::Length(donut_height),          // Donut animation (above header)
                 Constraint::Length(content_height.max(1)), // Messages (exact height)
                 Constraint::Length(queued_height),         // Queued messages (above status)
                 Constraint::Length(1),                     // Status line
                 Constraint::Length(picker_height),         // Picker (0 or 1 line)
                 Constraint::Length(input_height),          // Input
+                Constraint::Length(donut_height),          // Donut animation
             ]
         } else {
             vec![
-                Constraint::Length(donut_height),  // Donut animation (above header)
                 Constraint::Min(3),                // Messages (scrollable)
                 Constraint::Length(queued_height), // Queued messages (above status)
                 Constraint::Length(1),             // Status line
                 Constraint::Length(picker_height), // Picker (0 or 1 line)
                 Constraint::Length(input_height),  // Input
+                Constraint::Length(donut_height),  // Donut animation
             ]
         })
         .split(chat_area);
@@ -1994,12 +1994,12 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if let Some(ref mut capture) = debug_capture {
         capture.layout.use_packed = use_packed;
         capture.layout.estimated_content_height = content_height as usize;
-        capture.layout.messages_area = Some(chunks[1].into());
+        capture.layout.messages_area = Some(chunks[0].into());
         if queued_height > 0 {
-            capture.layout.queued_area = Some(chunks[2].into());
+            capture.layout.queued_area = Some(chunks[1].into());
         }
-        capture.layout.status_area = Some(chunks[3].into());
-        capture.layout.input_area = Some(chunks[5].into());
+        capture.layout.status_area = Some(chunks[2].into());
+        capture.layout.input_area = Some(chunks[4].into());
         capture.layout.input_lines_raw = app.input().lines().count().max(1);
         capture.layout.input_lines_wrapped = base_input_height as usize;
 
@@ -2057,13 +2057,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
     let draw_start = Instant::now();
 
-    // Draw donut animation above header when idle
-    if donut_height > 0 {
-        draw_donut_animation(frame, app, chunks[0]);
-    }
-
-    // Messages area is chunks[1] within the chat column (already excludes diagram).
-    let messages_area = chunks[1];
+    // Messages area is chunks[0] within the chat column (already excludes diagram).
+    let messages_area = chunks[0];
 
     if let Some(ref mut capture) = debug_capture {
         capture.layout.messages_area = Some(messages_area.into());
@@ -2105,27 +2100,31 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         if let Some(ref mut capture) = debug_capture {
             capture.render_order.push("draw_queued".to_string());
         }
-        draw_queued(frame, app, chunks[2], user_count + 1);
+        draw_queued(frame, app, chunks[1], user_count + 1);
     }
     if let Some(ref mut capture) = debug_capture {
         capture.render_order.push("draw_status".to_string());
     }
-    draw_status(frame, app, chunks[3], pending_count);
+    draw_status(frame, app, chunks[2], pending_count);
     if let Some(ref mut capture) = debug_capture {
         capture.render_order.push("draw_input".to_string());
     }
     // Draw picker line if active
     if picker_height > 0 {
-        draw_picker_line(frame, app, chunks[4]);
+        draw_picker_line(frame, app, chunks[3]);
     }
 
     draw_input(
         frame,
         app,
-        chunks[5],
+        chunks[4],
         user_count + pending_count + 1,
         &mut debug_capture,
     );
+
+    if donut_height > 0 {
+        draw_donut_animation(frame, app, chunks[5]);
+    }
 
     // Draw info widget overlays (if there's space and content)
     let widget_data = app.info_widget_data();
@@ -3670,13 +3669,13 @@ fn draw_debug_overlay(
     if chunks.len() < 5 {
         return;
     }
-    render_overlay_box(frame, chunks[1], "messages", Color::Red);
-    render_overlay_box(frame, chunks[2], "queued", Color::Yellow);
-    render_overlay_box(frame, chunks[3], "status", Color::Cyan);
-    render_overlay_box(frame, chunks[4], "picker", Color::Magenta);
-    render_overlay_box(frame, chunks[5], "input", Color::Green);
-    if chunks[0].height > 0 {
-        render_overlay_box(frame, chunks[0], "donut", Color::Blue);
+    render_overlay_box(frame, chunks[0], "messages", Color::Red);
+    render_overlay_box(frame, chunks[1], "queued", Color::Yellow);
+    render_overlay_box(frame, chunks[2], "status", Color::Cyan);
+    render_overlay_box(frame, chunks[3], "picker", Color::Magenta);
+    render_overlay_box(frame, chunks[4], "input", Color::Green);
+    if chunks.len() > 5 && chunks[5].height > 0 {
+        render_overlay_box(frame, chunks[5], "donut", Color::Blue);
     }
 
     for placement in placements {
@@ -4868,18 +4867,70 @@ fn draw_donut_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     }
 
     let elapsed = app.animation_elapsed();
+    let w = area.width as usize;
+    let h = area.height as usize;
 
-    let donut_w = (area.width as usize).min(60);
-    let donut_h = area.height as usize;
-    let donut_lines = render_donut(elapsed, donut_w, donut_h);
+    let a = elapsed * 1.0;
+    let b = elapsed * 0.5;
+    let cos_a = a.cos();
+    let sin_a = a.sin();
+    let cos_b = b.cos();
+    let sin_b = b.sin();
 
-    let pulse = ((elapsed * 2.0).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
-    let base = 60u8;
-    let boost = (pulse * 80.0) as u8;
-    let g = base.saturating_add(boost).saturating_add(30);
-    let b = base.saturating_add(boost).saturating_add(50);
-    let art_color = Color::Rgb(base.saturating_add(boost), g, b);
+    let mut output = vec![vec![b' '; w]; h];
+    let mut lum_buf = vec![vec![0.0f32; w]; h];
+    let mut zbuffer = vec![vec![0.0f32; w]; h];
 
+    let aspect = 0.5;
+    let r1 = 1.0f32;
+    let r2 = 2.0f32;
+    let k2 = 5.0f32;
+    let k1 = w.min((h as f32 / aspect) as usize) as f32 * k2 * 0.35 / (r1 + r2);
+
+    let chars = b".,-~:;=!*#$@";
+
+    let mut theta: f32 = 0.0;
+    while theta < std::f32::consts::TAU {
+        let ct = theta.cos();
+        let st = theta.sin();
+
+        let mut phi: f32 = 0.0;
+        while phi < std::f32::consts::TAU {
+            let cp = phi.cos();
+            let sp = phi.sin();
+
+            let cx = r2 + r1 * ct;
+            let cy = r1 * st;
+
+            let x = cx * (cos_b * cp + sin_a * sin_b * sp) - cy * cos_a * sin_b;
+            let y = cx * (sin_b * cp - sin_a * cos_b * sp) + cy * cos_a * cos_b;
+            let z = k2 + cos_a * cx * sp + cy * sin_a;
+            let ooz = 1.0 / z;
+
+            let xp = (w as f32 / 2.0 + k1 * ooz * x) as isize;
+            let yp = (h as f32 / 2.0 - k1 * ooz * y * aspect) as isize;
+
+            let lum = cp * ct * sin_b - cos_a * ct * sp - sin_a * st
+                + cos_b * (cos_a * st - ct * sin_a * sp);
+
+            if xp >= 0
+                && (xp as usize) < w
+                && yp >= 0
+                && (yp as usize) < h
+                && ooz > zbuffer[yp as usize][xp as usize]
+            {
+                zbuffer[yp as usize][xp as usize] = ooz;
+                lum_buf[yp as usize][xp as usize] = lum;
+                let li = (lum * 8.0).max(0.0).min((chars.len() - 1) as f32) as usize;
+                output[yp as usize][xp as usize] = chars[li];
+            }
+
+            phi += 0.015;
+        }
+        theta += 0.05;
+    }
+
+    let time_hue = elapsed * 20.0;
     let centered = app.centered_mode();
     let align = if centered {
         ratatui::layout::Alignment::Center
@@ -4887,14 +4938,55 @@ fn draw_donut_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         ratatui::layout::Alignment::Left
     };
 
-    let lines: Vec<Line<'static>> = donut_lines
-        .into_iter()
-        .map(|s| {
-            Line::from(Span::styled(s, Style::default().fg(art_color))).alignment(align)
+    let lines: Vec<Line<'static>> = output
+        .iter()
+        .enumerate()
+        .map(|(row, chars_row)| {
+            let spans: Vec<Span<'static>> = chars_row
+                .iter()
+                .enumerate()
+                .map(|(col, &ch)| {
+                    if ch == b' ' {
+                        Span::raw(" ")
+                    } else {
+                        let l = lum_buf[row][col];
+                        let t = (l + 1.0) * 0.5;
+                        let hue = (time_hue + col as f32 * 0.8 + row as f32 * 1.2) % 360.0;
+                        let sat = 0.4 + t * 0.3;
+                        let val = 0.25 + t * 0.65;
+                        let (r, g, b) = hsv_to_rgb(hue, sat, val);
+                        Span::styled(
+                            String::from(ch as char),
+                            Style::default().fg(Color::Rgb(r, g, b)),
+                        )
+                    }
+                })
+                .collect();
+            Line::from(spans).alignment(align)
         })
         .collect();
 
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let c = v * s;
+    let h2 = h / 60.0;
+    let x = c * (1.0 - (h2 % 2.0 - 1.0).abs());
+    let (r1, g1, b1) = match h2 as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    (
+        ((r1 + m) * 255.0) as u8,
+        ((g1 + m) * 255.0) as u8,
+        ((b1 + m) * 255.0) as u8,
+    )
 }
 
 fn draw_input(
