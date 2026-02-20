@@ -4867,27 +4867,32 @@ fn draw_donut_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     }
 
     let elapsed = app.animation_elapsed();
-    let w = area.width as usize;
-    let h = area.height as usize;
+    let cw = area.width as usize;
+    let ch = area.height as usize;
 
-    let a = elapsed * 1.0;
-    let b = elapsed * 0.5;
-    let cos_a = a.cos();
-    let sin_a = a.sin();
-    let cos_b = b.cos();
-    let sin_b = b.sin();
+    const SUB_X: usize = 3;
+    const SUB_Y: usize = 3;
+    let sw = cw * SUB_X;
+    let sh = ch * SUB_Y;
 
-    let mut output = vec![vec![b' '; w]; h];
-    let mut lum_buf = vec![vec![0.0f32; w]; h];
-    let mut zbuffer = vec![vec![0.0f32; w]; h];
+    let a_rot = elapsed * 1.0;
+    let b_rot = elapsed * 0.5;
+    let cos_a = a_rot.cos();
+    let sin_a = a_rot.sin();
+    let cos_b = b_rot.cos();
+    let sin_b = b_rot.sin();
+
+    let mut hit = vec![false; sw * sh];
+    let mut lum_map = vec![0.0f32; sw * sh];
+    let mut z_buf = vec![0.0f32; sw * sh];
 
     let aspect = 0.5;
     let r1 = 1.0f32;
     let r2 = 2.0f32;
     let k2 = 5.0f32;
-    let k1 = w.min((h as f32 / aspect) as usize) as f32 * k2 * 0.35 / (r1 + r2);
-
-    let chars = b".,-~:;=!*#$@";
+    let effective_w = sw as f32;
+    let effective_h = sh as f32 / aspect;
+    let k1 = effective_w.min(effective_h) * k2 * 0.35 / (r1 + r2);
 
     let mut theta: f32 = 0.0;
     while theta < std::f32::consts::TAU {
@@ -4907,27 +4912,28 @@ fn draw_donut_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             let z = k2 + cos_a * cx * sp + cy * sin_a;
             let ooz = 1.0 / z;
 
-            let xp = (w as f32 / 2.0 + k1 * ooz * x) as isize;
-            let yp = (h as f32 / 2.0 - k1 * ooz * y * aspect) as isize;
+            let xp = (sw as f32 / 2.0 + k1 * ooz * x) as isize;
+            let yp = (sh as f32 / 2.0 - k1 * ooz * y * aspect) as isize;
 
             let lum = cp * ct * sin_b - cos_a * ct * sp - sin_a * st
                 + cos_b * (cos_a * st - ct * sin_a * sp);
 
             if xp >= 0
-                && (xp as usize) < w
+                && (xp as usize) < sw
                 && yp >= 0
-                && (yp as usize) < h
-                && ooz > zbuffer[yp as usize][xp as usize]
+                && (yp as usize) < sh
             {
-                zbuffer[yp as usize][xp as usize] = ooz;
-                lum_buf[yp as usize][xp as usize] = lum;
-                let li = (lum * 8.0).max(0.0).min((chars.len() - 1) as f32) as usize;
-                output[yp as usize][xp as usize] = chars[li];
+                let idx = yp as usize * sw + xp as usize;
+                if ooz > z_buf[idx] {
+                    z_buf[idx] = ooz;
+                    lum_map[idx] = lum;
+                    hit[idx] = true;
+                }
             }
 
-            phi += 0.015;
+            phi += 0.007;
         }
-        theta += 0.05;
+        theta += 0.02;
     }
 
     let time_hue = elapsed * 20.0;
@@ -4938,25 +4944,39 @@ fn draw_donut_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         ratatui::layout::Alignment::Left
     };
 
-    let lines: Vec<Line<'static>> = output
-        .iter()
-        .enumerate()
-        .map(|(row, chars_row)| {
-            let spans: Vec<Span<'static>> = chars_row
-                .iter()
-                .enumerate()
-                .map(|(col, &ch)| {
-                    if ch == b' ' {
+    let lines: Vec<Line<'static>> = (0..ch)
+        .map(|row| {
+            let spans: Vec<Span<'static>> = (0..cw)
+                .map(|col| {
+                    let mut pattern = 0u16;
+                    let mut total_lum = 0.0f32;
+                    let mut hit_count = 0u32;
+
+                    for sy in 0..SUB_Y {
+                        for sx in 0..SUB_X {
+                            let px = col * SUB_X + sx;
+                            let py = row * SUB_Y + sy;
+                            let idx = py * sw + px;
+                            if hit[idx] {
+                                pattern |= 1 << (sy * SUB_X + sx);
+                                total_lum += lum_map[idx];
+                                hit_count += 1;
+                            }
+                        }
+                    }
+
+                    if hit_count == 0 {
                         Span::raw(" ")
                     } else {
-                        let l = lum_buf[row][col];
-                        let t = (l + 1.0) * 0.5;
+                        let avg_lum = total_lum / hit_count as f32;
+                        let ch = shape_char_3x3(pattern);
+                        let t = (avg_lum + 1.0) * 0.5;
                         let hue = (time_hue + col as f32 * 0.8 + row as f32 * 1.2) % 360.0;
-                        let sat = 0.4 + t * 0.3;
-                        let val = 0.25 + t * 0.65;
+                        let sat = 0.35 + t * 0.35;
+                        let val = 0.3 + t * 0.6;
                         let (r, g, b) = hsv_to_rgb(hue, sat, val);
                         Span::styled(
-                            String::from(ch as char),
+                            String::from(ch),
                             Style::default().fg(Color::Rgb(r, g, b)),
                         )
                     }
@@ -4967,6 +4987,130 @@ fn draw_donut_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         .collect();
 
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn shape_char_3x3(pattern: u16) -> char {
+    if pattern == 0 {
+        return ' ';
+    }
+
+    // 3x3 grid bit layout:
+    // 0 1 2   (top row)
+    // 3 4 5   (middle row)
+    // 6 7 8   (bottom row)
+    let top_l = pattern & 1 != 0;
+    let top_c = pattern & 2 != 0;
+    let top_r = pattern & 4 != 0;
+    let mid_l = pattern & 8 != 0;
+    let mid_c = pattern & 16 != 0;
+    let mid_r = pattern & 32 != 0;
+    let bot_l = pattern & 64 != 0;
+    let bot_c = pattern & 128 != 0;
+    let bot_r = pattern & 256 != 0;
+
+    let count = pattern.count_ones();
+    let top = (top_l as u8) + (top_c as u8) + (top_r as u8);
+    let mid = (mid_l as u8) + (mid_c as u8) + (mid_r as u8);
+    let bot = (bot_l as u8) + (bot_c as u8) + (bot_r as u8);
+    let left = (top_l as u8) + (mid_l as u8) + (bot_l as u8);
+    let center = (top_c as u8) + (mid_c as u8) + (bot_c as u8);
+    let right = (top_r as u8) + (mid_r as u8) + (bot_r as u8);
+
+    if count >= 8 {
+        return '@';
+    }
+    if count >= 7 {
+        return '#';
+    }
+
+    // Diagonal: top-left to bottom-right
+    if top_l && mid_c && bot_r && !top_r && !bot_l {
+        return '\\';
+    }
+    // Diagonal: top-right to bottom-left
+    if top_r && mid_c && bot_l && !top_l && !bot_r {
+        return '/';
+    }
+
+    // Horizontal line (middle row dominant)
+    if mid >= 2 && top <= 1 && bot <= 1 && mid > top && mid > bot {
+        return '-';
+    }
+    // Top edge
+    if top >= 2 && mid <= 1 && bot == 0 {
+        return '-';
+    }
+    // Bottom edge
+    if bot >= 2 && mid <= 1 && top == 0 {
+        return '_';
+    }
+
+    // Vertical line (center column dominant)
+    if center >= 2 && left <= 1 && right <= 1 && center > left && center > right {
+        return '|';
+    }
+    // Left edge
+    if left >= 2 && center <= 1 && right == 0 {
+        return '|';
+    }
+    // Right edge
+    if right >= 2 && center <= 1 && left == 0 {
+        return '|';
+    }
+
+    // Top-heavy shapes
+    if top >= 2 && bot == 0 {
+        if mid >= 1 { return '"'; }
+        return '^';
+    }
+    // Bottom-heavy
+    if bot >= 2 && top == 0 {
+        if mid >= 1 { return ','; }
+        return '.';
+    }
+
+    // Left-heavy (curved)
+    if left >= 2 && right == 0 {
+        return '(';
+    }
+    // Right-heavy (curved)
+    if right >= 2 && left == 0 {
+        return ')';
+    }
+
+    // Mostly full
+    if count >= 6 {
+        return '%';
+    }
+    if count >= 5 {
+        return '*';
+    }
+
+    // Center blob
+    if mid_c && count <= 3 {
+        return 'o';
+    }
+
+    // Sparse diagonal hints
+    if top_r && bot_l && count <= 3 {
+        return '/';
+    }
+    if top_l && bot_r && count <= 3 {
+        return '\\';
+    }
+
+    // Corner dots
+    if count == 1 {
+        if bot_c || bot_l || bot_r { return '.'; }
+        if top_c || top_l || top_r { return '\''; }
+        return ':';
+    }
+
+    if count <= 3 {
+        return ':';
+    }
+
+    '+'
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
