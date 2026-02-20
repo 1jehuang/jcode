@@ -4896,9 +4896,6 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         ratatui::layout::Alignment::Left
     };
 
-    let cx_f = cw as f32 / 2.0;
-    let cy_f = ch as f32 / 2.0;
-
     let lines: Vec<Line<'static>> = (0..ch)
         .map(|row| {
             let spans: Vec<Span<'static>> = (0..cw)
@@ -4925,16 +4922,13 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                     } else {
                         let avg_lum = total_lum / hit_count as f32;
                         let coverage = hit_count as f32 / (SUB_X * SUB_Y) as f32;
-                        let ch = shape_char_3x3(pattern);
                         let t = (avg_lum + 1.0) * 0.5;
+                        let ch = shape_char_3x3(pattern, t);
 
-                        let dx = col as f32 - cx_f;
-                        let dy = (row as f32 - cy_f) * 2.0;
-                        let angle = dy.atan2(dx).to_degrees();
-                        let hue = (time_hue + angle * 0.5 + t * 40.0) % 360.0;
+                        let hue = (time_hue + t * 30.0) % 360.0;
                         let hue = if hue < 0.0 { hue + 360.0 } else { hue };
 
-                        let sat = 0.5 + t * 0.4;
+                        let sat = 0.6 + t * 0.3;
                         let val = (0.15 + t * t * 0.85) * (0.6 + coverage * 0.4);
                         let (r, g, b) = hsv_to_rgb(hue, sat, val);
                         Span::styled(
@@ -5337,7 +5331,7 @@ fn sample_knot(
     }
 }
 
-fn shape_char_3x3(pattern: u16) -> char {
+fn shape_char_3x3(pattern: u16, brightness: f32) -> char {
     if pattern == 0 {
         return ' ';
     }
@@ -5364,101 +5358,103 @@ fn shape_char_3x3(pattern: u16) -> char {
     let center = (top_c as u8) + (mid_c as u8) + (bot_c as u8);
     let right = (top_r as u8) + (mid_r as u8) + (bot_r as u8);
 
+    // brightness 0.0=dark .. 1.0=bright, quantize to 3 levels
+    let bl = if brightness > 0.65 { 2u8 } else if brightness > 0.35 { 1u8 } else { 0u8 };
+
+    // Full/near-full coverage — density ramp
     if count >= 8 {
-        return '@';
+        return match bl { 2 => '@', 1 => '#', _ => '%' };
     }
     if count >= 7 {
-        return '#';
+        return match bl { 2 => '#', 1 => '%', _ => '*' };
     }
 
     // Diagonal: top-left to bottom-right
     if top_l && mid_c && bot_r && !top_r && !bot_l {
-        return '\\';
+        return match bl { 2 => '\\', 1 => '\\', _ => '.' };
     }
     // Diagonal: top-right to bottom-left
     if top_r && mid_c && bot_l && !top_l && !bot_r {
-        return '/';
+        return match bl { 2 => '/', 1 => '/', _ => '.' };
     }
 
     // Horizontal line (middle row dominant)
     if mid >= 2 && top <= 1 && bot <= 1 && mid > top && mid > bot {
-        return '-';
+        return match bl { 2 => '=', 1 => '-', _ => '~' };
     }
     // Top edge
     if top >= 2 && mid <= 1 && bot == 0 {
-        return '-';
+        return match bl { 2 => '=', 1 => '-', _ => '~' };
     }
     // Bottom edge
     if bot >= 2 && mid <= 1 && top == 0 {
-        return '_';
+        return match bl { 2 => '=', 1 => '_', _ => '.' };
     }
 
     // Vertical line (center column dominant)
     if center >= 2 && left <= 1 && right <= 1 && center > left && center > right {
-        return '|';
+        return match bl { 2 => '|', 1 => '|', _ => ':' };
     }
     // Left edge
     if left >= 2 && center <= 1 && right == 0 {
-        return '|';
+        return match bl { 2 => '|', 1 => '|', _ => ':' };
     }
     // Right edge
     if right >= 2 && center <= 1 && left == 0 {
-        return '|';
+        return match bl { 2 => '|', 1 => '|', _ => ':' };
     }
 
     // Top-heavy shapes
     if top >= 2 && bot == 0 {
-        if mid >= 1 { return '"'; }
-        return '^';
+        return match bl { 2 => '"', 1 => '^', _ => '\'' };
     }
     // Bottom-heavy
     if bot >= 2 && top == 0 {
-        if mid >= 1 { return ','; }
-        return '.';
+        return match bl { 2 => ',', 1 => '.', _ => '.' };
     }
 
     // Left-heavy (curved)
     if left >= 2 && right == 0 {
-        return '(';
+        return match bl { 2 => '(', 1 => '(', _ => ':' };
     }
     // Right-heavy (curved)
     if right >= 2 && left == 0 {
-        return ')';
+        return match bl { 2 => ')', 1 => ')', _ => ':' };
     }
 
     // Mostly full
     if count >= 6 {
-        return '%';
+        return match bl { 2 => '%', 1 => '*', _ => '+' };
     }
     if count >= 5 {
-        return '*';
+        return match bl { 2 => '*', 1 => '+', _ => ':' };
     }
 
     // Center blob
     if mid_c && count <= 3 {
-        return 'o';
+        return match bl { 2 => 'o', 1 => '*', _ => '.' };
     }
 
     // Sparse diagonal hints
     if top_r && bot_l && count <= 3 {
-        return '/';
+        return match bl { 2 => '/', 1 => '/', _ => '.' };
     }
     if top_l && bot_r && count <= 3 {
-        return '\\';
+        return match bl { 2 => '\\', 1 => '\\', _ => '.' };
     }
 
     // Corner dots
     if count == 1 {
-        if bot_c || bot_l || bot_r { return '.'; }
-        if top_c || top_l || top_r { return '\''; }
-        return ':';
+        if bot_c || bot_l || bot_r { return match bl { 2 => '.', _ => '.' }; }
+        if top_c || top_l || top_r { return match bl { 2 => '\'', 1 => '\'', _ => '.' }; }
+        return match bl { 2 => ':', 1 => '.', _ => '.' };
     }
 
     if count <= 3 {
-        return ':';
+        return match bl { 2 => ':', 1 => ':', _ => '.' };
     }
 
-    '+'
+    match bl { 2 => '+', 1 => ':', _ => '.' }
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
