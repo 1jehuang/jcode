@@ -1909,13 +1909,13 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     };
 
     let diff_mode = app.diff_mode();
-    let pinned_diffs = if diff_mode.is_pinned() {
-        collect_pinned_diffs(app.display_messages())
+    let pinned_content = if diff_mode.is_pinned() {
+        collect_pinned_content(app.display_messages())
     } else {
         Vec::new()
     };
 
-    let (chat_area, diff_pane_area) = if !pinned_diffs.is_empty() {
+    let (chat_area, diff_pane_area) = if !pinned_content.is_empty() {
         const MIN_DIFF_WIDTH: u16 = 30;
         const MIN_CHAT_WIDTH: u16 = 20;
         let max_diff = chat_area.width.saturating_sub(MIN_CHAT_WIDTH);
@@ -2113,11 +2113,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
 
     if let Some(diff_area) = diff_pane_area {
-        if !pinned_diffs.is_empty() {
+        if !pinned_content.is_empty() {
             if let Some(ref mut capture) = debug_capture {
-                capture.render_order.push("draw_pinned_diffs".to_string());
+                capture.render_order.push("draw_pinned_content".to_string());
             }
-            draw_pinned_diffs(frame, diff_area, &pinned_diffs, app.diff_pane_scroll());
+            draw_pinned_content(frame, diff_area, &pinned_content, app.diff_pane_scroll());
         }
     }
 
@@ -6575,16 +6575,24 @@ fn get_tool_summary(tool: &ToolCall) -> String {
     }
 }
 
-// ─── Pinned diff pane ──────────────────────────────────────────────────────
+// ─── Pinned content pane (diffs + images) ───────────────────────────────────
 
-struct PinnedDiffEntry {
-    file_path: String,
-    lines: Vec<ParsedDiffLine>,
-    additions: usize,
-    deletions: usize,
+enum PinnedContentEntry {
+    Diff {
+        file_path: String,
+        lines: Vec<ParsedDiffLine>,
+        additions: usize,
+        deletions: usize,
+    },
+    Image {
+        file_path: String,
+        hash: u64,
+        width: u32,
+        height: u32,
+    },
 }
 
-fn collect_pinned_diffs(messages: &[DisplayMessage]) -> Vec<PinnedDiffEntry> {
+fn collect_pinned_content(messages: &[DisplayMessage]) -> Vec<PinnedContentEntry> {
     let mut entries = Vec::new();
     for msg in messages {
         if msg.role != "tool" {
@@ -6593,6 +6601,29 @@ fn collect_pinned_diffs(messages: &[DisplayMessage]) -> Vec<PinnedDiffEntry> {
         let Some(ref tc) = msg.tool_data else {
             continue;
         };
+
+        if matches!(tc.name.as_str(), "read" | "Read") {
+            let file_path = tc
+                .input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let path = std::path::Path::new(&file_path);
+            if is_supported_image_ext(path) && path.exists() {
+                if let Some((w, h)) = get_image_dimensions_from_path(path) {
+                    let hash = super::mermaid::register_external_image(path, w, h);
+                    entries.push(PinnedContentEntry::Image {
+                        file_path,
+                        hash,
+                        width: w,
+                        height: h,
+                    });
+                }
+            }
+            continue;
+        }
+
         if !matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit") {
             continue;
         }
@@ -6625,7 +6656,7 @@ fn collect_pinned_diffs(messages: &[DisplayMessage]) -> Vec<PinnedDiffEntry> {
             .filter(|l| l.kind == DiffLineKind::Del)
             .count();
 
-        entries.push(PinnedDiffEntry {
+        entries.push(PinnedContentEntry::Diff {
             file_path,
             lines: change_lines,
             additions,
@@ -6635,10 +6666,60 @@ fn collect_pinned_diffs(messages: &[DisplayMessage]) -> Vec<PinnedDiffEntry> {
     entries
 }
 
-fn draw_pinned_diffs(
+fn is_supported_image_ext(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn get_image_dimensions_from_path(path: &std::path::Path) -> Option<(u32, u32)> {
+    let data = std::fs::read(path).ok()?;
+    // PNG
+    if data.len() > 24 && &data[0..8] == b"\x89PNG\r\n\x1a\n" {
+        let w = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
+        let h = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
+        return Some((w, h));
+    }
+    // JPEG: search for SOF0 marker
+    if data.len() > 2 && data[0] == 0xFF && data[1] == 0xD8 {
+        let mut i = 2;
+        while i + 9 < data.len() {
+            if data[i] == 0xFF {
+                let marker = data[i + 1];
+                if marker == 0xC0 || marker == 0xC2 {
+                    let h = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
+                    let w = u16::from_be_bytes([data[i + 7], data[i + 8]]) as u32;
+                    return Some((w, h));
+                }
+                if marker == 0xD9 || marker == 0xDA {
+                    break;
+                }
+                let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+                i += 2 + len;
+            } else {
+                i += 1;
+            }
+        }
+    }
+    // GIF
+    if data.len() > 10 && (&data[0..4] == b"GIF8") {
+        let w = u16::from_le_bytes([data[6], data[7]]) as u32;
+        let h = u16::from_le_bytes([data[8], data[9]]) as u32;
+        return Some((w, h));
+    }
+    None
+}
+
+fn draw_pinned_content(
     frame: &mut Frame,
     area: Rect,
-    entries: &[PinnedDiffEntry],
+    entries: &[PinnedContentEntry],
     scroll: usize,
 ) {
     use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
@@ -6647,26 +6728,55 @@ fn draw_pinned_diffs(
         return;
     }
 
-    let total_files = entries.len();
-    let total_additions: usize = entries.iter().map(|e| e.additions).sum();
-    let total_deletions: usize = entries.iter().map(|e| e.deletions).sum();
+    let total_diffs = entries
+        .iter()
+        .filter(|e| matches!(e, PinnedContentEntry::Diff { .. }))
+        .count();
+    let total_images = entries
+        .iter()
+        .filter(|e| matches!(e, PinnedContentEntry::Image { .. }))
+        .count();
+    let total_additions: usize = entries
+        .iter()
+        .map(|e| match e {
+            PinnedContentEntry::Diff { additions, .. } => *additions,
+            _ => 0,
+        })
+        .sum();
+    let total_deletions: usize = entries
+        .iter()
+        .map(|e| match e {
+            PinnedContentEntry::Diff { deletions, .. } => *deletions,
+            _ => 0,
+        })
+        .sum();
 
-    let title_parts = vec![
-        Span::styled(" diffs ", Style::default().fg(TOOL_COLOR)),
-        Span::styled(
+    let mut title_parts = vec![Span::styled(" pinned ", Style::default().fg(TOOL_COLOR))];
+    if total_diffs > 0 {
+        title_parts.push(Span::styled(
             format!("+{}", total_additions),
             Style::default().fg(DIFF_ADD_COLOR),
-        ),
-        Span::styled(" ", Style::default().fg(DIM_COLOR)),
-        Span::styled(
+        ));
+        title_parts.push(Span::styled(" ", Style::default().fg(DIM_COLOR)));
+        title_parts.push(Span::styled(
             format!("-{}", total_deletions),
             Style::default().fg(DIFF_DEL_COLOR),
-        ),
-        Span::styled(
-            format!(" {} file{} ", total_files, if total_files == 1 { "" } else { "s" }),
+        ));
+        title_parts.push(Span::styled(
+            format!(" {}f", total_diffs),
             Style::default().fg(DIM_COLOR),
-        ),
-    ];
+        ));
+    }
+    if total_images > 0 {
+        if total_diffs > 0 {
+            title_parts.push(Span::styled(" ", Style::default().fg(DIM_COLOR)));
+        }
+        title_parts.push(Span::styled(
+            format!("📷{}", total_images),
+            Style::default().fg(DIM_COLOR),
+        ));
+    }
+    title_parts.push(Span::styled(" ", Style::default().fg(DIM_COLOR)));
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -6681,86 +6791,172 @@ fn draw_pinned_diffs(
         return;
     }
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut text_lines: Vec<Line<'static>> = Vec::new();
+
+    struct ImagePlacement {
+        after_text_line: usize,
+        hash: u64,
+        rows: u16,
+    }
+    let mut image_placements: Vec<ImagePlacement> = Vec::new();
+
+    let has_protocol = super::mermaid::protocol_type().is_some();
 
     for (i, entry) in entries.iter().enumerate() {
         if i > 0 {
-            lines.push(Line::from(""));
+            text_lines.push(Line::from(""));
         }
 
-        let short_path = entry
-            .file_path
-            .rsplit('/')
-            .take(2)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("/");
+        match entry {
+            PinnedContentEntry::Diff {
+                file_path,
+                lines: diff_lines,
+                additions,
+                deletions,
+            } => {
+                let short_path = file_path
+                    .rsplit('/')
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("/");
 
-        let file_ext = std::path::Path::new(&entry.file_path)
-            .extension()
-            .and_then(|e| e.to_str());
+                let file_ext = std::path::Path::new(file_path)
+                    .extension()
+                    .and_then(|e| e.to_str());
 
-        lines.push(Line::from(vec![
-            Span::styled("── ", Style::default().fg(DIM_COLOR)),
-            Span::styled(
-                short_path,
-                Style::default()
-                    .fg(Color::Rgb(180, 200, 255))
-                    .add_modifier(ratatui::style::Modifier::BOLD),
-            ),
-            Span::styled(" (", Style::default().fg(DIM_COLOR)),
-            Span::styled(
-                format!("+{}", entry.additions),
-                Style::default().fg(DIFF_ADD_COLOR),
-            ),
-            Span::styled(" ", Style::default().fg(DIM_COLOR)),
-            Span::styled(
-                format!("-{}", entry.deletions),
-                Style::default().fg(DIFF_DEL_COLOR),
-            ),
-            Span::styled(")", Style::default().fg(DIM_COLOR)),
-        ]));
+                text_lines.push(Line::from(vec![
+                    Span::styled("── ", Style::default().fg(DIM_COLOR)),
+                    Span::styled(
+                        short_path,
+                        Style::default()
+                            .fg(Color::Rgb(180, 200, 255))
+                            .add_modifier(ratatui::style::Modifier::BOLD),
+                    ),
+                    Span::styled(" (", Style::default().fg(DIM_COLOR)),
+                    Span::styled(
+                        format!("+{}", additions),
+                        Style::default().fg(DIFF_ADD_COLOR),
+                    ),
+                    Span::styled(" ", Style::default().fg(DIM_COLOR)),
+                    Span::styled(
+                        format!("-{}", deletions),
+                        Style::default().fg(DIFF_DEL_COLOR),
+                    ),
+                    Span::styled(")", Style::default().fg(DIM_COLOR)),
+                ]));
 
-        for line in &entry.lines {
-            let base_color = if line.kind == DiffLineKind::Add {
-                DIFF_ADD_COLOR
-            } else {
-                DIFF_DEL_COLOR
-            };
+                for line in diff_lines {
+                    let base_color = if line.kind == DiffLineKind::Add {
+                        DIFF_ADD_COLOR
+                    } else {
+                        DIFF_DEL_COLOR
+                    };
 
-            let mut spans: Vec<Span<'static>> = vec![Span::styled(
-                line.prefix.clone(),
-                Style::default().fg(base_color),
-            )];
+                    let mut spans: Vec<Span<'static>> = vec![Span::styled(
+                        line.prefix.clone(),
+                        Style::default().fg(base_color),
+                    )];
 
-            if !line.content.is_empty() {
-                let highlighted = markdown::highlight_line(line.content.as_str(), file_ext);
-                for span in highlighted {
-                    let tinted = tint_span_with_diff_color(span, base_color);
-                    spans.push(tinted);
+                    if !line.content.is_empty() {
+                        let highlighted =
+                            markdown::highlight_line(line.content.as_str(), file_ext);
+                        for span in highlighted {
+                            let tinted = tint_span_with_diff_color(span, base_color);
+                            spans.push(tinted);
+                        }
+                    }
+
+                    text_lines.push(Line::from(spans));
                 }
             }
+            PinnedContentEntry::Image {
+                file_path,
+                hash,
+                width: img_w,
+                height: img_h,
+            } => {
+                let short_path = file_path
+                    .rsplit('/')
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("/");
 
-            lines.push(Line::from(spans));
+                text_lines.push(Line::from(vec![
+                    Span::styled("── 📷 ", Style::default().fg(DIM_COLOR)),
+                    Span::styled(
+                        short_path,
+                        Style::default()
+                            .fg(Color::Rgb(180, 200, 255))
+                            .add_modifier(ratatui::style::Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" {}×{}", img_w, img_h),
+                        Style::default().fg(DIM_COLOR),
+                    ),
+                ]));
+
+                if has_protocol {
+                    let img_rows = inner.height.min(12).max(4);
+                    image_placements.push(ImagePlacement {
+                        after_text_line: text_lines.len(),
+                        hash: *hash,
+                        rows: img_rows,
+                    });
+                    for _ in 0..img_rows {
+                        text_lines.push(Line::from(""));
+                    }
+                }
+            }
         }
     }
 
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "No diffs yet",
+    if text_lines.is_empty() {
+        text_lines.push(Line::from(Span::styled(
+            "No content yet",
             Style::default().fg(DIM_COLOR),
         )));
     }
 
-    let visible_lines: Vec<Line<'static>> = lines
-        .into_iter()
-        .skip(scroll)
-        .collect();
+    let visible_lines: Vec<Line<'static>> = text_lines.into_iter().skip(scroll).collect();
 
     let paragraph = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
     frame.render_widget(paragraph, inner);
+
+    if has_protocol {
+        for placement in &image_placements {
+            let text_y = placement.after_text_line as u16;
+            if text_y < scroll as u16 {
+                continue;
+            }
+            let y_in_inner = text_y.saturating_sub(scroll as u16);
+            if y_in_inner >= inner.height {
+                continue;
+            }
+            let avail_rows = inner.height.saturating_sub(y_in_inner).min(placement.rows);
+            if avail_rows < 2 {
+                continue;
+            }
+            let img_area = Rect {
+                x: inner.x,
+                y: inner.y + y_in_inner,
+                width: inner.width,
+                height: avail_rows,
+            };
+            super::mermaid::render_image_widget_fit(
+                placement.hash,
+                img_area,
+                frame.buffer_mut(),
+                false,
+                false,
+            );
+        }
+    }
 }
 
 #[cfg(test)]

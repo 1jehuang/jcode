@@ -1168,6 +1168,29 @@ pub fn get_cached_png(hash: u64) -> Option<(PathBuf, u32, u32)> {
     Some((diagram.path, diagram.width, diagram.height))
 }
 
+/// Register an external image file (e.g. from file_read) in the render cache
+/// so it can be displayed with render_image_widget_fit/render_image_widget.
+/// Returns the hash used for rendering.
+pub fn register_external_image(path: &Path, width: u32, height: u32) -> u64 {
+    use std::hash::{Hash as _, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    path.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    if let Ok(mut cache) = RENDER_CACHE.lock() {
+        cache.insert(
+            hash,
+            CachedDiagram {
+                path: path.to_path_buf(),
+                width,
+                height,
+                complexity: 0,
+            },
+        );
+    }
+    hash
+}
+
 fn has_render_error(hash: u64) -> bool {
     RENDER_ERRORS
         .lock()
