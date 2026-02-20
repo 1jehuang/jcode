@@ -1254,8 +1254,8 @@ impl TuiState for ClientApp {
         false // Deprecated client doesn't support canary mode
     }
 
-    fn show_diffs(&self) -> bool {
-        true // Always show diffs in deprecated client
+    fn diff_mode(&self) -> crate::config::DiffDisplayMode {
+        crate::config::DiffDisplayMode::Inline
     }
 
     fn current_session_id(&self) -> Option<String> {
@@ -1504,6 +1504,9 @@ impl TuiState for ClientApp {
 
     fn diagram_zoom(&self) -> u8 {
         100
+    }
+    fn diff_pane_scroll(&self) -> usize {
+        0
     }
     fn picker_state(&self) -> Option<&super::PickerState> {
         None

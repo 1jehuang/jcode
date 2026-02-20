@@ -1091,7 +1091,7 @@ impl SessionPicker {
         };
 
         let centered = crate::config::config().display.centered;
-        let show_diffs = crate::config::config().display.show_diffs;
+        let diff_mode = crate::config::config().display.diff_mode;
         let align = if centered {
             Alignment::Center
         } else {
@@ -1241,7 +1241,7 @@ impl SessionPicker {
                 }
                 "assistant" => {
                     let md_lines =
-                        super::ui::render_assistant_message(&display_msg, assistant_width, false);
+                        super::ui::render_assistant_message(&display_msg, assistant_width, crate::config::DiffDisplayMode::Off);
                     let mut skip_mermaid_blank = false;
 
                     for line in md_lines {
@@ -1274,7 +1274,7 @@ impl SessionPicker {
                     let tool_lines = super::ui::render_tool_message(
                         &display_msg,
                         preview_inner_width,
-                        show_diffs,
+                        diff_mode,
                     );
                     for line in tool_lines {
                         lines.push(super::ui::align_if_unset(line, align));

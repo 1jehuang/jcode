@@ -84,6 +84,49 @@ impl Default for KeybindingsConfig {
     }
 }
 
+/// How to display file diffs from edit/write tools
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffDisplayMode {
+    /// Don't show diffs at all
+    Off,
+    /// Show diffs inline in the chat (default)
+    #[default]
+    Inline,
+    /// Show diffs in a dedicated pinned pane
+    Pinned,
+}
+
+impl DiffDisplayMode {
+    pub fn is_off(&self) -> bool {
+        matches!(self, DiffDisplayMode::Off)
+    }
+
+    pub fn is_inline(&self) -> bool {
+        matches!(self, DiffDisplayMode::Inline)
+    }
+
+    pub fn is_pinned(&self) -> bool {
+        matches!(self, DiffDisplayMode::Pinned)
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            DiffDisplayMode::Off => DiffDisplayMode::Inline,
+            DiffDisplayMode::Inline => DiffDisplayMode::Pinned,
+            DiffDisplayMode::Pinned => DiffDisplayMode::Off,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            DiffDisplayMode::Off => "OFF",
+            DiffDisplayMode::Inline => "Inline",
+            DiffDisplayMode::Pinned => "Pinned",
+        }
+    }
+}
+
 /// How to display mermaid diagrams
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -109,8 +152,11 @@ pub enum DiagramPanePosition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DisplayConfig {
-    /// Show diffs by default (default: true)
-    pub show_diffs: bool,
+    /// How to display file diffs (off/inline/pinned, default: inline)
+    pub diff_mode: DiffDisplayMode,
+    /// Legacy: "show_diffs = true/false" maps to diff_mode inline/off
+    #[serde(default)]
+    show_diffs: Option<bool>,
     /// Queue mode by default - wait until done before sending (default: false)
     pub queue_mode: bool,
     /// Capture mouse events (default: false). Enables scroll wheel but disables terminal selection.
@@ -132,7 +178,8 @@ pub struct DisplayConfig {
 impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
-            show_diffs: true,
+            diff_mode: DiffDisplayMode::default(),
+            show_diffs: None,
             queue_mode: false,
             mouse_capture: true,
             debug_socket: false,
@@ -141,6 +188,18 @@ impl Default for DisplayConfig {
             diagram_mode: DiagramDisplayMode::default(),
             startup_animation: false,
             idle_animation: true,
+        }
+    }
+}
+
+impl DisplayConfig {
+    fn apply_legacy_compat(&mut self) {
+        if let Some(show) = self.show_diffs.take() {
+            self.diff_mode = if show {
+                DiffDisplayMode::Inline
+            } else {
+                DiffDisplayMode::Off
+            };
         }
     }
 }
@@ -332,8 +391,11 @@ impl Config {
         }
 
         let content = std::fs::read_to_string(&path).ok()?;
-        match toml::from_str(&content) {
-            Ok(config) => Some(config),
+        match toml::from_str::<Self>(&content) {
+            Ok(mut config) => {
+                config.display.apply_legacy_compat();
+                Some(config)
+            }
             Err(e) => {
                 crate::logging::error(&format!("Failed to parse config file: {}", e));
                 None
@@ -379,9 +441,16 @@ impl Config {
         }
 
         // Display
-        if let Ok(v) = std::env::var("JCODE_SHOW_DIFFS") {
+        if let Ok(v) = std::env::var("JCODE_DIFF_MODE") {
+            match v.to_lowercase().as_str() {
+                "off" | "none" | "0" | "false" => self.display.diff_mode = DiffDisplayMode::Off,
+                "inline" | "on" | "1" | "true" => self.display.diff_mode = DiffDisplayMode::Inline,
+                "pinned" | "pin" => self.display.diff_mode = DiffDisplayMode::Pinned,
+                _ => {}
+            }
+        } else if let Ok(v) = std::env::var("JCODE_SHOW_DIFFS") {
             if let Some(parsed) = parse_env_bool(&v) {
-                self.display.show_diffs = parsed;
+                self.display.diff_mode = if parsed { DiffDisplayMode::Inline } else { DiffDisplayMode::Off };
             }
         }
         if let Ok(v) = std::env::var("JCODE_QUEUE_MODE") {
@@ -581,8 +650,8 @@ scroll_prompt_down = "alt+]"
 scroll_bookmark = "ctrl+g"
 
 [display]
-# Show file diffs for edit/write operations
-show_diffs = true
+# Diff display mode: "off", "inline" (default), or "pinned" (dedicated pane)
+diff_mode = "inline"
 
 # Queue mode: wait until assistant is done before sending next message
 queue_mode = false
@@ -706,7 +775,7 @@ desktop_notifications = true
 - Scroll bookmark: `{}`
 
 **Display:**
-- Show diffs: {}
+- Diff mode: {}
 - Queue mode: {}
 - Mouse capture: {}
 - Debug socket: {}
@@ -756,7 +825,7 @@ desktop_notifications = true
             self.keybindings.scroll_prompt_up,
             self.keybindings.scroll_prompt_down,
             self.keybindings.scroll_bookmark,
-            self.display.show_diffs,
+            self.display.diff_mode.label(),
             self.display.queue_mode,
             self.display.mouse_capture,
             self.display.debug_socket,

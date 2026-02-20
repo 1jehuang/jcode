@@ -64,7 +64,7 @@ struct BenchState {
     scroll_offset: usize,
     is_processing: bool,
     status: ProcessingStatus,
-    show_diffs: bool,
+    diff_mode: jcode::config::DiffDisplayMode,
     queue_mode: bool,
     context_info: ContextInfo,
     info_widget: InfoWidgetData,
@@ -110,7 +110,7 @@ impl BenchState {
             scroll_offset: 0,
             is_processing,
             status,
-            show_diffs: false,
+            diff_mode: jcode::config::DiffDisplayMode::Off,
             queue_mode: true,
             context_info: ContextInfo::default(),
             info_widget: InfoWidgetData::default(),
@@ -242,8 +242,8 @@ impl TuiState for BenchState {
         false
     }
 
-    fn show_diffs(&self) -> bool {
-        self.show_diffs
+    fn diff_mode(&self) -> jcode::config::DiffDisplayMode {
+        self.diff_mode
     }
 
     fn current_session_id(&self) -> Option<String> {
@@ -354,6 +354,9 @@ impl TuiState for BenchState {
 
     fn diagram_zoom(&self) -> u8 {
         100
+    }
+    fn diff_pane_scroll(&self) -> usize {
+        0
     }
     fn picker_state(&self) -> Option<&jcode::tui::PickerState> {
         None

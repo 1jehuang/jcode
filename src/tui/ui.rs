@@ -1542,7 +1542,7 @@ struct PreparedMessages {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct BodyCacheKey {
     width: u16,
-    show_diffs: bool,
+    diff_mode: crate::config::DiffDisplayMode,
     messages_version: u64,
     diagram_mode: crate::config::DiagramDisplayMode,
 }
@@ -1562,7 +1562,7 @@ fn body_cache() -> &'static Mutex<BodyCacheState> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct MessageCacheKey {
     width: u16,
-    show_diffs: bool,
+    diff_mode: crate::config::DiffDisplayMode,
     message_hash: u64,
     content_len: usize,
     diagram_mode: crate::config::DiagramDisplayMode,
@@ -1908,6 +1908,30 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         (area, None)
     };
 
+    let diff_mode = app.diff_mode();
+    let pinned_diffs = if diff_mode.is_pinned() {
+        collect_pinned_diffs(app.display_messages())
+    } else {
+        Vec::new()
+    };
+
+    let (chat_area, diff_pane_area) = if !pinned_diffs.is_empty() {
+        const MIN_DIFF_WIDTH: u16 = 30;
+        const MIN_CHAT_WIDTH: u16 = 20;
+        let max_diff = chat_area.width.saturating_sub(MIN_CHAT_WIDTH);
+        if max_diff >= MIN_DIFF_WIDTH {
+            let diff_width = (chat_area.width * 35 / 100).max(MIN_DIFF_WIDTH).min(max_diff);
+            let new_chat_width = chat_area.width.saturating_sub(diff_width);
+            let chat = Rect { x: chat_area.x, y: chat_area.y, width: new_chat_width, height: chat_area.height };
+            let diff = Rect { x: chat_area.x + new_chat_width, y: chat_area.y, width: diff_width, height: chat_area.height };
+            (chat, Some(diff))
+        } else {
+            (chat_area, None)
+        }
+    } else {
+        (chat_area, None)
+    };
+
     // Calculate pending messages (queued + interleave) for numbering and layout
     let pending_count = pending_prompt_count(app);
     let queued_height = pending_count.min(3) as u16;
@@ -2086,6 +2110,15 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             app.diagram_zoom(),
             pane_position,
         );
+    }
+
+    if let Some(diff_area) = diff_pane_area {
+        if !pinned_diffs.is_empty() {
+            if let Some(ref mut capture) = debug_capture {
+                capture.render_order.push("draw_pinned_diffs".to_string());
+            }
+            draw_pinned_diffs(frame, diff_area, &pinned_diffs, app.diff_pane_scroll());
+        }
     }
 
     let messages_draw = draw_start.elapsed();
@@ -2944,7 +2977,7 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
 fn prepare_body_cached(app: &dyn TuiState, width: u16) -> PreparedMessages {
     let key = BodyCacheKey {
         width,
-        show_diffs: app.show_diffs(),
+        diff_mode: app.diff_mode(),
         messages_version: app.display_messages_version(),
         diagram_mode: app.diagram_mode(),
     };
@@ -3061,7 +3094,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 let cached = get_cached_message_lines(
                     msg,
                     content_width,
-                    app.show_diffs(),
+                    app.diff_mode(),
                     render_assistant_message,
                 );
                 for line in cached {
@@ -3079,7 +3112,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
             }
             "tool" => {
                 let cached =
-                    get_cached_message_lines(msg, width, app.show_diffs(), render_tool_message);
+                    get_cached_message_lines(msg, width, app.diff_mode(), render_tool_message);
                 for line in cached {
                     lines.push(align_if_unset(line, align));
                 }
@@ -3157,15 +3190,15 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
 fn get_cached_message_lines<F>(
     msg: &DisplayMessage,
     width: u16,
-    show_diffs: bool,
+    diff_mode: crate::config::DiffDisplayMode,
     render: F,
 ) -> Vec<Line<'static>>
 where
-    F: FnOnce(&DisplayMessage, u16, bool) -> Vec<Line<'static>>,
+    F: FnOnce(&DisplayMessage, u16, crate::config::DiffDisplayMode) -> Vec<Line<'static>>,
 {
     let key = MessageCacheKey {
         width,
-        show_diffs,
+        diff_mode,
         message_hash: hash_display_message(msg),
         content_len: msg.content.len(),
         diagram_mode: crate::config::config().display.diagram_mode,
@@ -3179,7 +3212,7 @@ where
         return lines;
     }
 
-    let lines = render(msg, width, show_diffs);
+    let lines = render(msg, width, diff_mode);
     cache.insert(key, lines.clone());
     lines
 }
@@ -3187,7 +3220,7 @@ where
 pub(crate) fn render_assistant_message(
     msg: &DisplayMessage,
     width: u16,
-    _show_diffs: bool,
+    _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
     let content_width = width as usize;
     let mut lines = markdown::render_markdown_with_width(&msg.content, Some(content_width));
@@ -3206,7 +3239,7 @@ pub(crate) fn render_assistant_message(
 pub(crate) fn render_tool_message(
     msg: &DisplayMessage,
     width: u16,
-    show_diffs: bool,
+    diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let Some(ref tc) = msg.tool_data else {
@@ -3301,7 +3334,7 @@ pub(crate) fn render_tool_message(
     }
 
     // Show diff output for editing tools with syntax highlighting
-    if show_diffs && is_edit_tool {
+    if diff_mode.is_inline() && is_edit_tool {
         // Extract file extension for syntax highlighting
         let file_ext = tc
             .input
@@ -6540,6 +6573,194 @@ fn get_tool_summary(tool: &ToolCall) -> String {
         }
         _ => String::new(),
     }
+}
+
+// ─── Pinned diff pane ──────────────────────────────────────────────────────
+
+struct PinnedDiffEntry {
+    file_path: String,
+    lines: Vec<ParsedDiffLine>,
+    additions: usize,
+    deletions: usize,
+}
+
+fn collect_pinned_diffs(messages: &[DisplayMessage]) -> Vec<PinnedDiffEntry> {
+    let mut entries = Vec::new();
+    for msg in messages {
+        if msg.role != "tool" {
+            continue;
+        }
+        let Some(ref tc) = msg.tool_data else {
+            continue;
+        };
+        if !matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit") {
+            continue;
+        }
+
+        let file_path = tc
+            .input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let change_lines = {
+            let from_content = collect_diff_lines(&msg.content);
+            if !from_content.is_empty() {
+                from_content
+            } else {
+                generate_diff_lines_from_tool_input(tc)
+            }
+        };
+        if change_lines.is_empty() {
+            continue;
+        }
+
+        let additions = change_lines
+            .iter()
+            .filter(|l| l.kind == DiffLineKind::Add)
+            .count();
+        let deletions = change_lines
+            .iter()
+            .filter(|l| l.kind == DiffLineKind::Del)
+            .count();
+
+        entries.push(PinnedDiffEntry {
+            file_path,
+            lines: change_lines,
+            additions,
+            deletions,
+        });
+    }
+    entries
+}
+
+fn draw_pinned_diffs(
+    frame: &mut Frame,
+    area: Rect,
+    entries: &[PinnedDiffEntry],
+    scroll: usize,
+) {
+    use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+
+    if area.width < 10 || area.height < 3 {
+        return;
+    }
+
+    let total_files = entries.len();
+    let total_additions: usize = entries.iter().map(|e| e.additions).sum();
+    let total_deletions: usize = entries.iter().map(|e| e.deletions).sum();
+
+    let title_parts = vec![
+        Span::styled(" diffs ", Style::default().fg(TOOL_COLOR)),
+        Span::styled(
+            format!("+{}", total_additions),
+            Style::default().fg(DIFF_ADD_COLOR),
+        ),
+        Span::styled(" ", Style::default().fg(DIM_COLOR)),
+        Span::styled(
+            format!("-{}", total_deletions),
+            Style::default().fg(DIFF_DEL_COLOR),
+        ),
+        Span::styled(
+            format!(" {} file{} ", total_files, if total_files == 1 { "" } else { "s" }),
+            Style::default().fg(DIM_COLOR),
+        ),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(DIM_COLOR))
+        .title(Line::from(title_parts));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    for (i, entry) in entries.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+
+        let short_path = entry
+            .file_path
+            .rsplit('/')
+            .take(2)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("/");
+
+        let file_ext = std::path::Path::new(&entry.file_path)
+            .extension()
+            .and_then(|e| e.to_str());
+
+        lines.push(Line::from(vec![
+            Span::styled("── ", Style::default().fg(DIM_COLOR)),
+            Span::styled(
+                short_path,
+                Style::default()
+                    .fg(Color::Rgb(180, 200, 255))
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+            Span::styled(" (", Style::default().fg(DIM_COLOR)),
+            Span::styled(
+                format!("+{}", entry.additions),
+                Style::default().fg(DIFF_ADD_COLOR),
+            ),
+            Span::styled(" ", Style::default().fg(DIM_COLOR)),
+            Span::styled(
+                format!("-{}", entry.deletions),
+                Style::default().fg(DIFF_DEL_COLOR),
+            ),
+            Span::styled(")", Style::default().fg(DIM_COLOR)),
+        ]));
+
+        for line in &entry.lines {
+            let base_color = if line.kind == DiffLineKind::Add {
+                DIFF_ADD_COLOR
+            } else {
+                DIFF_DEL_COLOR
+            };
+
+            let mut spans: Vec<Span<'static>> = vec![Span::styled(
+                line.prefix.clone(),
+                Style::default().fg(base_color),
+            )];
+
+            if !line.content.is_empty() {
+                let highlighted = markdown::highlight_line(line.content.as_str(), file_ext);
+                for span in highlighted {
+                    let tinted = tint_span_with_diff_color(span, base_color);
+                    spans.push(tinted);
+                }
+            }
+
+            lines.push(Line::from(spans));
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No diffs yet",
+            Style::default().fg(DIM_COLOR),
+        )));
+    }
+
+    let visible_lines: Vec<Line<'static>> = lines
+        .into_iter()
+        .skip(scroll)
+        .collect();
+
+    let paragraph = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, inner);
 }
 
 #[cfg(test)]

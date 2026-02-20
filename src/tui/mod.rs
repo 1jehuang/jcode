@@ -93,8 +93,8 @@ pub trait TuiState {
     fn is_canary(&self) -> bool;
     /// Whether running in replay mode
     fn is_replay(&self) -> bool;
-    /// Whether to show diffs for edit/write tools
-    fn show_diffs(&self) -> bool;
+    /// Diff display mode (off/inline/pinned)
+    fn diff_mode(&self) -> crate::config::DiffDisplayMode;
     /// Current session ID (if available)
     fn current_session_id(&self) -> Option<String>;
     /// Session display name (memorable short name like "fox" or "oak")
@@ -148,6 +148,8 @@ pub trait TuiState {
     fn diagram_pane_position(&self) -> crate::config::DiagramPanePosition;
     /// Diagram zoom percentage (100 = normal)
     fn diagram_zoom(&self) -> u8;
+    /// Scroll offset for pinned diff pane (line index)
+    fn diff_pane_scroll(&self) -> usize;
     /// Interactive model/provider picker state (shown as inline row above input)
     fn picker_state(&self) -> Option<&PickerState>;
     /// Working directory for this session

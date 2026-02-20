@@ -588,8 +588,8 @@ pub struct App {
     last_injected_memory_signature: Option<(String, Instant)>,
     // Swarm feature toggle for this session
     swarm_enabled: bool,
-    // Show diffs for edit/write tool outputs (toggle with Alt+D)
-    show_diffs: bool,
+    // Diff display mode (toggle with Shift+Tab)
+    diff_mode: crate::config::DiffDisplayMode,
     // Center all content (from config)
     centered: bool,
     // Diagram display mode (from config)
@@ -609,6 +609,8 @@ pub struct App {
     diagram_pane_position: crate::config::DiagramPanePosition,
     // Diagram zoom percentage (100 = normal)
     diagram_zoom: u8,
+    // Scroll offset for pinned diff pane
+    diff_pane_scroll: usize,
     // Interactive model/provider picker
     picker_state: Option<super::PickerState>,
     // Pending model switch from picker (for remote mode async processing)
@@ -621,7 +623,7 @@ pub struct App {
     scroll_keys: ScrollKeys,
     // Scroll bookmark: stashed scroll position for quick teleport back
     scroll_bookmark: Option<usize>,
-    // Short-lived notice for status feedback (model switch, toggle diff, etc.)
+    // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
     status_notice: Option<(String, Instant)>,
     // Message to interleave during processing (set via Shift+Enter)
     interleave_message: Option<String>,
@@ -855,7 +857,7 @@ impl App {
             memory_enabled: features.memory,
             last_injected_memory_signature: None,
             swarm_enabled: features.swarm,
-            show_diffs: display.show_diffs,
+            diff_mode: display.diff_mode,
             centered: display.centered,
             diagram_mode: display.diagram_mode,
             diagram_focus: false,
@@ -866,6 +868,7 @@ impl App {
             diagram_pane_enabled: true,
             diagram_pane_position: crate::config::DiagramPanePosition::default(),
             diagram_zoom: 100,
+            diff_pane_scroll: 0,
             picker_state: None,
             pending_model_switch: None,
             model_switch_keys: super::keybind::load_model_switch_keys(),
@@ -5147,15 +5150,11 @@ impl App {
             return Ok(());
         }
 
-        // Shift+Tab: toggle diff view
+        // Shift+Tab: cycle diff mode (Off → Inline → Pinned)
         if code == KeyCode::BackTab {
-            self.show_diffs = !self.show_diffs;
-            let status = if self.show_diffs {
-                "Diffs: ON"
-            } else {
-                "Diffs: OFF"
-            };
-            self.set_status_notice(status);
+            self.diff_mode = self.diff_mode.cycle();
+            let status = format!("Diffs: {}", self.diff_mode.label());
+            self.set_status_notice(&status);
             return Ok(());
         }
 
@@ -5816,15 +5815,11 @@ impl App {
             return Ok(());
         }
 
-        // Shift+Tab: toggle diff view
+        // Shift+Tab: cycle diff mode (Off → Inline → Pinned)
         if code == KeyCode::BackTab {
-            self.show_diffs = !self.show_diffs;
-            let status = if self.show_diffs {
-                "Diffs: ON"
-            } else {
-                "Diffs: OFF"
-            };
-            self.set_status_notice(status);
+            self.diff_mode = self.diff_mode.cycle();
+            let status = format!("Diffs: {}", self.diff_mode.label());
+            self.set_status_notice(&status);
             return Ok(());
         }
 
@@ -6386,6 +6381,7 @@ impl App {
                      • `+` / `-` - Resize diagram pane (when focused)\n\
                      • `Alt+M` - Toggle diagram pane\n\
                      • `Alt+T` - Toggle diagram pane position (side/top)\n\
+                     • `Shift+Tab` - Cycle diff mode (Off → Inline → Pinned)\n\
                      • `Alt+V` - Paste image from clipboard\n\
                      • `Ctrl+R` - Recover from missing tool outputs\n\
                      • `PageUp/Down` or `Up/Down` - Scroll history\n\
@@ -11501,8 +11497,8 @@ impl super::TuiState for App {
         self.is_replay
     }
 
-    fn show_diffs(&self) -> bool {
-        self.show_diffs
+    fn diff_mode(&self) -> crate::config::DiffDisplayMode {
+        self.diff_mode
     }
 
     fn current_session_id(&self) -> Option<String> {
@@ -12131,6 +12127,9 @@ impl super::TuiState for App {
     fn diagram_zoom(&self) -> u8 {
         self.diagram_zoom
     }
+    fn diff_pane_scroll(&self) -> usize {
+        self.diff_pane_scroll
+    }
     fn picker_state(&self) -> Option<&super::PickerState> {
         self.picker_state.as_ref()
     }
@@ -12498,7 +12497,7 @@ mod tests {
         let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
         let mut app = App::new(provider, registry);
         app.queue_mode = false;
-        app.show_diffs = true;
+        app.diff_mode = crate::config::DiffDisplayMode::Inline;
         app
     }
 
