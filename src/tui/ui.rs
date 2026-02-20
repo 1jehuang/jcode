@@ -4888,13 +4888,16 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         _ => sample_knot(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
     }
 
-    let time_hue = elapsed * 20.0;
+    let time_hue = elapsed * 15.0;
     let centered = app.centered_mode();
     let align = if centered {
         ratatui::layout::Alignment::Center
     } else {
         ratatui::layout::Alignment::Left
     };
+
+    let cx_f = cw as f32 / 2.0;
+    let cy_f = ch as f32 / 2.0;
 
     let lines: Vec<Line<'static>> = (0..ch)
         .map(|row| {
@@ -4921,11 +4924,18 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                         Span::raw(" ")
                     } else {
                         let avg_lum = total_lum / hit_count as f32;
+                        let coverage = hit_count as f32 / (SUB_X * SUB_Y) as f32;
                         let ch = shape_char_3x3(pattern);
                         let t = (avg_lum + 1.0) * 0.5;
-                        let hue = (time_hue + col as f32 * 0.8 + row as f32 * 1.2) % 360.0;
-                        let sat = 0.35 + t * 0.35;
-                        let val = 0.3 + t * 0.6;
+
+                        let dx = col as f32 - cx_f;
+                        let dy = (row as f32 - cy_f) * 2.0;
+                        let angle = dy.atan2(dx).to_degrees();
+                        let hue = (time_hue + angle + t * 60.0) % 360.0;
+                        let hue = if hue < 0.0 { hue + 360.0 } else { hue };
+
+                        let sat = 0.5 + t * 0.4;
+                        let val = (0.15 + t * t * 0.85) * (0.6 + coverage * 0.4);
                         let (r, g, b) = hsv_to_rgb(hue, sat, val);
                         Span::styled(
                             String::from(ch),
