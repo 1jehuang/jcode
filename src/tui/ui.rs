@@ -1965,27 +1965,27 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Use packed layout when content fits, scrolling layout otherwise
     let use_packed = content_height + fixed_height <= available_height;
 
-    // Layout: messages (includes header), queued, status, picker, input, donut
+    // Layout: donut, messages (includes header), queued, status, picker, input
     // All vertical chunks are within the chat_area (left column).
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if use_packed {
             vec![
+                Constraint::Length(donut_height),          // Donut animation (above header)
                 Constraint::Length(content_height.max(1)), // Messages (exact height)
                 Constraint::Length(queued_height),         // Queued messages (above status)
                 Constraint::Length(1),                     // Status line
                 Constraint::Length(picker_height),         // Picker (0 or 1 line)
                 Constraint::Length(input_height),          // Input
-                Constraint::Length(donut_height),          // Donut animation
             ]
         } else {
             vec![
+                Constraint::Length(donut_height),  // Donut animation (above header)
                 Constraint::Min(3),                // Messages (scrollable)
                 Constraint::Length(queued_height), // Queued messages (above status)
                 Constraint::Length(1),             // Status line
                 Constraint::Length(picker_height), // Picker (0 or 1 line)
                 Constraint::Length(input_height),  // Input
-                Constraint::Length(donut_height),  // Donut animation
             ]
         })
         .split(chat_area);
@@ -1994,12 +1994,12 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if let Some(ref mut capture) = debug_capture {
         capture.layout.use_packed = use_packed;
         capture.layout.estimated_content_height = content_height as usize;
-        capture.layout.messages_area = Some(chunks[0].into());
+        capture.layout.messages_area = Some(chunks[1].into());
         if queued_height > 0 {
-            capture.layout.queued_area = Some(chunks[1].into());
+            capture.layout.queued_area = Some(chunks[2].into());
         }
-        capture.layout.status_area = Some(chunks[2].into());
-        capture.layout.input_area = Some(chunks[4].into());
+        capture.layout.status_area = Some(chunks[3].into());
+        capture.layout.input_area = Some(chunks[5].into());
         capture.layout.input_lines_raw = app.input().lines().count().max(1);
         capture.layout.input_lines_wrapped = base_input_height as usize;
 
@@ -2057,8 +2057,13 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
     let draw_start = Instant::now();
 
-    // Messages area is chunks[0] within the chat column (already excludes diagram).
-    let messages_area = chunks[0];
+    // Draw donut animation above header when idle
+    if donut_height > 0 {
+        draw_donut_animation(frame, app, chunks[0]);
+    }
+
+    // Messages area is chunks[1] within the chat column (already excludes diagram).
+    let messages_area = chunks[1];
 
     if let Some(ref mut capture) = debug_capture {
         capture.layout.messages_area = Some(messages_area.into());
@@ -2100,31 +2105,27 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         if let Some(ref mut capture) = debug_capture {
             capture.render_order.push("draw_queued".to_string());
         }
-        draw_queued(frame, app, chunks[1], user_count + 1);
+        draw_queued(frame, app, chunks[2], user_count + 1);
     }
     if let Some(ref mut capture) = debug_capture {
         capture.render_order.push("draw_status".to_string());
     }
-    draw_status(frame, app, chunks[2], pending_count);
+    draw_status(frame, app, chunks[3], pending_count);
     if let Some(ref mut capture) = debug_capture {
         capture.render_order.push("draw_input".to_string());
     }
     // Draw picker line if active
     if picker_height > 0 {
-        draw_picker_line(frame, app, chunks[3]);
+        draw_picker_line(frame, app, chunks[4]);
     }
 
     draw_input(
         frame,
         app,
-        chunks[4],
+        chunks[5],
         user_count + pending_count + 1,
         &mut debug_capture,
     );
-
-    if donut_height > 0 {
-        draw_donut_animation(frame, app, chunks[5]);
-    }
 
     // Draw info widget overlays (if there's space and content)
     let widget_data = app.info_widget_data();
@@ -3669,13 +3670,13 @@ fn draw_debug_overlay(
     if chunks.len() < 5 {
         return;
     }
-    render_overlay_box(frame, chunks[0], "messages", Color::Red);
-    render_overlay_box(frame, chunks[1], "queued", Color::Yellow);
-    render_overlay_box(frame, chunks[2], "status", Color::Cyan);
-    render_overlay_box(frame, chunks[3], "picker", Color::Magenta);
-    render_overlay_box(frame, chunks[4], "input", Color::Green);
-    if chunks.len() > 5 && chunks[5].height > 0 {
-        render_overlay_box(frame, chunks[5], "donut", Color::Blue);
+    render_overlay_box(frame, chunks[1], "messages", Color::Red);
+    render_overlay_box(frame, chunks[2], "queued", Color::Yellow);
+    render_overlay_box(frame, chunks[3], "status", Color::Cyan);
+    render_overlay_box(frame, chunks[4], "picker", Color::Magenta);
+    render_overlay_box(frame, chunks[5], "input", Color::Green);
+    if chunks[0].height > 0 {
+        render_overlay_box(frame, chunks[0], "donut", Color::Blue);
     }
 
     for placement in placements {
