@@ -628,6 +628,8 @@ async fn run_main(mut args: Args) -> Result<()> {
 
     match args.command {
         Some(Command::Serve) => {
+            // When running as a background server, skip interactive login prompts
+            std::env::set_var("JCODE_NON_INTERACTIVE", "1");
             let (provider, _registry) =
                 init_provider_and_registry(&args.provider, args.model.as_deref()).await?;
             let server = server::Server::new(provider);
@@ -748,6 +750,39 @@ async fn run_main(mut args: Args) -> Result<()> {
                 }
 
                 if !server_running {
+                    // Check for credentials before spawning the server (which can't prompt interactively)
+                    let (has_claude, has_openai) = tokio::join!(
+                        tokio::task::spawn_blocking(|| auth::claude::load_credentials().is_ok()),
+                        tokio::task::spawn_blocking(|| auth::codex::load_credentials().is_ok()),
+                    );
+                    let has_claude = has_claude.unwrap_or(false);
+                    let has_openai = has_openai.unwrap_or(false);
+                    let has_openrouter = provider::openrouter::OpenRouterProvider::has_credentials();
+                    let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
+
+                    if !has_claude && !has_openai && !has_openrouter && !has_api_key
+                        && args.provider == ProviderChoice::Auto
+                    {
+                        eprintln!("No credentials found. Let's log in!\n");
+                        eprintln!("Choose a provider:");
+                        eprintln!("  1. Claude (Claude Max subscription)");
+                        eprintln!("  2. OpenAI (ChatGPT Pro subscription)");
+                        eprintln!("  3. OpenRouter (API key - 200+ models)");
+                        eprint!("\nEnter 1-3: ");
+                        io::stdout().flush()?;
+
+                        let mut input = String::new();
+                        io::stdin().read_line(&mut input)?;
+
+                        match input.trim() {
+                            "1" => login_claude_flow().await?,
+                            "2" => login_openai_flow().await?,
+                            "3" => login_openrouter_flow()?,
+                            _ => anyhow::bail!("Invalid choice. Run 'jcode login' to try again."),
+                        }
+                        eprintln!();
+                    }
+
                     // Clean up any stale sockets
                     let _ = std::fs::remove_file(server::socket_path());
                     let _ = std::fs::remove_file(server::debug_socket_path());
@@ -763,15 +798,50 @@ async fn run_main(mut args: Args) -> Result<()> {
                     let mut child = cmd
                         .arg("serve")
                         .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::piped())
                         .spawn()?;
 
                     // Wait for server to be ready (up to 10 seconds)
                     let start = std::time::Instant::now();
                     loop {
                         if start.elapsed() > std::time::Duration::from_secs(10) {
+                            let stderr_output = child.stderr.take()
+                                .and_then(|mut s| {
+                                    let mut buf = String::new();
+                                    use std::io::Read;
+                                    s.read_to_string(&mut buf).ok()?;
+                                    Some(buf)
+                                })
+                                .unwrap_or_default();
                             let _ = child.kill();
-                            anyhow::bail!("Server failed to start within 10 seconds");
+                            if stderr_output.is_empty() {
+                                anyhow::bail!("Server failed to start within 10 seconds. Check logs at ~/.jcode/logs/");
+                            } else {
+                                anyhow::bail!("Server failed to start within 10 seconds:\n{}", stderr_output.trim());
+                            }
+                        }
+                        // Check if server process already exited (crashed)
+                        if let Some(status) = child.try_wait()? {
+                            let stderr_output = child.stderr.take()
+                                .and_then(|mut s| {
+                                    let mut buf = String::new();
+                                    use std::io::Read;
+                                    s.read_to_string(&mut buf).ok()?;
+                                    Some(buf)
+                                })
+                                .unwrap_or_default();
+                            if stderr_output.is_empty() {
+                                anyhow::bail!(
+                                    "Server process exited immediately ({}). Check logs at ~/.jcode/logs/",
+                                    status
+                                );
+                            } else {
+                                anyhow::bail!(
+                                    "Server process exited immediately ({}):\n{}",
+                                    status,
+                                    stderr_output.trim()
+                                );
+                            }
                         }
                         if server::socket_path().exists() {
                             if tokio::net::UnixStream::connect(server::socket_path())
@@ -857,7 +927,15 @@ async fn init_provider_and_registry(
                 std::env::set_var("JCODE_ACTIVE_PROVIDER", multi.name().to_lowercase());
                 Arc::new(multi)
             } else {
-                // No credentials - prompt for login
+                // No credentials found
+                let non_interactive = std::env::var("JCODE_NON_INTERACTIVE").is_ok();
+                if non_interactive {
+                    anyhow::bail!(
+                        "No credentials configured. Run 'jcode login' or set ANTHROPIC_API_KEY to authenticate."
+                    );
+                }
+
+                // Interactive - prompt for login
                 eprintln!("No credentials found. Let's log in!\n");
                 eprintln!("Choose a provider:");
                 eprintln!("  1. Claude (Claude Max subscription)");
