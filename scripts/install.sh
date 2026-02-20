@@ -68,13 +68,18 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
   fi
 
   info "Added $INSTALL_DIR to PATH in:$added_to"
-  info ""
-  printf '\033[1;33m%s\033[0m\n' "Restart your shell or run:"
-  echo ""
-  echo "  $PATH_LINE"
-  echo ""
 fi
 
+echo ""
 info "✅ jcode $VERSION installed successfully!"
-info ""
-info "Run 'jcode' to get started."
+echo ""
+
+if command -v jcode >/dev/null 2>&1; then
+  info "Run 'jcode' to get started."
+else
+  echo "  To start using jcode, run:"
+  echo ""
+  printf '    \033[1;32mexec $SHELL && jcode\033[0m\n'
+  echo ""
+  echo "  (This restarts your shell so it picks up the new PATH.)"
+fi
