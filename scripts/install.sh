@@ -34,9 +34,21 @@ VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep
 
 URL="https://github.com/$REPO/releases/download/$VERSION/$ARTIFACT.tar.gz"
 
-info "Installing jcode $VERSION ($ARTIFACT)"
-info "  from: $URL"
-info "  to:   $INSTALL_DIR/jcode"
+EXISTING=""
+if [ -x "$INSTALL_DIR/jcode" ]; then
+  EXISTING=$("$INSTALL_DIR/jcode" --version 2>/dev/null | head -1 || echo "unknown")
+fi
+
+if [ -n "$EXISTING" ]; then
+  if echo "$EXISTING" | grep -qF "${VERSION#v}"; then
+    info "jcode $VERSION is already installed — reinstalling"
+  else
+    info "Updating jcode $EXISTING → $VERSION"
+  fi
+else
+  info "Installing jcode $VERSION"
+fi
+info "  $INSTALL_DIR/jcode ($ARTIFACT)"
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
