@@ -16,7 +16,7 @@ all running natively in your terminal.
 
 <br>
 
-<img src="https://github.com/1jehuang/jcode/releases/download/v0.2.0/demo.avif" alt="jcode demo" width="800">
+<video src="https://github.com/1jehuang/jcode/releases/download/v0.3.1/jcode_replay_jaguar_20260220_115340.mp4" alt="jcode demo" width="800" autoplay loop muted playsinline></video>
 
 <br>
 
