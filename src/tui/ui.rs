@@ -4928,7 +4928,6 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     match variant {
         0 => sample_donut(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
         1 => sample_knot(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
-        2 => sample_spring(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
         _ => sample_dna(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
     }
 
@@ -5056,94 +5055,8 @@ fn idle_animation_variant() -> usize {
         let mut hasher = DefaultHasher::new();
         std::time::SystemTime::now().hash(&mut hasher);
         std::process::id().hash(&mut hasher);
-        (std::hash::Hasher::finish(&hasher) % 4) as usize
+        (std::hash::Hasher::finish(&hasher) % 3) as usize
     })
-}
-
-fn sample_spring(
-    elapsed: f32,
-    sw: usize,
-    sh: usize,
-    hit: &mut [bool],
-    lum_map: &mut [f32],
-    z_buf: &mut [f32],
-) {
-    let rot_y = elapsed * 0.5;
-    let rot_x = elapsed * 0.2;
-    let cam_dist = 8.0f32;
-    let aspect = 0.5;
-    let scale_base = (sw as f32).min(sh as f32 / aspect) * 0.22;
-    let tube_r = 0.3f32;
-    let coil_r = 1.2f32;
-    let coils = 5.0f32;
-    let stretch = 3.0f32;
-
-    let mut t: f32 = -coils * std::f32::consts::PI;
-    let t_end = coils * std::f32::consts::PI;
-    while t < t_end {
-        let hx = coil_r * t.cos();
-        let hy = (t / (coils * std::f32::consts::PI)) * stretch;
-        let hz = coil_r * t.sin();
-
-        let dt = 0.01f32;
-        let t2 = t + dt;
-        let dx = coil_r * t2.cos() - hx;
-        let dy = (t2 / (coils * std::f32::consts::PI)) * stretch - hy;
-        let dz = coil_r * t2.sin() - hz;
-        let dl = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
-        let tx = dx / dl;
-        let ty = dy / dl;
-        let tz = dz / dl;
-
-        let (bx, by, bz) = {
-            let up = if tx.abs() < 0.9 { (1.0f32, 0.0, 0.0) } else { (0.0, 1.0, 0.0) };
-            let bx = ty * up.2 - tz * up.1;
-            let by = tz * up.0 - tx * up.2;
-            let bz = tx * up.1 - ty * up.0;
-            let bl = (bx * bx + by * by + bz * bz).sqrt().max(0.001);
-            (bx / bl, by / bl, bz / bl)
-        };
-        let nx = by * tz - bz * ty;
-        let ny = bz * tx - bx * tz;
-        let nz = bx * ty - by * tx;
-
-        let mut phi: f32 = 0.0;
-        while phi < std::f32::consts::TAU {
-            let cp = phi.cos();
-            let sp = phi.sin();
-            let px = hx + tube_r * (cp * nx + sp * bx);
-            let py = hy + tube_r * (cp * ny + sp * by);
-            let pz = hz + tube_r * (cp * nz + sp * bz);
-
-            let sn_x = cp * nx + sp * bx;
-            let sn_y = cp * ny + sp * by;
-            let sn_z = cp * nz + sp * bz;
-
-            let (rx, ry, rz) = rotate_xyz(px, py, pz, rot_x, rot_y, 0.0);
-            let d = cam_dist + rz;
-            if d < 0.1 {
-                phi += 0.1;
-                continue;
-            }
-            let proj = cam_dist / d;
-            let xp = (sw as f32 / 2.0 + rx * proj * scale_base) as isize;
-            let yp = (sh as f32 / 2.0 - ry * proj * scale_base * aspect) as isize;
-            let depth = 1.0 / d;
-
-            if xp >= 0 && (xp as usize) < sw && yp >= 0 && (yp as usize) < sh {
-                let idx = yp as usize * sw + xp as usize;
-                if depth > z_buf[idx] {
-                    z_buf[idx] = depth;
-                    let (rnx, rny, _) = rotate_xyz(sn_x, sn_y, sn_z, rot_x, rot_y, 0.0);
-                    let lum = (rnx * 0.4 + rny * 0.5 + 0.3).clamp(-1.0, 1.0);
-                    lum_map[idx] = lum;
-                    hit[idx] = true;
-                }
-            }
-            phi += 0.1;
-        }
-        t += 0.01;
-    }
 }
 
 fn sample_dna(
