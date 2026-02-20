@@ -4925,11 +4925,11 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                         let t = (avg_lum + 1.0) * 0.5;
                         let ch = shape_char_3x3(pattern, t);
 
-                        let hue = (time_hue + t * 30.0) % 360.0;
+                        let hue = (time_hue + t * 120.0) % 360.0;
                         let hue = if hue < 0.0 { hue + 360.0 } else { hue };
 
-                        let sat = 0.6 + t * 0.3;
-                        let val = (0.15 + t * t * 0.85) * (0.6 + coverage * 0.4);
+                        let sat = 0.55 + t * 0.35;
+                        let val = (0.12 + t * t * 0.88) * (0.6 + coverage * 0.4);
                         let (r, g, b) = hsv_to_rgb(hue, sat, val);
                         Span::styled(
                             String::from(ch),
