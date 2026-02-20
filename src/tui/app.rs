@@ -6063,23 +6063,13 @@ impl App {
     }
 
     /// Queue a message to be sent later
-    /// Handle paste: check for clipboard images first, then store text content
+    /// Handle bracketed paste: store text content (image URLs are still detected inline)
     fn handle_paste(&mut self, text: String) {
-        // Check if clipboard has actual image data (e.g., screenshot, native image copy)
-        if let Some((media_type, base64_data)) = clipboard_image() {
-            let size_kb = base64_data.len() / 1024;
-            crate::logging::info(&format!(
-                "Image paste: {} ({} KB base64)",
-                media_type, size_kb
-            ));
-            self.pending_images.push((media_type, base64_data));
-            let n = self.pending_images.len();
-            let placeholder = format!("[image {}]", n);
-            self.input.insert_str(self.cursor_pos, &placeholder);
-            self.cursor_pos += placeholder.len();
-            self.sync_model_picker_preview_from_input();
-            return;
-        }
+        // Note: clipboard_image() is NOT checked here. Bracketed paste events from the
+        // terminal always deliver text. Checking clipboard_image() here caused a bug where
+        // text pastes were misidentified as images when the clipboard also had image data
+        // (common on Wayland where apps advertise multiple MIME types). Image pasting is
+        // handled by paste_image_from_clipboard() (Ctrl+V / Alt+V) instead.
 
         // Check if pasted text contains an image URL (e.g., Discord <img src="...">)
         if let Some(url) = extract_image_url(&text) {
