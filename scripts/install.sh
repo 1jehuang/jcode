@@ -48,12 +48,31 @@ mkdir -p "$INSTALL_DIR"
 mv "$tmpdir/$ARTIFACT" "$INSTALL_DIR/jcode"
 chmod +x "$INSTALL_DIR/jcode"
 
+PATH_LINE="export PATH=\"$INSTALL_DIR:\$PATH\""
+
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
-  printf '\n\033[1;33m%s\033[0m\n' "⚠  $INSTALL_DIR is not in your PATH. Add it:"
+  added_to=""
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+    if [ -f "$rc" ]; then
+      if ! grep -qF "$INSTALL_DIR" "$rc" 2>/dev/null; then
+        printf '\n# Added by jcode installer\n%s\n' "$PATH_LINE" >> "$rc"
+        added_to="$added_to $rc"
+      fi
+    fi
+  done
+
+  if [ -z "$added_to" ]; then
+    # No rc files found — create .profile
+    printf '# Added by jcode installer\n%s\n' "$PATH_LINE" >> "$HOME/.profile"
+    added_to=" $HOME/.profile"
+  fi
+
+  info "Added $INSTALL_DIR to PATH in:$added_to"
+  info ""
+  printf '\033[1;33m%s\033[0m\n' "Restart your shell or run:"
   echo ""
-  echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+  echo "  $PATH_LINE"
   echo ""
-  echo "  Add that line to your ~/.bashrc, ~/.zshrc, or equivalent."
 fi
 
 info "✅ jcode $VERSION installed successfully!"
