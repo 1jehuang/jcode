@@ -238,8 +238,8 @@ impl AnthropicProvider {
                         if dangling.contains(id) {
                             synthetic_results.push(ApiContentBlock::ToolResult {
                                 tool_use_id: id.clone(),
-                                content: "[Session interrupted before tool execution completed]"
-                                    .to_string(),
+                                content: ToolResultContent::Text("[Session interrupted before tool execution completed]"
+                                    .to_string()),
                                 is_error: true,
                             });
                         }
@@ -340,47 +340,77 @@ impl AnthropicProvider {
         blocks: &[ContentBlock],
         is_oauth: bool,
     ) -> Vec<ApiContentBlock> {
-        blocks
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text, .. } => Some(ApiContentBlock::Text {
-                    text: text.clone(),
-                    cache_control: None,
-                }),
-                ContentBlock::ToolUse { id, name, input } => Some(ApiContentBlock::ToolUse {
-                    id: id.clone(),
-                    name: if is_oauth {
-                        map_tool_name_for_oauth(name)
-                    } else {
-                        name.clone()
-                    },
-                    // Anthropic API requires input to be an object, not null
-                    input: if input.is_null() {
-                        serde_json::json!({})
-                    } else {
-                        input.clone()
-                    },
-                    cache_control: None,
-                }),
+        let mut result: Vec<ApiContentBlock> = Vec::new();
+        for block in blocks {
+            match block {
+                ContentBlock::Text { text, .. } => {
+                    result.push(ApiContentBlock::Text {
+                        text: text.clone(),
+                        cache_control: None,
+                    });
+                }
+                ContentBlock::ToolUse { id, name, input } => {
+                    result.push(ApiContentBlock::ToolUse {
+                        id: id.clone(),
+                        name: if is_oauth {
+                            map_tool_name_for_oauth(name)
+                        } else {
+                            name.clone()
+                        },
+                        input: if input.is_null() {
+                            serde_json::json!({})
+                        } else {
+                            input.clone()
+                        },
+                        cache_control: None,
+                    });
+                }
                 ContentBlock::ToolResult {
                     tool_use_id,
                     content,
                     is_error,
-                } => Some(ApiContentBlock::ToolResult {
-                    tool_use_id: tool_use_id.clone(),
-                    content: content.clone(),
-                    is_error: is_error.unwrap_or(false),
-                }),
-                ContentBlock::Image { media_type, data } => Some(ApiContentBlock::Image {
-                    source: ApiImageSource {
-                        kind: "base64".to_string(),
-                        media_type: media_type.clone(),
-                        data: data.clone(),
-                    },
-                }),
-                _ => None, // Skip other block types (thinking, etc.)
-            })
-            .collect()
+                } => {
+                    result.push(ApiContentBlock::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        content: ToolResultContent::Text(content.clone()),
+                        is_error: is_error.unwrap_or(false),
+                    });
+                }
+                ContentBlock::Image { media_type, data } => {
+                    let img_block = ToolResultContentBlock::Image {
+                        source: ApiImageSource {
+                            kind: "base64".to_string(),
+                            media_type: media_type.clone(),
+                            data: data.clone(),
+                        },
+                    };
+                    if let Some(ApiContentBlock::ToolResult { content, .. }) = result.last_mut() {
+                        match content {
+                            ToolResultContent::Text(text) => {
+                                let text_block = ToolResultContentBlock::Text {
+                                    text: std::mem::take(text),
+                                };
+                                *content =
+                                    ToolResultContent::Blocks(vec![text_block, img_block]);
+                            }
+                            ToolResultContent::Blocks(blocks) => {
+                                blocks.push(img_block);
+                            }
+                        }
+                    } else {
+                        result.push(ApiContentBlock::Image {
+                            source: ApiImageSource {
+                                kind: "base64".to_string(),
+                                media_type: media_type.clone(),
+                                data: data.clone(),
+                            },
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        result
     }
 
     /// Convert tool definitions to Anthropic API format
@@ -1201,10 +1231,26 @@ enum ApiContentBlock {
     #[serde(rename = "tool_result")]
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: ToolResultContent,
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },
+    #[serde(rename = "image")]
+    Image { source: ApiImageSource },
+}
+
+#[derive(Serialize, Clone)]
+#[serde(untagged)]
+enum ToolResultContent {
+    Text(String),
+    Blocks(Vec<ToolResultContentBlock>),
+}
+
+#[derive(Serialize, Clone)]
+#[serde(tag = "type")]
+enum ToolResultContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
     #[serde(rename = "image")]
     Image { source: ApiImageSource },
 }
@@ -1369,7 +1415,10 @@ mod tests {
             {
                 found_ids.insert(tool_use_id.clone());
                 assert!(is_error);
-                assert!(content.contains("interrupted"));
+                match content {
+                    ToolResultContent::Text(t) => assert!(t.contains("interrupted")),
+                    ToolResultContent::Blocks(_) => panic!("Expected text content"),
+                }
             } else {
                 panic!("Expected ToolResult block");
             }
@@ -1420,7 +1469,10 @@ mod tests {
         // The last message should be the actual tool_result, not synthetic
         let last_msg = &formatted[2];
         if let ApiContentBlock::ToolResult { content, .. } = &last_msg.content[0] {
-            assert!(content.contains("file1.txt"));
+            match content {
+                ToolResultContent::Text(t) => assert!(t.contains("file1.txt")),
+                ToolResultContent::Blocks(_) => panic!("Expected text content"),
+            }
         } else {
             panic!("Expected ToolResult block");
         }
