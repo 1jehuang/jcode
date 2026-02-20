@@ -1,5 +1,6 @@
 [build]
-rustc-wrapper = "/home/jeremy/.cargo/bin/sccache"
+# Set RUSTC_WRAPPER=sccache in your shell env; no hardcoded path needed.
+# CI overrides this file, so leaving rustc-wrapper unset here is safe.
 jobs = 6
 
 [target.x86_64-unknown-linux-gnu]
