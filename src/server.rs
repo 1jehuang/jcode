@@ -831,10 +831,18 @@ impl Server {
 
                     // Only check for conflicts when someone writes/edits (reads never conflict)
                     let is_write = matches!(touch.op, FileOp::Write | FileOp::Edit);
+                    if is_write {
+                        crate::logging::info(&format!(
+                            "[conflict-check] WRITE by {} on {}, swarm_peers: {:?}",
+                            &session_id[..8.min(session_id.len())],
+                            path.display(),
+                            swarm_session_ids.iter().map(|s| &s[..8.min(s.len())]).collect::<Vec<_>>()
+                        ));
+                    }
                     let previous_touches: Vec<FileAccess> = if is_write {
                         let touches = file_touches.read().await;
                         if let Some(accesses) = touches.get(&path) {
-                            accesses
+                            let result: Vec<FileAccess> = accesses
                                 .iter()
                                 .filter(|a| {
                                     a.session_id != session_id
@@ -842,8 +850,14 @@ impl Server {
                                         && matches!(a.op, FileOp::Write | FileOp::Edit)
                                 })
                                 .cloned()
-                                .collect()
+                                .collect();
+                            crate::logging::info(&format!(
+                                "[conflict-check] {} prev write-touches from peers ({} total accesses)",
+                                result.len(), accesses.len()
+                            ));
+                            result
                         } else {
+                            crate::logging::info("[conflict-check] no touches for this path yet");
                             vec![]
                         }
                     } else {
@@ -852,6 +866,10 @@ impl Server {
 
                     // If there are previous write conflicts from swarm members, send alerts
                     if !previous_touches.is_empty() {
+                        crate::logging::info(&format!(
+                            "[conflict-check] CONFLICT on {} — sending alerts",
+                            path.display()
+                        ));
                         let members = swarm_members.read().await;
                         let current_member = members.get(&session_id);
                         let current_name = current_member.and_then(|m| m.friendly_name.clone());

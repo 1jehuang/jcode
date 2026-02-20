@@ -1954,13 +1954,14 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
     let prep_elapsed = prep_start.elapsed();
     let content_height = prepared.wrapped_lines.len().max(1) as u16;
-    let fixed_height = 1 + queued_height + picker_height + input_height; // status + queued + picker + input
+    let donut_height: u16 = if app.is_processing() { 14 } else { 0 };
+    let fixed_height = 1 + queued_height + picker_height + input_height + donut_height; // status + queued + picker + input + donut
     let available_height = chat_area.height;
 
     // Use packed layout when content fits, scrolling layout otherwise
     let use_packed = content_height + fixed_height <= available_height;
 
-    // Layout: messages (includes header), queued, status, picker, input
+    // Layout: messages (includes header), queued, status, picker, input, donut
     // All vertical chunks are within the chat_area (left column).
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1971,6 +1972,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 Constraint::Length(1),                     // Status line
                 Constraint::Length(picker_height),         // Picker (0 or 1 line)
                 Constraint::Length(input_height),          // Input
+                Constraint::Length(donut_height),          // Donut animation
             ]
         } else {
             vec![
@@ -1979,6 +1981,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 Constraint::Length(1),             // Status line
                 Constraint::Length(picker_height), // Picker (0 or 1 line)
                 Constraint::Length(input_height),  // Input
+                Constraint::Length(donut_height),  // Donut animation
             ]
         })
         .split(chat_area);
@@ -2114,6 +2117,10 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         user_count + pending_count + 1,
         &mut debug_capture,
     );
+
+    if donut_height > 0 {
+        draw_donut_animation(frame, app, chunks[5]);
+    }
 
     // Draw info widget overlays (if there's space and content)
     let widget_data = app.info_widget_data();
@@ -3663,6 +3670,9 @@ fn draw_debug_overlay(
     render_overlay_box(frame, chunks[2], "status", Color::Cyan);
     render_overlay_box(frame, chunks[3], "picker", Color::Magenta);
     render_overlay_box(frame, chunks[4], "input", Color::Green);
+    if chunks.len() > 5 && chunks[5].height > 0 {
+        render_overlay_box(frame, chunks[5], "donut", Color::Blue);
+    }
 
     for placement in placements {
         let title = format!("widget:{}", placement.kind.as_str());
@@ -4845,6 +4855,41 @@ fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usi
         Paragraph::new(lines)
     };
     frame.render_widget(paragraph, area);
+}
+
+fn draw_donut_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
+    if area.width < 4 || area.height < 2 {
+        return;
+    }
+
+    let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
+
+    let donut_w = (area.width as usize).min(60);
+    let donut_h = area.height as usize;
+    let donut_lines = render_donut(elapsed, donut_w, donut_h);
+
+    let pulse = ((elapsed * 2.0).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+    let base = 60u8;
+    let boost = (pulse * 80.0) as u8;
+    let g = base.saturating_add(boost).saturating_add(30);
+    let b = base.saturating_add(boost).saturating_add(50);
+    let art_color = Color::Rgb(base.saturating_add(boost), g, b);
+
+    let centered = app.centered_mode();
+    let align = if centered {
+        ratatui::layout::Alignment::Center
+    } else {
+        ratatui::layout::Alignment::Left
+    };
+
+    let lines: Vec<Line<'static>> = donut_lines
+        .into_iter()
+        .map(|s| {
+            Line::from(Span::styled(s, Style::default().fg(art_color))).alignment(align)
+        })
+        .collect();
+
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_input(
