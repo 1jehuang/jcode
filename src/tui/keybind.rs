@@ -174,10 +174,16 @@ pub struct ScrollKeys {
     pub down: KeyBinding,
     pub page_up: KeyBinding,
     pub page_down: KeyBinding,
+    pub prompt_up: KeyBinding,
+    pub prompt_down: KeyBinding,
+    pub bookmark: KeyBinding,
     pub up_label: String,
     pub down_label: String,
     pub page_up_label: String,
     pub page_down_label: String,
+    pub prompt_up_label: String,
+    pub prompt_down_label: String,
+    pub bookmark_label: String,
 }
 
 impl ScrollKeys {
@@ -204,6 +210,22 @@ impl ScrollKeys {
         }
         None
     }
+
+    /// Check if a key matches prompt jump (returns direction: -1 = prev, 1 = next)
+    pub fn prompt_jump(&self, code: KeyCode, modifiers: KeyModifiers) -> Option<i8> {
+        if self.prompt_up.matches(code.clone(), modifiers) {
+            return Some(-1);
+        }
+        if self.prompt_down.matches(code, modifiers) {
+            return Some(1);
+        }
+        None
+    }
+
+    /// Check if a key matches the scroll bookmark toggle
+    pub fn is_bookmark(&self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        self.bookmark.matches(code, modifiers)
+    }
 }
 
 pub fn load_scroll_keys() -> ScrollKeys {
@@ -226,6 +248,18 @@ pub fn load_scroll_keys() -> ScrollKeys {
         code: KeyCode::Char('d'),
         modifiers: KeyModifiers::ALT,
     };
+    let default_prompt_up = KeyBinding {
+        code: KeyCode::Char('['),
+        modifiers: KeyModifiers::ALT,
+    };
+    let default_prompt_down = KeyBinding {
+        code: KeyCode::Char(']'),
+        modifiers: KeyModifiers::ALT,
+    };
+    let default_bookmark = KeyBinding {
+        code: KeyCode::Char('g'),
+        modifiers: KeyModifiers::CONTROL,
+    };
 
     let (up, up_label) = parse_or_default(&cfg.keybindings.scroll_up, default_up, "Ctrl+K");
     let (down, down_label) = parse_or_default(&cfg.keybindings.scroll_down, default_down, "Ctrl+J");
@@ -236,16 +270,37 @@ pub fn load_scroll_keys() -> ScrollKeys {
         default_page_down,
         "Alt+D",
     );
+    let (prompt_up, prompt_up_label) = parse_or_default(
+        &cfg.keybindings.scroll_prompt_up,
+        default_prompt_up,
+        "Alt+[",
+    );
+    let (prompt_down, prompt_down_label) = parse_or_default(
+        &cfg.keybindings.scroll_prompt_down,
+        default_prompt_down,
+        "Alt+]",
+    );
+    let (bookmark, bookmark_label) = parse_or_default(
+        &cfg.keybindings.scroll_bookmark,
+        default_bookmark,
+        "Ctrl+G",
+    );
 
     ScrollKeys {
         up,
         down,
         page_up,
         page_down,
+        prompt_up,
+        prompt_down,
+        bookmark,
         up_label,
         down_label,
         page_up_label,
         page_down_label,
+        prompt_up_label,
+        prompt_down_label,
+        bookmark_label,
     }
 }
 
@@ -359,10 +414,25 @@ mod tests {
                 code: KeyCode::Char('d'),
                 modifiers: KeyModifiers::ALT,
             },
+            prompt_up: KeyBinding {
+                code: KeyCode::Char('['),
+                modifiers: KeyModifiers::ALT,
+            },
+            prompt_down: KeyBinding {
+                code: KeyCode::Char(']'),
+                modifiers: KeyModifiers::ALT,
+            },
+            bookmark: KeyBinding {
+                code: KeyCode::Char('g'),
+                modifiers: KeyModifiers::CONTROL,
+            },
             up_label: "Alt+K".to_string(),
             down_label: "Alt+J".to_string(),
             page_up_label: "Alt+U".to_string(),
             page_down_label: "Alt+D".to_string(),
+            prompt_up_label: "Alt+[".to_string(),
+            prompt_down_label: "Alt+]".to_string(),
+            bookmark_label: "Ctrl+G".to_string(),
         };
 
         assert_eq!(

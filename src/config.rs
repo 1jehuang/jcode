@@ -58,6 +58,12 @@ pub struct KeybindingsConfig {
     pub effort_increase: String,
     /// Effort decrease key (default: "alt+left")
     pub effort_decrease: String,
+    /// Scroll to previous prompt key (default: "alt+[")
+    pub scroll_prompt_up: String,
+    /// Scroll to next prompt key (default: "alt+]")
+    pub scroll_prompt_down: String,
+    /// Scroll bookmark toggle key (default: "ctrl+g")
+    pub scroll_bookmark: String,
 }
 
 impl Default for KeybindingsConfig {
@@ -71,6 +77,9 @@ impl Default for KeybindingsConfig {
             model_switch_prev: "ctrl+shift+tab".to_string(),
             effort_increase: "alt+right".to_string(),
             effort_decrease: "alt+left".to_string(),
+            scroll_prompt_up: "alt+[".to_string(),
+            scroll_prompt_down: "alt+]".to_string(),
+            scroll_bookmark: "ctrl+g".to_string(),
         }
     }
 }
@@ -359,6 +368,15 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_EFFORT_DECREASE_KEY") {
             self.keybindings.effort_decrease = v;
         }
+        if let Ok(v) = std::env::var("JCODE_SCROLL_PROMPT_UP_KEY") {
+            self.keybindings.scroll_prompt_up = v;
+        }
+        if let Ok(v) = std::env::var("JCODE_SCROLL_PROMPT_DOWN_KEY") {
+            self.keybindings.scroll_prompt_down = v;
+        }
+        if let Ok(v) = std::env::var("JCODE_SCROLL_BOOKMARK_KEY") {
+            self.keybindings.scroll_bookmark = v;
+        }
 
         // Display
         if let Ok(v) = std::env::var("JCODE_SHOW_DIFFS") {
@@ -555,6 +573,13 @@ model_switch_prev = "ctrl+shift+tab"
 effort_increase = "alt+right"
 effort_decrease = "alt+left"
 
+# Jump between user prompts
+scroll_prompt_up = "alt+["
+scroll_prompt_down = "alt+]"
+
+# Scroll bookmark toggle (stash position, jump to bottom, press again to return)
+scroll_bookmark = "ctrl+g"
+
 [display]
 # Show file diffs for edit/write operations
 show_diffs = true
@@ -676,6 +701,9 @@ desktop_notifications = true
 - Model prev: `{}`
 - Effort increase: `{}`
 - Effort decrease: `{}`
+- Prompt up: `{}`
+- Prompt down: `{}`
+- Scroll bookmark: `{}`
 
 **Display:**
 - Show diffs: {}
@@ -725,6 +753,9 @@ desktop_notifications = true
             self.keybindings.model_switch_prev,
             self.keybindings.effort_increase,
             self.keybindings.effort_decrease,
+            self.keybindings.scroll_prompt_up,
+            self.keybindings.scroll_prompt_down,
+            self.keybindings.scroll_bookmark,
             self.display.show_diffs,
             self.display.queue_mode,
             self.display.mouse_capture,

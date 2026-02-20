@@ -617,6 +617,8 @@ pub struct App {
     effort_switch_keys: super::keybind::EffortSwitchKeys,
     // Keybindings for scrolling
     scroll_keys: ScrollKeys,
+    // Scroll bookmark: stashed scroll position for quick teleport back
+    scroll_bookmark: Option<usize>,
     // Short-lived notice for status feedback (model switch, toggle diff, etc.)
     status_notice: Option<(String, Instant)>,
     // Message to interleave during processing (set via Shift+Enter)
@@ -866,6 +868,7 @@ impl App {
             model_switch_keys: super::keybind::load_model_switch_keys(),
             effort_switch_keys: super::keybind::load_effort_switch_keys(),
             scroll_keys: super::keybind::load_scroll_keys(),
+            scroll_bookmark: None,
             status_notice: None,
             interleave_message: None,
             pending_soft_interrupt: None,
@@ -5114,6 +5117,22 @@ impl App {
             return Ok(());
         }
 
+        // Handle prompt jump keys (default: Alt+[/])
+        if let Some(dir) = self.scroll_keys.prompt_jump(code.clone(), modifiers) {
+            if dir < 0 {
+                self.scroll_to_prev_prompt();
+            } else {
+                self.scroll_to_next_prompt();
+            }
+            return Ok(());
+        }
+
+        // Handle scroll bookmark toggle (default: Ctrl+G)
+        if self.scroll_keys.is_bookmark(code.clone(), modifiers) {
+            self.toggle_scroll_bookmark();
+            return Ok(());
+        }
+
         // Shift+Tab: toggle diff view
         if code == KeyCode::BackTab {
             self.show_diffs = !self.show_diffs;
@@ -5764,6 +5783,22 @@ impl App {
             } else {
                 self.scroll_down(amount as usize);
             }
+            return Ok(());
+        }
+
+        // Handle prompt jump keys (default: Alt+[/])
+        if let Some(dir) = self.scroll_keys.prompt_jump(code.clone(), modifiers) {
+            if dir < 0 {
+                self.scroll_to_prev_prompt();
+            } else {
+                self.scroll_to_next_prompt();
+            }
+            return Ok(());
+        }
+
+        // Handle scroll bookmark toggle (default: Ctrl+G)
+        if self.scroll_keys.is_bookmark(code.clone(), modifiers) {
+            self.toggle_scroll_bookmark();
             return Ok(());
         }
 
@@ -11057,8 +11092,8 @@ impl App {
         // Find the next user message position above current scroll
         for (is_user, pos) in &positions {
             if *is_user && *pos > current + 3 {
-                // Scroll to put this message near top of view
                 self.scroll_offset = *pos;
+                self.auto_scroll_paused = true;
                 return;
             }
         }
@@ -11066,6 +11101,7 @@ impl App {
         // If no more user messages above, scroll to top
         if let Some((_, max_pos)) = positions.last() {
             self.scroll_offset = *max_pos;
+            self.auto_scroll_paused = true;
         }
     }
 
@@ -11087,6 +11123,9 @@ impl App {
                 if *pos >= current {
                     // This user message is at or above current - use the previous one
                     self.scroll_offset = prev_user_pos;
+                    if prev_user_pos == 0 {
+                        self.follow_chat_bottom();
+                    }
                     return;
                 }
                 prev_user_pos = *pos;
@@ -11095,6 +11134,23 @@ impl App {
 
         // No user message found below, go to bottom
         self.follow_chat_bottom();
+    }
+
+    /// Toggle scroll bookmark: stash current position and jump to bottom,
+    /// or restore stashed position if already at bottom.
+    fn toggle_scroll_bookmark(&mut self) {
+        if let Some(saved) = self.scroll_bookmark.take() {
+            // We have a bookmark — teleport back to it
+            self.scroll_offset = saved;
+            self.auto_scroll_paused = saved > 0;
+            self.set_status_notice("📌 Returned to bookmark");
+        } else if self.auto_scroll_paused && self.scroll_offset > 0 {
+            // We're scrolled up — save position and jump to bottom
+            self.scroll_bookmark = Some(self.scroll_offset);
+            self.follow_chat_bottom();
+            self.set_status_notice("📌 Bookmark set — press again to return");
+        }
+        // If already at bottom with no bookmark, do nothing
     }
 
     // ==================== Debug Socket Methods ====================
