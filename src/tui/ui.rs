@@ -2123,15 +2123,15 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     );
 
     if donut_height > 0 {
-        draw_donut_animation(frame, app, chunks[5]);
+        draw_idle_animation(frame, app, chunks[5]);
     }
 
-    // Draw info widget overlays (if there's space and content)
+    // Draw info widget overlays (skip during idle animation - they look out of place)
     let widget_data = app.info_widget_data();
     let mut widget_render_ms: Option<f32> = None;
     let mut placements: Vec<info_widget::WidgetPlacement> = Vec::new();
     let widget_bounds = messages_area;
-    if !widget_data.is_empty() {
+    if !widget_data.is_empty() && !show_donut {
         if let Some(ref mut capture) = debug_capture {
             capture.render_order.push("render_info_widgets".to_string());
         }
@@ -4861,7 +4861,7 @@ fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usi
     frame.render_widget(paragraph, area);
 }
 
-fn draw_donut_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
+fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     if area.width < 4 || area.height < 2 {
         return;
     }
@@ -4875,65 +4875,15 @@ fn draw_donut_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let sw = cw * SUB_X;
     let sh = ch * SUB_Y;
 
-    let a_rot = elapsed * 1.0;
-    let b_rot = elapsed * 0.5;
-    let cos_a = a_rot.cos();
-    let sin_a = a_rot.sin();
-    let cos_b = b_rot.cos();
-    let sin_b = b_rot.sin();
-
     let mut hit = vec![false; sw * sh];
     let mut lum_map = vec![0.0f32; sw * sh];
     let mut z_buf = vec![0.0f32; sw * sh];
 
-    let aspect = 0.5;
-    let r1 = 1.0f32;
-    let r2 = 2.0f32;
-    let k2 = 5.0f32;
-    let effective_w = sw as f32;
-    let effective_h = sh as f32 / aspect;
-    let k1 = effective_w.min(effective_h) * k2 * 0.35 / (r1 + r2);
-
-    let mut theta: f32 = 0.0;
-    while theta < std::f32::consts::TAU {
-        let ct = theta.cos();
-        let st = theta.sin();
-
-        let mut phi: f32 = 0.0;
-        while phi < std::f32::consts::TAU {
-            let cp = phi.cos();
-            let sp = phi.sin();
-
-            let cx = r2 + r1 * ct;
-            let cy = r1 * st;
-
-            let x = cx * (cos_b * cp + sin_a * sin_b * sp) - cy * cos_a * sin_b;
-            let y = cx * (sin_b * cp - sin_a * cos_b * sp) + cy * cos_a * cos_b;
-            let z = k2 + cos_a * cx * sp + cy * sin_a;
-            let ooz = 1.0 / z;
-
-            let xp = (sw as f32 / 2.0 + k1 * ooz * x) as isize;
-            let yp = (sh as f32 / 2.0 - k1 * ooz * y * aspect) as isize;
-
-            let lum = cp * ct * sin_b - cos_a * ct * sp - sin_a * st
-                + cos_b * (cos_a * st - ct * sin_a * sp);
-
-            if xp >= 0
-                && (xp as usize) < sw
-                && yp >= 0
-                && (yp as usize) < sh
-            {
-                let idx = yp as usize * sw + xp as usize;
-                if ooz > z_buf[idx] {
-                    z_buf[idx] = ooz;
-                    lum_map[idx] = lum;
-                    hit[idx] = true;
-                }
-            }
-
-            phi += 0.007;
-        }
-        theta += 0.02;
+    let cycle = ((elapsed / 10.0) as usize) % 3;
+    match cycle {
+        0 => sample_donut(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
+        1 => sample_globe(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
+        _ => sample_mobius(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
     }
 
     let time_hue = elapsed * 20.0;
@@ -4987,6 +4937,185 @@ fn draw_donut_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         .collect();
 
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn sample_donut(
+    elapsed: f32,
+    sw: usize,
+    sh: usize,
+    hit: &mut [bool],
+    lum_map: &mut [f32],
+    z_buf: &mut [f32],
+) {
+    let a_rot = elapsed * 1.0;
+    let b_rot = elapsed * 0.5;
+    let cos_a = a_rot.cos();
+    let sin_a = a_rot.sin();
+    let cos_b = b_rot.cos();
+    let sin_b = b_rot.sin();
+
+    let aspect = 0.5;
+    let r1 = 1.0f32;
+    let r2 = 2.0f32;
+    let k2 = 5.0f32;
+    let k1 = (sw as f32).min(sh as f32 / aspect) * k2 * 0.35 / (r1 + r2);
+
+    let mut theta: f32 = 0.0;
+    while theta < std::f32::consts::TAU {
+        let ct = theta.cos();
+        let st = theta.sin();
+
+        let mut phi: f32 = 0.0;
+        while phi < std::f32::consts::TAU {
+            let cp = phi.cos();
+            let sp = phi.sin();
+
+            let cx = r2 + r1 * ct;
+            let cy = r1 * st;
+
+            let x = cx * (cos_b * cp + sin_a * sin_b * sp) - cy * cos_a * sin_b;
+            let y = cx * (sin_b * cp - sin_a * cos_b * sp) + cy * cos_a * cos_b;
+            let z = k2 + cos_a * cx * sp + cy * sin_a;
+            let ooz = 1.0 / z;
+
+            let xp = (sw as f32 / 2.0 + k1 * ooz * x) as isize;
+            let yp = (sh as f32 / 2.0 - k1 * ooz * y * aspect) as isize;
+
+            let lum = cp * ct * sin_b - cos_a * ct * sp - sin_a * st
+                + cos_b * (cos_a * st - ct * sin_a * sp);
+
+            if xp >= 0 && (xp as usize) < sw && yp >= 0 && (yp as usize) < sh {
+                let idx = yp as usize * sw + xp as usize;
+                if ooz > z_buf[idx] {
+                    z_buf[idx] = ooz;
+                    lum_map[idx] = lum;
+                    hit[idx] = true;
+                }
+            }
+
+            phi += 0.007;
+        }
+        theta += 0.02;
+    }
+}
+
+fn sample_globe(
+    elapsed: f32,
+    sw: usize,
+    sh: usize,
+    hit: &mut [bool],
+    lum_map: &mut [f32],
+    z_buf: &mut [f32],
+) {
+    let rot = elapsed * 0.8;
+    let cos_r = rot.cos();
+    let sin_r = rot.sin();
+    let tilt = elapsed * 0.15;
+    let cos_t = tilt.cos();
+    let sin_t = tilt.sin();
+
+    let aspect = 0.5;
+    let radius = (sw as f32).min(sh as f32 / aspect) * 0.4;
+    let cx = sw as f32 / 2.0;
+    let cy = sh as f32 / 2.0;
+
+    let mut lat: f32 = -std::f32::consts::FRAC_PI_2;
+    while lat < std::f32::consts::FRAC_PI_2 {
+        let cos_lat = lat.cos();
+        let sin_lat = lat.sin();
+        let mut lon: f32 = 0.0;
+        while lon < std::f32::consts::TAU {
+            let cos_lon = lon.cos();
+            let sin_lon = lon.sin();
+            let x3 = cos_lat * sin_lon;
+            let y3 = sin_lat;
+            let z3 = cos_lat * cos_lon;
+            let rx = x3 * cos_r + z3 * sin_r;
+            let rz = -x3 * sin_r + z3 * cos_r;
+            let ry = y3 * cos_t - rz * sin_t;
+            let rz2 = y3 * sin_t + rz * cos_t;
+
+            if rz2 < -0.05 {
+                lon += 0.02;
+                continue;
+            }
+
+            let xp = (cx + rx * radius) as isize;
+            let yp = (cy - ry * radius * aspect) as isize;
+            let depth = rz2 + 1.0;
+
+            if xp >= 0 && (xp as usize) < sw && yp >= 0 && (yp as usize) < sh {
+                let idx = yp as usize * sw + xp as usize;
+                if depth > z_buf[idx] {
+                    z_buf[idx] = depth;
+                    let is_grid = (lat * 6.0).fract().abs() < 0.12
+                        || ((lon + rot) * 6.0 / std::f32::consts::TAU).fract().abs() < 0.08;
+                    let lum = if is_grid {
+                        rz2 * 0.8 + 0.2
+                    } else {
+                        rz2 * 0.3
+                    };
+                    lum_map[idx] = lum;
+                    hit[idx] = true;
+                }
+            }
+            lon += 0.02;
+        }
+        lat += 0.02;
+    }
+}
+
+fn sample_mobius(
+    elapsed: f32,
+    sw: usize,
+    sh: usize,
+    hit: &mut [bool],
+    lum_map: &mut [f32],
+    z_buf: &mut [f32],
+) {
+    let rot = elapsed * 0.6;
+    let cam_dist = 6.0f32;
+    let aspect = 0.5;
+
+    let scale_base = (sw as f32).min(sh as f32 / aspect) * 0.35;
+
+    let mut u: f32 = 0.0;
+    while u < std::f32::consts::TAU {
+        let mut v: f32 = -0.5;
+        while v <= 0.5 {
+            let half_u = u / 2.0;
+            let x = (1.0 + v * half_u.cos()) * u.cos();
+            let y = (1.0 + v * half_u.cos()) * u.sin();
+            let z = v * half_u.sin();
+            let (rx, ry, rz) = rotate_xyz(x, y, z, elapsed * 0.3, rot, 0.0);
+
+            let d = cam_dist + rz;
+            if d < 0.1 {
+                v += 0.015;
+                continue;
+            }
+            let proj_scale = cam_dist / d;
+            let xp = (sw as f32 / 2.0 + rx * proj_scale * scale_base) as isize;
+            let yp = (sh as f32 / 2.0 - ry * proj_scale * scale_base * aspect) as isize;
+            let depth = 1.0 / d;
+
+            if xp >= 0 && (xp as usize) < sw && yp >= 0 && (yp as usize) < sh {
+                let idx = yp as usize * sw + xp as usize;
+                if depth > z_buf[idx] {
+                    z_buf[idx] = depth;
+                    let nx = half_u.cos() * u.cos();
+                    let ny = half_u.cos() * u.sin();
+                    let nz = half_u.sin();
+                    let (rnx, rny, _) = rotate_xyz(nx, ny, nz, elapsed * 0.3, rot, 0.0);
+                    let lum = (rnx * 0.5 + rny * 0.5 + 0.5).clamp(0.0, 1.0) * 2.0 - 1.0;
+                    lum_map[idx] = lum;
+                    hit[idx] = true;
+                }
+            }
+            v += 0.015;
+        }
+        u += 0.01;
+    }
 }
 
 fn shape_char_3x3(pattern: u16) -> char {
