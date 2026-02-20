@@ -116,6 +116,8 @@ pub struct DisplayConfig {
     pub diagram_mode: DiagramDisplayMode,
     /// Show startup animation (default: false)
     pub startup_animation: bool,
+    /// Show idle animation before first prompt (default: true)
+    pub idle_animation: bool,
 }
 
 impl Default for DisplayConfig {
@@ -129,6 +131,7 @@ impl Default for DisplayConfig {
             show_thinking: false,
             diagram_mode: DiagramDisplayMode::default(),
             startup_animation: false,
+            idle_animation: true,
         }
     }
 }
@@ -388,6 +391,11 @@ impl Config {
                 self.display.startup_animation = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_IDLE_ANIMATION") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.idle_animation = parsed;
+            }
+        }
 
         // Features
         if let Ok(v) = std::env::var("JCODE_MEMORY_ENABLED") {
@@ -566,6 +574,9 @@ show_thinking = false
 # Show startup animation (default: false)
 startup_animation = false
 
+# Show idle animation before first prompt (default: true)
+idle_animation = true
+
 [features]
 # Memory: retrieval + extraction sidecar features
 memory = true
@@ -672,6 +683,7 @@ desktop_notifications = true
 - Mouse capture: {}
 - Debug socket: {}
 - Startup animation: {}
+- Idle animation: {}
 
 **Features:**
 - Memory: {}
@@ -718,6 +730,7 @@ desktop_notifications = true
             self.display.mouse_capture,
             self.display.debug_socket,
             self.display.startup_animation,
+            self.display.idle_animation,
             self.features.memory,
             self.features.swarm,
             self.provider

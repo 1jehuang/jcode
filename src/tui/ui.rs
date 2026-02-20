@@ -1954,7 +1954,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
     let prep_elapsed = prep_start.elapsed();
     let content_height = prepared.wrapped_lines.len().max(1) as u16;
-    let show_donut = app.display_messages().is_empty()
+    let show_donut = crate::config::config().display.idle_animation
+        && app.display_messages().is_empty()
         && !app.is_processing()
         && app.streaming_text().is_empty()
         && app.queued_messages().is_empty();
@@ -4879,11 +4880,12 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let mut lum_map = vec![0.0f32; sw * sh];
     let mut z_buf = vec![0.0f32; sw * sh];
 
-    let cycle = ((elapsed / 10.0) as usize) % 3;
-    match cycle {
+    let variant = idle_animation_variant();
+    match variant {
         0 => sample_donut(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
-        1 => sample_globe(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
-        _ => sample_mobius(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
+        1 => sample_cube(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
+        2 => sample_sphere(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
+        _ => sample_knot(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
     }
 
     let time_hue = elapsed * 20.0;
@@ -4999,7 +5001,18 @@ fn sample_donut(
     }
 }
 
-fn sample_globe(
+fn idle_animation_variant() -> usize {
+    use std::sync::OnceLock;
+    static VARIANT: OnceLock<usize> = OnceLock::new();
+    *VARIANT.get_or_init(|| {
+        let mut hasher = DefaultHasher::new();
+        std::time::SystemTime::now().hash(&mut hasher);
+        std::process::id().hash(&mut hasher);
+        (std::hash::Hasher::finish(&hasher) % 4) as usize
+    })
+}
+
+fn sample_cube(
     elapsed: f32,
     sw: usize,
     sh: usize,
@@ -5007,12 +5020,83 @@ fn sample_globe(
     lum_map: &mut [f32],
     z_buf: &mut [f32],
 ) {
-    let rot = elapsed * 0.8;
-    let cos_r = rot.cos();
-    let sin_r = rot.sin();
-    let tilt = elapsed * 0.15;
-    let cos_t = tilt.cos();
-    let sin_t = tilt.sin();
+    let ax = elapsed * 0.7;
+    let ay = elapsed * 0.5;
+    let az = elapsed * 0.3;
+    let cam_dist = 5.0f32;
+    let aspect = 0.5;
+    let scale_base = (sw as f32).min(sh as f32 / aspect) * 0.3;
+    let s = 1.0f32;
+
+    let faces: [([f32; 3], [f32; 3], [f32; 3], [f32; 3]); 6] = [
+        ([-s,-s,-s], [ s,-s,-s], [ s, s,-s], [-s, s,-s]),
+        ([-s,-s, s], [ s,-s, s], [ s, s, s], [-s, s, s]),
+        ([-s,-s,-s], [-s,-s, s], [-s, s, s], [-s, s,-s]),
+        ([ s,-s,-s], [ s,-s, s], [ s, s, s], [ s, s,-s]),
+        ([-s,-s,-s], [ s,-s,-s], [ s,-s, s], [-s,-s, s]),
+        ([-s, s,-s], [ s, s,-s], [ s, s, s], [-s, s, s]),
+    ];
+    let normals: [[f32; 3]; 6] = [
+        [0.0, 0.0, -1.0], [0.0, 0.0, 1.0],
+        [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0], [0.0, 1.0, 0.0],
+    ];
+
+    let steps = 40usize;
+    for (face_idx, (p0, p1, p2, p3)) in faces.iter().enumerate() {
+        let (rnx, rny, rnz) = rotate_xyz(
+            normals[face_idx][0], normals[face_idx][1], normals[face_idx][2],
+            ax, ay, az,
+        );
+        if rnz < -0.1 { continue; }
+        let face_lum = (rnx * 0.4 + rny * 0.5 + rnz * 0.3).clamp(-1.0, 1.0);
+
+        for iu in 0..=steps {
+            let u = iu as f32 / steps as f32;
+            for iv in 0..=steps {
+                let v = iv as f32 / steps as f32;
+                let x = p0[0] * (1.0-u) * (1.0-v) + p1[0] * u * (1.0-v)
+                      + p2[0] * u * v + p3[0] * (1.0-u) * v;
+                let y = p0[1] * (1.0-u) * (1.0-v) + p1[1] * u * (1.0-v)
+                      + p2[1] * u * v + p3[1] * (1.0-u) * v;
+                let z = p0[2] * (1.0-u) * (1.0-v) + p1[2] * u * (1.0-v)
+                      + p2[2] * u * v + p3[2] * (1.0-u) * v;
+
+                let (rx, ry, rz) = rotate_xyz(x, y, z, ax, ay, az);
+                let d = cam_dist + rz;
+                if d < 0.1 { continue; }
+                let proj = cam_dist / d;
+                let xp = (sw as f32 / 2.0 + rx * proj * scale_base) as isize;
+                let yp = (sh as f32 / 2.0 - ry * proj * scale_base * aspect) as isize;
+                let depth = 1.0 / d;
+
+                if xp >= 0 && (xp as usize) < sw && yp >= 0 && (yp as usize) < sh {
+                    let idx = yp as usize * sw + xp as usize;
+                    if depth > z_buf[idx] {
+                        z_buf[idx] = depth;
+                        lum_map[idx] = face_lum;
+                        hit[idx] = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn sample_sphere(
+    elapsed: f32,
+    sw: usize,
+    sh: usize,
+    hit: &mut [bool],
+    lum_map: &mut [f32],
+    z_buf: &mut [f32],
+) {
+    let rot_y = elapsed * 0.6;
+    let rot_x = elapsed * 0.25;
+    let cos_ry = rot_y.cos();
+    let sin_ry = rot_y.sin();
+    let cos_rx = rot_x.cos();
+    let sin_rx = rot_x.sin();
 
     let aspect = 0.5;
     let radius = (sw as f32).min(sh as f32 / aspect) * 0.4;
@@ -5027,45 +5111,41 @@ fn sample_globe(
         while lon < std::f32::consts::TAU {
             let cos_lon = lon.cos();
             let sin_lon = lon.sin();
-            let x3 = cos_lat * sin_lon;
-            let y3 = sin_lat;
-            let z3 = cos_lat * cos_lon;
-            let rx = x3 * cos_r + z3 * sin_r;
-            let rz = -x3 * sin_r + z3 * cos_r;
-            let ry = y3 * cos_t - rz * sin_t;
-            let rz2 = y3 * sin_t + rz * cos_t;
 
-            if rz2 < -0.05 {
-                lon += 0.02;
+            let nx = cos_lat * sin_lon;
+            let ny = sin_lat;
+            let nz = cos_lat * cos_lon;
+
+            let rx = nx * cos_ry + nz * sin_ry;
+            let rz_temp = -nx * sin_ry + nz * cos_ry;
+            let ry = ny * cos_rx - rz_temp * sin_rx;
+            let rz = ny * sin_rx + rz_temp * cos_rx;
+
+            if rz < -0.05 {
+                lon += 0.015;
                 continue;
             }
 
             let xp = (cx + rx * radius) as isize;
             let yp = (cy - ry * radius * aspect) as isize;
-            let depth = rz2 + 1.0;
+            let depth = rz + 1.0;
 
             if xp >= 0 && (xp as usize) < sw && yp >= 0 && (yp as usize) < sh {
                 let idx = yp as usize * sw + xp as usize;
                 if depth > z_buf[idx] {
                     z_buf[idx] = depth;
-                    let is_grid = (lat * 6.0).fract().abs() < 0.12
-                        || ((lon + rot) * 6.0 / std::f32::consts::TAU).fract().abs() < 0.08;
-                    let lum = if is_grid {
-                        rz2 * 0.8 + 0.2
-                    } else {
-                        rz2 * 0.3
-                    };
+                    let lum = (rx * 0.4 + ry * 0.5 + rz * 0.3).clamp(-1.0, 1.0);
                     lum_map[idx] = lum;
                     hit[idx] = true;
                 }
             }
-            lon += 0.02;
+            lon += 0.015;
         }
-        lat += 0.02;
+        lat += 0.015;
     }
 }
 
-fn sample_mobius(
+fn sample_knot(
     elapsed: f32,
     sw: usize,
     sh: usize,
@@ -5073,48 +5153,79 @@ fn sample_mobius(
     lum_map: &mut [f32],
     z_buf: &mut [f32],
 ) {
-    let rot = elapsed * 0.6;
+    let rot_y = elapsed * 0.4;
+    let rot_x = elapsed * 0.2;
     let cam_dist = 6.0f32;
     let aspect = 0.5;
+    let scale_base = (sw as f32).min(sh as f32 / aspect) * 0.28;
+    let tube_r = 0.35f32;
 
-    let scale_base = (sw as f32).min(sh as f32 / aspect) * 0.35;
+    let mut t: f32 = 0.0;
+    while t < std::f32::consts::TAU {
+        let kx = (2.0 + (2.0 * t).cos()) * t.cos();
+        let ky = (2.0 + (2.0 * t).cos()) * t.sin();
+        let kz = (2.0 * t).sin();
 
-    let mut u: f32 = 0.0;
-    while u < std::f32::consts::TAU {
-        let mut v: f32 = -0.5;
-        while v <= 0.5 {
-            let half_u = u / 2.0;
-            let x = (1.0 + v * half_u.cos()) * u.cos();
-            let y = (1.0 + v * half_u.cos()) * u.sin();
-            let z = v * half_u.sin();
-            let (rx, ry, rz) = rotate_xyz(x, y, z, elapsed * 0.3, rot, 0.0);
+        let dt = 0.01f32;
+        let t2 = t + dt;
+        let dx = (2.0 + (2.0 * t2).cos()) * t2.cos() - kx;
+        let dy = (2.0 + (2.0 * t2).cos()) * t2.sin() - ky;
+        let dz = (2.0 * t2).sin() - kz;
+        let dl = (dx * dx + dy * dy + dz * dz).sqrt().max(0.001);
+        let tx = dx / dl;
+        let ty = dy / dl;
+        let tz = dz / dl;
 
+        let up_x = 0.0f32;
+        let up_y = 0.0f32;
+        let up_z = 1.0f32;
+        let bx = ty * up_z - tz * up_y;
+        let by = tz * up_x - tx * up_z;
+        let bz = tx * up_y - ty * up_x;
+        let bl = (bx * bx + by * by + bz * bz).sqrt().max(0.001);
+        let bx = bx / bl;
+        let by = by / bl;
+        let bz = bz / bl;
+        let nx = by * tz - bz * ty;
+        let ny = bz * tx - bx * tz;
+        let nz = bx * ty - by * tx;
+
+        let mut phi: f32 = 0.0;
+        while phi < std::f32::consts::TAU {
+            let cp = phi.cos();
+            let sp = phi.sin();
+            let px = kx + tube_r * (cp * nx + sp * bx);
+            let py = ky + tube_r * (cp * ny + sp * by);
+            let pz = kz + tube_r * (cp * nz + sp * bz);
+
+            let sn_x = cp * nx + sp * bx;
+            let sn_y = cp * ny + sp * by;
+            let sn_z = cp * nz + sp * bz;
+
+            let (rx, ry, rz) = rotate_xyz(px, py, pz, rot_x, rot_y, 0.0);
             let d = cam_dist + rz;
             if d < 0.1 {
-                v += 0.015;
+                phi += 0.08;
                 continue;
             }
-            let proj_scale = cam_dist / d;
-            let xp = (sw as f32 / 2.0 + rx * proj_scale * scale_base) as isize;
-            let yp = (sh as f32 / 2.0 - ry * proj_scale * scale_base * aspect) as isize;
+            let proj = cam_dist / d;
+            let xp = (sw as f32 / 2.0 + rx * proj * scale_base) as isize;
+            let yp = (sh as f32 / 2.0 - ry * proj * scale_base * aspect) as isize;
             let depth = 1.0 / d;
 
             if xp >= 0 && (xp as usize) < sw && yp >= 0 && (yp as usize) < sh {
                 let idx = yp as usize * sw + xp as usize;
                 if depth > z_buf[idx] {
                     z_buf[idx] = depth;
-                    let nx = half_u.cos() * u.cos();
-                    let ny = half_u.cos() * u.sin();
-                    let nz = half_u.sin();
-                    let (rnx, rny, _) = rotate_xyz(nx, ny, nz, elapsed * 0.3, rot, 0.0);
-                    let lum = (rnx * 0.5 + rny * 0.5 + 0.5).clamp(0.0, 1.0) * 2.0 - 1.0;
+                    let (rnx, rny, _) = rotate_xyz(sn_x, sn_y, sn_z, rot_x, rot_y, 0.0);
+                    let lum = (rnx * 0.4 + rny * 0.5 + 0.3).clamp(-1.0, 1.0);
                     lum_map[idx] = lum;
                     hit[idx] = true;
                 }
             }
-            v += 0.015;
+            phi += 0.08;
         }
-        u += 0.01;
+        t += 0.008;
     }
 }
 
