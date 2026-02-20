@@ -90,6 +90,19 @@ to native code with `jemalloc` for memory-efficient long-running sessions.
 
 ## Installation
 
+### Quick Install (macOS & Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/1jehuang/jcode/master/scripts/install.sh | bash
+```
+
+### macOS via Homebrew
+
+```bash
+brew tap 1jehuang/jcode
+brew install jcode
+```
+
 ### From Source (all platforms)
 
 ```bash
@@ -106,13 +119,6 @@ ln -sf $(pwd)/target/release/jcode ~/.local/bin/jcode
 
 # macOS
 ln -sf $(pwd)/target/release/jcode /usr/local/bin/jcode
-```
-
-### macOS via Homebrew
-
-```bash
-brew tap jcode-cli/jcode
-brew install jcode
 ```
 
 ### Prerequisites
