@@ -441,6 +441,8 @@ pub fn auto_edit_timeline(timeline: &[TimelineEvent], opts: &AutoEditOpts) -> Ve
 
     // Track done→user_message gaps
     let mut last_done_t: Option<u64> = None;
+    // Track user_message→thinking gaps
+    let mut last_user_msg_t: Option<u64> = None;
 
     for event in timeline {
         let orig_t = event.t;
@@ -448,11 +450,19 @@ pub fn auto_edit_timeline(timeline: &[TimelineEvent], opts: &AutoEditOpts) -> Ve
 
         match &event.kind {
             TimelineEventKind::Thinking { duration } => {
-                // Clamp the gap before thinking
+                // Clamp gap from done→thinking
                 if let Some(done_t) = last_done_t.take() {
                     let gap = orig_t.saturating_sub(done_t);
                     if gap > opts.gap_max_ms {
                         time_shift -= (gap - opts.gap_max_ms) as i64;
+                        new_t = (orig_t as i64 + time_shift).max(0) as u64;
+                    }
+                }
+                // Clamp gap from user_message→thinking (model response delay)
+                if let Some(user_t) = last_user_msg_t.take() {
+                    let gap = orig_t.saturating_sub(user_t);
+                    if gap > opts.response_delay_max_ms {
+                        time_shift -= (gap - opts.response_delay_max_ms) as i64;
                         new_t = (orig_t as i64 + time_shift).max(0) as u64;
                     }
                 }
@@ -475,6 +485,7 @@ pub fn auto_edit_timeline(timeline: &[TimelineEvent], opts: &AutoEditOpts) -> Ve
                         new_t = (orig_t as i64 + time_shift).max(0) as u64;
                     }
                 }
+                last_user_msg_t = Some(orig_t);
             }
             TimelineEventKind::ToolStart { .. } => {
                 if tool_depth == 0 {
@@ -517,6 +528,8 @@ pub struct AutoEditOpts {
     pub gap_max_ms: u64,
     /// Max ms for thinking duration (default: 1200)
     pub think_max_ms: u64,
+    /// Max ms between user_message→thinking (model response delay, default: 1000)
+    pub response_delay_max_ms: u64,
 }
 
 impl Default for AutoEditOpts {
@@ -525,6 +538,7 @@ impl Default for AutoEditOpts {
             tool_max_ms: 800,
             gap_max_ms: 2000,
             think_max_ms: 1200,
+            response_delay_max_ms: 1000,
         }
     }
 }

@@ -410,8 +410,8 @@ enum Command {
         #[arg(long)]
         auto_edit: bool,
 
-        /// Export as video file (mp4, gif, or cast)
-        #[arg(long)]
+        /// Export as video file (auto-generates name if no path given)
+        #[arg(long, default_missing_value = "auto", num_args = 0..=1)]
         video: Option<String>,
 
         /// Video width in columns (default: 120)
@@ -2262,12 +2262,21 @@ async fn run_replay_command(
 
     // Video export mode
     if let Some(output) = video_output {
-        let output_path = std::path::Path::new(output);
+        let output_path = if output == "auto" {
+            let date = chrono::Local::now().format("%Y%m%d_%H%M%S");
+            let safe_name = session_name
+                .chars()
+                .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                .collect::<String>();
+            std::path::PathBuf::from(format!("jcode_replay_{}_{}.mp4", safe_name, date))
+        } else {
+            std::path::PathBuf::from(output)
+        };
         eprintln!(
             "{} Exporting session: {} ({} events)",
             icon, session_name, timeline.len()
         );
-        video_export::export_video(&session, &timeline, speed, output_path, cols, rows, fps)
+        video_export::export_video(&session, &timeline, speed, &output_path, cols, rows, fps)
             .await?;
         return Ok(());
     }
