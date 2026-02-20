@@ -5653,6 +5653,16 @@ impl App {
                         return Ok(());
                     }
 
+                    // Any other slash command: handle locally via submit_input()
+                    // (covers /auth, /login, /clear, /config, /effort, /fix,
+                    //  /info, /version, /rewind, /remember, /record, etc.)
+                    if trimmed.starts_with('/') {
+                        self.input = trimmed.to_string();
+                        self.cursor_pos = self.input.len();
+                        self.submit_input();
+                        return Ok(());
+                    }
+
                     // Queue message if processing, otherwise send
                     match self.send_action(false) {
                         SendAction::Submit => {
