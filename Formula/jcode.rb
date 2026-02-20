@@ -4,8 +4,8 @@ class Jcode < Formula
   license "MIT"
   head "https://github.com/1jehuang/jcode.git", branch: "master"
 
-  url "https://github.com/1jehuang/jcode/archive/refs/tags/v0.3.0.tar.gz"
-  version "0.3.0"
+  url "https://github.com/1jehuang/jcode/archive/refs/tags/v0.3.1.tar.gz"
+  version "0.3.1"
 
   depends_on "rust" => :build
 
