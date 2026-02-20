@@ -546,6 +546,8 @@ pub struct App {
     remote_server_version: Option<String>,
     // Whether the remote server has a newer binary available
     remote_server_has_update: Option<bool>,
+    // Remote server short name (e.g., "running", "blazing")
+    remote_server_short_name: Option<String>,
     // Current message request ID (for remote mode - to match Done events)
     current_message_id: Option<u64>,
     // Whether running in remote mode
@@ -831,6 +833,7 @@ impl App {
             remote_is_canary: None,
             remote_server_version: None,
             remote_server_has_update: None,
+            remote_server_short_name: None,
             current_message_id: None,
             is_remote: false,
             is_replay: false,
@@ -980,9 +983,16 @@ impl App {
             self.session.is_canary
         };
         let suffix = if is_canary { " [self-dev]" } else { "" };
+        let prefix = self
+            .remote_server_short_name
+            .as_deref()
+            .unwrap_or("jcode");
         let _ = crossterm::execute!(
             std::io::stdout(),
-            crossterm::terminal::SetTitle(format!("{} jcode {}{}", icon, session_name, suffix))
+            crossterm::terminal::SetTitle(format!(
+                "{} {} {}{}",
+                icon, prefix, session_name, suffix
+            ))
         );
     }
 
@@ -4742,6 +4752,7 @@ impl App {
                 client_count,
                 is_canary,
                 server_version,
+                server_name,
                 server_has_update,
                 was_interrupted,
                 ..
@@ -4786,7 +4797,6 @@ impl App {
                     self.swarm_plan_items.clear();
                     self.swarm_plan_version = None;
                     self.swarm_plan_swarm_id = None;
-                    self.update_terminal_title();
                 }
                 // Store provider info for UI display
                 if let Some(name) = provider_name {
@@ -4803,6 +4813,10 @@ impl App {
                 self.remote_is_canary = is_canary;
                 self.remote_server_version = server_version;
                 self.remote_server_has_update = server_has_update;
+                self.remote_server_short_name = server_name;
+
+                // Update terminal title (always, since server name may have arrived)
+                self.update_terminal_title();
 
                 // Parse MCP servers from "name:count" format
                 if !mcp_servers.is_empty() {
@@ -11501,7 +11515,6 @@ impl super::TuiState for App {
 
     fn session_display_name(&self) -> Option<String> {
         if self.is_remote {
-            // For remote mode, extract name from session ID
             self.remote_session_id
                 .as_ref()
                 .and_then(|id| crate::id::extract_session_name(id))
@@ -11509,6 +11522,10 @@ impl super::TuiState for App {
         } else {
             Some(self.session.display_name().to_string())
         }
+    }
+
+    fn server_display_name(&self) -> Option<String> {
+        self.remote_server_short_name.clone()
     }
 
     fn server_sessions(&self) -> Vec<String> {
@@ -11733,7 +11750,13 @@ impl super::TuiState for App {
         } else {
             (None, None)
         };
-        let session_name = self.session_display_name();
+        let session_name = self.session_display_name().map(|name| {
+            if let Some(ref srv) = self.remote_server_short_name {
+                format!("{} {}", srv, name)
+            } else {
+                name
+            }
+        });
 
         // Gather memory info
         let memory_info = if self.memory_enabled {

@@ -254,6 +254,10 @@ impl TuiState for BenchState {
         Some("bench".to_string())
     }
 
+    fn server_display_name(&self) -> Option<String> {
+        None
+    }
+
     fn server_sessions(&self) -> Vec<String> {
         Vec::new()
     }

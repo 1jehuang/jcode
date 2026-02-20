@@ -1269,6 +1269,10 @@ impl TuiState for ClientApp {
             .map(|s| s.to_string())
     }
 
+    fn server_display_name(&self) -> Option<String> {
+        None
+    }
+
     fn server_sessions(&self) -> Vec<String> {
         Vec::new() // Deprecated client doesn't track server sessions
     }

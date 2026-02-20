@@ -2618,6 +2618,7 @@ fn abbreviate_home(path: &str) -> String {
 fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let model = app.provider_model();
     let session_name = app.session_display_name().unwrap_or_default();
+    let server_name = app.server_display_name();
     let short_model = shorten_model_name(&model);
     let icon = crate::id::session_icon(&session_name);
     let nice_model = format_model_name(&short_model);
@@ -2661,9 +2662,13 @@ fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>>
         lines.push(Line::from("")); // Empty line if no badges (only in centered mode)
     }
 
-    // Line 2: "JCode <icon> <SessionName>" (chroma)
+    // Line 2: "<ServerName|JCode> <icon> <SessionName>" (chroma)
     if !session_name.is_empty() {
-        let full_name = format!("JCode {} {}", icon, capitalize(&session_name));
+        let title_prefix = server_name
+            .as_deref()
+            .map(capitalize)
+            .unwrap_or_else(|| "JCode".to_string());
+        let full_name = format!("{} {} {}", title_prefix, icon, capitalize(&session_name));
         lines.push(
             Line::from(Span::styled(
                 full_name,
@@ -2672,9 +2677,13 @@ fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>>
             .alignment(align),
         );
     } else {
+        let title_prefix = server_name
+            .as_deref()
+            .map(capitalize)
+            .unwrap_or_else(|| "JCode".to_string());
         lines.push(
             Line::from(Span::styled(
-                "JCode",
+                title_prefix,
                 Style::default().fg(HEADER_NAME_COLOR),
             ))
             .alignment(align),
