@@ -444,6 +444,15 @@ fn parse_area_spec(spec: &str) -> Option<Rect> {
     })
 }
 
+/// State for an in-progress OAuth/API-key login flow triggered by `/login`.
+#[derive(Debug, Clone)]
+enum PendingLogin {
+    /// Waiting for user to paste Claude OAuth code (verifier needed for token exchange)
+    Claude { verifier: String },
+    /// Waiting for user to paste OpenRouter API key
+    OpenRouter,
+}
+
 /// TUI Application state
 pub struct App {
     provider: Arc<dyn Provider>,
@@ -655,6 +664,8 @@ pub struct App {
     streaming_md_renderer: RefCell<IncrementalMarkdownRenderer>,
     /// Ambient mode system prompt override (when running as visible ambient cycle)
     ambient_system_prompt: Option<String>,
+    /// Pending login flow: if set, next input is intercepted as OAuth code or API key
+    pending_login: Option<PendingLogin>,
 }
 
 impl ScrollTestState {
@@ -895,6 +906,7 @@ impl App {
             debug_trace: DebugTrace::new(),
             streaming_md_renderer: RefCell::new(IncrementalMarkdownRenderer::new(None)),
             ambient_system_prompt: None,
+            pending_login: None,
         }
     }
 
@@ -1302,6 +1314,10 @@ impl App {
                     continuation_msg.len()
                 ));
                 self.queued_messages.push(continuation_msg);
+                // Trigger processing so the queued message gets sent to the LLM.
+                // Without this, the local event loop waits for user input since
+                // process_queued_messages only runs inside process_turn_with_input.
+                self.pending_turn = true;
             }
         } else {
             crate::logging::error(&format!("Failed to restore session: {}", session_id));
@@ -3880,6 +3896,35 @@ impl App {
                 .and_then(|sid| ReloadContext::peek_for_session(sid).ok().flatten())
                 .is_some();
 
+            // Check for per-session client-reload-pending marker (written when a
+            // client re-exec breaks out before queuing the continuation message).
+            let has_client_reload_marker = session_to_resume
+                .as_deref()
+                .and_then(|sid| {
+                    let jcode_dir = crate::storage::jcode_dir().ok()?;
+                    let marker = jcode_dir.join(format!("client-reload-pending-{}", sid));
+                    if marker.exists() {
+                        let info = std::fs::read_to_string(&marker).ok()?;
+                        let _ = std::fs::remove_file(&marker);
+                        crate::logging::info(&format!(
+                            "Found client-reload-pending marker for {}, injecting reload info",
+                            sid
+                        ));
+                        if self.reload_info.is_empty() {
+                            for line in info.lines() {
+                                let trimmed = line.trim();
+                                if !trimmed.is_empty() {
+                                    self.reload_info.push(trimmed.to_string());
+                                }
+                            }
+                        }
+                        Some(())
+                    } else {
+                        None
+                    }
+                })
+                .is_some();
+
             // Show reconnection message if applicable
             if reconnect_attempts > 0 {
                 if self.reload_info.is_empty() {
@@ -3913,6 +3958,29 @@ impl App {
                         .remote_session_id
                         .clone()
                         .unwrap_or_else(|| crate::id::new_id("ses"));
+                    // Save a per-session marker so the re-exec'd client knows to
+                    // send a reload continuation message.  Without this, the
+                    // continuation is lost because we break out before queuing it,
+                    // and the re-exec'd client connects fresh (reconnect_attempts=0)
+                    // with no reload-info file (already consumed above).
+                    if has_reload_ctx_for_session || !self.reload_info.is_empty() {
+                        if let Ok(jcode_dir) = crate::storage::jcode_dir() {
+                            let marker = jcode_dir.join(format!(
+                                "client-reload-pending-{}",
+                                session_id
+                            ));
+                            let info = if self.reload_info.is_empty() {
+                                "reload".to_string()
+                            } else {
+                                self.reload_info.join("\n")
+                            };
+                            let _ = std::fs::write(&marker, &info);
+                            crate::logging::info(&format!(
+                                "Wrote client-reload-pending marker for {} before re-exec",
+                                session_id
+                            ));
+                        }
+                    }
                     self.reload_requested = Some(session_id);
                     self.should_quit = true;
                     break 'outer;
@@ -3936,7 +4004,7 @@ impl App {
             // Queue message to notify the agent about reload completion.
             // This must run on both reconnect and first connect after a client hot-reload.
             let should_queue_reload_continuation =
-                !self.reload_info.is_empty() || has_reload_ctx_for_session;
+                !self.reload_info.is_empty() || has_reload_ctx_for_session || has_client_reload_marker;
             if should_queue_reload_continuation {
                 let reload_ctx = session_to_resume
                     .as_deref()
@@ -6273,6 +6341,9 @@ impl App {
             "config" => {
                 "`/config`\nShow active configuration.\n\n`/config init`\nCreate default config file.\n\n`/config edit`\nOpen config in `$EDITOR`."
             }
+            "auth" | "login" => {
+                "`/auth` / `/login`\nShow authentication status for all providers.\n\n`/login <provider>`\nStart login flow for a provider (claude, openai, openrouter)."
+            }
             "client-reload" if self.is_remote => {
                 "`/client-reload`\nForce client binary reload in remote mode."
             }
@@ -6295,6 +6366,11 @@ impl App {
         self.pasted_contents.clear();
         self.cursor_pos = 0;
         self.follow_chat_bottom(); // Reset to bottom and resume auto-scroll on new input
+
+        if let Some(pending) = self.pending_login.take() {
+            self.handle_login_input(pending, input);
+            return;
+        }
 
         // Check for built-in commands
         let trimmed = input.trim();
@@ -6359,6 +6435,7 @@ impl App {
                      • `/rewind` - Show history with numbers, `/rewind N` to rewind\n\
                      • `/compact` - Manually compact context (summarize old messages)\n\
                      • `/fix` - Attempt session recovery (context/tool/session issues)\n\
+                     • `/auth` / `/login` - Show auth status, `/login <provider>` to authenticate\n\
                      • `/debug-visual` - Enable visual debugging for TUI issues\n\
                      • `/<skill>` - Activate a skill\n\n\
                      **Available skills:** {}\n\n\
@@ -7175,6 +7252,28 @@ impl App {
                 title: None,
                 tool_data: None,
             });
+            return;
+        }
+
+        if trimmed == "/auth" || trimmed == "/login" {
+            self.show_auth_status();
+            return;
+        }
+
+        if let Some(provider) = trimmed
+            .strip_prefix("/login ")
+            .or_else(|| trimmed.strip_prefix("/auth "))
+        {
+            match provider.trim().to_lowercase().as_str() {
+                "claude" | "anthropic" => self.start_claude_login(),
+                "openai" => self.start_openai_login(),
+                "openrouter" => self.start_openrouter_login(),
+                other => {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Unknown provider '{}'. Use: claude, openai, or openrouter", other
+                    )));
+                }
+            }
             return;
         }
 
@@ -8236,6 +8335,370 @@ impl App {
         if !enabled {
             self.remote_swarm_members.clear();
         }
+    }
+
+    fn show_auth_status(&mut self) {
+        let status = crate::auth::AuthStatus::check();
+        let icon = |state: crate::auth::AuthState| match state {
+            crate::auth::AuthState::Available => "✓",
+            crate::auth::AuthState::Expired => "⚠ expired",
+            crate::auth::AuthState::NotConfigured => "✗",
+        };
+
+        let claude_detail = if status.anthropic.has_oauth && status.anthropic.has_api_key {
+            "OAuth + API key"
+        } else if status.anthropic.has_oauth {
+            "OAuth"
+        } else if status.anthropic.has_api_key {
+            "API key"
+        } else {
+            "not configured"
+        };
+
+        let openai_detail = if status.openai_has_oauth && status.openai_has_api_key {
+            "OAuth + API key"
+        } else if status.openai_has_oauth {
+            "OAuth"
+        } else if status.openai_has_api_key {
+            "API key"
+        } else {
+            "not configured"
+        };
+
+        self.push_display_message(DisplayMessage::system(format!(
+            "**Authentication Status:**\n\n\
+             | Provider | Status | Method |\n\
+             |----------|--------|--------|\n\
+             | Claude (Anthropic) | {} | {} |\n\
+             | OpenAI | {} | {} |\n\
+             | OpenRouter | {} | API key |\n\n\
+             Use `/login <provider>` to authenticate (claude, openai, openrouter).",
+            icon(status.anthropic.state),
+            claude_detail,
+            icon(status.openai),
+            openai_detail,
+            icon(status.openrouter),
+        )));
+    }
+
+    fn start_claude_login(&mut self) {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use sha2::{Digest, Sha256};
+
+        let verifier: String = {
+            use rand::Rng;
+            const CHARSET: &[u8] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+            let mut rng = rand::rng();
+            (0..64)
+                .map(|_| {
+                    let idx = rng.random_range(0..CHARSET.len());
+                    CHARSET[idx] as char
+                })
+                .collect()
+        };
+
+        let mut hasher = Sha256::new();
+        hasher.update(verifier.as_bytes());
+        let hash = hasher.finalize();
+        let challenge = URL_SAFE_NO_PAD.encode(hash);
+
+        let auth_url = format!(
+            "{}?code=true&client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
+            crate::auth::oauth::claude::AUTHORIZE_URL,
+            crate::auth::oauth::claude::CLIENT_ID,
+            urlencoding::encode(crate::auth::oauth::claude::REDIRECT_URI),
+            urlencoding::encode(crate::auth::oauth::claude::SCOPES),
+            challenge,
+            verifier,
+        );
+
+        let _ = open::that(&auth_url);
+
+        self.push_display_message(DisplayMessage::system(format!(
+            "**Claude OAuth Login**\n\n\
+             Opening browser for authentication...\n\n\
+             If the browser didn't open, visit:\n{}\n\n\
+             After logging in, copy the authorization code and **paste it here**.",
+            auth_url
+        )));
+        self.set_status_notice("Login: paste code…");
+        self.pending_login = Some(PendingLogin::Claude { verifier });
+    }
+
+    fn start_openai_login(&mut self) {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use sha2::{Digest, Sha256};
+
+        let verifier: String = {
+            use rand::Rng;
+            const CHARSET: &[u8] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+            let mut rng = rand::rng();
+            (0..64)
+                .map(|_| {
+                    let idx = rng.random_range(0..CHARSET.len());
+                    CHARSET[idx] as char
+                })
+                .collect()
+        };
+
+        let mut hasher = Sha256::new();
+        hasher.update(verifier.as_bytes());
+        let hash = hasher.finalize();
+        let challenge = URL_SAFE_NO_PAD.encode(hash);
+
+        let state: String = {
+            let bytes: [u8; 16] = rand::random();
+            hex::encode(bytes)
+        };
+
+        let auth_url = format!(
+            "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=codex_cli_rs",
+            crate::auth::oauth::openai::AUTHORIZE_URL,
+            crate::auth::oauth::openai::CLIENT_ID,
+            urlencoding::encode(crate::auth::oauth::openai::REDIRECT_URI),
+            urlencoding::encode(crate::auth::oauth::openai::SCOPES),
+            challenge,
+            state,
+        );
+
+        let _ = open::that(&auth_url);
+
+        let verifier_clone = verifier.clone();
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            match Self::openai_login_callback(verifier_clone, state_clone).await {
+                Ok(msg) => {
+                    crate::logging::info(&format!("OpenAI login: {}", msg));
+                }
+                Err(e) => {
+                    crate::logging::error(&format!("OpenAI login failed: {}", e));
+                }
+            }
+        });
+
+        self.push_display_message(DisplayMessage::system(format!(
+            "**OpenAI OAuth Login**\n\n\
+             Opening browser for authentication...\n\n\
+             If the browser didn't open, visit:\n{}\n\n\
+             Waiting for callback on `localhost:9876`... (this will complete automatically)",
+            auth_url
+        )));
+        self.set_status_notice("Login: waiting…");
+    }
+
+    async fn openai_login_callback(
+        verifier: String,
+        expected_state: String,
+    ) -> Result<String, String> {
+        let code = crate::auth::oauth::wait_for_callback_async(9876, &expected_state)
+            .await
+            .map_err(|e| format!("Callback failed: {}", e))?;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(crate::auth::oauth::openai::TOKEN_URL)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(format!(
+                "grant_type=authorization_code&client_id={}&code={}&code_verifier={}&redirect_uri={}",
+                crate::auth::oauth::openai::CLIENT_ID,
+                code,
+                verifier,
+                urlencoding::encode(crate::auth::oauth::openai::REDIRECT_URI)
+            ))
+            .send()
+            .await
+            .map_err(|e| format!("Token exchange request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Token exchange failed: {}", text));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct TokenResponse {
+            access_token: String,
+            refresh_token: String,
+            expires_in: i64,
+            id_token: Option<String>,
+        }
+
+        let tokens: TokenResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse token response: {}", e))?;
+        let expires_at = chrono::Utc::now().timestamp_millis() + (tokens.expires_in * 1000);
+
+        let oauth_tokens = crate::auth::oauth::OAuthTokens {
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token,
+            expires_at,
+            id_token: tokens.id_token,
+        };
+
+        crate::auth::oauth::save_openai_tokens(&oauth_tokens)
+            .map_err(|e| format!("Failed to save tokens: {}", e))?;
+
+        Ok("Successfully logged in to OpenAI!".to_string())
+    }
+
+    fn start_openrouter_login(&mut self) {
+        self.push_display_message(DisplayMessage::system(
+            "**OpenRouter API Key**\n\n\
+             Get your API key from: https://openrouter.ai/keys\n\n\
+             **Paste your API key below** (it will be saved securely)."
+                .to_string(),
+        ));
+        self.set_status_notice("Login: paste key…");
+        self.pending_login = Some(PendingLogin::OpenRouter);
+    }
+
+    fn handle_login_input(&mut self, pending: PendingLogin, input: String) {
+        if input.is_empty() || input == "/cancel" {
+            self.push_display_message(DisplayMessage::system("Login cancelled.".to_string()));
+            return;
+        }
+
+        match pending {
+            PendingLogin::Claude { verifier } => {
+                self.set_status_notice("Login: exchanging…");
+                let input_owned = input.clone();
+                tokio::spawn(async move {
+                    match Self::claude_token_exchange(verifier, input_owned).await {
+                        Ok(msg) => {
+                            crate::logging::info(&format!("Claude login: {}", msg));
+                        }
+                        Err(e) => {
+                            crate::logging::error(&format!("Claude login failed: {}", e));
+                        }
+                    }
+                });
+                self.push_display_message(DisplayMessage::system(
+                    "Exchanging authorization code for tokens...".to_string(),
+                ));
+            }
+            PendingLogin::OpenRouter => {
+                let key = input.trim().to_string();
+                if !key.starts_with("sk-or-") {
+                    self.push_display_message(DisplayMessage::system(
+                        "⚠ OpenRouter keys typically start with `sk-or-`. Saving anyway..."
+                            .to_string(),
+                    ));
+                }
+
+                match Self::save_openrouter_key(&key) {
+                    Ok(()) => {
+                        self.push_display_message(DisplayMessage::system(
+                            "✓ **OpenRouter API key saved!**\n\n\
+                             Stored at `~/.config/jcode/openrouter.env`.\n\
+                             You can now use `/model` to switch to OpenRouter models."
+                                .to_string(),
+                        ));
+                        self.set_status_notice("Login: ✓ saved");
+                    }
+                    Err(e) => {
+                        self.push_display_message(DisplayMessage::error(format!(
+                            "Failed to save OpenRouter key: {}",
+                            e
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    async fn claude_token_exchange(verifier: String, input: String) -> Result<String, String> {
+        let raw_code = if input.contains("code=") {
+            let url = url::Url::parse(&input)
+                .or_else(|_| url::Url::parse(&format!("https://example.com?{}", input)))
+                .map_err(|e| format!("Failed to parse URL: {}", e))?;
+            url.query_pairs()
+                .find(|(k, _)| k == "code")
+                .map(|(_, v)| v.to_string())
+                .ok_or_else(|| "No code found in URL".to_string())?
+        } else {
+            input.trim().to_string()
+        };
+
+        let (code, state_from_callback) = if raw_code.contains('#') {
+            let parts: Vec<&str> = raw_code.splitn(2, '#').collect();
+            (parts[0].to_string(), Some(parts[1].to_string()))
+        } else {
+            (raw_code, None)
+        };
+
+        let client = reqwest::Client::new();
+        let mut body = serde_json::json!({
+            "grant_type": "authorization_code",
+            "client_id": crate::auth::oauth::claude::CLIENT_ID,
+            "code": code,
+            "code_verifier": verifier,
+            "redirect_uri": crate::auth::oauth::claude::REDIRECT_URI,
+        });
+
+        if let Some(state) = state_from_callback {
+            body["state"] = serde_json::Value::String(state);
+        }
+
+        let resp = client
+            .post(crate::auth::oauth::claude::TOKEN_URL)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Token exchange request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Token exchange failed: {}", text));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct TokenResponse {
+            access_token: String,
+            refresh_token: String,
+            expires_in: i64,
+            id_token: Option<String>,
+        }
+
+        let tokens: TokenResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse token response: {}", e))?;
+        let expires_at = chrono::Utc::now().timestamp_millis() + (tokens.expires_in * 1000);
+
+        let oauth_tokens = crate::auth::oauth::OAuthTokens {
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token,
+            expires_at,
+            id_token: tokens.id_token,
+        };
+
+        crate::auth::oauth::save_claude_tokens(&oauth_tokens)
+            .map_err(|e| format!("Failed to save tokens: {}", e))?;
+
+        Ok("Successfully logged in to Claude!".to_string())
+    }
+
+    fn save_openrouter_key(key: &str) -> anyhow::Result<()> {
+        let config_dir = dirs::config_dir()
+            .ok_or_else(|| anyhow::anyhow!("No config directory found"))?
+            .join("jcode");
+        std::fs::create_dir_all(&config_dir)?;
+
+        let file_path = config_dir.join("openrouter.env");
+        let content = format!("OPENROUTER_API_KEY={}\n", key);
+        std::fs::write(&file_path, &content)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+
+        std::env::set_var("OPENROUTER_API_KEY", key);
+        Ok(())
     }
 
     fn model_picker_preview_filter(input: &str) -> Option<String> {
@@ -10720,6 +11183,17 @@ impl App {
                 .collect();
         }
 
+        if prefix.starts_with("/login ") || prefix.starts_with("/auth ") {
+            return vec![
+                ("/login claude".into(), "Login to Claude (Anthropic OAuth)"),
+                ("/login openai".into(), "Login to OpenAI (OAuth)"),
+                (
+                    "/login openrouter".into(),
+                    "Login to OpenRouter (API key)",
+                ),
+            ];
+        }
+
         // Built-in commands
         let mut commands: Vec<(String, &'static str)> = vec![
             ("/help".into(), "Show help and keyboard shortcuts"),
@@ -10745,6 +11219,11 @@ impl App {
             ("/rebuild".into(), "Full rebuild (git pull + build + tests)"),
             ("/split".into(), "Split session into a new window"),
             ("/quit".into(), "Exit jcode"),
+            ("/auth".into(), "Show authentication status"),
+            (
+                "/login".into(),
+                "Login to a provider (claude/openai/openrouter)",
+            ),
         ];
 
         // Add client-reload and server-reload commands in remote mode

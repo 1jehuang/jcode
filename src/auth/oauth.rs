@@ -106,6 +106,50 @@ fn wait_for_callback(port: u16, expected_state: &str) -> Result<String> {
     Ok(code)
 }
 
+/// Async version of wait_for_callback using tokio (for use from TUI context)
+pub async fn wait_for_callback_async(port: u16, expected_state: &str) -> Result<String> {
+    let expected_state = expected_state.to_string();
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
+
+    let (stream, _) = listener.accept().await?;
+
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line).await?;
+
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        anyhow::bail!("Invalid HTTP request");
+    }
+
+    let path = parts[1];
+    let url = url::Url::parse(&format!("http://localhost{}", path))?;
+
+    let code = url
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.to_string())
+        .ok_or_else(|| anyhow::anyhow!("No code in callback"))?;
+
+    let state = url
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .map(|(_, v)| v.to_string())
+        .ok_or_else(|| anyhow::anyhow!("No state in callback"))?;
+
+    if state != expected_state {
+        anyhow::bail!("State mismatch - possible CSRF attack");
+    }
+
+    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
+        <html><body><h1>Success!</h1><p>You can close this window and return to jcode.</p></body></html>";
+    writer.write_all(response.as_bytes()).await?;
+
+    Ok(code)
+}
+
 /// Perform OAuth login for Claude
 pub async fn login_claude() -> Result<OAuthTokens> {
     let (verifier, challenge) = generate_pkce();
