@@ -44,6 +44,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          cache-all-crates: "true"
 
       - name: Build release binary
         run: |
@@ -82,3 +83,64 @@ jobs:
         with:
           generate_release_notes: true
           files: artifacts/**/*.tar.gz
+
+      - name: Update Homebrew formula
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          VERSION_NUM="${VERSION#v}"
+
+          LINUX_SHA=$(sha256sum artifacts/jcode-linux-x86_64/jcode-linux-x86_64.tar.gz | cut -d' ' -f1)
+          MACOS_SHA=$(sha256sum artifacts/jcode-macos-aarch64/jcode-macos-aarch64.tar.gz | cut -d' ' -f1)
+
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
+
+          git clone git@github.com:1jehuang/homebrew-jcode.git /tmp/homebrew-jcode
+
+          cat > /tmp/homebrew-jcode/Formula/jcode.rb << FORMULA
+          class Jcode < Formula
+            desc "AI coding agent powered by Claude and ChatGPT"
+            homepage "https://github.com/1jehuang/jcode"
+            version "${VERSION_NUM}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-macos-aarch64.tar.gz"
+                sha256 "${MACOS_SHA}"
+
+                def install
+                  bin.install "jcode-macos-aarch64" => "jcode"
+                end
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-x86_64.tar.gz"
+                sha256 "${LINUX_SHA}"
+
+                def install
+                  bin.install "jcode-linux-x86_64" => "jcode"
+                end
+              end
+            end
+
+            test do
+              assert_match "jcode", shell_output("#{bin}/jcode --version")
+            end
+          end
+          FORMULA
+
+          sed -i 's/^          //' /tmp/homebrew-jcode/Formula/jcode.rb
+
+          cd /tmp/homebrew-jcode
+          git config user.name "jcode-release-bot"
+          git config user.email "release@jcode.dev"
+          git add Formula/jcode.rb
+          git commit -m "Update to ${VERSION}" || echo "No changes"
+          git push
