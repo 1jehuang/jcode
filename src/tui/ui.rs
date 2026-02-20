@@ -1909,8 +1909,10 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     };
 
     let diff_mode = app.diff_mode();
-    let pinned_content = if diff_mode.is_pinned() {
-        collect_pinned_content(app.display_messages())
+    let pin_images = app.pin_images();
+    let collect_diffs = diff_mode.is_pinned();
+    let pinned_content = if collect_diffs || pin_images {
+        collect_pinned_content(app.display_messages(), collect_diffs, pin_images)
     } else {
         Vec::new()
     };
@@ -6592,7 +6594,11 @@ enum PinnedContentEntry {
     },
 }
 
-fn collect_pinned_content(messages: &[DisplayMessage]) -> Vec<PinnedContentEntry> {
+fn collect_pinned_content(
+    messages: &[DisplayMessage],
+    collect_diffs: bool,
+    collect_images: bool,
+) -> Vec<PinnedContentEntry> {
     let mut entries = Vec::new();
     for msg in messages {
         if msg.role != "tool" {
@@ -6602,7 +6608,7 @@ fn collect_pinned_content(messages: &[DisplayMessage]) -> Vec<PinnedContentEntry
             continue;
         };
 
-        if matches!(tc.name.as_str(), "read" | "Read") {
+        if collect_images && matches!(tc.name.as_str(), "read" | "Read") {
             let file_path = tc
                 .input
                 .get("file_path")
@@ -6621,6 +6627,10 @@ fn collect_pinned_content(messages: &[DisplayMessage]) -> Vec<PinnedContentEntry
                     });
                 }
             }
+            continue;
+        }
+
+        if !collect_diffs {
             continue;
         }
 

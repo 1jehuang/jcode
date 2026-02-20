@@ -611,6 +611,8 @@ pub struct App {
     diagram_zoom: u8,
     // Scroll offset for pinned diff pane
     diff_pane_scroll: usize,
+    // Pin read images to side pane
+    pin_images: bool,
     // Interactive model/provider picker
     picker_state: Option<super::PickerState>,
     // Pending model switch from picker (for remote mode async processing)
@@ -869,6 +871,7 @@ impl App {
             diagram_pane_position: crate::config::DiagramPanePosition::default(),
             diagram_zoom: 100,
             diff_pane_scroll: 0,
+            pin_images: display.pin_images,
             picker_state: None,
             pending_model_switch: None,
             model_switch_keys: super::keybind::load_model_switch_keys(),
@@ -12129,6 +12132,9 @@ impl super::TuiState for App {
     }
     fn diff_pane_scroll(&self) -> usize {
         self.diff_pane_scroll
+    }
+    fn pin_images(&self) -> bool {
+        self.pin_images
     }
     fn picker_state(&self) -> Option<&super::PickerState> {
         self.picker_state.as_ref()

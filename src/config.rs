@@ -169,6 +169,8 @@ pub struct DisplayConfig {
     pub show_thinking: bool,
     /// How to display mermaid diagrams (none/margin/pinned, default: pinned)
     pub diagram_mode: DiagramDisplayMode,
+    /// Pin read images to side pane (default: true)
+    pub pin_images: bool,
     /// Show startup animation (default: false)
     pub startup_animation: bool,
     /// Show idle animation before first prompt (default: true)
@@ -180,6 +182,7 @@ impl Default for DisplayConfig {
         Self {
             diff_mode: DiffDisplayMode::default(),
             show_diffs: None,
+            pin_images: true,
             queue_mode: false,
             mouse_capture: true,
             debug_socket: false,
@@ -453,6 +456,11 @@ impl Config {
                 self.display.diff_mode = if parsed { DiffDisplayMode::Inline } else { DiffDisplayMode::Off };
             }
         }
+        if let Ok(v) = std::env::var("JCODE_PIN_IMAGES") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.pin_images = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_QUEUE_MODE") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.queue_mode = parsed;
@@ -653,6 +661,9 @@ scroll_bookmark = "ctrl+g"
 # Diff display mode: "off", "inline" (default), or "pinned" (dedicated pane)
 diff_mode = "inline"
 
+# Pin read images to a side pane (default: true)
+pin_images = true
+
 # Queue mode: wait until assistant is done before sending next message
 queue_mode = false
 
@@ -776,6 +787,7 @@ desktop_notifications = true
 
 **Display:**
 - Diff mode: {}
+- Pin images: {}
 - Queue mode: {}
 - Mouse capture: {}
 - Debug socket: {}
@@ -826,6 +838,7 @@ desktop_notifications = true
             self.keybindings.scroll_prompt_down,
             self.keybindings.scroll_bookmark,
             self.display.diff_mode.label(),
+            self.display.pin_images,
             self.display.queue_mode,
             self.display.mouse_capture,
             self.display.debug_socket,

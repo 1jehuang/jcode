@@ -358,6 +358,9 @@ impl TuiState for BenchState {
     fn diff_pane_scroll(&self) -> usize {
         0
     }
+    fn pin_images(&self) -> bool {
+        false
+    }
     fn picker_state(&self) -> Option<&jcode::tui::PickerState> {
         None
     }

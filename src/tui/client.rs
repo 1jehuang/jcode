@@ -1508,6 +1508,9 @@ impl TuiState for ClientApp {
     fn diff_pane_scroll(&self) -> usize {
         0
     }
+    fn pin_images(&self) -> bool {
+        crate::config::config().display.pin_images
+    }
     fn picker_state(&self) -> Option<&super::PickerState> {
         None
     }

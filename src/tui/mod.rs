@@ -150,6 +150,8 @@ pub trait TuiState {
     fn diagram_zoom(&self) -> u8;
     /// Scroll offset for pinned diff pane (line index)
     fn diff_pane_scroll(&self) -> usize;
+    /// Whether to pin read images to a side pane
+    fn pin_images(&self) -> bool;
     /// Interactive model/provider picker state (shown as inline row above input)
     fn picker_state(&self) -> Option<&PickerState>;
     /// Working directory for this session
