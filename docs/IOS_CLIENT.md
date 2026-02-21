@@ -14,8 +14,8 @@ A native iOS application that connects to a jcode server running on the user's l
 │          iPhone (iOS App)            │         │      Laptop/Desktop (Server)         │
 │                                      │   WS    │                                      │
 │  ┌────────────────────────────────┐  │  over   │  ┌────────────────────────────────┐  │
-│  │  SwiftUI Interface             │  │  TLS    │  │  jcode server (Rust)           │  │
-│  │  - Conversation view           │◄─┼────────►│  │  - Agent + LLM providers       │  │
+│  │  SwiftUI Interface             │  │  Tail-  │  │  jcode server (Rust)           │  │
+│  │  - Conversation view           │◄─┼─scale──►│  │  - Agent + LLM providers       │  │
 │  │  - Tool approval sheet         │  │         │  │  - Tool execution (bash, etc)  │  │
 │  │  - Ambient mode dashboard      │  │         │  │  - Memory graph                │  │
 │  │  - Server manager              │  │         │  │  - MCP servers                 │  │
@@ -23,10 +23,10 @@ A native iOS application that connects to a jcode server running on the user's l
 │                                      │         │  └────────────────────────────────┘  │
 │  ┌────────────────────────────────┐  │         │                                      │
 │  │  Local Services                │  │         │  ┌────────────────────────────────┐  │
-│  │  - Push notification handler   │  │         │  │  WebSocket Gateway (new)       │  │
-│  │  - Server discovery (Bonjour)  │  │         │  │  - Listens on TCP port         │  │
-│  │  - Keychain (auth tokens)      │  │         │  │  - TLS termination             │  │
+│  │  - APNs push handler           │  │         │  │  WebSocket Gateway (new)       │  │
+│  │  - Keychain (auth tokens)      │  │         │  │  - Listens on TCP port         │  │
 │  │  - Offline message queue       │  │         │  │  - Token authentication        │  │
+│  │  - Live Activities / Widgets   │  │         │  │  - APNs push sender            │  │
 │  └────────────────────────────────┘  │         │  │  - Bridges to Unix socket      │  │
 │                                      │         │  └────────────────────────────────┘  │
 └──────────────────────────────────────┘         └──────────────────────────────────────┘
@@ -75,9 +75,10 @@ A new network listener alongside the existing Unix socket. Same protocol, differ
 
 **Key decisions:**
 - Listen on a configurable TCP port (default: `7643` - "jc" on phone keypad)
-- TLS required for non-localhost connections (self-signed cert or Let's Encrypt)
+- Over Tailscale: plain WebSocket (tunnel provides encryption)
+- Fallback without Tailscale: TLS required (self-signed or Let's Encrypt)
 - WebSocket upgrade on `/ws` endpoint
-- REST endpoints for discovery and health: `GET /health`, `GET /info`
+- REST endpoints for health and pairing: `GET /health`, `POST /pair`
 - Same `Request`/`ServerEvent` JSON protocol as Unix socket
 
 **Minimal diff to protocol:**
@@ -481,17 +482,18 @@ No Mac needed. Build and test entirely on Linux.
 
 1. Add WebSocket listener to jcode server (`src/gateway.rs`)
    - Depends on: `tokio-tungstenite` (already in Cargo.toml)
-   - Listen on configurable TCP port
+   - Listen on configurable TCP port (default: `7643`)
    - Bridge WebSocket frames to existing Unix socket protocol
 2. Add token-based authentication
    - Pairing command: `jcode pair`
    - Device registry: `~/.jcode/devices.json`
-3. Add mDNS/Bonjour advertisement
-   - Crate: `mdns-sd`
-   - Advertise `_jcode._tcp` with server name, version
-4. Test with `websocat` or a simple Python script
+3. Tailscale connectivity
+   - Bind to `0.0.0.0` (Tailscale routes traffic through WireGuard)
+   - Optionally bind only to Tailscale interface for security
+   - Document setup: install Tailscale on phone + laptop
+4. Test with `websocat` or a simple Python script over Tailscale
 
-**Deliverable:** Any WebSocket client can connect to jcode server, authenticate, and interact with sessions. Testable from Linux with CLI tools.
+**Deliverable:** Any WebSocket client can connect to jcode server over Tailscale, authenticate, and interact with sessions. Testable from Linux with CLI tools.
 
 ### Phase 1: Minimal iOS Client (needs Mac)
 
@@ -499,8 +501,8 @@ Borrow the MacBook for initial setup, then iterate.
 
 1. Xcode project setup
    - SwiftUI app targeting iOS 17+
-   - Bonjour discovery (NSNetServiceBrowser)
    - WebSocket connection (URLSessionWebSocketTask)
+   - Server connection via Tailscale hostname
 2. Pairing flow
    - Enter 6-digit code
    - Store token in Keychain
