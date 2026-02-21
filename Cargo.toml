@@ -1,6 +1,6 @@
 [package]
 name = "jcode"
-version = "0.3.2"
+version = "0.3.3"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2021"
 
