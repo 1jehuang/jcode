@@ -810,7 +810,6 @@ impl SessionPicker {
         const BATCH_RESTORE: Color = Color::Rgb(255, 140, 140);
         const BATCH_ROW_BG: Color = Color::Rgb(36, 18, 18);
 
-        let last_msg_ago = format_time_ago(session.last_message_time);
         let created_ago = format_time_ago(session.created_at);
         let in_batch_restore = self.crashed_session_ids.contains(&session.id);
 
@@ -826,18 +825,27 @@ impl SessionPicker {
         let canary_marker = if session.is_canary { " 🔬" } else { "" };
         let debug_marker = if session.is_debug { " 🧪" } else { "" };
 
-        // Status indicator with color
-        let (status_icon, status_color) = match &session.status {
-            SessionStatus::Active => ("▶", Color::Rgb(100, 200, 100)),
-            SessionStatus::Closed => ("✓", DIM),
-            SessionStatus::Crashed { .. } => ("💥", Color::Rgb(220, 100, 100)),
-            SessionStatus::Reloaded => ("🔄", USER_CLR),
-            SessionStatus::Compacted => ("📦", Color::Rgb(255, 193, 7)),
-            SessionStatus::RateLimited => ("⏳", ACCENT),
-            SessionStatus::Error { .. } => ("❌", Color::Rgb(220, 100, 100)),
+        // Status indicator with color and time label
+        let time_ago = format_time_ago(session.last_message_time);
+        let (status_icon, status_color, time_label) = match &session.status {
+            SessionStatus::Active => ("▶", Color::Rgb(100, 200, 100), "active".to_string()),
+            SessionStatus::Closed => ("✓", DIM, format!("closed {}", time_ago)),
+            SessionStatus::Crashed { .. } => {
+                ("💥", Color::Rgb(220, 100, 100), format!("crashed {}", time_ago))
+            }
+            SessionStatus::Reloaded => ("🔄", USER_CLR, format!("reloaded {}", time_ago)),
+            SessionStatus::Compacted => {
+                ("📦", Color::Rgb(255, 193, 7), format!("compacted {}", time_ago))
+            }
+            SessionStatus::RateLimited => {
+                ("⏳", ACCENT, format!("rate-limited {}", time_ago))
+            }
+            SessionStatus::Error { .. } => {
+                ("❌", Color::Rgb(220, 100, 100), format!("errored {}", time_ago))
+            }
         };
 
-        // Line 1: icon + name + status + last message time
+        // Line 1: icon + name + status + time context
         let mut line1_spans = vec![
             Span::styled("  ", Style::default()), // Indent for sessions under server
             Span::styled(
@@ -852,7 +860,7 @@ impl SessionPicker {
                 Style::default().fg(status_color),
             ),
             Span::styled(
-                format!("  last: {}", last_msg_ago),
+                format!("  {}", time_label),
                 Style::default().fg(DIM),
             ),
         ];
@@ -1116,10 +1124,22 @@ impl SessionPicker {
                         .fg(HEADER_SESSION_COLOR)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    format!("  {}", format_time_ago(session.last_message_time)),
-                    Style::default().fg(DIM_COLOR),
-                ),
+                {
+                    let ago = format_time_ago(session.last_message_time);
+                    let label = match &session.status {
+                        SessionStatus::Active => "active".to_string(),
+                        SessionStatus::Closed => format!("closed {}", ago),
+                        SessionStatus::Crashed { .. } => format!("crashed {}", ago),
+                        SessionStatus::Reloaded => format!("reloaded {}", ago),
+                        SessionStatus::Compacted => format!("compacted {}", ago),
+                        SessionStatus::RateLimited => format!("rate-limited {}", ago),
+                        SessionStatus::Error { .. } => format!("errored {}", ago),
+                    };
+                    Span::styled(
+                        format!("  {}", label),
+                        Style::default().fg(DIM_COLOR),
+                    )
+                },
             ])
             .alignment(align),
         );
@@ -1572,9 +1592,10 @@ impl SessionPicker {
                                 }
                                 KeyCode::Enter => {
                                     self.search_active = false;
-                                    // Keep the query, just exit search input mode
                                     if self.sessions.is_empty() {
-                                        // No results - clear and continue
+                                        // No results - clear search and return to full list
+                                        self.search_query.clear();
+                                        self.rebuild_items();
                                     } else {
                                         // Select current item
                                         break Ok(self
@@ -1602,7 +1623,16 @@ impl SessionPicker {
 
                         // Normal mode
                         match key.code {
-                            KeyCode::Esc | KeyCode::Char('q') => {
+                            KeyCode::Esc => {
+                                if !self.search_query.is_empty() {
+                                    // Clear active search filter first
+                                    self.search_query.clear();
+                                    self.rebuild_items();
+                                } else {
+                                    break Ok(None);
+                                }
+                            }
+                            KeyCode::Char('q') => {
                                 break Ok(None);
                             }
                             KeyCode::Enter => {
