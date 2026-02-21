@@ -66,30 +66,28 @@ fi
 
 PATH_LINE="export PATH=\"$INSTALL_DIR:\$PATH\""
 
+if [ "$(uname -s)" = "Darwin" ]; then
+  DEFAULT_RC="$HOME/.zshrc"
+else
+  DEFAULT_RC="$HOME/.bashrc"
+fi
+
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
   added_to=""
 
-  if [ "$(uname -s)" = "Darwin" ]; then
-    RC_FILES="$HOME/.zshrc $HOME/.zprofile $HOME/.bash_profile $HOME/.profile"
-    DEFAULT_RC="$HOME/.zshrc"
-  else
-    RC_FILES="$HOME/.bashrc $HOME/.zshrc $HOME/.bash_profile $HOME/.profile"
-    DEFAULT_RC="$HOME/.bashrc"
+  # Always ensure the default rc file has the PATH
+  if [ ! -f "$DEFAULT_RC" ] || ! grep -qF "$INSTALL_DIR" "$DEFAULT_RC" 2>/dev/null; then
+    printf '\n# Added by jcode installer\n%s\n' "$PATH_LINE" >> "$DEFAULT_RC"
+    added_to="$added_to $DEFAULT_RC"
   fi
 
-  for rc in $RC_FILES; do
-    if [ -f "$rc" ]; then
-      if ! grep -qF "$INSTALL_DIR" "$rc" 2>/dev/null; then
-        printf '\n# Added by jcode installer\n%s\n' "$PATH_LINE" >> "$rc"
-        added_to="$added_to $rc"
-      fi
+  # Also add to other existing rc files
+  for rc in "$HOME/.zprofile" "$HOME/.bash_profile" "$HOME/.profile"; do
+    if [ -f "$rc" ] && ! grep -qF "$INSTALL_DIR" "$rc" 2>/dev/null; then
+      printf '\n# Added by jcode installer\n%s\n' "$PATH_LINE" >> "$rc"
+      added_to="$added_to $rc"
     fi
   done
-
-  if [ -z "$added_to" ]; then
-    printf '# Added by jcode installer\n%s\n' "$PATH_LINE" >> "$DEFAULT_RC"
-    added_to=" $DEFAULT_RC"
-  fi
 
   info "Added $INSTALL_DIR to PATH in:$added_to"
 fi
@@ -101,9 +99,11 @@ echo ""
 if command -v jcode >/dev/null 2>&1; then
   info "Run 'jcode' to get started."
 else
-  echo "  To start using jcode, run:"
+  echo "  To start using jcode, open a new terminal window, or run:"
   echo ""
-  printf '    \033[1;32mexec $SHELL && jcode\033[0m\n'
+  printf '    \033[1;32msource %s\033[0m\n' "$DEFAULT_RC"
   echo ""
-  echo "  (This restarts your shell so it picks up the new PATH.)"
+  echo "  Then run:"
+  echo ""
+  printf '    \033[1;32mjcode\033[0m\n'
 fi
