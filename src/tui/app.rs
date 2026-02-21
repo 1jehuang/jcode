@@ -1287,43 +1287,29 @@ impl App {
             }
 
             // Queue an automatic message to notify the AI that reload completed
-            // Only do this if there's actually a conversation to continue
-            if total_turns > 0 {
-                // Try to load reload context for richer continuation message
-                let reload_ctx = ReloadContext::load_for_session(session_id).ok().flatten();
-
-                let continuation_msg = if let Some(ctx) = reload_ctx {
-                    let action = if ctx.is_rollback {
-                        "Rollback"
-                    } else {
-                        "Reload"
-                    };
-                    let task_info = ctx
-                        .task_context
-                        .map(|t| format!("\nTask context: {}", t))
-                        .unwrap_or_default();
-
-                    format!(
-                        "[SYSTEM: {} succeeded. Build {} → {}.{}\nSession restored with {} turns.\nIMPORTANT: The reload is done. You MUST immediately continue your work. Do NOT ask the user what to do next. Do NOT summarize what happened. Just pick up exactly where you left off and keep going.]",
-                        action,
-                        ctx.version_before,
-                        ctx.version_after,
-                        task_info,
-                        total_turns
-                    )
+            // Only do this for the session that actually initiated the reload
+            // (identified by matching ReloadContext). Other sessions that are
+            // restored after a server restart were idle and shouldn't be prompted.
+            let reload_ctx = ReloadContext::load_for_session(session_id).ok().flatten();
+            if let Some(ctx) = reload_ctx {
+                let action = if ctx.is_rollback {
+                    "Rollback"
                 } else {
-                    // Fallback to basic message if no context
-                    let cwd = std::env::current_dir()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| "unknown".to_string());
-
-                    format!(
-                        "[SYSTEM: Reload complete. Build: {}, CWD: {}, Session: {} turns.\nIMPORTANT: You MUST immediately continue your work. Do NOT ask the user what to do next. Just pick up exactly where you left off and keep going.]",
-                        build_hash,
-                        cwd,
-                        total_turns
-                    )
+                    "Reload"
                 };
+                let task_info = ctx
+                    .task_context
+                    .map(|t| format!("\nTask context: {}", t))
+                    .unwrap_or_default();
+
+                let continuation_msg = format!(
+                    "[SYSTEM: {} succeeded. Build {} → {}.{}\nSession restored with {} turns.\nIMPORTANT: The reload is done. You MUST immediately continue your work. Do NOT ask the user what to do next. Do NOT summarize what happened. Just pick up exactly where you left off and keep going.]",
+                    action,
+                    ctx.version_before,
+                    ctx.version_after,
+                    task_info,
+                    total_turns
+                );
 
                 crate::logging::info(&format!(
                     "Queuing reload continuation message ({} chars)",
@@ -4072,9 +4058,13 @@ impl App {
             }
 
             // Queue message to notify the agent about reload completion.
-            // This must run on both reconnect and first connect after a client hot-reload.
+            // Only queue a continuation for the session that actually initiated
+            // the reload (has_reload_ctx_for_session) or was explicitly marked
+            // for continuation (has_client_reload_marker). Other sessions that
+            // reconnect after a server restart should NOT get a continuation
+            // prompt - they were idle and have nothing to continue.
             let should_queue_reload_continuation =
-                !self.reload_info.is_empty() || has_reload_ctx_for_session || has_client_reload_marker;
+                has_reload_ctx_for_session || has_client_reload_marker;
             crate::logging::info(&format!(
                 "Reload continuation check: should_queue={}, reload_info_empty={}, has_ctx={}, has_marker={}",
                 should_queue_reload_continuation,
@@ -4095,7 +4085,7 @@ impl App {
                         result.ok().flatten()
                     });
 
-                let continuation_msg = if let Some(ctx) = reload_ctx {
+                if let Some(ctx) = reload_ctx {
                     let action = if ctx.is_rollback {
                         "Rollback"
                     } else {
@@ -4106,34 +4096,24 @@ impl App {
                         .map(|t| format!("\nTask context: {}", t))
                         .unwrap_or_default();
 
-                    format!(
+                    let continuation_msg = format!(
                         "[SYSTEM: {} succeeded. Build {} → {}.{}\nIMPORTANT: The reload is done. You MUST immediately continue your work. Do NOT ask the user what to do next. Do NOT summarize what happened. Just pick up exactly where you left off and keep going.]",
                         action,
                         ctx.version_before,
                         ctx.version_after,
                         task_info
-                    )
-                } else {
-                    // Fallback to basic message
-                    let cwd = std::env::current_dir()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| "unknown".to_string());
-                    let reload_summary = if self.reload_info.is_empty() {
-                        "Reloaded session restored".to_string()
-                    } else {
-                        self.reload_info.join(", ")
-                    };
-                    format!(
-                        "[SYSTEM: Reload complete. {}. CWD: {}.\nIMPORTANT: You MUST immediately continue your work. Do NOT ask the user what to do next. Just pick up exactly where you left off and keep going.]",
-                        reload_summary, cwd
-                    )
-                };
+                    );
 
-                crate::logging::info(&format!(
-                    "Queuing reload continuation message ({} chars)",
-                    continuation_msg.len()
-                ));
-                self.queued_messages.push(continuation_msg);
+                    crate::logging::info(&format!(
+                        "Queuing reload continuation message ({} chars)",
+                        continuation_msg.len()
+                    ));
+                    self.queued_messages.push(continuation_msg);
+                } else {
+                    crate::logging::warn(
+                        "Reload context expected but not found (race condition?), skipping continuation"
+                    );
+                }
                 self.reload_info.clear();
             }
 
