@@ -452,16 +452,64 @@ fn load_disk_cache() -> Option<Vec<ModelInfo>> {
 }
 
 /// Look up the `created` timestamp for a model from the disk cache.
-/// Returns None if the cache is missing or the model isn't found.
+/// Tries exact match first, then common provider-prefixed variants
+/// (e.g. "claude-opus-4-6" → "anthropic/claude-opus-4.6").
 pub fn model_created_timestamp(model_id: &str) -> Option<u64> {
     let path = cache_path();
     let content = std::fs::read_to_string(&path).ok()?;
     let cache: DiskCache = serde_json::from_str(&content).ok()?;
+
+    // Exact match
+    if let Some(ts) = cache.models.iter().find(|m| m.id == model_id).and_then(|m| m.created) {
+        return Some(ts);
+    }
+
+    // Try OpenRouter-style ID variants for direct provider models
+    let candidates = openrouter_id_candidates(model_id);
+    for candidate in &candidates {
+        if let Some(ts) = cache.models.iter().find(|m| m.id == *candidate).and_then(|m| m.created) {
+            return Some(ts);
+        }
+    }
+
+    None
+}
+
+/// Generate OpenRouter ID candidates for a direct provider model name.
+/// e.g. "claude-opus-4-6" → ["anthropic/claude-opus-4.6", "anthropic/claude-opus-4-6"]
+///      "gpt-5.3-codex"   → ["openai/gpt-5.3-codex"]
+fn openrouter_id_candidates(model: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if model.starts_with("claude-") || model.starts_with("claude_") {
+        candidates.push(format!("anthropic/{}", model));
+        // Try version with dot instead of dash (claude-opus-4-6 → claude-opus-4.6)
+        if let Some(pos) = model.rfind('-') {
+            let mut dotted = model.to_string();
+            dotted.replace_range(pos..pos + 1, ".");
+            candidates.push(format!("anthropic/{}", dotted));
+        }
+    } else if model.starts_with("gpt-") || model.starts_with("codex-") || model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4") {
+        candidates.push(format!("openai/{}", model));
+    }
+    candidates
+}
+
+/// Return all cached model timestamps as (id, created) pairs.
+pub fn all_model_timestamps() -> Vec<(String, u64)> {
+    let path = cache_path();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let cache: DiskCache = match serde_json::from_str(&content) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
     cache
         .models
-        .iter()
-        .find(|m| m.id == model_id)
-        .and_then(|m| m.created)
+        .into_iter()
+        .filter_map(|m| m.created.map(|t| (m.id, t)))
+        .collect()
 }
 
 /// Save models to disk cache

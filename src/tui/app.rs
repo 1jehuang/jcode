@@ -8999,27 +8999,15 @@ impl App {
         const RECOMMENDED_MODELS: &[&str] =
             &["gpt-5.3-codex-spark", "gpt-5.3-codex", "claude-opus-4-6", "claude-sonnet-4-6"];
 
-        const OLD_MODELS: &[&str] = &[
-            "claude-opus-4-5",
-            "claude-sonnet-4-5",
-            "claude-sonnet-4-20250514",
-            "gpt-5-chat-latest",
-            "gpt-5-codex",
-            "gpt-5-codex-mini",
-            "gpt-5-pro",
-            "gpt-5-mini",
-            "gpt-5-nano",
-            "gpt-5",
-        ];
-
-        // Threshold: models created more than 6 months ago are "old"
-        let old_threshold_secs = {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            now.saturating_sub(180 * 86400) // ~6 months
-        };
+        // Find the latest recommended model's created timestamp from OpenRouter cache,
+        // then mark anything more than 1 month older as "old".
+        let latest_recommended_ts: Option<u64> = RECOMMENDED_MODELS
+            .iter()
+            .filter_map(|m| crate::provider::openrouter::model_created_timestamp(m))
+            .max();
+        let old_threshold_secs = latest_recommended_ts
+            .map(|ts| ts.saturating_sub(30 * 86400)) // 1 month before latest recommended
+            .unwrap_or(0);
 
         // Format a unix timestamp as "Mon YYYY"
         fn format_created(ts: u64) -> String {
@@ -9064,17 +9052,16 @@ impl App {
                         is_current: is_this_current,
                         recommended: RECOMMENDED_MODELS.contains(&name.as_str())
                             && (*effort == "xhigh" || *effort == "high"),
-                        old: OLD_MODELS.contains(&name.as_str())
-                            || or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
+                        old: old_threshold_secs > 0
+                            && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
                         created_date: or_created.map(|t| format_created(t)),
                         effort: Some(effort.to_string()),
                     });
                 }
             } else {
                 let or_created = crate::provider::openrouter::model_created_timestamp(name);
-                let is_old = OLD_MODELS.contains(&name.as_str())
-                    || OLD_MODELS.iter().any(|old| name.ends_with(old))
-                    || or_created.map(|t| t < old_threshold_secs).unwrap_or(false);
+                let is_old = old_threshold_secs > 0
+                    && or_created.map(|t| t < old_threshold_secs).unwrap_or(false);
                 models.push(super::ModelEntry {
                     name: name.clone(),
                     routes: entry_routes,
