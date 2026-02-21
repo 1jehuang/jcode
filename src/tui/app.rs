@@ -4116,14 +4116,7 @@ impl App {
                         if !self.is_processing && !self.queued_messages.is_empty() {
                             let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
                             crate::logging::info(&format!("Sending queued continuation message ({} chars)", combined.len()));
-                            self.push_display_message(DisplayMessage {
-                                role: "user".to_string(),
-                                content: combined.clone(),
-                                tool_calls: vec![],
-                                duration_secs: None,
-                                title: None,
-                                tool_data: None,
-                            });
+                            self.push_display_message(DisplayMessage::system(combined.clone()));
                             if let Ok(msg_id) = remote.send_message(combined).await {
                                 self.current_message_id = Some(msg_id);
                                 self.is_processing = true;
@@ -4219,14 +4212,7 @@ impl App {
                                         }
                                     } else if !self.queued_messages.is_empty() {
                                         let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
-                                        self.push_display_message(DisplayMessage {
-                                            role: "user".to_string(),
-                                            content: combined.clone(),
-                                            tool_calls: vec![],
-                                            duration_secs: None,
-                                            title: None,
-                                            tool_data: None,
-                                        });
+                                        self.push_display_message(DisplayMessage::system(combined.clone()));
                                         if let Ok(msg_id) = remote.send_message(combined).await {
                                             self.current_message_id = Some(msg_id);
                                             self.is_processing = true;
@@ -7615,15 +7601,8 @@ impl App {
             // Combine all currently queued messages into one
             let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
 
-            // Add user message to display
-            self.push_display_message(DisplayMessage {
-                role: "user".to_string(),
-                content: combined.clone(),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
+            // Display as system notification (not user input)
+            self.push_display_message(DisplayMessage::system(combined.clone()));
 
             self.add_provider_message(Message::user(&combined));
             self.session.add_message(
@@ -8996,8 +8975,17 @@ impl App {
             (avail, method, r.provider.clone())
         }
 
-        const RECOMMENDED_MODELS: &[&str] =
-            &["gpt-5.3-codex-spark", "gpt-5.3-codex", "claude-opus-4-6", "claude-sonnet-4-6"];
+        const RECOMMENDED_MODELS: &[&str] = &[
+            "gpt-5.3-codex-spark",
+            "gpt-5.3-codex",
+            "claude-opus-4-6",
+            "claude-opus-4-6[1m]",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-6[1m]",
+            "anthropic/claude-opus-4.6",
+            "anthropic/claude-sonnet-4.6",
+            "moonshotai/kimi-k2.5",
+        ];
 
         // Find the latest recommended model's created timestamp from OpenRouter cache,
         // then mark anything more than 1 month older as "old".
@@ -9138,6 +9126,17 @@ impl App {
                 picker.selected = picker.selected.saturating_sub(1);
                 Ok(true)
             }
+            KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
+                let picker = self.picker_state.as_mut().unwrap();
+                let max = picker.filtered.len().saturating_sub(1);
+                picker.selected = (picker.selected + 1).min(max);
+                Ok(true)
+            }
+            KeyCode::Char('k') if modifiers.contains(KeyModifiers::CONTROL) => {
+                let picker = self.picker_state.as_mut().unwrap();
+                picker.selected = picker.selected.saturating_sub(1);
+                Ok(true)
+            }
             KeyCode::PageDown => {
                 let picker = self.picker_state.as_mut().unwrap();
                 let max = picker.filtered.len().saturating_sub(1);
@@ -9193,7 +9192,15 @@ impl App {
                 }
                 self.picker_state = None;
             }
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if matches!(code, KeyCode::Char('k')) && !_modifiers.contains(KeyModifiers::CONTROL) {
+                    // Plain 'k' is a filter character, not navigation
+                    if let Some(ref mut picker) = self.picker_state {
+                        picker.filter.push('k');
+                        Self::apply_picker_filter(picker);
+                    }
+                    return Ok(());
+                }
                 if let Some(ref mut picker) = self.picker_state {
                     if picker.column == 0 {
                         picker.selected = picker.selected.saturating_sub(1);
@@ -9206,7 +9213,15 @@ impl App {
                     }
                 }
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
+                if matches!(code, KeyCode::Char('j')) && !_modifiers.contains(KeyModifiers::CONTROL) {
+                    // Plain 'j' is a filter character, not navigation
+                    if let Some(ref mut picker) = self.picker_state {
+                        picker.filter.push('j');
+                        Self::apply_picker_filter(picker);
+                    }
+                    return Ok(());
+                }
                 if let Some(ref mut picker) = self.picker_state {
                     if picker.column == 0 {
                         let max = picker.filtered.len().saturating_sub(1);
@@ -12690,6 +12705,8 @@ impl super::TuiState for App {
                 }
             } else if provider_name.contains("openrouter") {
                 super::info_widget::AuthMethod::OpenRouterApiKey
+            } else if provider_name.contains("copilot") {
+                super::info_widget::AuthMethod::CopilotOAuth
             } else {
                 super::info_widget::AuthMethod::Unknown
             }
