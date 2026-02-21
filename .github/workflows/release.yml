@@ -146,9 +146,9 @@ jobs:
           git push
 
       - name: Update AUR package
-        if: ${{ secrets.AUR_SSH_KEY != '' }}
         env:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        if: env.AUR_SSH_KEY != ''
         run: |
           VERSION="${GITHUB_REF_NAME}"
           VERSION_NUM="${VERSION#v}"
@@ -187,24 +187,19 @@ jobs:
           sed -i "s|SHA_PLACEHOLDER|${LINUX_SHA}|" /tmp/jcode-aur/PKGBUILD
           sed -i 's/^          //' /tmp/jcode-aur/PKGBUILD
 
-          # Generate .SRCINFO without makepkg
-          cat > /tmp/jcode-aur/.SRCINFO << SRCINFO
-          pkgbase = jcode-bin
-          	pkgdesc = AI coding agent powered by Claude and ChatGPT
-          	pkgver = ${VERSION_NUM}
-          	pkgrel = 1
-          	url = https://github.com/1jehuang/jcode
-          	arch = x86_64
-          	license = MIT
-          	provides = jcode
-          	conflicts = jcode
-          	source = ${LINUX_URL}
-          	sha256sums = ${LINUX_SHA}
-
-          pkgname = jcode-bin
-          SRCINFO
-
-          sed -i 's/^          //' /tmp/jcode-aur/.SRCINFO
+          # Generate .SRCINFO without makepkg (AUR uses tab indentation)
+          printf 'pkgbase = jcode-bin\n' > /tmp/jcode-aur/.SRCINFO
+          printf '\tpkgdesc = AI coding agent powered by Claude and ChatGPT\n' >> /tmp/jcode-aur/.SRCINFO
+          printf '\tpkgver = %s\n' "${VERSION_NUM}" >> /tmp/jcode-aur/.SRCINFO
+          printf '\tpkgrel = 1\n' >> /tmp/jcode-aur/.SRCINFO
+          printf '\turl = https://github.com/1jehuang/jcode\n' >> /tmp/jcode-aur/.SRCINFO
+          printf '\tarch = x86_64\n' >> /tmp/jcode-aur/.SRCINFO
+          printf '\tlicense = MIT\n' >> /tmp/jcode-aur/.SRCINFO
+          printf '\tprovides = jcode\n' >> /tmp/jcode-aur/.SRCINFO
+          printf '\tconflicts = jcode\n' >> /tmp/jcode-aur/.SRCINFO
+          printf '\tsource = %s\n' "${LINUX_URL}" >> /tmp/jcode-aur/.SRCINFO
+          printf '\tsha256sums = %s\n' "${LINUX_SHA}" >> /tmp/jcode-aur/.SRCINFO
+          printf '\npkgname = jcode-bin\n' >> /tmp/jcode-aur/.SRCINFO
 
           cd /tmp/jcode-aur
           git config user.name "Jeremy Huang"
