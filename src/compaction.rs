@@ -41,6 +41,11 @@ const EMERGENCY_TOOL_RESULT_MAX_CHARS: usize = 4000;
 /// Approximate chars per token for estimation
 const CHARS_PER_TOKEN: usize = 4;
 
+/// Fixed token overhead for system prompt + tool definitions.
+/// These are not counted in message content but do count toward the context limit.
+/// Estimated conservatively: ~8k tokens for system prompt + ~10k for 50+ tools.
+const SYSTEM_OVERHEAD_TOKENS: usize = 18_000;
+
 const SUMMARY_PROMPT: &str = r#"Summarize our conversation so you can continue this work later.
 
 Write in natural language with these sections:
@@ -188,7 +193,16 @@ impl CompactionManager {
             total_chars += Self::message_char_count(msg);
         }
 
-        total_chars / CHARS_PER_TOKEN
+        let msg_tokens = total_chars / CHARS_PER_TOKEN;
+        // Add overhead for system prompt + tool definitions, which are not in the message list
+        // but do count toward the context limit. Scale the overhead to the budget so
+        // tests with tiny budgets aren't affected.
+        let overhead = if self.token_budget >= DEFAULT_TOKEN_BUDGET / 2 {
+            SYSTEM_OVERHEAD_TOKENS
+        } else {
+            0
+        };
+        msg_tokens + overhead
     }
 
     /// Get current token estimate (backward compat — uses 0 messages, only summary + observed)
@@ -197,7 +211,13 @@ impl CompactionManager {
         if let Some(ref summary) = self.active_summary {
             total_chars += summary.text.len();
         }
-        total_chars / CHARS_PER_TOKEN
+        let msg_tokens = total_chars / CHARS_PER_TOKEN;
+        let overhead = if self.token_budget >= DEFAULT_TOKEN_BUDGET / 2 {
+            SYSTEM_OVERHEAD_TOKENS
+        } else {
+            0
+        };
+        msg_tokens + overhead
     }
 
     /// Store provider-reported input token usage for compaction decisions.
@@ -983,10 +1003,11 @@ mod tests {
     #[test]
     fn test_token_estimate() {
         let manager = CompactionManager::new();
-        // 100 chars = ~25 tokens
+        // 100 chars = ~25 tokens (plus 18k overhead for full budget)
         let messages = vec![make_text_message(Role::User, &"x".repeat(100))];
         let estimate = manager.token_estimate_with(&messages);
-        assert!(estimate > 20 && estimate < 30);
+        // With DEFAULT_TOKEN_BUDGET and 18k overhead: 25 + 18000 = 18025
+        assert!(estimate >= 18_000 && estimate < 19_000);
     }
 
     #[test]

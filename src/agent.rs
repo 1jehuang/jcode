@@ -104,6 +104,76 @@ pub struct Agent {
 }
 
 impl Agent {
+    fn is_context_limit_error(error: &str) -> bool {
+        let lower = error.to_lowercase();
+        lower.contains("context length")
+            || lower.contains("context window")
+            || lower.contains("maximum context")
+            || lower.contains("max context")
+            || lower.contains("token limit")
+            || lower.contains("too many tokens")
+            || lower.contains("prompt is too long")
+            || lower.contains("input is too long")
+            || lower.contains("request too large")
+            || lower.contains("length limit")
+            || lower.contains("maximum tokens")
+            || (lower.contains("exceeded") && lower.contains("tokens"))
+    }
+
+    /// Best-effort emergency recovery after a context-limit error.
+    ///
+    /// Performs a synchronous hard compaction and resets provider session state,
+    /// allowing the caller to retry the same turn immediately.
+    fn try_auto_compact_after_context_limit(&mut self, error: &str) -> bool {
+        if !Self::is_context_limit_error(error) {
+            return false;
+        }
+        if !self.provider.supports_compaction() {
+            return false;
+        }
+
+        let context_limit = self.provider.context_window() as u64;
+        let all_messages = self.session.messages_for_provider();
+        let compaction = self.registry.compaction();
+
+        let (dropped, usage_pct) = match compaction.try_write() {
+            Ok(mut manager) => {
+                // Force a conservative usage reading so hard-compaction is attempted
+                // even when heuristic estimation undercounts tool/system overhead.
+                manager.update_observed_input_tokens(context_limit);
+                let usage_pct = manager.context_usage_with(&all_messages) * 100.0;
+                match manager.hard_compact_with(&all_messages) {
+                    Ok(dropped) => (dropped, usage_pct),
+                    Err(reason) => {
+                        logging::warn(&format!(
+                            "Context-limit auto-recovery failed: hard compact failed ({})",
+                            reason
+                        ));
+                        return false;
+                    }
+                }
+            }
+            Err(_) => {
+                logging::warn(
+                    "Context-limit auto-recovery skipped: compaction manager lock busy",
+                );
+                return false;
+            }
+        };
+
+        self.cache_tracker.reset();
+        self.locked_tools = None;
+        self.provider_session_id = None;
+        self.session.provider_session_id = None;
+
+        logging::warn(&format!(
+            "Context limit exceeded; auto-compacted and retrying (dropped {} messages, usage was {:.1}%)",
+            dropped, usage_pct
+        ));
+
+        true
+    }
+
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
         let skills = SkillRegistry::load().unwrap_or_default();
         let mut agent = Self {
@@ -1476,7 +1546,7 @@ impl Agent {
             } else {
                 &messages_with_memory
             };
-            let mut stream = self
+            let mut stream = match self
                 .provider
                 .complete_split(
                     send_messages,
@@ -1485,7 +1555,16 @@ impl Agent {
                     &split_prompt.dynamic_part,
                     self.provider_session_id.as_deref(),
                 )
-                .await?;
+                .await
+            {
+                Ok(stream) => stream,
+                Err(e) => {
+                    if self.try_auto_compact_after_context_limit(&e.to_string()) {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
 
             logging::info(&format!(
                 "API stream opened in {:.2}s",
@@ -1514,8 +1593,21 @@ impl Agent {
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
 
+            let mut retry_after_compaction = false;
             while let Some(event) = stream.next().await {
-                match event? {
+                let event = match event {
+                    Ok(event) => event,
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        if self.try_auto_compact_after_context_limit(&err_str) {
+                            retry_after_compaction = true;
+                            break;
+                        }
+                        return Err(e);
+                    }
+                };
+
+                match event {
                     StreamEvent::ThinkingStart => {
                         // Track start but don't print - wait for ThinkingDone
                         _thinking_start = Some(Instant::now());
@@ -1714,9 +1806,17 @@ impl Agent {
                         if trace {
                             eprintln!("[trace] stream_error {}", message);
                         }
+                        if self.try_auto_compact_after_context_limit(&message) {
+                            retry_after_compaction = true;
+                            break;
+                        }
                         return Err(anyhow::anyhow!("Stream error: {}", message));
                     }
                 }
+            }
+
+            if retry_after_compaction {
+                continue;
             }
 
             let api_elapsed = api_start.elapsed();
@@ -2101,7 +2201,7 @@ impl Agent {
             } else {
                 &messages_with_memory
             };
-            let mut stream = self
+            let mut stream = match self
                 .provider
                 .complete_split(
                     send_messages,
@@ -2110,7 +2210,16 @@ impl Agent {
                     &split_prompt.dynamic_part,
                     self.provider_session_id.as_deref(),
                 )
-                .await?;
+                .await
+            {
+                Ok(stream) => stream,
+                Err(e) => {
+                    if self.try_auto_compact_after_context_limit(&e.to_string()) {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
 
             logging::info(&format!(
                 "API stream opened in {:.2}s",
@@ -2133,8 +2242,21 @@ impl Agent {
             let mut tool_id_to_name: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
 
+            let mut retry_after_compaction = false;
             while let Some(event) = stream.next().await {
-                match event? {
+                let event = match event {
+                    Ok(event) => event,
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        if self.try_auto_compact_after_context_limit(&err_str) {
+                            retry_after_compaction = true;
+                            break;
+                        }
+                        return Err(e);
+                    }
+                };
+
+                match event {
                     StreamEvent::ThinkingStart | StreamEvent::ThinkingEnd => {}
                     StreamEvent::ThinkingDelta(thinking_text) => {
                         // Only send thinking content if enabled in config
@@ -2274,9 +2396,17 @@ impl Agent {
                         let _ = event_tx.send(ServerEvent::UpstreamProvider { provider });
                     }
                     StreamEvent::Error { message, .. } => {
+                        if self.try_auto_compact_after_context_limit(&message) {
+                            retry_after_compaction = true;
+                            break;
+                        }
                         return Err(anyhow::anyhow!("Stream error: {}", message));
                     }
                 }
+            }
+
+            if retry_after_compaction {
+                continue;
             }
 
             let api_elapsed = api_start.elapsed();
@@ -2630,7 +2760,7 @@ impl Agent {
             } else {
                 &messages_with_memory
             };
-            let mut stream = self
+            let mut stream = match self
                 .provider
                 .complete_split(
                     send_messages,
@@ -2639,7 +2769,16 @@ impl Agent {
                     &split_prompt.dynamic_part,
                     self.provider_session_id.as_deref(),
                 )
-                .await?;
+                .await
+            {
+                Ok(stream) => stream,
+                Err(e) => {
+                    if self.try_auto_compact_after_context_limit(&e.to_string()) {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
 
             logging::info(&format!(
                 "API stream opened in {:.2}s",
@@ -2661,8 +2800,21 @@ impl Agent {
             let mut tool_id_to_name: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
 
+            let mut retry_after_compaction = false;
             while let Some(event) = stream.next().await {
-                match event? {
+                let event = match event {
+                    Ok(event) => event,
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        if self.try_auto_compact_after_context_limit(&err_str) {
+                            retry_after_compaction = true;
+                            break;
+                        }
+                        return Err(e);
+                    }
+                };
+
+                match event {
                     StreamEvent::ThinkingStart | StreamEvent::ThinkingEnd => {}
                     StreamEvent::ThinkingDelta(thinking_text) => {
                         // Only send thinking content if enabled in config
@@ -2800,9 +2952,17 @@ impl Agent {
                         let _ = event_tx.send(ServerEvent::UpstreamProvider { provider });
                     }
                     StreamEvent::Error { message, .. } => {
+                        if self.try_auto_compact_after_context_limit(&message) {
+                            retry_after_compaction = true;
+                            break;
+                        }
                         return Err(anyhow::anyhow!("Stream error: {}", message));
                     }
                 }
+            }
+
+            if retry_after_compaction {
+                continue;
             }
 
             let api_elapsed = api_start.elapsed();
