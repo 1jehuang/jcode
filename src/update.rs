@@ -8,7 +8,6 @@ use std::time::{Duration, SystemTime};
 
 const GITHUB_REPO: &str = "1jehuang/jcode";
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(60); // minimum gap between checks
-const UPDATE_CHECK_INTERVAL_MAIN: Duration = Duration::from_secs(5 * 60); // 5 min for main channel
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -75,15 +74,8 @@ impl UpdateMetadata {
     }
 
     pub fn should_check(&self) -> bool {
-        let interval = if crate::config::config().features.update_channel
-            == crate::config::UpdateChannel::Main
-        {
-            UPDATE_CHECK_INTERVAL_MAIN
-        } else {
-            UPDATE_CHECK_INTERVAL
-        };
         match self.last_check.elapsed() {
-            Ok(elapsed) => elapsed > interval,
+            Ok(elapsed) => elapsed > UPDATE_CHECK_INTERVAL,
             Err(_) => true,
         }
     }

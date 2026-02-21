@@ -8987,7 +8987,7 @@ impl App {
         }
 
         const RECOMMENDED_MODELS: &[&str] =
-            &["gpt-5.3-codex-spark", "gpt-5.3-codex", "claude-opus-4-6"];
+            &["gpt-5.3-codex-spark", "gpt-5.3-codex", "claude-opus-4-6", "claude-sonnet-4-6"];
 
         let current_effort = self.provider.reasoning_effort();
         let available_efforts = self.provider.available_efforts();
