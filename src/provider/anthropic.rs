@@ -34,9 +34,9 @@ const OAUTH_BETA_HEADERS: &str =
 const OAUTH_BETA_HEADERS_1M: &str =
     "oauth-2025-04-20,claude-code-20250219,prompt-caching-2024-07-31,context-1m-2025-08-07";
 
-/// Get the appropriate beta headers based on model and account capabilities
+/// Get the appropriate beta headers based on model
 fn oauth_beta_headers(model: &str) -> &'static str {
-    if is_1m_model(model) || crate::usage::has_extra_usage() {
+    if is_1m_model(model) {
         OAUTH_BETA_HEADERS_1M
     } else {
         OAUTH_BETA_HEADERS
