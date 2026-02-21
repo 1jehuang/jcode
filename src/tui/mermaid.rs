@@ -1387,6 +1387,10 @@ fn get_cached_diagram(hash: u64, min_width: Option<u32>) -> Option<CachedDiagram
     cache.get(hash, min_width)
 }
 
+pub fn get_cached_path(hash: u64) -> Option<PathBuf> {
+    get_cached_diagram(hash, None).map(|c| c.path)
+}
+
 fn invalidate_cached_image(hash: u64) {
     if let Ok(mut state) = IMAGE_STATE.lock() {
         state.remove(&hash);

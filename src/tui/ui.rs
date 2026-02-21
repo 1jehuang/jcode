@@ -3817,17 +3817,20 @@ fn is_diagram_poor_fit(
     let img_w = diagram.width as f64;
     let img_h = diagram.height as f64;
     let aspect = img_w / img_h.max(1.0);
+    let scale = (inner_w / img_w).min(inner_h / img_h);
+
+    if scale < 0.3 {
+        return true;
+    }
 
     match position {
         crate::config::DiagramPanePosition::Side => {
-            let scale = (inner_w / img_w).min(inner_h / img_h);
             let used_w = img_w * scale;
             let used_h = img_h * scale;
             let utilization = (used_w * used_h) / (inner_w * inner_h);
             aspect > 2.0 && utilization < 0.35
         }
         crate::config::DiagramPanePosition::Top => {
-            let scale = (inner_w / img_w).min(inner_h / img_h);
             let used_w = img_w * scale;
             let used_h = img_h * scale;
             let utilization = (used_w * used_h) / (inner_w * inner_h);
@@ -3898,6 +3901,17 @@ fn draw_pinned_diagram(
         };
         title_parts.push(Span::styled(
             hint,
+            Style::default().fg(ACCENT_COLOR).add_modifier(ratatui::style::Modifier::BOLD),
+        ));
+    }
+    if focused {
+        title_parts.push(Span::styled(
+            " o open",
+            Style::default().fg(if poor_fit { ACCENT_COLOR } else { DIM_COLOR }),
+        ));
+    } else if poor_fit {
+        title_parts.push(Span::styled(
+            " focus+o open",
             Style::default().fg(ACCENT_COLOR).add_modifier(ratatui::style::Modifier::BOLD),
         ));
     }

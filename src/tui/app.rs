@@ -1519,6 +1519,33 @@ impl App {
         self.set_status_notice(format!("Diagram pane: {}", label));
     }
 
+    fn pop_out_diagram(&mut self) {
+        let diagrams = super::mermaid::get_active_diagrams();
+        let total = diagrams.len();
+        if total == 0 {
+            self.set_status_notice("No diagrams to open");
+            return;
+        }
+        let index = self.diagram_index.min(total - 1);
+        let diagram = &diagrams[index];
+        if let Some(path) = super::mermaid::get_cached_path(diagram.hash) {
+            if path.exists() {
+                match open::that(&path) {
+                    Ok(_) => self.set_status_notice(format!(
+                        "Opened diagram {}/{} in viewer",
+                        index + 1,
+                        total
+                    )),
+                    Err(e) => self.set_status_notice(format!("Failed to open: {}", e)),
+                }
+            } else {
+                self.set_status_notice("Diagram image not found on disk");
+            }
+        } else {
+            self.set_status_notice("Diagram not cached");
+        }
+    }
+
     fn handle_diagram_ctrl_key(&mut self, code: KeyCode, diagram_available: bool) -> bool {
         if !diagram_available {
             return false;
@@ -1578,6 +1605,7 @@ impl App {
             KeyCode::Char('-') | KeyCode::Char('_') => self.adjust_diagram_pane_ratio(-5),
             KeyCode::Char(']') => self.adjust_diagram_zoom(10),
             KeyCode::Char('[') => self.adjust_diagram_zoom(-10),
+            KeyCode::Char('o') => self.pop_out_diagram(),
             KeyCode::Esc => {
                 self.set_diagram_focus(false);
             }
