@@ -139,37 +139,57 @@ The iOS app needs to find the jcode server on the local network.
 
 The app should support all three, trying Bonjour first.
 
-### 4. Push Notifications
+### 4. Push Notifications (APNs)
 
-jcode already has a notification system (`src/notifications.rs`) with ntfy.sh, desktop notifications, and email. iOS push adds another channel.
-
-**Approach: ntfy.sh (simplest, no Apple infrastructure needed)**
-
-ntfy.sh already supports iOS push notifications via their app. jcode already has ntfy.sh support. The iOS app just needs to subscribe to the same ntfy topic.
+Native push notifications via Apple Push Notification Service. Since we're building a native iOS app, we use APNs directly - no third-party services in the loop.
 
 ```
-Already exists in jcode:          New for iOS:
-┌──────────────────────┐          ┌──────────────────────────┐
-│ notifications.rs     │          │ iOS App                  │
-│                      │          │                          │
-│ ntfy.sh ────────────►│──push──► │ ntfy.sh iOS SDK          │
-│ desktop notify       │          │ → native push alerts     │
-│ email                │          │ → lock screen widgets    │
-└──────────────────────┘          └──────────────────────────┘
+jcode server                     Apple APNs              iPhone
+(your laptop)                    (Apple cloud)           (jcode app)
+
+Event fires ───► HTTP/2 POST ──► Routes push ──► 🔔 Native push
+                 to APNs with    to device        notification
+                 device token                     in jcode app
+                 + JWT signing
+```
+
+**How it works:**
+- Apple Developer Account provides an APNs key (.p8 file)
+- The .p8 key is stored on the jcode server (`~/.jcode/apns/`)
+- iOS app registers for push on launch, gets a device token from Apple
+- Device token is sent to jcode server during pairing (stored in `devices.json`)
+- To send a push: jcode server signs a JWT with the .p8 key, POSTs to `api.push.apple.com`
+- Rust crate: `a2` (APNs client) or raw HTTP/2 via `hyper`/`reqwest`
+
+**Pairing flow handles token exchange naturally:**
+```
+iPhone                              jcode server
+  │                                      │
+  │  Register for push with Apple        │
+  │◄──── device token ────────────────   │
+  │                                      │
+  │  Pair with server (6-digit code)     │
+  │  + send device token ──────────────► │
+  │                                      │  Store in devices.json:
+  │  ◄──── auth token ─────────────────  │  { token, device_token,
+  │                                      │    apns_token: "abc..." }
+  │  Done. Server can now push to this   │
+  │  device at any time.                 │
 ```
 
 **Events worth pushing:**
 - Task/message completed (agent finished a turn)
-- Tool approval requested (safety system Tier 2 action)
+- Tool approval requested (safety system Tier 2 action) - actionable notification
 - Ambient cycle completed (with summary)
 - Server going offline / coming back online
 - Swarm task assigned to you
 
-**Future: Apple Push Notification Service (APNs)**
-- Required for App Store distribution
-- Needs a relay server (or direct APNs from jcode server)
-- More complex but more reliable than ntfy.sh
-- Can power Live Activities, Dynamic Island, and widgets
+**Rich notification features (APNs enables all of these):**
+- **Actionable notifications** - Approve/Deny tool calls from lock screen
+- **Live Activities** - Show task progress on lock screen and Dynamic Island
+- **Notification grouping** - Group by session (all fox notifications together)
+- **Silent pushes** - Update app state in background without alerting user
+- **Critical alerts** - For safety-tier actions that need immediate attention
 
 ### 5. Image/File Transfer
 
@@ -502,7 +522,7 @@ Borrow the MacBook for initial setup, then iterate.
 17. iPad layout (split view, sidebar)
 18. Offline mode (queue messages, sync when reconnected)
 19. TestFlight beta distribution
-20. App Store submission (requires APNs migration from ntfy.sh)
+20. App Store submission
 
 ---
 
@@ -536,7 +556,7 @@ Borrow the MacBook for initial setup, then iterate.
 | **Networking** | URLSessionWebSocketTask | Native iOS WebSocket, no dependencies |
 | **Discovery** | NWBrowser (Network.framework) | Modern replacement for NSNetServiceBrowser |
 | **Auth tokens** | Keychain Services | Secure, persists across app installs |
-| **Push notifications** | ntfy.sh (Phase 3), APNs (Phase 4) | ntfy.sh is zero-infrastructure |
+| **Push notifications** | APNs (native) | Direct Apple push, no third-party relay |
 | **Syntax highlighting** | Splash or Highlightr | Swift libraries for code rendering |
 | **Widgets** | WidgetKit | Home screen ambient dashboard |
 | **Live Activities** | ActivityKit | Lock screen task progress |
