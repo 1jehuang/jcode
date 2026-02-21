@@ -4143,6 +4143,33 @@ fn format_elapsed(secs: f32) -> String {
     }
 }
 
+/// Compute the character indices in `text` that match the fuzzy `pattern`.
+/// Same greedy subsequence algorithm as `App::picker_fuzzy_score`.
+fn fuzzy_match_positions(pattern: &str, text: &str) -> Vec<usize> {
+    let pat: Vec<char> = pattern
+        .to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    if pat.is_empty() {
+        return Vec::new();
+    }
+    let txt: Vec<char> = text.to_lowercase().chars().collect();
+    let mut pi = 0;
+    let mut positions = Vec::new();
+    for (ti, &tc) in txt.iter().enumerate() {
+        if pi < pat.len() && tc == pat[pi] {
+            positions.push(ti);
+            pi += 1;
+        }
+    }
+    if pi == pat.len() {
+        positions
+    } else {
+        Vec::new()
+    }
+}
+
 /// Draw the inline model/provider picker line
 fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let picker = match app.picker_state() {
@@ -4160,9 +4187,15 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let total = picker.models.len();
     let filtered_count = picker.filtered.len();
     let col = picker.column;
+    let is_preview = picker.preview;
 
-    // Column labels
-    let col_names = ["MODEL", "PROVIDER", "VIA"];
+    // In preview mode, column order is: PROVIDER | MODEL | VIA
+    // In full mode, column order is: MODEL | PROVIDER | VIA
+    let col_names: [&str; 3] = if is_preview {
+        ["PROVIDER", "MODEL", "VIA"]
+    } else {
+        ["MODEL", "PROVIDER", "VIA"]
+    };
     let col_focus_style = Style::default().fg(Color::White).bold().underlined();
     let col_dim_style = Style::default().fg(DIM_COLOR);
 
@@ -4197,13 +4230,25 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     ));
 
     // Column headers with focus indicator
+    // In preview mode, map col index to display position (col 0=model maps to display pos 1)
     for (i, name) in col_names.iter().enumerate() {
         if i > 0 {
             header_spans.push(Span::styled("  ", Style::default()));
         }
+        let logical_col = if is_preview {
+            // Display order: PROVIDER(0) MODEL(1) VIA(2)
+            // Logical cols:  1           0        2
+            match i {
+                0 => 1, // PROVIDER display pos -> logical col 1
+                1 => 0, // MODEL display pos -> logical col 0
+                _ => 2, // VIA display pos -> logical col 2
+            }
+        } else {
+            i
+        };
         header_spans.push(Span::styled(
             name.to_string(),
-            if i == col {
+            if logical_col == col {
                 col_focus_style
             } else {
                 col_dim_style
@@ -4211,7 +4256,7 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         ));
     }
 
-    if picker.preview {
+    if is_preview {
         header_spans.push(Span::styled(
             "  press Enter to open",
             Style::default().fg(Color::Rgb(60, 60, 80)).italic(),
@@ -4238,10 +4283,20 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     }
 
     // Calculate column widths based on content
-    // Model column: flexible, Provider: ~20, Via: ~12
-    let via_width = 12usize;
-    let provider_width = 20usize;
-    let model_width = width.saturating_sub(3 + provider_width + via_width + 4); // 3 for marker, 4 for gaps
+    // In preview mode: model (center) gets priority, provider/via are compact
+    let via_width: usize;
+    let provider_width: usize;
+    let model_width: usize;
+    if is_preview {
+        // Compact side columns, model gets remaining space
+        provider_width = 14;
+        via_width = 10;
+        model_width = width.saturating_sub(3 + provider_width + via_width + 4);
+    } else {
+        via_width = 12;
+        provider_width = 20;
+        model_width = width.saturating_sub(3 + provider_width + via_width + 4);
+    }
 
     // Vertical list
     let list_height = height.saturating_sub(1);
@@ -4282,15 +4337,25 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
         let unavailable = route.map(|r| !r.available).unwrap_or(true);
 
-        // Model column
-        let rec_suffix = if entry.recommended && !entry.is_current {
-            " ★"
+        // Prepare model display text
+        let suffix = if entry.recommended && !entry.is_current {
+            " ★".to_string()
         } else if entry.old && !entry.is_current {
-            " old"
+            if let Some(ref date) = entry.created_date {
+                format!(" {}", date)
+            } else {
+                " old".to_string()
+            }
+        } else if let Some(ref date) = entry.created_date {
+            if !entry.is_current {
+                format!(" {}", date)
+            } else {
+                String::new()
+            }
         } else {
-            ""
+            String::new()
         };
-        let display_name = format!("{}{}", entry.name, rec_suffix);
+        let display_name = format!("{}{}", entry.name, suffix);
         let model_text = if display_name.len() > model_width {
             format!("{:<w$}", &display_name[..model_width], w = model_width)
         } else {
@@ -4312,12 +4377,44 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         } else {
             Style::default().fg(Color::Rgb(200, 200, 220))
         };
-        spans.push(Span::styled(model_text, model_style));
 
-        // Provider column
+        // Build model spans with fuzzy match highlighting
+        let match_positions = if !picker.filter.is_empty() {
+            fuzzy_match_positions(&picker.filter, &entry.name)
+        } else {
+            Vec::new()
+        };
+        let model_spans: Vec<Span> = if match_positions.is_empty() || unavailable {
+            vec![Span::styled(model_text.clone(), model_style)]
+        } else {
+            let model_chars: Vec<char> = model_text.chars().collect();
+            let highlight_style = model_style.underlined();
+            let mut result = Vec::new();
+            let mut run_start = 0;
+            let mut is_match_run = false;
+            if !model_chars.is_empty() {
+                is_match_run = match_positions.contains(&0);
+            }
+            for ci in 1..=model_chars.len() {
+                let cur_is_match = ci < model_chars.len() && match_positions.contains(&ci);
+                if cur_is_match != is_match_run || ci == model_chars.len() {
+                    let chunk: String = model_chars[run_start..ci].iter().collect();
+                    let style = if is_match_run {
+                        highlight_style
+                    } else {
+                        model_style
+                    };
+                    result.push(Span::styled(chunk, style));
+                    run_start = ci;
+                    is_match_run = cur_is_match;
+                }
+            }
+            result
+        };
+
+        // Prepare provider display text
         let route_count = entry.routes.len();
         let provider_text = route.map(|r| r.provider.as_str()).unwrap_or("—");
-        // When on model column, show route count hint instead of full provider
         let provider_display = if col == 0 && route_count > 1 {
             let label = format!("{} ({})", provider_text, route_count);
             if label.len() > provider_width {
@@ -4344,9 +4441,8 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         } else {
             Style::default().fg(Color::Rgb(140, 180, 255))
         };
-        spans.push(Span::styled(provider_display, provider_style));
 
-        // Via/API column
+        // Prepare via display text
         let via_text = route.map(|r| r.api_method.as_str()).unwrap_or("—");
         let via_display = format!(" {:<w$}", via_text, w = via_width);
         let via_style = if unavailable {
@@ -4359,7 +4455,19 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         } else {
             Style::default().fg(Color::Rgb(220, 190, 120))
         };
-        spans.push(Span::styled(via_display, via_style));
+
+        // Emit columns in display order
+        if is_preview {
+            // Preview mode: PROVIDER | MODEL | VIA
+            spans.push(Span::styled(provider_display, provider_style));
+            spans.extend(model_spans);
+            spans.push(Span::styled(via_display, via_style));
+        } else {
+            // Full mode: MODEL | PROVIDER | VIA
+            spans.extend(model_spans);
+            spans.push(Span::styled(provider_display, provider_style));
+            spans.push(Span::styled(via_display, via_style));
+        }
 
         // Detail (pricing etc) after columns
         if let Some(route) = route {

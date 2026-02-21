@@ -184,6 +184,8 @@ pub struct ModelEntry {
     pub is_current: bool,
     pub recommended: bool,
     pub old: bool,
+    /// Human-readable created date (e.g. "Jan 2026") for OpenRouter models
+    pub created_date: Option<String>,
     pub effort: Option<String>,
 }
 

@@ -9003,7 +9003,33 @@ impl App {
             "claude-opus-4-5",
             "claude-sonnet-4-5",
             "claude-sonnet-4-20250514",
+            "gpt-5-chat-latest",
+            "gpt-5-codex",
+            "gpt-5-codex-mini",
+            "gpt-5-pro",
+            "gpt-5-mini",
+            "gpt-5-nano",
+            "gpt-5",
         ];
+
+        // Threshold: models created more than 6 months ago are "old"
+        let old_threshold_secs = {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            now.saturating_sub(180 * 86400) // ~6 months
+        };
+
+        // Format a unix timestamp as "Mon YYYY"
+        fn format_created(ts: u64) -> String {
+            use chrono::{TimeZone, Utc};
+            if let Some(dt) = Utc.timestamp_opt(ts as i64, 0).single() {
+                dt.format("%b %Y").to_string()
+            } else {
+                String::new()
+            }
+        }
 
         let current_effort = self.provider.reasoning_effort();
         let available_efforts = self.provider.available_efforts();
@@ -9030,6 +9056,7 @@ impl App {
                     let display_name = format!("{} ({})", name, effort_label);
                     let is_this_current = *name == current_model
                         && current_effort.as_deref() == Some(*effort);
+                    let or_created = crate::provider::openrouter::model_created_timestamp(name);
                     models.push(super::ModelEntry {
                         name: display_name,
                         routes: entry_routes.clone(),
@@ -9037,13 +9064,17 @@ impl App {
                         is_current: is_this_current,
                         recommended: RECOMMENDED_MODELS.contains(&name.as_str())
                             && (*effort == "xhigh" || *effort == "high"),
-                        old: OLD_MODELS.contains(&name.as_str()),
+                        old: OLD_MODELS.contains(&name.as_str())
+                            || or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
+                        created_date: or_created.map(|t| format_created(t)),
                         effort: Some(effort.to_string()),
                     });
                 }
             } else {
+                let or_created = crate::provider::openrouter::model_created_timestamp(name);
                 let is_old = OLD_MODELS.contains(&name.as_str())
-                    || OLD_MODELS.iter().any(|old| name.ends_with(old));
+                    || OLD_MODELS.iter().any(|old| name.ends_with(old))
+                    || or_created.map(|t| t < old_threshold_secs).unwrap_or(false);
                 models.push(super::ModelEntry {
                     name: name.clone(),
                     routes: entry_routes,
@@ -9051,6 +9082,7 @@ impl App {
                     is_current: *name == current_model,
                     recommended: RECOMMENDED_MODELS.contains(&name.as_str()),
                     old: is_old,
+                    created_date: or_created.map(|t| format_created(t)),
                     effort: None,
                 });
             }
@@ -9331,6 +9363,36 @@ impl App {
     }
 
     /// Fuzzy match score for picker: returns Some(score) if pattern is a subsequence of text.
+    /// Returns the character indices in `text` that matched the fuzzy pattern.
+    /// Uses the same greedy algorithm as `picker_fuzzy_score`.
+    fn picker_fuzzy_match_positions(pattern: &str, text: &str) -> Option<Vec<usize>> {
+        let pat: Vec<char> = pattern
+            .to_lowercase()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let txt: Vec<char> = text.to_lowercase().chars().collect();
+        if pat.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let mut pi = 0;
+        let mut positions = Vec::new();
+
+        for (ti, &tc) in txt.iter().enumerate() {
+            if pi < pat.len() && tc == pat[pi] {
+                positions.push(ti);
+                pi += 1;
+            }
+        }
+
+        if pi == pat.len() {
+            Some(positions)
+        } else {
+            None
+        }
+    }
+
     /// Higher score = better match. Bonuses for consecutive chars, word boundaries.
     fn picker_fuzzy_score(pattern: &str, text: &str) -> Option<i32> {
         let pat: Vec<char> = pattern

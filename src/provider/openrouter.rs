@@ -99,6 +99,9 @@ pub struct ModelInfo {
     pub context_length: Option<u64>,
     #[serde(default)]
     pub pricing: ModelPricing,
+    /// Unix timestamp when the model was created/added
+    #[serde(default)]
+    pub created: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -446,6 +449,19 @@ fn load_disk_cache() -> Option<Vec<ModelInfo>> {
     } else {
         None
     }
+}
+
+/// Look up the `created` timestamp for a model from the disk cache.
+/// Returns None if the cache is missing or the model isn't found.
+pub fn model_created_timestamp(model_id: &str) -> Option<u64> {
+    let path = cache_path();
+    let content = std::fs::read_to_string(&path).ok()?;
+    let cache: DiskCache = serde_json::from_str(&content).ok()?;
+    cache
+        .models
+        .iter()
+        .find(|m| m.id == model_id)
+        .and_then(|m| m.created)
 }
 
 /// Save models to disk cache
