@@ -418,6 +418,8 @@ pub enum AuthMethod {
     OpenAIApiKey,
     /// OpenRouter API key
     OpenRouterApiKey,
+    /// GitHub Copilot OAuth
+    CopilotOAuth,
 }
 
 /// Subscription usage info for the info widget
@@ -2682,6 +2684,7 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
             AuthMethod::OpenAIOAuth => ("🔐", "OAuth", Color::Rgb(100, 200, 180)),
             AuthMethod::OpenAIApiKey => ("🔑", "API Key", Color::Rgb(180, 180, 190)),
             AuthMethod::OpenRouterApiKey => ("🔑", "API Key", Color::Rgb(140, 180, 255)),
+            AuthMethod::CopilotOAuth => ("🔐", "OAuth", Color::Rgb(110, 200, 140)),
             AuthMethod::Unknown => unreachable!(),
         };
 

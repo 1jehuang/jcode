@@ -1380,6 +1380,8 @@ impl TuiState for ClientApp {
             }
         } else if provider_name.contains("openrouter") {
             super::info_widget::AuthMethod::OpenRouterApiKey
+        } else if provider_name.contains("copilot") {
+            super::info_widget::AuthMethod::CopilotOAuth
         } else {
             super::info_widget::AuthMethod::Unknown
         };
