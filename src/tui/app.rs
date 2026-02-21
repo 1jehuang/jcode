@@ -1475,8 +1475,12 @@ impl App {
     }
 
     fn adjust_diagram_pane_ratio(&mut self, delta: i8) {
+        let (min_ratio, max_ratio) = match self.diagram_pane_position {
+            crate::config::DiagramPanePosition::Side => (25i16, 70i16),
+            crate::config::DiagramPanePosition::Top => (20i16, 60i16),
+        };
         let current_target = self.diagram_pane_ratio_target;
-        let next = (current_target as i16 + delta as i16).clamp(25, 70) as u8;
+        let next = (current_target as i16 + delta as i16).clamp(min_ratio, max_ratio) as u8;
         if next != current_target {
             self.diagram_pane_ratio_from = self.animated_diagram_pane_ratio();
             self.diagram_pane_ratio_target = next;
@@ -1516,6 +1520,12 @@ impl App {
             DiagramPanePosition::Side => DiagramPanePosition::Top,
             DiagramPanePosition::Top => DiagramPanePosition::Side,
         };
+        let (min_ratio, max_ratio) = match self.diagram_pane_position {
+            DiagramPanePosition::Side => (25u8, 70u8),
+            DiagramPanePosition::Top => (20u8, 60u8),
+        };
+        self.diagram_pane_ratio_target = self.diagram_pane_ratio_target.clamp(min_ratio, max_ratio);
+        self.diagram_pane_anim_start = None;
         let label = match self.diagram_pane_position {
             DiagramPanePosition::Side => "side",
             DiagramPanePosition::Top => "top",
@@ -1574,10 +1584,10 @@ impl App {
         }
 
         match code {
-            KeyCode::Char('h') | KeyCode::Left => self.pan_diagram(-1, 0),
-            KeyCode::Char('l') | KeyCode::Right => self.pan_diagram(1, 0),
-            KeyCode::Char('k') | KeyCode::Up => self.pan_diagram(0, -1),
-            KeyCode::Char('j') | KeyCode::Down => self.pan_diagram(0, 1),
+            KeyCode::Char('h') | KeyCode::Left => self.pan_diagram(-4, 0),
+            KeyCode::Char('l') | KeyCode::Right => self.pan_diagram(4, 0),
+            KeyCode::Char('k') | KeyCode::Up => self.pan_diagram(0, -3),
+            KeyCode::Char('j') | KeyCode::Down => self.pan_diagram(0, 3),
             KeyCode::Char('+') | KeyCode::Char('=') => self.adjust_diagram_pane_ratio(5),
             KeyCode::Char('-') | KeyCode::Char('_') => self.adjust_diagram_pane_ratio(-5),
             KeyCode::Char(']') => self.adjust_diagram_zoom(10),
