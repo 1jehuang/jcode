@@ -218,7 +218,9 @@ fn check_for_stable_update_blocking() -> Result<Option<GitHubRelease>> {
 
 /// Check for updates on the main branch (cutting edge channel).
 /// Compares the current binary's git hash against the latest commit on main.
-/// Uses the "nightly" release tag for pre-built binaries.
+/// If a new commit is found:
+///   - Tries to build from source if cargo is available
+///   - Falls back to latest GitHub Release if not
 fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
     let current_hash = env!("JCODE_GIT_HASH");
     if current_hash.is_empty() || current_hash == "unknown" {
@@ -260,55 +262,197 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
     };
 
     if current_short == latest_sha {
-        crate::logging::info(&format!(
-            "Main channel: up to date ({})",
-            current_short
-        ));
+        crate::logging::info(&format!("Main channel: up to date ({})", current_short));
         return Ok(None);
     }
 
     crate::logging::info(&format!(
-        "Main channel: update available {} -> {}",
+        "Main channel: new commit {} -> {}",
         current_short, latest_sha
     ));
 
-    // Try to find a nightly release with pre-built binaries
-    let nightly_url = format!(
-        "https://api.github.com/repos/{}/releases/tags/nightly",
-        GITHUB_REPO
-    );
-    let response = client.get(&nightly_url).send();
-    if let Ok(resp) = response {
-        if resp.status().is_success() {
-            if let Ok(release) = resp.json::<GitHubRelease>() {
-                let asset_name = get_asset_name();
-                let has_asset = release.assets.iter().any(|a| a.name.starts_with(asset_name));
-                if has_asset {
-                    return Ok(Some(release));
+    // Try to build from source
+    if has_cargo() {
+        crate::logging::info("Main channel: cargo found, attempting build from source");
+        match build_from_source() {
+            Ok(path) => {
+                crate::logging::info(&format!("Main channel: built successfully at {}", path.display()));
+                // Install the built binary
+                let install_dir = stable_install_dir()?;
+                fs::create_dir_all(&install_dir)?;
+                let current_stable = install_dir.join("jcode");
+
+                let mut metadata = UpdateMetadata::load().unwrap_or_default();
+                if current_stable.exists() {
+                    if let Ok(resolved) = fs::read_link(&current_stable) {
+                        metadata.previous_binary = Some(resolved.to_string_lossy().to_string());
+                    } else {
+                        let backup = install_dir.join(format!("jcode-backup-{}", std::process::id()));
+                        let _ = fs::copy(&current_stable, &backup);
+                        metadata.previous_binary = Some(backup.to_string_lossy().to_string());
+                    }
                 }
+
+                // Copy built binary to install location
+                let dest = install_dir.join(format!("jcode-main-{}", latest_sha));
+                fs::copy(&path, &dest).context("Failed to copy built binary")?;
+                let mut perms = fs::metadata(&dest)?.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&dest, perms)?;
+
+                // Atomic symlink swap
+                let temp_symlink = install_dir.join(format!(".jcode-symlink-{}", std::process::id()));
+                #[cfg(unix)]
+                {
+                    let _ = fs::remove_file(&temp_symlink);
+                    std::os::unix::fs::symlink(&dest, &temp_symlink)?;
+                    fs::rename(&temp_symlink, &current_stable)?;
+                }
+
+                // Also update the user's binary if it's a symlink or in ~/.local/bin
+                if let Ok(exe) = std::env::current_exe() {
+                    if let Ok(resolved) = fs::canonicalize(&exe) {
+                        // If running from ~/.local/bin, update that too
+                        if resolved != dest {
+                            let _ = fs::copy(&dest, &exe);
+                            #[cfg(target_os = "macos")]
+                            {
+                                // Re-sign on macOS
+                                let _ = std::process::Command::new("codesign")
+                                    .args(["--force", "--sign", "-"])
+                                    .arg(&exe)
+                                    .output();
+                            }
+                        }
+                    }
+                }
+
+                metadata.installed_version = Some(format!("main-{}", latest_sha));
+                metadata.installed_from = Some("source".to_string());
+                metadata.last_check = SystemTime::now();
+                metadata.save()?;
+
+                // Return a synthetic release so the caller knows an update was installed
+                return Ok(Some(GitHubRelease {
+                    tag_name: format!("main-{}", latest_sha),
+                    name: Some(format!("Built from main ({})", latest_sha)),
+                    html_url: format!("https://github.com/{}/commit/{}", GITHUB_REPO, latest_sha),
+                    published_at: None,
+                    assets: vec![],
+                    target_commitish: latest_sha.to_string(),
+                }));
+            }
+            Err(e) => {
+                crate::logging::error(&format!("Main channel: build failed: {}", e));
+                // Fall through to release fallback
             }
         }
+    } else {
+        crate::logging::info("Main channel: cargo not found, falling back to latest release");
     }
 
-    // No nightly release; fall back to latest stable release if it's newer
+    // Fallback: use latest stable release if available
     if let Ok(release) = fetch_latest_release_blocking() {
         let asset_name = get_asset_name();
         let has_asset = release.assets.iter().any(|a| a.name.starts_with(asset_name));
         if has_asset {
-            // Check if the release commit is newer than our current hash
-            let release_hash = &release.target_commitish;
-            let release_short = if release_hash.len() >= 7 {
-                &release_hash[..7]
-            } else {
-                release_hash.as_str()
-            };
-            if release_short != current_short {
+            let release_version = release.tag_name.trim_start_matches('v');
+            let current_version = env!("JCODE_VERSION").trim_start_matches('v');
+            if version_is_newer(release_version, current_version) {
                 return Ok(Some(release));
             }
         }
     }
 
     Ok(None)
+}
+
+/// Check if cargo is available on the system
+fn has_cargo() -> bool {
+    std::process::Command::new("cargo")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Build jcode from source by cloning/pulling the repo and running cargo build
+fn build_from_source() -> Result<PathBuf> {
+    let build_dir = storage::jcode_dir()?.join("builds").join("source");
+    fs::create_dir_all(&build_dir)?;
+
+    let repo_dir = build_dir.join("jcode");
+
+    if repo_dir.join(".git").exists() {
+        // Pull latest
+        crate::logging::info("Main channel: pulling latest from main...");
+        let output = std::process::Command::new("git")
+            .args(["pull", "--ff-only", "origin", "main"])
+            .current_dir(&repo_dir)
+            .output()
+            .context("Failed to run git pull")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // If pull fails (e.g. diverged), reset to origin/main
+            crate::logging::warn(&format!("git pull failed: {}, trying reset", stderr.trim()));
+            let output = std::process::Command::new("git")
+                .args(["fetch", "origin", "main"])
+                .current_dir(&repo_dir)
+                .output()
+                .context("Failed to run git fetch")?;
+            if !output.status.success() {
+                anyhow::bail!("git fetch failed: {}", String::from_utf8_lossy(&output.stderr));
+            }
+            let output = std::process::Command::new("git")
+                .args(["reset", "--hard", "origin/main"])
+                .current_dir(&repo_dir)
+                .output()
+                .context("Failed to run git reset")?;
+            if !output.status.success() {
+                anyhow::bail!("git reset failed: {}", String::from_utf8_lossy(&output.stderr));
+            }
+        }
+    } else {
+        // Clone
+        crate::logging::info("Main channel: cloning repository...");
+        let clone_url = format!("https://github.com/{}.git", GITHUB_REPO);
+        let output = std::process::Command::new("git")
+            .args(["clone", "--depth", "1", "--branch", "main", &clone_url, "jcode"])
+            .current_dir(&build_dir)
+            .output()
+            .context("Failed to run git clone")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "git clone failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    // Build
+    crate::logging::info("Main channel: building with cargo...");
+    let output = std::process::Command::new("cargo")
+        .args(["build", "--release"])
+        .current_dir(&repo_dir)
+        .env("JCODE_RELEASE_BUILD", "1")
+        .output()
+        .context("Failed to run cargo build")?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "cargo build failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let binary = repo_dir.join("target").join("release").join("jcode");
+    if !binary.exists() {
+        anyhow::bail!("Built binary not found at {}", binary.display());
+    }
+
+    Ok(binary)
 }
 
 fn version_is_newer(release: &str, current: &str) -> bool {
