@@ -26,9 +26,32 @@ const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
 /// User-Agent for OAuth requests (must match Claude CLI format)
 const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/1.0.0";
 
-/// Beta headers required for OAuth
+/// Beta headers required for OAuth (base)
 const OAUTH_BETA_HEADERS: &str =
     "oauth-2025-04-20,claude-code-20250219,prompt-caching-2024-07-31";
+
+/// Beta headers with 1M context (requires extra usage enabled)
+const OAUTH_BETA_HEADERS_1M: &str =
+    "oauth-2025-04-20,claude-code-20250219,prompt-caching-2024-07-31,context-1m-2025-08-07";
+
+/// Get the appropriate beta headers based on model and account capabilities
+fn oauth_beta_headers(model: &str) -> &'static str {
+    if is_1m_model(model) || crate::usage::has_extra_usage() {
+        OAUTH_BETA_HEADERS_1M
+    } else {
+        OAUTH_BETA_HEADERS
+    }
+}
+
+/// Check if a model name requests 1M context (e.g. "claude-opus-4-6[1m]")
+fn is_1m_model(model: &str) -> bool {
+    model.ends_with("[1m]")
+}
+
+/// Strip the [1m] suffix to get the actual API model name
+fn strip_1m_suffix(model: &str) -> &str {
+    model.strip_suffix("[1m]").unwrap_or(model)
+}
 
 /// Default model
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
@@ -82,7 +105,9 @@ const RETRY_BASE_DELAY_MS: u64 = 1000;
 /// Available models
 pub const AVAILABLE_MODELS: &[&str] = &[
     "claude-opus-4-6",
+    "claude-opus-4-6[1m]",
     "claude-sonnet-4-6",
+    "claude-sonnet-4-6[1m]",
     "claude-haiku-4-5",
     "claude-opus-4-5",
     "claude-sonnet-4-5",
@@ -109,6 +134,11 @@ impl AnthropicProvider {
     pub fn new() -> Self {
         let model =
             std::env::var("JCODE_ANTHROPIC_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+
+        // Trigger background usage fetch so extra_usage is known before first API call
+        let _ = tokio::runtime::Handle::try_current().map(|_| {
+            tokio::spawn(async { let _ = crate::usage::get().await; })
+        });
 
         Self {
             client: Client::new(),
@@ -457,13 +487,14 @@ impl Provider for AnthropicProvider {
     ) -> Result<EventStream> {
         let (token, is_oauth) = self.get_access_token().await?;
         let model = self.model.read().unwrap().clone();
+        let api_model = strip_1m_suffix(&model).to_string();
 
         // Format request
         let api_messages = self.format_messages(messages, is_oauth);
         let api_tools = self.format_tools(tools, is_oauth);
 
         let request = ApiRequest {
-            model: model.clone(),
+            model: api_model,
             max_tokens: 16384,
             system: build_system_param(system, is_oauth),
             messages: format_messages_with_identity(api_messages, is_oauth),
@@ -490,7 +521,8 @@ impl Provider for AnthropicProvider {
         // Spawn task to handle streaming with retry logic.
         // This includes forced OAuth refresh on auth failures.
         tokio::spawn(async move {
-            run_stream_with_retries(client, token, is_oauth, request, tx, credentials).await;
+            run_stream_with_retries(client, token, is_oauth, request, tx, credentials, model)
+                .await;
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))
@@ -540,13 +572,14 @@ impl Provider for AnthropicProvider {
     ) -> Result<EventStream> {
         let (token, is_oauth) = self.get_access_token().await?;
         let model = self.model.read().unwrap().clone();
+        let api_model = strip_1m_suffix(&model).to_string();
 
         // Format request
         let api_messages = self.format_messages(messages, is_oauth);
         let api_tools = self.format_tools(tools, is_oauth);
 
         let request = ApiRequest {
-            model: model.clone(),
+            model: api_model,
             max_tokens: 16384,
             system: build_system_param_split(system_static, system_dynamic, is_oauth),
             messages: format_messages_with_identity(api_messages, is_oauth),
@@ -572,7 +605,8 @@ impl Provider for AnthropicProvider {
 
         // Spawn task to handle streaming with retry logic
         tokio::spawn(async move {
-            run_stream_with_retries(client, token, is_oauth, request, tx, credentials).await;
+            run_stream_with_retries(client, token, is_oauth, request, tx, credentials, model)
+                .await;
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))
@@ -586,6 +620,7 @@ async fn run_stream_with_retries(
     request: ApiRequest,
     tx: mpsc::Sender<Result<StreamEvent>>,
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
+    model_name: String,
 ) {
     let mut token = initial_token;
     let mut last_error = None;
@@ -609,6 +644,7 @@ async fn run_stream_with_retries(
             is_oauth,
             request.clone(),
             tx.clone(),
+            &model_name,
         )
         .await
         {
@@ -724,6 +760,7 @@ async fn stream_response(
     is_oauth: bool,
     request: ApiRequest,
     tx: mpsc::Sender<Result<StreamEvent>>,
+    model_name: &str,
 ) -> Result<()> {
     if std::env::var("JCODE_ANTHROPIC_DEBUG")
         .map(|v| v == "1")
@@ -751,7 +788,7 @@ async fn stream_response(
         req = req
             .header("Authorization", format!("Bearer {}", token))
             .header("User-Agent", CLAUDE_CLI_USER_AGENT)
-            .header("anthropic-beta", OAUTH_BETA_HEADERS);
+            .header("anthropic-beta", oauth_beta_headers(model_name));
     } else {
         // Direct API keys use x-api-key
         // Include prompt-caching beta header
@@ -759,7 +796,11 @@ async fn stream_response(
             .header("x-api-key", &token)
             .header(
                 "anthropic-beta",
-                "prompt-caching-2024-07-31",
+                if is_1m_model(model_name) {
+                    "prompt-caching-2024-07-31,context-1m-2025-08-07"
+                } else {
+                    "prompt-caching-2024-07-31"
+                },
             );
     }
 
@@ -1356,7 +1397,11 @@ mod tests {
     fn test_available_models() {
         let provider = AnthropicProvider::new();
         let models = provider.available_models();
-        assert!(models.contains(&"claude-opus-4-5-20251101"));
+        assert!(models.contains(&"claude-opus-4-6"));
+        assert!(models.contains(&"claude-opus-4-6[1m]"));
+        assert!(models.contains(&"claude-sonnet-4-6"));
+        assert!(models.contains(&"claude-sonnet-4-6[1m]"));
+        assert!(models.contains(&"claude-haiku-4-5"));
     }
 
     #[test]

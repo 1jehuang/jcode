@@ -30,6 +30,8 @@ pub struct UsageData {
     pub seven_day_resets_at: Option<String>,
     /// Seven-day Opus utilization (0.0-1.0)
     pub seven_day_opus: Option<f32>,
+    /// Whether extra usage (long context, etc.) is enabled
+    pub extra_usage_enabled: bool,
     /// Last fetch time
     pub fetched_at: Option<Instant>,
     /// Last error (if any)
@@ -62,12 +64,18 @@ struct UsageResponse {
     five_hour: Option<UsageWindow>,
     seven_day: Option<UsageWindow>,
     seven_day_opus: Option<UsageWindow>,
+    extra_usage: Option<ExtraUsageResponse>,
 }
 
 #[derive(Deserialize, Debug)]
 struct UsageWindow {
     utilization: Option<f32>,
     resets_at: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ExtraUsageResponse {
+    is_enabled: Option<bool>,
 }
 
 /// Global usage tracker
@@ -130,6 +138,11 @@ async fn fetch_usage() -> Result<UsageData> {
             .as_ref()
             .and_then(|w| w.utilization)
             .map(|u| u / 100.0),
+        extra_usage_enabled: data
+            .extra_usage
+            .as_ref()
+            .and_then(|e| e.is_enabled)
+            .unwrap_or(false),
         fetched_at: Some(Instant::now()),
         last_error: None,
     })
@@ -178,6 +191,17 @@ pub async fn get() -> UsageData {
     }
 
     current_data
+}
+
+/// Check if extra usage (1M context, etc.) is enabled for the account.
+/// Returns false if unknown/not yet fetched.
+pub fn has_extra_usage() -> bool {
+    if let Some(usage) = USAGE.get() {
+        if let Ok(data) = usage.try_read() {
+            return data.extra_usage_enabled;
+        }
+    }
+    false
 }
 
 /// Get usage data synchronously (returns cached data, triggers refresh if stale)

@@ -196,7 +196,9 @@ pub trait Provider: Send + Sync {
 /// Available models (shown in /model list)
 pub const ALL_CLAUDE_MODELS: &[&str] = &[
     "claude-opus-4-6",
+    "claude-opus-4-6[1m]",
     "claude-sonnet-4-6",
+    "claude-sonnet-4-6[1m]",
     "claude-haiku-4-5",
     "claude-opus-4-5",
     "claude-sonnet-4-5",
@@ -350,6 +352,14 @@ pub fn context_limit_for_model(model: &str) -> Option<usize> {
     // Hardcoded fallbacks
     let model = model.to_lowercase();
 
+    // [1m] suffix explicitly requests 1M context
+    let (model, is_1m) = if let Some(base) = model.strip_suffix("[1m]") {
+        (base.to_string(), true)
+    } else {
+        (model, false)
+    };
+    let model = model.as_str();
+
     // Spark variant has a smaller context window than the full codex model
     if model.starts_with("gpt-5.3-codex-spark") {
         return Some(128_000);
@@ -368,11 +378,11 @@ pub fn context_limit_for_model(model: &str) -> Option<usize> {
     }
 
     if model.starts_with("claude-opus-4-6") || model.starts_with("claude-opus-4.6") {
-        return Some(1_048_576);
+        return Some(if is_1m { 1_048_576 } else { 200_000 });
     }
 
     if model.starts_with("claude-sonnet-4-6") || model.starts_with("claude-sonnet-4.6") {
-        return Some(1_048_576);
+        return Some(if is_1m { 1_048_576 } else { 200_000 });
     }
 
     if model.starts_with("claude-opus-4-5") || model.starts_with("claude-opus-4.5") {
@@ -1170,10 +1180,9 @@ mod tests {
 
     #[test]
     fn test_provider_for_model_claude() {
-        assert_eq!(
-            provider_for_model("claude-opus-4-5-20251101"),
-            Some("claude")
-        );
+        assert_eq!(provider_for_model("claude-opus-4-6"), Some("claude"));
+        assert_eq!(provider_for_model("claude-opus-4-6[1m]"), Some("claude"));
+        assert_eq!(provider_for_model("claude-sonnet-4-6"), Some("claude"));
     }
 
     #[test]
@@ -1217,8 +1226,16 @@ mod tests {
 
     #[test]
     fn test_context_limit_claude() {
-        assert_eq!(context_limit_for_model("claude-opus-4-6"), Some(1_048_576));
-        assert_eq!(context_limit_for_model("claude-sonnet-4-6"), Some(1_048_576));
+        assert_eq!(context_limit_for_model("claude-opus-4-6"), Some(200_000));
+        assert_eq!(context_limit_for_model("claude-sonnet-4-6"), Some(200_000));
+        assert_eq!(
+            context_limit_for_model("claude-opus-4-6[1m]"),
+            Some(1_048_576)
+        );
+        assert_eq!(
+            context_limit_for_model("claude-sonnet-4-6[1m]"),
+            Some(1_048_576)
+        );
     }
 
     #[test]
