@@ -1530,7 +1530,7 @@ impl App {
         let diagram = &diagrams[index];
         if let Some(path) = super::mermaid::get_cached_path(diagram.hash) {
             if path.exists() {
-                match open::that(&path) {
+                match open::that_detached(&path) {
                     Ok(_) => self.set_status_notice(format!(
                         "Opened diagram {}/{} in viewer",
                         index + 1,
