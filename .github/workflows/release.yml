@@ -144,3 +144,71 @@ jobs:
           git add Formula/jcode.rb
           git commit -m "Update to ${VERSION}" || echo "No changes"
           git push
+
+      - name: Update AUR package
+        if: ${{ secrets.AUR_SSH_KEY != '' }}
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          VERSION_NUM="${VERSION#v}"
+
+          LINUX_SHA=$(sha256sum artifacts/jcode-linux-x86_64/jcode-linux-x86_64.tar.gz | cut -d' ' -f1)
+          LINUX_URL="https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-x86_64.tar.gz"
+
+          mkdir -p ~/.ssh
+          echo "$AUR_SSH_KEY" > ~/.ssh/aur_key
+          chmod 600 ~/.ssh/aur_key
+          echo -e "Host aur.archlinux.org\n  IdentityFile ~/.ssh/aur_key\n  User aur\n  StrictHostKeyChecking no" >> ~/.ssh/config
+
+          git clone ssh://aur@aur.archlinux.org/jcode-bin.git /tmp/jcode-aur
+
+          cat > /tmp/jcode-aur/PKGBUILD << 'PKGBUILD_END'
+          # Maintainer: Jeremy Huang <jeremyhuang55555@gmail.com>
+          pkgname=jcode-bin
+          pkgver=VERSION_PLACEHOLDER
+          pkgrel=1
+          pkgdesc="AI coding agent powered by Claude and ChatGPT"
+          arch=('x86_64')
+          url="https://github.com/1jehuang/jcode"
+          license=('MIT')
+          provides=('jcode')
+          conflicts=('jcode')
+          source=("URL_PLACEHOLDER")
+          sha256sums=('SHA_PLACEHOLDER')
+
+          package() {
+              install -Dm755 "${srcdir}/jcode-linux-x86_64" "${pkgdir}/usr/bin/jcode"
+          }
+          PKGBUILD_END
+
+          sed -i "s|VERSION_PLACEHOLDER|${VERSION_NUM}|" /tmp/jcode-aur/PKGBUILD
+          sed -i "s|URL_PLACEHOLDER|${LINUX_URL}|" /tmp/jcode-aur/PKGBUILD
+          sed -i "s|SHA_PLACEHOLDER|${LINUX_SHA}|" /tmp/jcode-aur/PKGBUILD
+          sed -i 's/^          //' /tmp/jcode-aur/PKGBUILD
+
+          # Generate .SRCINFO without makepkg
+          cat > /tmp/jcode-aur/.SRCINFO << SRCINFO
+          pkgbase = jcode-bin
+          	pkgdesc = AI coding agent powered by Claude and ChatGPT
+          	pkgver = ${VERSION_NUM}
+          	pkgrel = 1
+          	url = https://github.com/1jehuang/jcode
+          	arch = x86_64
+          	license = MIT
+          	provides = jcode
+          	conflicts = jcode
+          	source = ${LINUX_URL}
+          	sha256sums = ${LINUX_SHA}
+
+          pkgname = jcode-bin
+          SRCINFO
+
+          sed -i 's/^          //' /tmp/jcode-aur/.SRCINFO
+
+          cd /tmp/jcode-aur
+          git config user.name "Jeremy Huang"
+          git config user.email "jeremyhuang55555@gmail.com"
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to ${VERSION}" || echo "No changes"
+          git push
