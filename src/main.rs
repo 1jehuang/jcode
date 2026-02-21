@@ -50,6 +50,7 @@ mod storage;
 mod telegram;
 mod todo;
 mod tool;
+mod transport;
 mod tui;
 mod update;
 mod usage;
@@ -727,7 +728,7 @@ async fn run_main(mut args: Args) -> Result<()> {
                 // Default: TUI client mode - start server if needed
                 let server_running = if server::socket_path().exists() {
                     // Test if server is actually responding
-                    tokio::net::UnixStream::connect(server::socket_path())
+                    crate::transport::Stream::connect(server::socket_path())
                         .await
                         .is_ok()
                 } else {
@@ -844,7 +845,7 @@ async fn run_main(mut args: Args) -> Result<()> {
                             }
                         }
                         if server::socket_path().exists() {
-                            if tokio::net::UnixStream::connect(server::socket_path())
+                            if crate::transport::Stream::connect(server::socket_path())
                                 .await
                                 .is_ok()
                             {
@@ -1747,7 +1748,7 @@ async fn debug_list_servers() -> Result<()> {
 
         // Check if server is alive and clean stale sockets when detected.
         let mut stale_main_removed = false;
-        let alive = match tokio::net::UnixStream::connect(&socket_path).await {
+        let alive = match crate::transport::Stream::connect(&socket_path).await {
             Ok(_) => true,
             Err(err)
                 if err.kind() == std::io::ErrorKind::ConnectionRefused && socket_path.exists() =>
@@ -1761,7 +1762,7 @@ async fn debug_list_servers() -> Result<()> {
 
         let mut stale_debug_removed = false;
         let debug_enabled = if debug_socket.exists() {
-            match tokio::net::UnixStream::connect(&debug_socket).await {
+            match crate::transport::Stream::connect(&debug_socket).await {
                 Ok(_) => true,
                 Err(err)
                     if err.kind() == std::io::ErrorKind::ConnectionRefused
@@ -1810,9 +1811,9 @@ async fn debug_list_servers() -> Result<()> {
 /// Get server info via debug socket
 async fn get_server_info(debug_socket: &std::path::Path) -> Result<String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
+    use crate::transport::Stream;
 
-    let stream = UnixStream::connect(debug_socket).await?;
+    let stream = Stream::connect(debug_socket).await?;
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
@@ -1861,7 +1862,7 @@ async fn debug_start_server(arg: &str, socket_path: Option<String>) -> Result<()
 
     // Check if server already running
     if socket_pathbuf.exists() {
-        if tokio::net::UnixStream::connect(&socket_pathbuf)
+        if crate::transport::Stream::connect(&socket_pathbuf)
             .await
             .is_ok()
         {
@@ -1906,7 +1907,7 @@ async fn debug_start_server(arg: &str, socket_path: Option<String>) -> Result<()
             anyhow::bail!("Server failed to start within 10 seconds");
         }
         if socket_pathbuf.exists() {
-            if tokio::net::UnixStream::connect(&socket_pathbuf)
+            if crate::transport::Stream::connect(&socket_pathbuf)
                 .await
                 .is_ok()
             {
@@ -2836,7 +2837,7 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
     if is_fresh_start {
         let selfdev_socket = std::path::Path::new(SELFDEV_SOCKET);
         let server_already_running = selfdev_socket.exists()
-            && tokio::net::UnixStream::connect(SELFDEV_SOCKET)
+            && crate::transport::Stream::connect(SELFDEV_SOCKET)
                 .await
                 .is_ok();
 
@@ -2888,7 +2889,7 @@ async fn is_server_alive(socket_path: &str) -> bool {
     if !std::path::Path::new(socket_path).exists() {
         return false;
     }
-    tokio::net::UnixStream::connect(socket_path).await.is_ok()
+    crate::transport::Stream::connect(socket_path).await.is_ok()
 }
 
 /// Wrapper that runs client, spawning server as detached daemon if needed

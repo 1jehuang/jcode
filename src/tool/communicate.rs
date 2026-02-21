@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use crate::transport::SyncStream;
 
 fn socket_path() -> std::path::PathBuf {
     crate::storage::runtime_dir().join("jcode.sock")
@@ -13,7 +13,7 @@ fn socket_path() -> std::path::PathBuf {
 
 fn send_request(request: &Value) -> Result<Value> {
     let path = socket_path();
-    let mut stream = UnixStream::connect(&path)?;
+    let mut stream = SyncStream::connect(&path)?;
 
     let json = serde_json::to_string(request)? + "\n";
     stream.write_all(json.as_bytes())?;

@@ -26,7 +26,7 @@ use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use crate::transport::{Listener, Stream, ReadHalf, WriteHalf};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 
 /// Record of a file access by an agent
@@ -296,8 +296,8 @@ pub fn cleanup_socket_pair(path: &std::path::Path) {
 }
 
 /// Connect to a Unix socket, cleaning up stale socket files on connection-refused.
-pub async fn connect_socket(path: &std::path::Path) -> Result<UnixStream> {
-    match UnixStream::connect(path).await {
+pub async fn connect_socket(path: &std::path::Path) -> Result<Stream> {
+    match Stream::connect(path).await {
         Ok(stream) => Ok(stream),
         Err(err) => {
             let is_stale = err.kind() == std::io::ErrorKind::ConnectionRefused && path.exists();
@@ -990,8 +990,8 @@ impl Server {
         let _ = std::fs::remove_file(&self.socket_path);
         let _ = std::fs::remove_file(&self.debug_socket_path);
 
-        let main_listener = UnixListener::bind(&self.socket_path)?;
-        let debug_listener = UnixListener::bind(&self.debug_socket_path)?;
+        let main_listener = Listener::bind(&self.socket_path)?;
+        let debug_listener = Listener::bind(&self.debug_socket_path)?;
 
         // Set logging context for this server
         crate::logging::set_server(&self.identity.name);
@@ -1333,7 +1333,7 @@ impl Server {
 }
 
 async fn handle_client(
-    stream: UnixStream,
+    stream: Stream,
     sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
     _global_event_tx: broadcast::Sender<ServerEvent>,
     provider_template: Arc<dyn Provider>,
@@ -6206,7 +6206,7 @@ fn parse_namespaced_command(command: &str) -> (&str, &str) {
 
 /// Handle debug socket connections (introspection + optional debug control)
 async fn handle_debug_client(
-    stream: UnixStream,
+    stream: Stream,
     sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
     is_processing: Arc<RwLock<bool>>,
     session_id: Arc<RwLock<String>>,
@@ -8401,8 +8401,8 @@ async fn execute_tester_subcommand(
 
 /// Client for connecting to a running server
 pub struct Client {
-    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
-    writer: tokio::net::unix::OwnedWriteHalf,
+    reader: BufReader<ReadHalf>,
+    writer: WriteHalf,
     next_id: u64,
 }
 

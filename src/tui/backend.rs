@@ -13,8 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::OwnedWriteHalf;
-use tokio::net::UnixStream;
+use crate::transport::{WriteHalf, Stream};
 use tokio::sync::Mutex;
 
 /// Debug events broadcast by standalone TUI via debug socket.
@@ -220,8 +219,8 @@ fn show_diffs_enabled() -> bool {
 
 /// Remote connection to jcode server
 pub struct RemoteConnection {
-    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
-    writer: Arc<Mutex<OwnedWriteHalf>>,
+    reader: BufReader<crate::transport::ReadHalf>,
+    writer: Arc<Mutex<WriteHalf>>,
     session_id: Option<String>,
     next_request_id: u64,
     provider_name: String,
@@ -242,7 +241,7 @@ impl RemoteConnection {
 
     /// Connect to the server and optionally resume a specific session
     pub async fn connect_with_session(resume_session: Option<&str>) -> Result<Self> {
-        let stream = UnixStream::connect(server::socket_path()).await?;
+        let stream = Stream::connect(server::socket_path()).await?;
         let (reader, writer) = stream.into_split();
 
         let mut conn = Self {
@@ -446,7 +445,7 @@ impl RemoteConnection {
     }
 
     /// Get writer for sending requests
-    pub fn writer(&self) -> Arc<Mutex<OwnedWriteHalf>> {
+    pub fn writer(&self) -> Arc<Mutex<WriteHalf>> {
         Arc::clone(&self.writer)
     }
 
@@ -457,7 +456,7 @@ impl RemoteConnection {
 
     /// Create a dummy RemoteConnection for replay mode (no real server)
     pub fn dummy() -> Self {
-        let (a, _b) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (a, _b) = crate::transport::Stream::pair().expect("socketpair");
         let (reader, writer) = a.into_split();
         Self {
             reader: BufReader::new(reader),

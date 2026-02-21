@@ -20,7 +20,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use crate::transport::Stream;
 use tokio::time::interval;
 
 /// Check if client-side diffs are enabled (default: true, disable with JCODE_SHOW_DIFFS=0)
@@ -269,7 +269,7 @@ impl ClientApp {
     }
 
     /// Connect to server and sync state
-    pub async fn connect(&mut self) -> Result<UnixStream> {
+    pub async fn connect(&mut self) -> Result<Stream> {
         let socket = server::socket_path();
         let stream = server::connect_socket(&socket).await?;
 
@@ -279,7 +279,7 @@ impl ClientApp {
 
     /// Sync history from server (for reconnection)
     #[allow(dead_code)]
-    pub async fn sync_history(&mut self, stream: &mut UnixStream) -> Result<()> {
+    pub async fn sync_history(&mut self, stream: &mut Stream) -> Result<()> {
         let (reader, mut writer) = stream.split();
         let mut reader = BufReader::new(reader);
 
@@ -975,7 +975,7 @@ impl ClientApp {
         &mut self,
         code: KeyCode,
         modifiers: KeyModifiers,
-        writer: &std::sync::Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
+        writer: &std::sync::Arc<tokio::sync::Mutex<crate::transport::WriteHalf>>,
     ) -> Result<()> {
         // Handle configurable scroll keys first (before character input)
         if let Some(amount) = self.scroll_keys.scroll_amount(code.clone(), modifiers) {

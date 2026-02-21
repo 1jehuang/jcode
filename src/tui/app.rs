@@ -11995,7 +11995,7 @@ impl App {
         mut rx: tokio::sync::broadcast::Receiver<super::backend::DebugEvent>,
     ) -> tokio::task::JoinHandle<()> {
         use tokio::io::AsyncWriteExt;
-        use tokio::net::UnixListener;
+        use crate::transport::Listener;
 
         let socket_path = Self::debug_socket_path();
         let initial_snapshot = self.create_debug_snapshot();
@@ -12004,7 +12004,7 @@ impl App {
             // Clean up old socket
             let _ = std::fs::remove_file(&socket_path);
 
-            let listener = match UnixListener::bind(&socket_path) {
+            let listener = match Listener::bind(&socket_path) {
                 Ok(l) => l,
                 Err(e) => {
                     crate::logging::error(&format!("Failed to bind debug socket: {}", e));
@@ -12013,7 +12013,7 @@ impl App {
             };
 
             // Accept connections and forward events
-            let clients: std::sync::Arc<tokio::sync::Mutex<Vec<tokio::net::unix::OwnedWriteHalf>>> =
+            let clients: std::sync::Arc<tokio::sync::Mutex<Vec<crate::transport::WriteHalf>>> =
                 std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
             let clients_clone = clients.clone();

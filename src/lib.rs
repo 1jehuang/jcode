@@ -35,6 +35,7 @@ pub mod storage;
 pub mod telegram;
 pub mod todo;
 pub mod tool;
+pub mod transport;
 pub mod tui;
 pub mod update;
 pub mod usage;

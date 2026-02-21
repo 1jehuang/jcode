@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use crate::transport::Stream;
 
 #[derive(Debug, Deserialize)]
 struct DebugSocketInput {
@@ -104,7 +104,7 @@ async fn execute_debug_command(
     // Connect to debug socket
     let stream = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        UnixStream::connect(&socket_path),
+        Stream::connect(&socket_path),
     )
     .await
     .map_err(|_| anyhow::anyhow!("Timeout connecting to debug socket"))?
