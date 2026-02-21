@@ -28,7 +28,7 @@ const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/1.0.0";
 
 /// Beta headers required for OAuth
 const OAUTH_BETA_HEADERS: &str =
-    "oauth-2025-04-20,claude-code-20250219,prompt-caching-2024-07-31,context-1m-2025-08-07";
+    "oauth-2025-04-20,claude-code-20250219,prompt-caching-2024-07-31";
 
 /// Default model
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
@@ -85,7 +85,7 @@ pub const AVAILABLE_MODELS: &[&str] = &[
     "claude-sonnet-4-6",
     "claude-opus-4-5-20251101",
     "claude-sonnet-4-20250514",
-    "claude-haiku-4-5-20241022",
+    "claude-haiku-4-5-20251001",
 ];
 
 /// Cached OAuth credentials
@@ -753,12 +753,12 @@ async fn stream_response(
             .header("anthropic-beta", OAUTH_BETA_HEADERS);
     } else {
         // Direct API keys use x-api-key
-        // Include prompt-caching and context-1m beta headers
+        // Include prompt-caching beta header
         req = req
             .header("x-api-key", &token)
             .header(
                 "anthropic-beta",
-                "prompt-caching-2024-07-31,context-1m-2025-08-07",
+                "prompt-caching-2024-07-31",
             );
     }
 
