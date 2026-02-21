@@ -9,27 +9,114 @@ A native iOS application that connects to a jcode server running on the user's l
 
 ## Architecture
 
+```mermaid
+graph TB
+    subgraph iPhone ["📱 iPhone (iOS App)"]
+        subgraph SwiftUI ["SwiftUI Interface"]
+            CV[💬 Conversation View]
+            TA[🔐 Tool Approval]
+            AD[📊 Ambient Dashboard]
+            SM[🖥️ Server Manager]
+        end
+        subgraph LocalSvc ["Local Services"]
+            APNs_H[🔔 APNs Push Handler]
+            KC[🔑 Keychain - Auth Tokens]
+            OQ[📤 Offline Message Queue]
+            LA[⏱️ Live Activities / Widgets]
+        end
+    end
+
+    subgraph TS ["🔒 Tailscale (WireGuard P2P)"]
+        TUN[Encrypted Tunnel]
+    end
+
+    subgraph Apple ["☁️ Apple APNs"]
+        APNs[Push Delivery]
+    end
+
+    subgraph Laptop ["💻 Laptop / Desktop"]
+        subgraph GW ["WebSocket Gateway (new)"]
+            WS["🌐 TCP :7643"]
+            AUTH[🎫 Token Auth]
+            PUSH[📨 APNs Push Sender]
+        end
+        subgraph Srv ["jcode Server (Rust)"]
+            AG[🤖 Agent Engine]
+            LLM["☁️ LLM Providers\n(Claude / OpenRouter)"]
+            TOOLS["🔧 Tools\n(bash, files, git)"]
+            MEM[🧠 Memory Graph]
+            MCP[🔌 MCP Servers]
+            AMB[🌙 Ambient Scheduler]
+            SWARM[🐝 Swarm Coordinator]
+        end
+        subgraph Existing ["Existing Sockets"]
+            US["Unix Socket\n(TUI clients)"]
+            DS["Debug Socket\n(automation)"]
+        end
+    end
+
+    CV <-->|WebSocket JSON| TUN
+    TA <-->|approve/deny| TUN
+    AD <-->|status events| TUN
+    SM <-->|server info| TUN
+    TUN <-->|"plain WS (tunnel encrypts)"| WS
+    WS --> AUTH --> AG
+    AG --> LLM
+    AG --> TOOLS
+    AG --> MEM
+    AG --> MCP
+    AG --> AMB
+    AG --> SWARM
+    PUSH -->|"HTTP/2 + JWT"| APNs
+    APNs -->|push| APNs_H
+    US --> AG
+    DS --> AG
+
+    style iPhone fill:#e3f2fd,stroke:#1565c0
+    style TS fill:#e8f5e9,stroke:#2e7d32
+    style Laptop fill:#fff3e0,stroke:#e65100
+    style Apple fill:#f3e5f5,stroke:#7b1fa2
+    style GW fill:#ffecb3,stroke:#ff8f00
+    style Srv fill:#ffe0b2,stroke:#e65100
+    style SwiftUI fill:#bbdefb,stroke:#1565c0
+    style LocalSvc fill:#b3e5fc,stroke:#0277bd
 ```
-┌──────────────────────────────────────┐         ┌──────────────────────────────────────┐
-│          iPhone (iOS App)            │         │      Laptop/Desktop (Server)         │
-│                                      │   WS    │                                      │
-│  ┌────────────────────────────────┐  │  over   │  ┌────────────────────────────────┐  │
-│  │  SwiftUI Interface             │  │  Tail-  │  │  jcode server (Rust)           │  │
-│  │  - Conversation view           │◄─┼─scale──►│  │  - Agent + LLM providers       │  │
-│  │  - Tool approval sheet         │  │         │  │  - Tool execution (bash, etc)  │  │
-│  │  - Ambient mode dashboard      │  │         │  │  - Memory graph                │  │
-│  │  - Server manager              │  │         │  │  - MCP servers                 │  │
-│  └────────────────────────────────┘  │         │  │  - Ambient scheduler           │  │
-│                                      │         │  └────────────────────────────────┘  │
-│  ┌────────────────────────────────┐  │         │                                      │
-│  │  Local Services                │  │         │  ┌────────────────────────────────┐  │
-│  │  - APNs push handler           │  │         │  │  WebSocket Gateway (new)       │  │
-│  │  - Keychain (auth tokens)      │  │         │  │  - Listens on TCP port         │  │
-│  │  - Offline message queue       │  │         │  │  - Token authentication        │  │
-│  │  - Live Activities / Widgets   │  │         │  │  - APNs push sender            │  │
-│  └────────────────────────────────┘  │         │  │  - Bridges to Unix socket      │  │
-│                                      │         │  └────────────────────────────────┘  │
-└──────────────────────────────────────┘         └──────────────────────────────────────┘
+
+### Connection Flow
+
+```mermaid
+sequenceDiagram
+    participant U as 👤 User
+    participant T as 📱 iOS App
+    participant TS as 🔒 Tailscale
+    participant S as 💻 jcode Server
+    participant A as ☁️ Apple APNs
+
+    Note over U,S: One-time Pairing
+    U->>S: jcode pair
+    S->>S: Generate 6-digit code (5 min TTL)
+    S->>U: Display code in terminal
+    U->>T: Enter code + Tailscale hostname
+    T->>A: Register for push notifications
+    A-->>T: Device token
+    T->>TS: Connect to hostname:7643
+    TS->>S: WireGuard tunnel
+    T->>S: POST /pair {code, device_id, apns_token}
+    S->>S: Validate code, store device
+    S-->>T: {auth_token}
+    T->>T: Store token in Keychain
+
+    Note over T,S: Normal Usage
+    T->>TS: WebSocket to hostname:7643
+    TS->>S: WireGuard tunnel
+    T->>S: Subscribe {auth_token, session}
+    S-->>T: History + streaming events
+
+    Note over T,S: Push (app closed)
+    S->>S: Task completes / needs approval
+    S->>A: HTTP/2 POST {device_token, payload}
+    A->>T: 🔔 Push notification
+    U->>T: Tap → opens app → reconnects
 ```
 
 ---
