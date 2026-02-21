@@ -4285,6 +4285,8 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         // Model column
         let rec_suffix = if entry.recommended && !entry.is_current {
             " ★"
+        } else if entry.old && !entry.is_current {
+            " old"
         } else {
             ""
         };
@@ -4305,6 +4307,8 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             Style::default().fg(ACCENT_COLOR)
         } else if entry.recommended {
             Style::default().fg(Color::Rgb(255, 220, 120))
+        } else if entry.old {
+            Style::default().fg(Color::Rgb(120, 120, 130))
         } else {
             Style::default().fg(Color::Rgb(200, 200, 220))
         };

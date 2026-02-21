@@ -8999,6 +8999,12 @@ impl App {
         const RECOMMENDED_MODELS: &[&str] =
             &["gpt-5.3-codex-spark", "gpt-5.3-codex", "claude-opus-4-6", "claude-sonnet-4-6"];
 
+        const OLD_MODELS: &[&str] = &[
+            "claude-opus-4-5",
+            "claude-sonnet-4-5",
+            "claude-sonnet-4-20250514",
+        ];
+
         let current_effort = self.provider.reasoning_effort();
         let available_efforts = self.provider.available_efforts();
         let is_openai = !available_efforts.is_empty();
@@ -9031,16 +9037,20 @@ impl App {
                         is_current: is_this_current,
                         recommended: RECOMMENDED_MODELS.contains(&name.as_str())
                             && (*effort == "xhigh" || *effort == "high"),
+                        old: OLD_MODELS.contains(&name.as_str()),
                         effort: Some(effort.to_string()),
                     });
                 }
             } else {
+                let is_old = OLD_MODELS.contains(&name.as_str())
+                    || OLD_MODELS.iter().any(|old| name.ends_with(old));
                 models.push(super::ModelEntry {
                     name: name.clone(),
                     routes: entry_routes,
                     selected_route: 0,
                     is_current: *name == current_model,
                     recommended: RECOMMENDED_MODELS.contains(&name.as_str()),
+                    old: is_old,
                     effort: None,
                 });
             }
@@ -9062,10 +9072,13 @@ impl App {
             } else {
                 1
             };
+            let a_old = if a.old { 1u8 } else { 0 };
+            let b_old = if b.old { 1u8 } else { 0 };
             a_current
                 .cmp(&b_current)
                 .then(a_rec.cmp(&b_rec))
                 .then(a_avail.cmp(&b_avail))
+                .then(a_old.cmp(&b_old))
                 .then(a.name.cmp(&b.name))
         });
 
