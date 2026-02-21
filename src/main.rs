@@ -278,8 +278,8 @@ struct Args {
     #[arg(long, global = true)]
     no_update: bool,
 
-    /// Auto-update when new version is available (default: false, just notify)
-    #[arg(long, global = true, default_value = "false")]
+    /// Auto-update when new version is available (default: true for release builds)
+    #[arg(long, global = true, default_value = "true")]
     auto_update: bool,
 
     /// Log tool inputs/outputs and token usage to stderr
