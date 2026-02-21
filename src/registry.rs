@@ -198,19 +198,7 @@ pub fn server_debug_socket_path(name: &str) -> PathBuf {
 
 /// Check if a process is still running
 fn is_process_running(pid: u32) -> bool {
-    // On Unix, we can send signal 0 to check if process exists
-    #[cfg(unix)]
-    {
-        // Signal 0 doesn't actually send a signal, just checks if process exists
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-
-    #[cfg(not(unix))]
-    {
-        // On other platforms, just assume it's running
-        let _ = pid;
-        true
-    }
+    crate::platform::is_process_running(pid)
 }
 
 /// Register the current server in the registry

@@ -36,6 +36,7 @@ mod memory_graph;
 mod message;
 mod notifications;
 mod plan;
+mod platform;
 mod prompt;
 mod protocol;
 mod provider;
@@ -550,12 +551,12 @@ async fn main() -> Result<()> {
                             path.display()
                         );
                         // Exec into the new binary
-                        use std::os::unix::process::CommandExt;
                         let args: Vec<String> = std::env::args().skip(1).collect();
-                        let err = ProcessCommand::new(&path)
-                            .args(&args)
-                            .arg("--no-update")
-                            .exec();
+                        let err = crate::platform::replace_process(
+                            ProcessCommand::new(&path)
+                                .args(&args)
+                                .arg("--no-update"),
+                        );
                         eprintln!("Failed to exec new binary: {}", err);
                     }
                     update::UpdateCheckResult::Error(e) => {
@@ -1103,8 +1104,6 @@ async fn run_tui(
 
 /// Hot-reload: exec into existing binary with session restore (no rebuild)
 fn hot_reload(session_id: &str) -> Result<()> {
-    use std::os::unix::process::CommandExt;
-
     let cwd = std::env::current_dir()?;
 
     // Check if this is a migration to a specific binary (auto-migration to stable)
@@ -1112,12 +1111,13 @@ fn hot_reload(session_id: &str) -> Result<()> {
         let binary_path = std::path::PathBuf::from(&migrate_binary);
         if binary_path.exists() {
             eprintln!("Migrating to stable binary...");
-            let err = ProcessCommand::new(&binary_path)
-                .arg("--resume")
-                .arg(session_id)
-                .arg("--no-update")
-                .current_dir(cwd)
-                .exec();
+            let err = crate::platform::replace_process(
+                ProcessCommand::new(&binary_path)
+                    .arg("--resume")
+                    .arg(session_id)
+                    .arg("--no-update")
+                    .current_dir(cwd),
+            );
             return Err(anyhow::anyhow!("Failed to exec {:?}: {}", binary_path, err));
         } else {
             eprintln!(
@@ -1173,11 +1173,12 @@ fn hot_reload(session_id: &str) -> Result<()> {
                 continue;
             }
         }
-        let err = ProcessCommand::new(&exe)
-            .arg("--resume")
-            .arg(session_id)
-            .current_dir(&cwd)
-            .exec();
+        let err = crate::platform::replace_process(
+            ProcessCommand::new(&exe)
+                .arg("--resume")
+                .arg(session_id)
+                .current_dir(&cwd),
+        );
 
         if err.kind() == std::io::ErrorKind::NotFound && attempt < 2 {
             crate::logging::warn(&format!(
@@ -1197,8 +1198,6 @@ fn hot_reload(session_id: &str) -> Result<()> {
 
 /// Hot-rebuild: pull, rebuild, test, and exec into new binary with session restore
 fn hot_rebuild(session_id: &str) -> Result<()> {
-    use std::os::unix::process::CommandExt;
-
     let cwd = std::env::current_dir()?;
     let repo_dir =
         get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
@@ -1255,13 +1254,14 @@ fn hot_rebuild(session_id: &str) -> Result<()> {
     eprintln!("Restarting with session {}...", session_id);
 
     // Build command with --resume flag
-    let err = ProcessCommand::new(&exe)
-        .arg("--resume")
-        .arg(session_id)
-        .current_dir(cwd)
-        .exec();
+    let err = crate::platform::replace_process(
+        ProcessCommand::new(&exe)
+            .arg("--resume")
+            .arg(session_id)
+            .current_dir(cwd),
+    );
 
-    // exec() only returns on error
+    // replace_process() only returns on error
     Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
 }
 
@@ -2082,11 +2082,7 @@ fn save_openrouter_key(key: &str) -> Result<()> {
     std::fs::write(&file_path, &content)?;
 
     // Set restrictive file permissions (owner read/write only)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    crate::platform::set_permissions_owner_only(&file_path)?;
 
     // Also set the env var so it's immediately available this session
     std::env::set_var("OPENROUTER_API_KEY", key);
@@ -2571,8 +2567,6 @@ fn check_for_updates() -> Option<bool> {
 
 /// Auto-update: pull, build, and exec into new binary
 fn run_auto_update() -> Result<()> {
-    use std::os::unix::process::CommandExt;
-
     let repo_dir =
         get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
@@ -2613,10 +2607,11 @@ fn run_auto_update() -> Result<()> {
     let exe = std::env::current_exe()?;
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    let err = ProcessCommand::new(&exe)
-        .args(&args)
-        .arg("--no-update") // Prevent infinite update loop
-        .exec();
+    let err = crate::platform::replace_process(
+        ProcessCommand::new(&exe)
+            .args(&args)
+            .arg("--no-update"),
+    );
 
     Err(anyhow::anyhow!(
         "Failed to exec new binary {:?}: {}",
@@ -2695,17 +2690,17 @@ fn list_sessions() -> Result<()> {
     match tui::session_picker::pick_session()? {
         Some(tui::session_picker::PickerResult::Selected(session_id)) => {
             // User selected a session - exec into jcode with that session
-            use std::os::unix::process::CommandExt;
             let exe = std::env::current_exe()?;
             let cwd = std::env::current_dir()?;
 
-            let err = ProcessCommand::new(&exe)
-                .arg("--resume")
-                .arg(&session_id)
-                .current_dir(cwd)
-                .exec();
+            let err = crate::platform::replace_process(
+                ProcessCommand::new(&exe)
+                    .arg("--resume")
+                    .arg(&session_id)
+                    .current_dir(cwd),
+            );
 
-            // exec() only returns on error
+            // replace_process() only returns on error
             Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
         }
         Some(tui::session_picker::PickerResult::RestoreAllCrashed) => {
@@ -2863,14 +2858,14 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
     let cwd = std::env::current_dir()?;
 
     // Use wrapper to handle crashes
-    use std::os::unix::process::CommandExt;
-    let err = ProcessCommand::new(&exe)
-        .arg("canary-wrapper")
-        .arg(&session_id)
-        .arg(binary_path.to_string_lossy().as_ref())
-        .arg(&hash)
-        .current_dir(cwd)
-        .exec();
+    let err = crate::platform::replace_process(
+        ProcessCommand::new(&exe)
+            .arg("canary-wrapper")
+            .arg(&session_id)
+            .arg(binary_path.to_string_lossy().as_ref())
+            .arg(&hash)
+            .current_dir(cwd),
+    );
 
     Err(anyhow::anyhow!("Failed to exec wrapper {:?}: {}", exe, err))
 }
@@ -3036,8 +3031,6 @@ async fn run_canary_wrapper(
     // Check if reload/rollback was requested - exec into new binary
     if let Some(code) = run_result.exit_code {
         if code == EXIT_RELOAD_REQUESTED || code == EXIT_ROLLBACK_REQUESTED {
-            use std::os::unix::process::CommandExt;
-
             let action = if code == EXIT_RELOAD_REQUESTED {
                 "reload"
             } else {
@@ -3070,12 +3063,13 @@ async fn run_canary_wrapper(
             let cwd = std::env::current_dir()?;
 
             // Exec into the new binary with self-dev mode and session resume
-            let err = ProcessCommand::new(&binary)
-                .arg("self-dev")
-                .arg("--resume")
-                .arg(session_id)
-                .current_dir(cwd)
-                .exec();
+            let err = crate::platform::replace_process(
+                ProcessCommand::new(&binary)
+                    .arg("self-dev")
+                    .arg("--resume")
+                    .arg(session_id)
+                    .current_dir(cwd),
+            );
 
             return Err(anyhow::anyhow!("Failed to exec {:?}: {}", binary, err));
         }

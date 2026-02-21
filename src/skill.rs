@@ -133,7 +133,7 @@ impl SkillRegistry {
                 // Resolve symlink and copy the target
                 let target = std::fs::read_link(&src_path)?;
                 // Try to create symlink, fall back to copying the file
-                if std::os::unix::fs::symlink(&target, &dst_path).is_err() {
+                if crate::platform::symlink_or_copy(&target, &dst_path).is_err() {
                     if let Ok(resolved) = std::fs::canonicalize(&src_path) {
                         std::fs::copy(&resolved, &dst_path)?;
                     }

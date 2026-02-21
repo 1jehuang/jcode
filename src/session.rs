@@ -869,19 +869,8 @@ pub fn detect_crashed_sessions() -> Result<Option<CrashedSessionsInfo>> {
     }))
 }
 
-#[cfg(unix)]
 fn is_pid_running(pid: u32) -> bool {
-    let result = unsafe { libc::kill(pid as i32, 0) };
-    if result == 0 {
-        return true;
-    }
-    let err = std::io::Error::last_os_error();
-    !matches!(err.raw_os_error(), Some(code) if code == libc::ESRCH)
-}
-
-#[cfg(not(unix))]
-fn is_pid_running(_pid: u32) -> bool {
-    true
+    crate::platform::is_process_running(pid)
 }
 
 /// Find a session by ID or memorable name

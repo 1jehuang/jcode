@@ -400,19 +400,11 @@ pub fn install_local_release(repo_dir: &std::path::Path) -> Result<PathBuf> {
     }
     std::fs::copy(&source, &versioned)?;
 
-    // Make executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&versioned)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&versioned, perms)?;
-    }
+    crate::platform::set_permissions_executable(&versioned)?;
 
     let link_path = dest_dir.join("jcode");
     let _ = std::fs::remove_file(&link_path);
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&versioned, &link_path)?;
+    crate::platform::symlink_or_copy(&versioned, &link_path)?;
 
     Ok(versioned)
 }
@@ -479,14 +471,7 @@ pub fn install_version(repo_dir: &std::path::Path, hash: &str) -> Result<PathBuf
 
     std::fs::copy(&source, &dest)?;
 
-    // Make executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&dest)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&dest, perms)?;
-    }
+    crate::platform::set_permissions_executable(&dest)?;
 
     Ok(dest)
 }
@@ -502,8 +487,7 @@ pub fn update_canary_symlink(hash: &str) -> Result<()> {
     // Remove existing symlink/file
     let _ = std::fs::remove_file(&link_path);
 
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&target, &link_path)?;
+    crate::platform::symlink_or_copy(&target, &link_path)?;
 
     Ok(())
 }
@@ -518,8 +502,7 @@ pub fn update_rollback_symlink(hash: &str) -> Result<()> {
 
     let _ = std::fs::remove_file(&link_path);
 
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&target, &link_path)?;
+    crate::platform::symlink_or_copy(&target, &link_path)?;
 
     Ok(())
 }

@@ -200,10 +200,7 @@ async fn render_svg_pipeline(
     for (frame_num, &unique_idx) in frame_indices.iter().enumerate() {
         let src = png_dir.join(format!("unique_{:06}.png", unique_idx));
         let dst = seq_dir.join(format!("frame_{:06}.png", frame_num));
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&src, &dst)?;
-        #[cfg(not(unix))]
-        std::fs::copy(&src, &dst)?;
+        crate::platform::symlink_or_copy(&src, &dst)?;
     }
 
     eprintln!("  Encoding video with ffmpeg...");

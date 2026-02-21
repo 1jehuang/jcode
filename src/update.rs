@@ -2,7 +2,6 @@ use crate::storage;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -288,18 +287,11 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
                 // Copy built binary to install location
                 let dest = install_dir.join(format!("jcode-main-{}", latest_sha));
                 fs::copy(&path, &dest).context("Failed to copy built binary")?;
-                let mut perms = fs::metadata(&dest)?.permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(&dest, perms)?;
+                crate::platform::set_permissions_executable(&dest)?;
 
                 // Atomic symlink swap
                 let temp_symlink = install_dir.join(format!(".jcode-symlink-{}", std::process::id()));
-                #[cfg(unix)]
-                {
-                    let _ = fs::remove_file(&temp_symlink);
-                    std::os::unix::fs::symlink(&dest, &temp_symlink)?;
-                    fs::rename(&temp_symlink, &current_stable)?;
-                }
+                crate::platform::atomic_symlink_swap(&dest, &current_stable, &temp_symlink)?;
 
                 // Also update the user's binary if it's a symlink or in ~/.local/bin
                 if let Ok(exe) = std::env::current_exe() {
@@ -520,9 +512,7 @@ pub fn download_and_install_blocking(release: &GitHubRelease) -> Result<PathBuf>
         fs::write(&temp_path, &bytes).context("Failed to write temp file")?;
     }
 
-    let mut perms = fs::metadata(&temp_path)?.permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&temp_path, perms)?;
+    crate::platform::set_permissions_executable(&temp_path)?;
 
     let install_dir = stable_install_dir()?;
     fs::create_dir_all(&install_dir)?;
@@ -549,13 +539,7 @@ pub fn download_and_install_blocking(release: &GitHubRelease) -> Result<PathBuf>
     })?;
 
     let temp_symlink = install_dir.join(format!(".jcode-symlink-{}", std::process::id()));
-
-    #[cfg(unix)]
-    {
-        let _ = fs::remove_file(&temp_symlink);
-        std::os::unix::fs::symlink(&versioned_path, &temp_symlink)?;
-        fs::rename(&temp_symlink, &current_stable)?;
-    }
+    crate::platform::atomic_symlink_swap(&versioned_path, &current_stable, &temp_symlink)?;
 
     metadata.installed_version = Some(release.tag_name.clone());
     metadata.installed_from = Some(asset.browser_download_url.clone());
@@ -637,13 +621,7 @@ pub fn rollback() -> Result<Option<PathBuf>> {
             let install_dir = stable_install_dir()?;
             let current_stable = install_dir.join("jcode");
             let temp_symlink = install_dir.join(format!(".jcode-symlink-{}", std::process::id()));
-
-            #[cfg(unix)]
-            {
-                let _ = fs::remove_file(&temp_symlink);
-                std::os::unix::fs::symlink(&previous_path, &temp_symlink)?;
-                fs::rename(&temp_symlink, &current_stable)?;
-            }
+            crate::platform::atomic_symlink_swap(&previous_path, &current_stable, &temp_symlink)?;
 
             return Ok(Some(previous_path));
         }

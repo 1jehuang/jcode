@@ -384,16 +384,8 @@ impl Drop for AmbientLock {
     }
 }
 
-#[cfg(unix)]
 fn is_pid_alive(pid: u32) -> bool {
-    // kill(pid, 0) checks if the process exists without sending a signal
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
-}
-
-#[cfg(not(unix))]
-fn is_pid_alive(_pid: u32) -> bool {
-    // Conservative: assume alive on non-Unix
-    true
+    crate::platform::is_process_running(pid)
 }
 
 // ---------------------------------------------------------------------------

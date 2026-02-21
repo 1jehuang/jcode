@@ -348,12 +348,7 @@ pub fn save_claude_tokens(tokens: &OAuthTokens) -> Result<()> {
     let json = serde_json::to_string_pretty(&auth)?;
     let auth_path = creds_dir.join("auth.json");
     std::fs::write(&auth_path, json)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    crate::platform::set_permissions_owner_only(&auth_path)?;
 
     Ok(())
 }
@@ -487,12 +482,7 @@ pub fn save_openai_tokens(tokens: &OAuthTokens) -> Result<()> {
     let json = serde_json::to_string_pretty(&auth)?;
     let auth_path = creds_dir.join("auth.json");
     std::fs::write(&auth_path, json)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    crate::platform::set_permissions_owner_only(&auth_path)?;
 
     Ok(())
 }

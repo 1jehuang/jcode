@@ -8821,11 +8821,7 @@ impl App {
         let content = format!("OPENROUTER_API_KEY={}\n", key);
         std::fs::write(&file_path, &content)?;
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o600))?;
-        }
+        crate::platform::set_permissions_owner_only(&file_path)?;
 
         std::env::set_var("OPENROUTER_API_KEY", key);
         Ok(())

@@ -8643,8 +8643,6 @@ fn get_repo_dir() -> Option<PathBuf> {
 /// Server hot-reload: pull, build, and exec into new binary
 #[allow(dead_code)]
 fn do_server_reload() -> Result<()> {
-    use std::os::unix::process::CommandExt;
-
     let repo_dir =
         get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
@@ -8685,9 +8683,9 @@ fn do_server_reload() -> Result<()> {
     }
 
     // Exec into new binary with serve command
-    let err = ProcessCommand::new(&exe).arg("serve").exec();
+    let err = crate::platform::replace_process(ProcessCommand::new(&exe).arg("serve"));
 
-    // exec() only returns on error
+    // replace_process() only returns on error
     Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
 }
 
@@ -8699,8 +8697,6 @@ async fn do_server_reload_with_progress(
     model_arg: Option<String>,
     socket_arg: String,
 ) -> Result<()> {
-    use std::os::unix::process::CommandExt;
-
     let send_progress =
         |step: &str, message: &str, success: Option<bool>, output: Option<String>| {
             let _ = tx.send(ServerEvent::ReloadProgress {
@@ -8815,9 +8811,9 @@ async fn do_server_reload_with_progress(
     if let Some(model) = model_arg {
         cmd.arg("--model").arg(model);
     }
-    let err = cmd.exec();
+    let err = crate::platform::replace_process(&mut cmd);
 
-    // exec() only returns on error
+    // replace_process() only returns on error
     Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
 }
 
@@ -8846,7 +8842,6 @@ fn normalize_model_arg(model: String) -> Option<String> {
 /// The server directly execs into the new binary instead of exiting
 /// NOTE: This should only be called on selfdev servers (guarded at call site)
 async fn monitor_selfdev_signals() {
-    use std::os::unix::process::CommandExt;
     use std::process::Command as ProcessCommand;
     use tokio::time::{interval, Duration};
 
@@ -8879,7 +8874,7 @@ async fn monitor_selfdev_signals() {
                         std::thread::sleep(std::time::Duration::from_millis(200));
 
                         // Exec into the new binary with serve mode
-                        let err = ProcessCommand::new(&binary).arg("serve").exec();
+                        let err = crate::platform::replace_process(ProcessCommand::new(&binary).arg("serve"));
 
                         // If we get here, exec failed
                         crate::logging::error(&format!(
@@ -8907,7 +8902,7 @@ async fn monitor_selfdev_signals() {
                     if binary.exists() {
                         std::thread::sleep(std::time::Duration::from_millis(200));
 
-                        let err = ProcessCommand::new(&binary).arg("serve").exec();
+                        let err = crate::platform::replace_process(ProcessCommand::new(&binary).arg("serve"));
 
                         crate::logging::error(&format!(
                             "Failed to exec into stable {:?}: {}",
