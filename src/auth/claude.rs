@@ -80,6 +80,20 @@ pub fn has_credentials() -> bool {
     load_credentials().is_ok()
 }
 
+/// Get the subscription type (e.g., "pro", "max") if available.
+pub fn get_subscription_type() -> Option<String> {
+    load_credentials().ok().and_then(|c| c.subscription_type)
+}
+
+/// Check if the subscription is Claude Max (allows Opus models).
+/// Returns true if subscription type is "max" or unknown (benefit of the doubt).
+pub fn is_max_subscription() -> bool {
+    match get_subscription_type() {
+        Some(t) => t != "pro",
+        None => true, // unknown = don't restrict
+    }
+}
+
 pub fn load_credentials() -> Result<ClaudeCredentials> {
     let now_ms = chrono::Utc::now().timestamp_millis();
 

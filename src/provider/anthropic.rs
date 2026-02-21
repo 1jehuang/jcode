@@ -132,8 +132,13 @@ pub struct AnthropicProvider {
 
 impl AnthropicProvider {
     pub fn new() -> Self {
-        let model =
-            std::env::var("JCODE_ANTHROPIC_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let model = std::env::var("JCODE_ANTHROPIC_MODEL").unwrap_or_else(|_| {
+            if crate::auth::claude::is_max_subscription() {
+                DEFAULT_MODEL.to_string()
+            } else {
+                "claude-sonnet-4-6".to_string()
+            }
+        });
 
         // Trigger background usage fetch so extra_usage is known before first API call
         let _ = tokio::runtime::Handle::try_current().map(|_| {

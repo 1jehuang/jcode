@@ -889,23 +889,42 @@ impl Provider for MultiProvider {
         let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
 
         // Anthropic models (oauth and/or api-key)
+        let is_max = crate::auth::claude::is_max_subscription();
         for model in ALL_CLAUDE_MODELS {
+            let is_1m = model.ends_with("[1m]");
+            let is_opus = model.contains("opus");
+
+            let (available, detail) = if is_1m && !crate::usage::has_extra_usage() {
+                (false, "requires extra usage".to_string())
+            } else if is_opus && !is_max && has_oauth && !has_api_key {
+                (false, "requires Max subscription".to_string())
+            } else {
+                (true, String::new())
+            };
+
             if has_oauth {
                 routes.push(ModelRoute {
                     model: model.to_string(),
                     provider: "Anthropic".to_string(),
                     api_method: "oauth".to_string(),
-                    available: true,
-                    detail: String::new(),
+                    available,
+                    detail: detail.clone(),
                 });
             }
             if has_api_key {
+                // API key = pay-per-token, no subscription tier restriction on Opus
+                // but 1M context still requires extra usage
+                let (ak_available, ak_detail) = if is_1m && !crate::usage::has_extra_usage() {
+                    (false, "requires extra usage".to_string())
+                } else {
+                    (true, String::new())
+                };
                 routes.push(ModelRoute {
                     model: model.to_string(),
                     provider: "Anthropic".to_string(),
                     api_method: "api-key".to_string(),
-                    available: true,
-                    detail: String::new(),
+                    available: ak_available,
+                    detail: ak_detail,
                 });
             }
             if !has_oauth && !has_api_key {

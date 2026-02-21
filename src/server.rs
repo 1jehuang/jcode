@@ -5818,7 +5818,7 @@ async fn execute_debug_command(
             .trim()
             .to_lowercase();
         let default_model = match provider.as_str() {
-            "claude" | "anthropic" => "claude-opus-4-5-20251101",
+            "claude" | "anthropic" => if crate::auth::claude::is_max_subscription() { "claude-opus-4-6" } else { "claude-sonnet-4-6" },
             "openai" | "codex" => "gpt-5.3-codex-spark",
             "openrouter" => "anthropic/claude-sonnet-4",
             "cursor" => "gpt-5",
