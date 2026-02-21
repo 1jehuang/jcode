@@ -344,6 +344,10 @@ impl TuiState for BenchState {
         40
     }
 
+    fn diagram_pane_animating(&self) -> bool {
+        false
+    }
+
     fn diagram_pane_enabled(&self) -> bool {
         true
     }

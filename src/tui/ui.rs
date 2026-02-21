@@ -2111,6 +2111,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             diagram_scroll_y,
             app.diagram_zoom(),
             pane_position,
+            app.diagram_pane_animating(),
         );
     }
 
@@ -3847,6 +3848,7 @@ fn draw_pinned_diagram(
     scroll_y: i32,
     zoom_percent: u8,
     pane_position: crate::config::DiagramPanePosition,
+    pane_animating: bool,
 ) {
     use ratatui::widgets::{BorderType, Clear, Paragraph, Wrap};
 
@@ -3913,7 +3915,14 @@ fn draw_pinned_diagram(
     // Render the diagram image inside the border
     if inner.width > 0 && inner.height > 0 {
         let mut rendered = 0u16;
-        if super::mermaid::protocol_type().is_some() {
+        if pane_animating {
+            frame.render_widget(Clear, inner);
+            let placeholder =
+                super::mermaid::diagram_placeholder_lines(diagram.width, diagram.height);
+            let paragraph = Paragraph::new(placeholder).wrap(Wrap { trim: true });
+            frame.render_widget(paragraph, inner);
+            rendered = inner.height;
+        } else if super::mermaid::protocol_type().is_some() {
             if focused {
                 rendered = super::mermaid::render_image_widget_viewport(
                     diagram.hash,

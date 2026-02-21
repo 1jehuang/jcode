@@ -3740,13 +3740,28 @@ impl App {
                                 }
                             }
                             Some(Ok(Event::Paste(text))) => {
-                                // Handle bracketed paste from terminal
                                 self.handle_paste(text);
                             }
                             Some(Ok(Event::Mouse(mouse))) => {
                                 self.handle_mouse_event(mouse);
                             }
                             _ => {}
+                        }
+                        while crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+                            if let Ok(ev) = crossterm::event::read() {
+                                match ev {
+                                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                                        self.handle_key(key.code, key.modifiers)?;
+                                    }
+                                    Event::Paste(text) => {
+                                        self.handle_paste(text);
+                                    }
+                                    Event::Mouse(mouse) => {
+                                        self.handle_mouse_event(mouse);
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
                     }
                     // Handle background task completion notifications
@@ -3934,9 +3949,21 @@ impl App {
                 }
             };
 
+            crate::logging::info(&format!(
+                "Reload check: session_to_resume={:?}, remote_session_id={:?}, reconnect_attempts={}",
+                session_to_resume, self.remote_session_id, reconnect_attempts
+            ));
             let has_reload_ctx_for_session = session_to_resume
                 .as_deref()
-                .and_then(|sid| ReloadContext::peek_for_session(sid).ok().flatten())
+                .and_then(|sid| {
+                    let result = ReloadContext::peek_for_session(sid);
+                    crate::logging::info(&format!(
+                        "Reload peek_for_session({}) = {:?}",
+                        sid,
+                        result.as_ref().map(|r| r.is_some())
+                    ));
+                    result.ok().flatten()
+                })
                 .is_some();
 
             // Check for per-session client-reload-pending marker (written when a
@@ -4048,10 +4075,25 @@ impl App {
             // This must run on both reconnect and first connect after a client hot-reload.
             let should_queue_reload_continuation =
                 !self.reload_info.is_empty() || has_reload_ctx_for_session || has_client_reload_marker;
+            crate::logging::info(&format!(
+                "Reload continuation check: should_queue={}, reload_info_empty={}, has_ctx={}, has_marker={}",
+                should_queue_reload_continuation,
+                self.reload_info.is_empty(),
+                has_reload_ctx_for_session,
+                has_client_reload_marker
+            ));
             if should_queue_reload_continuation {
                 let reload_ctx = session_to_resume
                     .as_deref()
-                    .and_then(|sid| ReloadContext::load_for_session(sid).ok().flatten());
+                    .and_then(|sid| {
+                        let result = ReloadContext::load_for_session(sid);
+                        crate::logging::info(&format!(
+                            "Reload load_for_session({}) = {:?}",
+                            sid,
+                            result.as_ref().map(|r| r.is_some())
+                        ));
+                        result.ok().flatten()
+                    });
 
                 let continuation_msg = if let Some(ctx) = reload_ctx {
                     let action = if ctx.is_rollback {
@@ -12831,6 +12873,12 @@ impl super::TuiState for App {
 
     fn diagram_pane_ratio(&self) -> u8 {
         self.animated_diagram_pane_ratio()
+    }
+
+    fn diagram_pane_animating(&self) -> bool {
+        self.diagram_pane_anim_start
+            .map(|s| s.elapsed().as_secs_f32() < Self::DIAGRAM_PANE_ANIM_DURATION)
+            .unwrap_or(false)
     }
 
     fn diagram_pane_enabled(&self) -> bool {

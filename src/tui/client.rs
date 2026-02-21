@@ -599,6 +599,24 @@ impl ClientApp {
                             }
                             _ => {}
                         }
+                        while crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+                            if let Ok(ev) = crossterm::event::read() {
+                                match ev {
+                                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                                        self.handle_key(key.code, key.modifiers, &writer).await?;
+                                    }
+                                    Event::Mouse(mouse) => {
+                                        use crossterm::event::MouseEventKind;
+                                        match mouse.kind {
+                                            MouseEventKind::ScrollUp => self.scroll_up(3),
+                                            MouseEventKind::ScrollDown => self.scroll_down(3),
+                                            _ => {}
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1494,6 +1512,10 @@ impl TuiState for ClientApp {
 
     fn diagram_pane_ratio(&self) -> u8 {
         40
+    }
+
+    fn diagram_pane_animating(&self) -> bool {
+        false
     }
 
     fn diagram_pane_enabled(&self) -> bool {
