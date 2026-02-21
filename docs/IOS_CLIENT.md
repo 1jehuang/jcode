@@ -117,27 +117,41 @@ Pairing Flow:
   ]
 ```
 
-### 3. Server Discovery
+### 3. Connectivity (Tailscale-first)
 
-The iOS app needs to find the jcode server on the local network.
+The iOS app connects to the jcode server over **Tailscale** as the primary transport. No LAN-only discovery, no mDNS fragility, no port forwarding.
 
-**Option A: Bonjour/mDNS (recommended for LAN)**
-- Server advertises `_jcode._tcp` service via mDNS
-- iOS discovers it automatically (NSNetServiceBrowser)
-- Works on any LAN without configuration
-- Rust crate: `mdns-sd` or `zeroconf`
+**Why Tailscale-first:**
+- Works from anywhere - home, coffee shop, cellular, different country
+- Already encrypted (WireGuard) - no TLS cert management on our side
+- Stable hostnames (`laptop.tail1234.ts.net`) that survive network changes
+- Punches through NAT automatically
+- Tailscale has a native iOS app, so the phone is already on the network
 
-**Option B: Tailscale/WireGuard (for remote access)**
-- User's phone and laptop on the same Tailscale network
-- Server binds to Tailscale IP
-- Manual configuration in the iOS app (enter Tailscale hostname)
-- Works from anywhere, not just LAN
+```
+iPhone                     Tailscale Network              Laptop
+(Tailscale app)            (WireGuard mesh)               (tailscaled)
+     │                            │                           │
+     │  jcode iOS app connects to laptop.tail1234.ts.net:7643 │
+     │────────────── encrypted WireGuard tunnel ──────────────►│
+     │                                                        │
+     │◄───────── WebSocket (plain, tunnel is encrypted) ─────►│
+```
 
-**Option C: Manual IP/hostname**
-- User enters `hostname:port` directly
-- Fallback when mDNS doesn't work
+**Setup flow:**
+1. User installs Tailscale on both phone and laptop (most devs already have this)
+2. jcode server binds to Tailscale IP (or `0.0.0.0` and Tailscale handles routing)
+3. iOS app asks for Tailscale hostname on first launch (e.g. `laptop` or `100.88.154.108`)
+4. Connection goes through WireGuard tunnel - encrypted, works everywhere
+5. Server can also use Tailscale's MagicDNS for human-friendly names
 
-The app should support all three, trying Bonjour first.
+**Fallback options (not primary):**
+- **Manual IP/hostname** - for users not on Tailscale, enter `hostname:port` directly
+  Requires TLS (self-signed or Let's Encrypt) since there's no tunnel encryption.
+- **LAN Bonjour** - possible future addition, but not worth the complexity upfront.
+  mDNS is flaky on corporate/guest WiFi and only works on same network.
+
+**No cloud relay needed** - Tailscale is peer-to-peer. Traffic goes directly between phone and laptop, even across networks. No jcode server in the cloud.
 
 ### 4. Push Notifications (APNs)
 
@@ -510,7 +524,7 @@ Borrow the MacBook for initial setup, then iterate.
 
 ### Phase 3: Ambient Mode + Notifications
 
-11. ntfy.sh push notification integration
+11. APNs push notification integration
 12. Ambient dashboard (status, history, schedule, memory health)
 13. Tool approval via push notification (actionable)
 14. iOS widgets (WidgetKit) for ambient status on home screen
@@ -554,21 +568,20 @@ Borrow the MacBook for initial setup, then iterate.
 |-----------|-----------|-------|
 | **iOS UI** | SwiftUI | Modern, declarative, good for our UX |
 | **Networking** | URLSessionWebSocketTask | Native iOS WebSocket, no dependencies |
-| **Discovery** | NWBrowser (Network.framework) | Modern replacement for NSNetServiceBrowser |
+| **Connectivity** | Tailscale + URLSession | Tailscale tunnel, plain WebSocket inside |
 | **Auth tokens** | Keychain Services | Secure, persists across app installs |
 | **Push notifications** | APNs (native) | Direct Apple push, no third-party relay |
 | **Syntax highlighting** | Splash or Highlightr | Swift libraries for code rendering |
 | **Widgets** | WidgetKit | Home screen ambient dashboard |
 | **Live Activities** | ActivityKit | Lock screen task progress |
 | **Server WebSocket** | tokio-tungstenite | Already a dependency |
-| **Server mDNS** | mdns-sd | Lightweight, async |
-| **Server TLS** | rustls | Already used via reqwest |
+| **Server TLS** | rustls (fallback only) | Only needed for non-Tailscale connections |
 
 ---
 
 ## Security Considerations
 
-- **All network connections must use TLS** (except localhost development)
+- **Tailscale provides encryption** - WireGuard tunnel encrypts all traffic. TLS only needed for non-Tailscale fallback connections.
 - **Auth tokens** stored in iOS Keychain, server stores only hashes
 - **Pairing codes** are time-limited (5 min) and single-use
 - **Device revocation** via `jcode devices revoke <name>`
@@ -580,9 +593,9 @@ Borrow the MacBook for initial setup, then iterate.
 
 ## Open Questions
 
-1. **Wake-on-LAN** - Can the iOS app wake a sleeping desktop? Would need WoL support in the server manager.
-2. **SSH tunnel fallback** - If the server is behind NAT without Tailscale, should the app support SSH tunneling?
-3. **Multiple servers** - The server manager UI supports this, but how to handle sessions spanning servers?
-4. **Offline mode** - How much should the app cache? Full conversation history? Just recent messages?
-5. **iPad as primary** - Should iPad support be a first-class goal or a stretch? Split view with code preview could be powerful.
-6. **Keyboard shortcuts** - iPad with keyboard should feel native (Cmd+Enter to send, etc.)
+1. **Wake-on-LAN** - Can the iOS app wake a sleeping desktop? Would need WoL support in the server manager. Tailscale has some "always on" features that might help.
+2. **Multiple servers** - The server manager UI supports this, but how to handle sessions spanning servers?
+3. **Offline mode** - How much should the app cache? Full conversation history? Just recent messages?
+4. **iPad as primary** - Should iPad support be a first-class goal or a stretch? Split view with code preview could be powerful.
+5. **Keyboard shortcuts** - iPad with keyboard should feel native (Cmd+Enter to send, etc.)
+6. **Tailscale requirement** - Should we require Tailscale, or invest in a non-Tailscale path early? Most developer users likely already use it or a similar overlay network.
