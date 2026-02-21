@@ -4189,81 +4189,123 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let col = picker.column;
     let is_preview = picker.preview;
 
-    // In preview mode, column order is: PROVIDER | MODEL | VIA
-    // In full mode, column order is: MODEL | PROVIDER | VIA
-    let col_names: [&str; 3] = if is_preview {
-        ["PROVIDER", "MODEL", "VIA"]
-    } else {
-        ["MODEL", "PROVIDER", "VIA"]
-    };
     let col_focus_style = Style::default().fg(Color::White).bold().underlined();
     let col_dim_style = Style::default().fg(DIM_COLOR);
 
-    // Header line: column headers + filter + count
-    let mut header_spans: Vec<Span> = Vec::new();
-    header_spans.push(Span::styled(" ", Style::default()));
+    // Marker takes 3 chars (" ▸ "), gaps between columns are 1 char each (leading space on col text)
+    let marker_width = 3usize;
 
-    // Filter display
-    if picker.filter.is_empty() {
-        header_spans.push(Span::styled(
-            "filter: ",
-            Style::default().fg(Color::Rgb(80, 80, 100)),
-        ));
+    // Compute column widths from actual filtered content
+    let mut max_provider_len = 0usize;
+    let mut max_via_len = 0usize;
+    for &fi in &picker.filtered {
+        let entry = &picker.models[fi];
+        let route = entry.routes.get(entry.selected_route);
+        if let Some(r) = route {
+            max_provider_len = max_provider_len.max(r.provider.len());
+            max_via_len = max_via_len.max(r.api_method.len());
+        }
+    }
+    // Include header labels in width calculation
+    max_provider_len = max_provider_len.max(8); // "PROVIDER"
+    max_via_len = max_via_len.max(3); // "VIA"
+
+    // In preview mode: provider and via are sized to content, model gets the rest
+    // In full mode: provider and via get comfortable widths, model gets the rest
+    let provider_width: usize;
+    let via_width: usize;
+    let model_width: usize;
+    if is_preview {
+        // +1 for leading space on each column
+        provider_width = (max_provider_len + 1).min(16);
+        via_width = (max_via_len + 1).min(12);
+        model_width = width.saturating_sub(marker_width + provider_width + via_width);
     } else {
-        header_spans.push(Span::styled("filter: ", Style::default().fg(DIM_COLOR)));
-        header_spans.push(Span::styled(
-            picker.filter.clone(),
-            Style::default().fg(Color::White).bold(),
-        ));
-        header_spans.push(Span::styled(" ", Style::default()));
+        via_width = 12;
+        provider_width = 20;
+        model_width = width.saturating_sub(marker_width + provider_width + via_width);
     }
 
-    // Count
-    let count_str = if filtered_count == total {
-        format!("({})", total)
+    // Display column order: preview = [provider, model, via], full = [model, provider, via]
+    // col_widths/col_labels/col_logical in display order
+    let (col_widths, col_labels, col_logical): ([usize; 3], [&str; 3], [usize; 3]) = if is_preview
+    {
+        (
+            [provider_width, model_width, via_width],
+            ["PROVIDER", "MODEL", "VIA"],
+            [1, 0, 2], // display pos -> logical col
+        )
     } else {
-        format!("({}/{})", filtered_count, total)
+        (
+            [model_width, provider_width, via_width],
+            ["MODEL", "PROVIDER", "VIA"],
+            [0, 1, 2],
+        )
+    };
+
+    // -- Header line, aligned to column widths --
+    let mut header_spans: Vec<Span> = Vec::new();
+
+    // First column header occupies marker_width + col_widths[0]
+    let first_label = col_labels[0];
+    let first_w = marker_width + col_widths[0];
+    let first_style = if col_logical[0] == col {
+        col_focus_style
+    } else {
+        col_dim_style
     };
     header_spans.push(Span::styled(
-        format!("{}  ", count_str),
-        Style::default().fg(DIM_COLOR),
+        format!(" {:<w$}", first_label, w = first_w.saturating_sub(1)),
+        first_style,
     ));
 
-    // Column headers with focus indicator
-    // In preview mode, map col index to display position (col 0=model maps to display pos 1)
-    for (i, name) in col_names.iter().enumerate() {
-        if i > 0 {
-            header_spans.push(Span::styled("  ", Style::default()));
-        }
-        let logical_col = if is_preview {
-            // Display order: PROVIDER(0) MODEL(1) VIA(2)
-            // Logical cols:  1           0        2
-            match i {
-                0 => 1, // PROVIDER display pos -> logical col 1
-                1 => 0, // MODEL display pos -> logical col 0
-                _ => 2, // VIA display pos -> logical col 2
-            }
+    // Second column header (center-aligned in preview mode)
+    let second_label = col_labels[1];
+    let second_w = col_widths[1];
+    let second_style = if col_logical[1] == col {
+        col_focus_style
+    } else {
+        col_dim_style
+    };
+    header_spans.push(Span::styled(
+        if is_preview {
+            format!("{:^w$}", second_label, w = second_w)
         } else {
-            i
-        };
-        header_spans.push(Span::styled(
-            name.to_string(),
-            if logical_col == col {
-                col_focus_style
-            } else {
-                col_dim_style
-            },
-        ));
+            format!("{:<w$}", second_label, w = second_w)
+        },
+        second_style,
+    ));
+
+    // Third column header
+    let third_label = col_labels[2];
+    let third_style = if col_logical[2] == col {
+        col_focus_style
+    } else {
+        col_dim_style
+    };
+    header_spans.push(Span::styled(format!(" {}", third_label), third_style));
+
+    // Filter + count + hint after headers
+    let mut meta_parts = String::new();
+    if !picker.filter.is_empty() {
+        meta_parts.push_str(&format!("  \"{}\"", picker.filter));
     }
+    let count_str = if filtered_count == total {
+        format!(" ({})", total)
+    } else {
+        format!(" ({}/{})", filtered_count, total)
+    };
+    meta_parts.push_str(&count_str);
+    header_spans.push(Span::styled(meta_parts, Style::default().fg(DIM_COLOR)));
 
     if is_preview {
         header_spans.push(Span::styled(
-            "  press Enter to open",
+            "  ↵ open",
             Style::default().fg(Color::Rgb(60, 60, 80)).italic(),
         ));
     } else {
         header_spans.push(Span::styled(
-            "  ↑↓ ←→ Enter Esc",
+            "  ↑↓ ←→ ↵ Esc",
             Style::default().fg(Color::Rgb(60, 60, 80)),
         ));
     }
@@ -4280,22 +4322,6 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         let paragraph = Paragraph::new(lines);
         frame.render_widget(paragraph, area);
         return;
-    }
-
-    // Calculate column widths based on content
-    // In preview mode: model (center) gets priority, provider/via are compact
-    let via_width: usize;
-    let provider_width: usize;
-    let model_width: usize;
-    if is_preview {
-        // Compact side columns, model gets remaining space
-        provider_width = 14;
-        via_width = 10;
-        model_width = width.saturating_sub(3 + provider_width + via_width + 4);
-    } else {
-        via_width = 12;
-        provider_width = 20;
-        model_width = width.saturating_sub(3 + provider_width + via_width + 4);
     }
 
     // Vertical list
@@ -4337,7 +4363,7 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
         let unavailable = route.map(|r| !r.available).unwrap_or(true);
 
-        // Prepare model display text
+        // -- Build model column spans (with fuzzy highlighting) --
         let suffix = if entry.recommended && !entry.is_current {
             " ★".to_string()
         } else if entry.old && !entry.is_current {
@@ -4356,10 +4382,15 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             String::new()
         };
         let display_name = format!("{}{}", entry.name, suffix);
-        let model_text = if display_name.len() > model_width {
-            format!("{:<w$}", &display_name[..model_width], w = model_width)
-        } else {
-            format!("{:<w$}", display_name, w = model_width)
+        let padded_model: String = {
+            let chars: Vec<char> = display_name.chars().collect();
+            if chars.len() > model_width {
+                chars[..model_width].iter().collect()
+            } else if is_preview {
+                format!("{:^w$}", display_name, w = model_width)
+            } else {
+                format!("{:<w$}", display_name, w = model_width)
+            }
         };
         let model_style = if unavailable {
             Style::default().fg(Color::Rgb(80, 80, 80))
@@ -4378,33 +4409,42 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             Style::default().fg(Color::Rgb(200, 200, 220))
         };
 
-        // Build model spans with fuzzy match highlighting
         let match_positions = if !picker.filter.is_empty() {
-            fuzzy_match_positions(&picker.filter, &entry.name)
+            let raw = fuzzy_match_positions(&picker.filter, &entry.name);
+            if is_preview && !raw.is_empty() {
+                let name_len = display_name.chars().count();
+                let pad = if name_len < model_width {
+                    (model_width - name_len) / 2
+                } else {
+                    0
+                };
+                raw.into_iter().map(|p| p + pad).collect()
+            } else {
+                raw
+            }
         } else {
             Vec::new()
         };
         let model_spans: Vec<Span> = if match_positions.is_empty() || unavailable {
-            vec![Span::styled(model_text.clone(), model_style)]
+            vec![Span::styled(padded_model, model_style)]
         } else {
-            let model_chars: Vec<char> = model_text.chars().collect();
+            let model_chars: Vec<char> = padded_model.chars().collect();
             let highlight_style = model_style.underlined();
             let mut result = Vec::new();
             let mut run_start = 0;
-            let mut is_match_run = false;
-            if !model_chars.is_empty() {
-                is_match_run = match_positions.contains(&0);
-            }
+            let mut is_match_run = !model_chars.is_empty() && match_positions.contains(&0);
             for ci in 1..=model_chars.len() {
                 let cur_is_match = ci < model_chars.len() && match_positions.contains(&ci);
                 if cur_is_match != is_match_run || ci == model_chars.len() {
                     let chunk: String = model_chars[run_start..ci].iter().collect();
-                    let style = if is_match_run {
-                        highlight_style
-                    } else {
-                        model_style
-                    };
-                    result.push(Span::styled(chunk, style));
+                    result.push(Span::styled(
+                        chunk,
+                        if is_match_run {
+                            highlight_style
+                        } else {
+                            model_style
+                        },
+                    ));
                     run_start = ci;
                     is_match_run = cur_is_match;
                 }
@@ -4412,24 +4452,23 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             result
         };
 
-        // Prepare provider display text
+        // -- Build provider column --
         let route_count = entry.routes.len();
-        let provider_text = route.map(|r| r.provider.as_str()).unwrap_or("—");
-        let provider_display = if col == 0 && route_count > 1 {
-            let label = format!("{} ({})", provider_text, route_count);
-            if label.len() > provider_width {
-                format!(" {:<w$}", &label[..provider_width], w = provider_width)
-            } else {
-                format!(" {:<w$}", label, w = provider_width)
-            }
-        } else if provider_text.len() > provider_width {
-            format!(
-                " {:<w$}",
-                &provider_text[..provider_width],
-                w = provider_width
-            )
+        let provider_raw = route.map(|r| r.provider.as_str()).unwrap_or("—");
+        let provider_label = if col == 0 && route_count > 1 {
+            format!("{} ({})", provider_raw, route_count)
         } else {
-            format!(" {:<w$}", provider_text, w = provider_width)
+            provider_raw.to_string()
+        };
+        let pw = provider_width.saturating_sub(1); // -1 for leading space
+        let provider_display = {
+            let chars: Vec<char> = provider_label.chars().collect();
+            if chars.len() > pw {
+                let truncated: String = chars[..pw].iter().collect();
+                format!(" {:<w$}", truncated, w = pw)
+            } else {
+                format!(" {:<w$}", provider_label, w = pw)
+            }
         };
         let provider_style = if unavailable {
             Style::default().fg(Color::Rgb(80, 80, 80))
@@ -4442,9 +4481,18 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             Style::default().fg(Color::Rgb(140, 180, 255))
         };
 
-        // Prepare via display text
-        let via_text = route.map(|r| r.api_method.as_str()).unwrap_or("—");
-        let via_display = format!(" {:<w$}", via_text, w = via_width);
+        // -- Build via column --
+        let via_raw = route.map(|r| r.api_method.as_str()).unwrap_or("—");
+        let vw = via_width.saturating_sub(1);
+        let via_display = {
+            let chars: Vec<char> = via_raw.chars().collect();
+            if chars.len() > vw {
+                let truncated: String = chars[..vw].iter().collect();
+                format!(" {:<w$}", truncated, w = vw)
+            } else {
+                format!(" {:<w$}", via_raw, w = vw)
+            }
+        };
         let via_style = if unavailable {
             Style::default().fg(Color::Rgb(80, 80, 80))
         } else if is_row_selected && col == 2 {
@@ -4458,12 +4506,10 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
         // Emit columns in display order
         if is_preview {
-            // Preview mode: PROVIDER | MODEL | VIA
             spans.push(Span::styled(provider_display, provider_style));
             spans.extend(model_spans);
             spans.push(Span::styled(via_display, via_style));
         } else {
-            // Full mode: MODEL | PROVIDER | VIA
             spans.extend(model_spans);
             spans.push(Span::styled(provider_display, provider_style));
             spans.push(Span::styled(via_display, via_style));
