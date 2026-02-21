@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime};
 
 const GITHUB_REPO: &str = "1jehuang/jcode";
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const UPDATE_CHECK_INTERVAL_MAIN: Duration = Duration::from_secs(5 * 60); // 5 min for main channel
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -74,8 +75,15 @@ impl UpdateMetadata {
     }
 
     pub fn should_check(&self) -> bool {
+        let interval = if crate::config::config().features.update_channel
+            == crate::config::UpdateChannel::Main
+        {
+            UPDATE_CHECK_INTERVAL_MAIN
+        } else {
+            UPDATE_CHECK_INTERVAL
+        };
         match self.last_check.elapsed() {
-            Ok(elapsed) => elapsed > UPDATE_CHECK_INTERVAL,
+            Ok(elapsed) => elapsed > interval,
             Err(_) => true,
         }
     }
@@ -177,6 +185,14 @@ pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
 }
 
 pub fn check_for_update_blocking() -> Result<Option<GitHubRelease>> {
+    let channel = crate::config::config().features.update_channel;
+    match channel {
+        crate::config::UpdateChannel::Main => check_for_main_update_blocking(),
+        crate::config::UpdateChannel::Stable => check_for_stable_update_blocking(),
+    }
+}
+
+fn check_for_stable_update_blocking() -> Result<Option<GitHubRelease>> {
     let current_version = env!("JCODE_VERSION");
     let release = fetch_latest_release_blocking()?;
 
@@ -194,6 +210,101 @@ pub fn check_for_update_blocking() -> Result<Option<GitHubRelease>> {
 
         if has_asset {
             return Ok(Some(release));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Check for updates on the main branch (cutting edge channel).
+/// Compares the current binary's git hash against the latest commit on main.
+/// Uses the "nightly" release tag for pre-built binaries.
+fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
+    let current_hash = env!("JCODE_GIT_HASH");
+    if current_hash.is_empty() || current_hash == "unknown" {
+        crate::logging::info("Main channel: no git hash in binary, skipping update check");
+        return Ok(None);
+    }
+
+    // Get latest commit on main branch
+    let url = format!(
+        "https://api.github.com/repos/{}/commits/main",
+        GITHUB_REPO
+    );
+    let client = reqwest::blocking::Client::builder()
+        .timeout(UPDATE_CHECK_TIMEOUT)
+        .user_agent("jcode-updater")
+        .build()?;
+
+    let response = client.get(&url).send().context("Failed to check main branch")?;
+    if !response.status().is_success() {
+        anyhow::bail!("GitHub API error checking main: {}", response.status());
+    }
+
+    let commit: serde_json::Value = response.json().context("Failed to parse commit info")?;
+    let latest_sha = commit["sha"]
+        .as_str()
+        .unwrap_or("")
+        .get(..7)
+        .unwrap_or("");
+
+    if latest_sha.is_empty() {
+        return Ok(None);
+    }
+
+    // Compare short hashes
+    let current_short = if current_hash.len() >= 7 {
+        &current_hash[..7]
+    } else {
+        current_hash
+    };
+
+    if current_short == latest_sha {
+        crate::logging::info(&format!(
+            "Main channel: up to date ({})",
+            current_short
+        ));
+        return Ok(None);
+    }
+
+    crate::logging::info(&format!(
+        "Main channel: update available {} -> {}",
+        current_short, latest_sha
+    ));
+
+    // Try to find a nightly release with pre-built binaries
+    let nightly_url = format!(
+        "https://api.github.com/repos/{}/releases/tags/nightly",
+        GITHUB_REPO
+    );
+    let response = client.get(&nightly_url).send();
+    if let Ok(resp) = response {
+        if resp.status().is_success() {
+            if let Ok(release) = resp.json::<GitHubRelease>() {
+                let asset_name = get_asset_name();
+                let has_asset = release.assets.iter().any(|a| a.name.starts_with(asset_name));
+                if has_asset {
+                    return Ok(Some(release));
+                }
+            }
+        }
+    }
+
+    // No nightly release; fall back to latest stable release if it's newer
+    if let Ok(release) = fetch_latest_release_blocking() {
+        let asset_name = get_asset_name();
+        let has_asset = release.assets.iter().any(|a| a.name.starts_with(asset_name));
+        if has_asset {
+            // Check if the release commit is newer than our current hash
+            let release_hash = &release.target_commitish;
+            let release_short = if release_hash.len() >= 7 {
+                &release_hash[..7]
+            } else {
+                release_hash.as_str()
+            };
+            if release_short != current_short {
+                return Ok(Some(release));
+            }
         }
     }
 

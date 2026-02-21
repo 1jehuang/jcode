@@ -63,8 +63,8 @@ pub trait TuiState {
     fn is_processing(&self) -> bool;
     fn queued_messages(&self) -> &[String];
     fn interleave_message(&self) -> Option<&str>;
-    /// Message sent as soft interrupt but not yet injected (shown in queue preview)
-    fn pending_soft_interrupt(&self) -> Option<&str>;
+    /// Messages sent as soft interrupt but not yet injected (shown in queue preview)
+    fn pending_soft_interrupts(&self) -> &[String];
     fn scroll_offset(&self) -> usize;
     /// Whether auto-scroll to bottom is paused (user scrolled up during streaming)
     fn auto_scroll_paused(&self) -> bool;
@@ -210,7 +210,7 @@ pub(crate) fn startup_animation_active(state: &dyn TuiState) -> bool {
         && state.input().trim().is_empty()
         && state.queued_messages().is_empty()
         && state.interleave_message().is_none()
-        && state.pending_soft_interrupt().is_none()
+        && state.pending_soft_interrupts().is_empty()
         && state.picker_state().is_none()
 }
 

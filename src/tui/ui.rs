@@ -38,7 +38,7 @@ const DIM_COLOR: Color = Color::Rgb(80, 80, 80); // Dimmer gray
 const ACCENT_COLOR: Color = Color::Rgb(186, 139, 255); // Purple accent
 const QUEUED_COLOR: Color = Color::Rgb(255, 193, 7); // Amber/yellow for queued
 const ASAP_COLOR: Color = Color::Rgb(110, 210, 255); // Cyan for immediate send
-const PENDING_COLOR: Color = Color::Rgb(180, 230, 140); // Light green for sent/awaiting injection
+const PENDING_COLOR: Color = Color::Rgb(140, 140, 140); // Gray for sent/awaiting injection
 const USER_TEXT: Color = Color::Rgb(245, 245, 255); // Bright cool white (user messages)
 const USER_BG: Color = Color::Rgb(35, 40, 50); // Subtle dark blue background for user
 const AI_TEXT: Color = Color::Rgb(220, 220, 215); // Softer warm white (AI messages)
@@ -4798,26 +4798,25 @@ fn draw_send_mode_indicator(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 }
 
 fn pending_prompt_count(app: &dyn TuiState) -> usize {
-    let pending_soft_interrupt = app.is_processing()
-        && app
-            .pending_soft_interrupt()
-            .map(|msg| !msg.is_empty())
-            .unwrap_or(false);
+    let pending_count = if app.is_processing() {
+        app.pending_soft_interrupts().len()
+    } else {
+        0
+    };
     let interleave = app.is_processing()
         && app
             .interleave_message()
             .map(|msg| !msg.is_empty())
             .unwrap_or(false);
     app.queued_messages().len()
-        + if pending_soft_interrupt { 1 } else { 0 }
+        + pending_count
         + if interleave { 1 } else { 0 }
 }
 
 fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
     let mut previews = Vec::new();
     if app.is_processing() {
-        // Show pending soft interrupt (sent to server, awaiting injection)
-        if let Some(msg) = app.pending_soft_interrupt() {
+        for msg in app.pending_soft_interrupts() {
             if !msg.is_empty() {
                 previews.push(format!("↻ {}", msg.chars().take(100).collect::<String>()));
             }
@@ -4846,10 +4845,9 @@ enum QueuedMsgType {
 fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usize) {
     let mut items: Vec<(QueuedMsgType, &str)> = Vec::new();
     if app.is_processing() {
-        // Pending soft interrupt (sent to server, awaiting injection)
-        if let Some(msg) = app.pending_soft_interrupt() {
+        for msg in app.pending_soft_interrupts() {
             if !msg.is_empty() {
-                items.push((QueuedMsgType::Pending, msg));
+                items.push((QueuedMsgType::Pending, msg.as_str()));
             }
         }
         // Interleave message (in buffer, ready to send)

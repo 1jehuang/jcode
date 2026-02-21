@@ -207,6 +207,31 @@ impl DisplayConfig {
     }
 }
 
+/// Update channel: how aggressively to receive updates
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    /// Only update from tagged GitHub Releases (default)
+    Stable,
+    /// Update from latest commit on main branch (bleeding edge)
+    Main,
+}
+
+impl Default for UpdateChannel {
+    fn default() -> Self {
+        Self::Stable
+    }
+}
+
+impl std::fmt::Display for UpdateChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stable => write!(f, "stable"),
+            Self::Main => write!(f, "main"),
+        }
+    }
+}
+
 /// Runtime feature toggles
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -217,6 +242,8 @@ pub struct FeatureConfig {
     pub swarm: bool,
     /// Inject timestamps into user messages and tool results sent to the model (default: true)
     pub message_timestamps: bool,
+    /// Update channel: "stable" (releases only) or "main" (latest commits)
+    pub update_channel: UpdateChannel,
 }
 
 impl Default for FeatureConfig {
@@ -225,6 +252,7 @@ impl Default for FeatureConfig {
             memory: true,
             swarm: true,
             message_timestamps: true,
+            update_channel: UpdateChannel::default(),
         }
     }
 }
@@ -503,6 +531,17 @@ impl Config {
                 self.features.swarm = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_UPDATE_CHANNEL") {
+            match v.trim().to_lowercase().as_str() {
+                "main" | "nightly" | "edge" => {
+                    self.features.update_channel = UpdateChannel::Main;
+                }
+                "stable" | "release" => {
+                    self.features.update_channel = UpdateChannel::Stable;
+                }
+                _ => {}
+            }
+        }
 
         // Ambient
         if let Ok(v) = std::env::var("JCODE_AMBIENT_ENABLED") {
@@ -687,6 +726,9 @@ idle_animation = true
 memory = true
 # Swarm: multi-session coordination features
 swarm = true
+# Update channel: "stable" (releases only) or "main" (latest commits on push)
+# Set to "main" for bleeding edge updates every time code is pushed
+update_channel = "stable"
 
 [provider]
 # Default model (optional, uses provider default if not set)
@@ -797,6 +839,7 @@ desktop_notifications = true
 **Features:**
 - Memory: {}
 - Swarm: {}
+- Update channel: {}
 
 **Provider:**
 - Default model: {}
@@ -846,6 +889,7 @@ desktop_notifications = true
             self.display.idle_animation,
             self.features.memory,
             self.features.swarm,
+            self.features.update_channel,
             self.provider
                 .default_model
                 .as_deref()

@@ -54,6 +54,10 @@ pub enum Request {
         urgent: bool,
     },
 
+    /// Cancel all pending soft interrupts (remove from server queue before injection)
+    #[serde(rename = "cancel_soft_interrupts")]
+    CancelSoftInterrupts { id: u64 },
+
     /// Clear conversation history
     #[serde(rename = "clear")]
     Clear { id: u64 },
@@ -690,6 +694,7 @@ impl Request {
             Request::Cancel { id } => *id,
             Request::BackgroundTool { id } => *id,
             Request::SoftInterrupt { id, .. } => *id,
+            Request::CancelSoftInterrupts { id } => *id,
             Request::Clear { id } => *id,
             Request::Ping { id } => *id,
             Request::GetState { id } => *id,

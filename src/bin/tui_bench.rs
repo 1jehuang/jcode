@@ -154,8 +154,8 @@ impl TuiState for BenchState {
         None
     }
 
-    fn pending_soft_interrupt(&self) -> Option<&str> {
-        None
+    fn pending_soft_interrupts(&self) -> &[String] {
+        &[]
     }
 
     fn scroll_offset(&self) -> usize {

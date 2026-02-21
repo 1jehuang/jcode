@@ -387,7 +387,7 @@ struct ScrollTestState {
     streaming_text: String,
     queued_messages: Vec<String>,
     interleave_message: Option<String>,
-    pending_soft_interrupt: Option<String>,
+    pending_soft_interrupts: Vec<String>,
     input: String,
     cursor_pos: usize,
     status: ProcessingStatus,
@@ -399,6 +399,9 @@ struct ScrollTestState {
     diagram_scroll_x: i32,
     diagram_scroll_y: i32,
     diagram_pane_ratio: u8,
+    diagram_pane_ratio_from: u8,
+    diagram_pane_ratio_target: u8,
+    diagram_pane_anim_start: Option<Instant>,
     diagram_pane_enabled: bool,
     diagram_pane_position: crate::config::DiagramPanePosition,
     diagram_zoom: u8,
@@ -612,6 +615,10 @@ pub struct App {
     diagram_scroll_y: i32,
     // Diagram pane width ratio (percentage)
     diagram_pane_ratio: u8,
+    // Animation state for smooth pane ratio transitions
+    diagram_pane_ratio_from: u8,
+    diagram_pane_ratio_target: u8,
+    diagram_pane_anim_start: Option<Instant>,
     // Whether the pinned diagram pane is visible
     diagram_pane_enabled: bool,
     // Position of pinned diagram pane (side or top)
@@ -639,7 +646,7 @@ pub struct App {
     // Message to interleave during processing (set via Shift+Enter)
     interleave_message: Option<String>,
     // Message sent as soft interrupt but not yet injected (shown in queue preview until injected)
-    pending_soft_interrupt: Option<String>,
+    pending_soft_interrupts: Vec<String>,
     // Queue mode: if true, Enter during processing queues; if false, Enter queues to send next
     // Toggle with Ctrl+Tab or Ctrl+T
     queue_mode: bool,
@@ -679,7 +686,7 @@ impl ScrollTestState {
             streaming_text: app.streaming_text.clone(),
             queued_messages: app.queued_messages.clone(),
             interleave_message: app.interleave_message.clone(),
-            pending_soft_interrupt: app.pending_soft_interrupt.clone(),
+            pending_soft_interrupts: app.pending_soft_interrupts.clone(),
             input: app.input.clone(),
             cursor_pos: app.cursor_pos,
             status: app.status.clone(),
@@ -691,6 +698,9 @@ impl ScrollTestState {
             diagram_scroll_x: app.diagram_scroll_x,
             diagram_scroll_y: app.diagram_scroll_y,
             diagram_pane_ratio: app.diagram_pane_ratio,
+            diagram_pane_ratio_from: app.diagram_pane_ratio_from,
+            diagram_pane_ratio_target: app.diagram_pane_ratio_target,
+            diagram_pane_anim_start: app.diagram_pane_anim_start,
             diagram_pane_enabled: app.diagram_pane_enabled,
             diagram_pane_position: app.diagram_pane_position,
             diagram_zoom: app.diagram_zoom,
@@ -706,7 +716,7 @@ impl ScrollTestState {
         app.streaming_text = self.streaming_text;
         app.queued_messages = self.queued_messages;
         app.interleave_message = self.interleave_message;
-        app.pending_soft_interrupt = self.pending_soft_interrupt;
+        app.pending_soft_interrupts = self.pending_soft_interrupts;
         app.input = self.input;
         app.cursor_pos = self.cursor_pos;
         app.status = self.status;
@@ -718,6 +728,9 @@ impl ScrollTestState {
         app.diagram_scroll_x = self.diagram_scroll_x;
         app.diagram_scroll_y = self.diagram_scroll_y;
         app.diagram_pane_ratio = self.diagram_pane_ratio;
+        app.diagram_pane_ratio_from = self.diagram_pane_ratio_from;
+        app.diagram_pane_ratio_target = self.diagram_pane_ratio_target;
+        app.diagram_pane_anim_start = self.diagram_pane_anim_start;
         app.diagram_pane_enabled = self.diagram_pane_enabled;
         app.diagram_pane_position = self.diagram_pane_position;
         app.diagram_zoom = self.diagram_zoom;
@@ -878,6 +891,9 @@ impl App {
             diagram_scroll_x: 0,
             diagram_scroll_y: 0,
             diagram_pane_ratio: 40,
+            diagram_pane_ratio_from: 40,
+            diagram_pane_ratio_target: 40,
+            diagram_pane_anim_start: None,
             diagram_pane_enabled: true,
             diagram_pane_position: crate::config::DiagramPanePosition::default(),
             diagram_zoom: 100,
@@ -891,7 +907,7 @@ impl App {
             scroll_bookmark: None,
             status_notice: None,
             interleave_message: None,
-            pending_soft_interrupt: None,
+            pending_soft_interrupts: Vec::new(),
             queue_mode: display.queue_mode,
             tab_completion_state: None,
             app_started: Instant::now(),
@@ -1444,10 +1460,27 @@ impl App {
         self.diagram_scroll_y = (self.diagram_scroll_y + dy).max(0);
     }
 
+    const DIAGRAM_PANE_ANIM_DURATION: f32 = 0.15;
+
+    fn animated_diagram_pane_ratio(&self) -> u8 {
+        let Some(start) = self.diagram_pane_anim_start else {
+            return self.diagram_pane_ratio_target;
+        };
+        let elapsed = start.elapsed().as_secs_f32();
+        let t = (elapsed / Self::DIAGRAM_PANE_ANIM_DURATION).clamp(0.0, 1.0);
+        let t = t * t * (3.0 - 2.0 * t); // smoothstep
+        let from = self.diagram_pane_ratio_from as f32;
+        let to = self.diagram_pane_ratio_target as f32;
+        (from + (to - from) * t).round() as u8
+    }
+
     fn adjust_diagram_pane_ratio(&mut self, delta: i8) {
-        let next = (self.diagram_pane_ratio as i16 + delta as i16).clamp(25, 70) as u8;
-        if next != self.diagram_pane_ratio {
-            self.diagram_pane_ratio = next;
+        let current_target = self.diagram_pane_ratio_target;
+        let next = (current_target as i16 + delta as i16).clamp(25, 70) as u8;
+        if next != current_target {
+            self.diagram_pane_ratio_from = self.animated_diagram_pane_ratio();
+            self.diagram_pane_ratio_target = next;
+            self.diagram_pane_anim_start = Some(Instant::now());
             self.set_status_notice(format!("Diagram pane: {}%", next));
         }
     }
@@ -1991,7 +2024,7 @@ impl App {
         self.clear_streaming_render_state();
         self.queued_messages.clear();
         self.interleave_message = None;
-        self.pending_soft_interrupt = None;
+        self.pending_soft_interrupts.clear();
         self.status = ProcessingStatus::Idle;
         self.processing_started = None;
         self.status_notice = None;
@@ -2400,7 +2433,7 @@ impl App {
                 "diagram_focus": self.diagram_focus,
                 "diagram_index": self.diagram_index,
                 "diagram_scroll": [self.diagram_scroll_x, self.diagram_scroll_y],
-                "diagram_pane_ratio": self.diagram_pane_ratio,
+                "diagram_pane_ratio": self.diagram_pane_ratio_target,
                 "diagram_pane_enabled": self.diagram_pane_enabled,
                 "diagram_pane_position": format!("{:?}", self.diagram_pane_position),
                 "diagram_zoom": self.diagram_zoom,
@@ -2876,7 +2909,7 @@ impl App {
                 "diagram_focus": self.diagram_focus,
                 "diagram_index": self.diagram_index,
                 "diagram_scroll": [self.diagram_scroll_x, self.diagram_scroll_y],
-                "diagram_pane_ratio": self.diagram_pane_ratio,
+                "diagram_pane_ratio": self.diagram_pane_ratio_target,
                 "diagram_pane_enabled": self.diagram_pane_enabled,
                 "diagram_pane_position": format!("{:?}", self.diagram_pane_position),
                 "diagram_zoom": self.diagram_zoom,
@@ -4140,7 +4173,7 @@ impl App {
                                 // If processing: send any buffered interleave immediately as soft interrupt
                                 // If not processing: send interleave or queued messages directly
                                 if self.is_processing {
-                                    if self.interleave_message.is_some() && self.pending_soft_interrupt.is_none() {
+                                    if self.interleave_message.is_some() {
                                         // Flush any leftover interleave buffer (e.g. from debug commands)
                                         if let Some(interleave_msg) = self.interleave_message.take() {
                                             if !interleave_msg.trim().is_empty() {
@@ -4150,7 +4183,7 @@ impl App {
                                                         "Failed to queue soft interrupt: {}", e
                                                     )));
                                                 } else {
-                                                    self.pending_soft_interrupt = Some(msg_clone);
+                                                    self.pending_soft_interrupts.push(msg_clone);
                                                 }
                                             }
                                         }
@@ -4744,7 +4777,7 @@ impl App {
                 self.is_processing = false;
                 self.status = ProcessingStatus::Idle;
                 self.interleave_message = None;
-                self.pending_soft_interrupt = None;
+                self.pending_soft_interrupts.clear();
                 crate::tui::mermaid::clear_streaming_preview_diagram();
                 self.thought_line_inserted = false;
                 self.thinking_prefix_emitted = false;
@@ -4862,7 +4895,7 @@ impl App {
                         self.queued_messages.clear();
                     }
                     self.interleave_message = None;
-                    self.pending_soft_interrupt = None;
+                    self.pending_soft_interrupts.clear();
                     self.remote_total_tokens = None;
                     self.remote_swarm_members.clear();
                     self.swarm_plan_items.clear();
@@ -5015,7 +5048,7 @@ impl App {
             } => {
                 // When injected, NOW add the message to display_messages
                 // (it was previously only in the queue preview area)
-                self.pending_soft_interrupt = None;
+                self.pending_soft_interrupts.clear();
                 self.push_display_message(DisplayMessage {
                     role: "user".to_string(),
                     content: content.clone(),
@@ -5296,8 +5329,11 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Up => {
-                    // Ctrl+Up: retrieve newest pending unsent message for editing
-                    self.retrieve_pending_message_for_edit();
+                    // Ctrl+Up: retrieve all pending unsent messages for editing
+                    let had_pending = self.retrieve_pending_message_for_edit();
+                    if had_pending {
+                        let _ = remote.cancel_soft_interrupts().await;
+                    }
                     return Ok(());
                 }
                 _ => {}
@@ -5770,7 +5806,7 @@ impl App {
         self.status = ProcessingStatus::Idle;
         self.processing_started = None;
         self.interleave_message = None;
-        self.pending_soft_interrupt = None;
+        self.pending_soft_interrupts.clear();
         self.thought_line_inserted = false;
         self.thinking_prefix_emitted = false;
         self.thinking_buffer.clear();
@@ -6006,7 +6042,7 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Up => {
-                    // Ctrl+Up: retrieve newest pending unsent message for editing
+                    // Ctrl+Up: retrieve all pending unsent messages for editing
                     self.retrieve_pending_message_for_edit();
                     return Ok(());
                 }
@@ -6121,7 +6157,7 @@ impl App {
                     // Interrupt generation
                     self.cancel_requested = true;
                     self.interleave_message = None;
-                    self.pending_soft_interrupt = None;
+                    self.pending_soft_interrupts.clear();
                 } else {
                     // Reset scroll to bottom and clear input
                     self.follow_chat_bottom();
@@ -6256,7 +6292,7 @@ impl App {
     }
 
     /// Send an interleave message immediately to the server as a soft interrupt.
-    /// Skips the intermediate buffer stage — goes directly to pending_soft_interrupt.
+    /// Skips the intermediate buffer stage - goes directly to pending_soft_interrupts.
     async fn send_interleave_now(
         &mut self,
         content: String,
@@ -6272,30 +6308,39 @@ impl App {
                 e
             )));
         } else {
-            self.pending_soft_interrupt = Some(msg_clone);
+            self.pending_soft_interrupts.push(msg_clone);
             self.set_status_notice("⏭ Interleave sent");
         }
     }
 
-    /// Retrieve the newest pending unsent message into the input for editing.
-    /// Priority: interleave buffer first (if still unsent), then queued messages.
-    fn retrieve_pending_message_for_edit(&mut self) {
+    /// Retrieve all pending unsent messages into the input for editing.
+    /// Priority: pending soft interrupts first, then interleave, then queued.
+    /// Returns true if pending soft interrupts were retrieved (caller should cancel on server).
+    fn retrieve_pending_message_for_edit(&mut self) -> bool {
         if !self.input.is_empty() {
-            return;
+            return false;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        let mut had_pending = false;
+
+        if !self.pending_soft_interrupts.is_empty() {
+            parts.extend(std::mem::take(&mut self.pending_soft_interrupts));
+            had_pending = true;
         }
         if let Some(msg) = self.interleave_message.take() {
             if !msg.is_empty() {
-                self.input = msg;
-                self.cursor_pos = self.input.len();
-                self.set_status_notice("Retrieved pending interleave for editing");
-                return;
+                parts.push(msg);
             }
         }
-        if let Some(msg) = self.queued_messages.pop() {
-            self.input = msg;
+        parts.extend(std::mem::take(&mut self.queued_messages));
+
+        if !parts.is_empty() {
+            self.input = parts.join("\n\n");
             self.cursor_pos = self.input.len();
-            self.set_status_notice("Retrieved queued message for editing");
+            let count = parts.len();
+            self.set_status_notice(&format!("Retrieved {} pending message{} for editing", count, if count == 1 { "" } else { "s" }));
         }
+        had_pending
     }
 
     fn send_action(&self, shift: bool) -> SendAction {
@@ -10207,7 +10252,7 @@ impl App {
                                     if self.cancel_requested {
                                         self.cancel_requested = false;
                                         self.interleave_message = None;
-                                        self.pending_soft_interrupt = None;
+                                        self.pending_soft_interrupts.clear();
                                         self.push_display_message(DisplayMessage {
                                             role: "system".to_string(),
                                             content: "Interrupted".to_string(),
@@ -10278,7 +10323,7 @@ impl App {
                                     if self.cancel_requested {
                                         self.cancel_requested = false;
                                         self.interleave_message = None;
-                                        self.pending_soft_interrupt = None;
+                                        self.pending_soft_interrupts.clear();
                                         self.push_display_message(DisplayMessage {
                                             role: "system".to_string(),
                                             content: "Interrupted".to_string(),
@@ -10842,7 +10887,7 @@ impl App {
                                         if self.cancel_requested {
                                             self.cancel_requested = false;
                                             self.interleave_message = None;
-                                            self.pending_soft_interrupt = None;
+                                            self.pending_soft_interrupts.clear();
                                             self.push_display_message(DisplayMessage {
                                                 role: "system".to_string(),
                                                 content: "Interrupted".to_string(),
@@ -11959,8 +12004,8 @@ impl super::TuiState for App {
         self.interleave_message.as_deref()
     }
 
-    fn pending_soft_interrupt(&self) -> Option<&str> {
-        self.pending_soft_interrupt.as_deref()
+    fn pending_soft_interrupts(&self) -> &[String] {
+        &self.pending_soft_interrupts
     }
 
     fn scroll_offset(&self) -> usize {
@@ -12686,7 +12731,7 @@ impl super::TuiState for App {
     }
 
     fn diagram_pane_ratio(&self) -> u8 {
-        self.diagram_pane_ratio
+        self.animated_diagram_pane_ratio()
     }
 
     fn diagram_pane_enabled(&self) -> bool {

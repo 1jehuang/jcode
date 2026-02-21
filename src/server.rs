@@ -1775,6 +1775,14 @@ async fn handle_client(
                 let _ = client_event_tx.send(ServerEvent::Ack { id });
             }
 
+            Request::CancelSoftInterrupts { id } => {
+                // Cancel all pending soft interrupts (drain the queue)
+                if let Ok(mut q) = soft_interrupt_queue.lock() {
+                    q.clear();
+                }
+                let _ = client_event_tx.send(ServerEvent::Ack { id });
+            }
+
             Request::BackgroundTool { id } => {
                 // Signal the agent to move the currently executing tool to background
                 background_tool_signal.store(true, std::sync::atomic::Ordering::SeqCst);

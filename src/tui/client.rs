@@ -1146,8 +1146,8 @@ impl TuiState for ClientApp {
         None
     }
 
-    fn pending_soft_interrupt(&self) -> Option<&str> {
-        None // Client mode doesn't track pending soft interrupts locally
+    fn pending_soft_interrupts(&self) -> &[String] {
+        &[] // Client mode doesn't track pending soft interrupts locally
     }
 
     fn scroll_offset(&self) -> usize {
