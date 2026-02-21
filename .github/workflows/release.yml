@@ -86,7 +86,7 @@ jobs:
 
       - name: Update Homebrew formula
         env:
-          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          HOMEBREW_DEPLOY_KEY: ${{ secrets.HOMEBREW_DEPLOY_KEY }}
         run: |
           VERSION="${GITHUB_REF_NAME}"
           VERSION_NUM="${VERSION#v}"
@@ -95,7 +95,7 @@ jobs:
           MACOS_SHA=$(sha256sum artifacts/jcode-macos-aarch64/jcode-macos-aarch64.tar.gz | cut -d' ' -f1)
 
           mkdir -p ~/.ssh
-          echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          echo "$HOMEBREW_DEPLOY_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
 
