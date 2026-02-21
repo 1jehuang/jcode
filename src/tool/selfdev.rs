@@ -177,6 +177,11 @@ impl SelfDevTool {
         let hash = build::current_git_hash(&repo_dir)?;
         let version_before = env!("JCODE_VERSION").to_string();
 
+        // Install the new binary and update canary symlink so the server
+        // exec's into the correct (freshly built) binary.
+        build::install_version(&repo_dir, &hash)?;
+        build::update_canary_symlink(&hash)?;
+
         // Update manifest - track what we're testing
         let mut manifest = build::BuildManifest::load()?;
         let stable_hash = manifest
