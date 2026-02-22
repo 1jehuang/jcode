@@ -12,7 +12,7 @@ use crate::protocol::{
     NotificationType, Request, ServerEvent,
 };
 use crate::provider::Provider;
-use crate::registry::{server_debug_socket_path, server_socket_path};
+use crate::registry;
 use crate::session::Session;
 use crate::tool::Registry;
 use anyhow::Result;
@@ -555,17 +555,6 @@ pub struct ServerIdentity {
 }
 
 impl ServerIdentity {
-    /// Create identity for unnamed/legacy server
-    pub fn unnamed() -> Self {
-        Self {
-            id: "server_default".to_string(),
-            name: "default".to_string(),
-            icon: "🔮".to_string(),
-            git_hash: String::new(),
-            version: env!("JCODE_VERSION").to_string(),
-        }
-    }
-
     /// Display name with icon (e.g., "🔥 blazing")
     pub fn display_name(&self) -> String {
         format!("{} {}", self.icon, self.name)
@@ -623,8 +612,21 @@ pub struct Server {
 
 impl Server {
     pub fn new(provider: Arc<dyn Provider>) -> Self {
+        use crate::id::{new_memorable_server_id, server_icon};
+
         let (event_tx, _) = broadcast::channel(1024);
         let (client_debug_response_tx, _) = broadcast::channel(64);
+
+        // Generate a memorable server name
+        let (id, name) = new_memorable_server_id();
+        let icon = server_icon(&name).to_string();
+        let identity = ServerIdentity {
+            id,
+            name,
+            icon,
+            git_hash: env!("JCODE_GIT_HASH").to_string(),
+            version: env!("JCODE_VERSION").to_string(),
+        };
 
         // Initialize ambient runner if enabled
         let ambient_runner = if crate::config::config().ambient.enabled {
@@ -638,63 +640,6 @@ impl Server {
             provider,
             socket_path: socket_path(),
             debug_socket_path: debug_socket_path(),
-            identity: ServerIdentity::unnamed(),
-            event_tx,
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            is_processing: Arc::new(RwLock::new(false)),
-            session_id: Arc::new(RwLock::new(String::new())),
-            client_count: Arc::new(RwLock::new(0)),
-            client_connections: Arc::new(RwLock::new(HashMap::new())),
-            file_touches: Arc::new(RwLock::new(HashMap::new())),
-            swarm_members: Arc::new(RwLock::new(HashMap::new())),
-            swarms_by_id: Arc::new(RwLock::new(HashMap::new())),
-            shared_context: Arc::new(RwLock::new(HashMap::new())),
-            swarm_plans: Arc::new(RwLock::new(HashMap::new())),
-            swarm_coordinators: Arc::new(RwLock::new(HashMap::new())),
-            client_debug_state: Arc::new(RwLock::new(ClientDebugState::default())),
-            client_debug_response_tx,
-            debug_jobs: Arc::new(RwLock::new(HashMap::new())),
-            channel_subscriptions: Arc::new(RwLock::new(HashMap::new())),
-            event_history: Arc::new(RwLock::new(Vec::new())),
-            event_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-            ambient_runner,
-            mcp_pool: Arc::new(crate::mcp::SharedMcpPool::from_default_config()),
-        }
-    }
-
-    /// Create a new server with a generated name and identity
-    /// Uses the registry for named socket paths
-    pub fn new_named(provider: Arc<dyn Provider>, git_hash: &str) -> Self {
-        use crate::id::{new_memorable_server_id, server_icon};
-
-        let (id, name) = new_memorable_server_id();
-        let icon = server_icon(&name).to_string();
-
-        let identity = ServerIdentity {
-            id,
-            name: name.clone(),
-            icon,
-            git_hash: git_hash.to_string(),
-            version: env!("JCODE_VERSION").to_string(),
-        };
-
-        let socket = server_socket_path(&name);
-        let debug_socket = server_debug_socket_path(&name);
-
-        let (event_tx, _) = broadcast::channel(1024);
-        let (client_debug_response_tx, _) = broadcast::channel(64);
-
-        let ambient_runner = if crate::config::config().ambient.enabled {
-            let safety = Arc::new(crate::safety::SafetySystem::new());
-            Some(AmbientRunnerHandle::new(safety))
-        } else {
-            None
-        };
-
-        Self {
-            provider,
-            socket_path: socket,
-            debug_socket_path: debug_socket,
             identity,
             event_tx,
             sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -1009,6 +954,30 @@ impl Server {
         let hash_path = format!("{}.hash", self.socket_path.display());
         let _ = std::fs::write(&hash_path, env!("JCODE_GIT_HASH"));
 
+        // Register server in the registry so session picker and clients can discover it
+        {
+            let mut registry = crate::registry::ServerRegistry::load().await.unwrap_or_default();
+            let _ = registry.cleanup_stale().await;
+            let info = crate::registry::ServerInfo {
+                id: self.identity.id.clone(),
+                name: self.identity.name.clone(),
+                icon: self.identity.icon.clone(),
+                socket: self.socket_path.clone(),
+                debug_socket: self.debug_socket_path.clone(),
+                git_hash: self.identity.git_hash.clone(),
+                version: self.identity.version.clone(),
+                pid: std::process::id(),
+                started_at: chrono::Utc::now().to_rfc3339(),
+                sessions: Vec::new(),
+            };
+            registry.register(info);
+            let _ = registry.save().await;
+            crate::logging::info(&format!(
+                "Registered as {} in server registry",
+                self.identity.display_name(),
+            ));
+        }
+
         // Spawn selfdev signal monitor (checks for reload/rollback signals)
         // Only run on selfdev servers to avoid non-selfdev servers picking up
         // rebuild-signal and exec'ing, which would kill all their client connections
@@ -1020,13 +989,18 @@ impl Server {
 
         // Log when we receive SIGTERM for debugging
         #[cfg(unix)]
-        tokio::spawn(async {
-            use tokio::signal::unix::{signal, SignalKind};
-            if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
-                sigterm.recv().await;
-                crate::logging::info("Server received SIGTERM, shutting down gracefully");
-            }
-        });
+        {
+            let sigterm_server_name = self.identity.name.clone();
+            tokio::spawn(async move {
+                use tokio::signal::unix::{signal, SignalKind};
+                if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+                    sigterm.recv().await;
+                    crate::logging::info("Server received SIGTERM, shutting down gracefully");
+                    let _ = crate::registry::unregister_server(&sigterm_server_name).await;
+                    std::process::exit(0);
+                }
+            });
+        }
 
         // Spawn the bus monitor for swarm coordination
         let monitor_file_touches = Arc::clone(&self.file_touches);
@@ -1101,9 +1075,8 @@ impl Server {
         if debug_control_allowed() {
             crate::logging::info("Debug control enabled; idle timeout monitor disabled.");
         } else {
-            // Spawn idle timeout monitor
-            // Server exits after IDLE_TIMEOUT_SECS with no connected clients
             let idle_client_count = Arc::clone(&self.client_count);
+            let idle_server_name = self.identity.name.clone();
             tokio::spawn(async move {
                 let mut idle_since: Option<std::time::Instant> = None;
                 let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(10));
@@ -1130,6 +1103,7 @@ impl Server {
                                     "Server idle for {} minutes with no clients. Shutting down.",
                                     idle_duration / 60
                                 ));
+                                let _ = crate::registry::unregister_server(&idle_server_name).await;
                                 std::process::exit(EXIT_IDLE_TIMEOUT);
                             }
                         }

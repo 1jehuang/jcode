@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::fs;
 
-use crate::id::{new_memorable_server_id, server_icon};
 use crate::storage::jcode_dir;
 
 /// Information about a running server
@@ -38,29 +37,6 @@ pub struct ServerInfo {
 }
 
 impl ServerInfo {
-    /// Create a new ServerInfo with generated ID and name
-    pub fn new(git_hash: &str, version: &str) -> Result<Self> {
-        let (id, name) = new_memorable_server_id();
-        let icon = server_icon(&name).to_string();
-        let socket = server_socket_path(&name);
-        let debug_socket = server_debug_socket_path(&name);
-        let pid = std::process::id();
-        let started_at = chrono::Utc::now().to_rfc3339();
-
-        Ok(Self {
-            id,
-            name,
-            icon,
-            socket,
-            debug_socket,
-            git_hash: git_hash.to_string(),
-            version: version.to_string(),
-            pid,
-            started_at,
-            sessions: Vec::new(),
-        })
-    }
-
     /// Display name with icon (e.g., "🔥 blazing")
     pub fn display_name(&self) -> String {
         format!("{} {}", self.icon, self.name)
@@ -110,11 +86,6 @@ impl ServerRegistry {
     /// Unregister a server by name
     pub fn unregister(&mut self, name: &str) {
         self.servers.remove(name);
-    }
-
-    /// Find a server by git hash
-    pub fn find_by_hash(&self, git_hash: &str) -> Option<&ServerInfo> {
-        self.servers.values().find(|s| s.git_hash == git_hash)
     }
 
     /// Find a server by name
@@ -201,27 +172,6 @@ fn is_process_running(pid: u32) -> bool {
     crate::platform::is_process_running(pid)
 }
 
-/// Register the current server in the registry
-pub async fn register_server(git_hash: &str, version: &str) -> Result<ServerInfo> {
-    let mut registry = ServerRegistry::load().await?;
-
-    // Clean up stale entries first
-    registry.cleanup_stale().await?;
-
-    // Create new server info
-    let info = ServerInfo::new(git_hash, version)?;
-
-    // Ensure socket directory exists
-    if let Ok(dir) = socket_dir() {
-        fs::create_dir_all(&dir).await?;
-    }
-
-    // Register and save
-    registry.register(info.clone());
-    registry.save().await?;
-
-    Ok(info)
-}
 
 /// Unregister a server from the registry
 pub async fn unregister_server(name: &str) -> Result<()> {
@@ -238,16 +188,6 @@ pub async fn unregister_server(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Find a server for the given git hash, or return None if a new one should be spawned
-pub async fn find_server_for_hash(git_hash: &str) -> Result<Option<ServerInfo>> {
-    let mut registry = ServerRegistry::load().await?;
-
-    // Clean up stale entries first
-    registry.cleanup_stale().await?;
-
-    Ok(registry.find_by_hash(git_hash).cloned())
-}
-
 /// List all running servers
 pub async fn list_servers() -> Result<Vec<ServerInfo>> {
     let mut registry = ServerRegistry::load().await?;
@@ -259,32 +199,34 @@ pub async fn list_servers() -> Result<Vec<ServerInfo>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_server_info_new() {
-        let info = ServerInfo::new("abc1234", "v0.1.123").unwrap();
-        assert!(info.id.starts_with("server_"));
-        assert!(!info.name.is_empty());
-        assert!(!info.icon.is_empty());
-        assert!(info.socket.to_string_lossy().contains(&info.name));
+    fn test_server_info(name: &str) -> ServerInfo {
+        ServerInfo {
+            id: format!("server_{}_123", name),
+            name: name.to_string(),
+            icon: "🔥".to_string(),
+            socket: PathBuf::from(format!("/tmp/{}.sock", name)),
+            debug_socket: PathBuf::from(format!("/tmp/{}-debug.sock", name)),
+            git_hash: "abc1234".to_string(),
+            version: "v0.1.123".to_string(),
+            pid: std::process::id(),
+            started_at: "2025-01-01T00:00:00Z".to_string(),
+            sessions: Vec::new(),
+        }
     }
 
     #[test]
     fn test_server_info_display_name() {
-        let mut info = ServerInfo::new("abc1234", "v0.1.123").unwrap();
-        info.name = "blazing".to_string();
-        info.icon = "🔥".to_string();
+        let info = test_server_info("blazing");
         assert_eq!(info.display_name(), "🔥 blazing");
     }
 
     #[test]
-    fn test_registry_find_by_hash() {
+    fn test_registry_find_by_name() {
         let mut registry = ServerRegistry::default();
-
-        let mut info = ServerInfo::new("abc1234", "v0.1.123").unwrap();
-        info.name = "blazing".to_string();
+        let info = test_server_info("blazing");
         registry.register(info);
 
-        assert!(registry.find_by_hash("abc1234").is_some());
-        assert!(registry.find_by_hash("xyz9999").is_none());
+        assert!(registry.find_by_name("blazing").is_some());
+        assert!(registry.find_by_name("frozen").is_none());
     }
 }
