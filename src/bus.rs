@@ -120,6 +120,8 @@ pub enum BusEvent {
     FileTouch(FileTouch),
     /// Background task completed
     BackgroundTaskCompleted(BackgroundTaskCompleted),
+    /// Usage report fetched from providers
+    UsageReport(Vec<crate::usage::ProviderUsage>),
 }
 
 pub struct Bus {
