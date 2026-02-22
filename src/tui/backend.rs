@@ -8,12 +8,12 @@
 use crate::message::ToolCall;
 use crate::protocol::{FeatureToggle, Request, ServerEvent};
 use crate::server;
+use crate::transport::{Stream, WriteHalf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use crate::transport::{WriteHalf, Stream};
 use tokio::sync::Mutex;
 
 /// Debug events broadcast by standalone TUI via debug socket.
@@ -269,8 +269,10 @@ impl RemoteConnection {
         .await?;
         conn.next_request_id += 1;
 
-        // If resuming a session, send ResumeSession BEFORE GetHistory
-        // This ensures the server loads the correct session before sending history
+        // If resuming a session, send ResumeSession BEFORE GetHistory.
+        // ResumeSession already returns a full History payload on success, so
+        // avoid an immediate duplicate GetHistory request in that case.
+        let mut sent_resume_request = false;
         if let Some(session_id) = resume_session {
             if crate::session::session_exists(session_id) {
                 conn.send_request(Request::ResumeSession {
@@ -279,15 +281,18 @@ impl RemoteConnection {
                 })
                 .await?;
                 conn.next_request_id += 1;
+                sent_resume_request = true;
             }
         }
 
-        // Request history (will be for the resumed session if we sent ResumeSession)
-        conn.send_request(Request::GetHistory {
-            id: conn.next_request_id,
-        })
-        .await?;
-        conn.next_request_id += 1;
+        // Request history when not resuming (or when resume ID is missing on disk).
+        if !sent_resume_request {
+            conn.send_request(Request::GetHistory {
+                id: conn.next_request_id,
+            })
+            .await?;
+            conn.next_request_id += 1;
+        }
 
         Ok(conn)
     }
