@@ -326,6 +326,12 @@ impl Registry {
             Arc::new(memory::MemoryTool::new()) as Arc<dyn Tool>,
         );
 
+        // Schedule tool for queueing future ambient tasks
+        tools_map.insert(
+            "schedule".to_string(),
+            Arc::new(ambient::ScheduleTool::new()) as Arc<dyn Tool>,
+        );
+
         // Populate the registry
         *registry.tools.write().await = tools_map;
 

@@ -187,6 +187,11 @@ impl Tool for EndAmbientCycleTool {
             wake_at: None,
             context: ns.context.unwrap_or_default(),
             priority: parse_priority(ns.priority.as_deref()),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
         });
 
         let now = Utc::now();
@@ -314,6 +319,11 @@ impl Tool for ScheduleAmbientTool {
             wake_at,
             context: params.context.clone(),
             priority: parse_priority(params.priority.as_deref()),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
         };
 
         let mut manager = AmbientManager::new()?;
@@ -653,6 +663,177 @@ impl Tool for RequestPermissionTool {
         };
 
         Ok(ToolOutput::new(output).with_title(format!("permission: {}", params.action)))
+    }
+}
+
+// ===========================================================================
+// ScheduleTool — available to normal sessions to queue future ambient tasks
+// ===========================================================================
+
+pub struct ScheduleTool;
+
+impl ScheduleTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[derive(Deserialize)]
+struct ScheduleToolInput {
+    task: String,
+    #[serde(default)]
+    wake_in_minutes: Option<u32>,
+    #[serde(default)]
+    wake_at: Option<String>,
+    #[serde(default)]
+    priority: Option<String>,
+    #[serde(default)]
+    relevant_files: Vec<String>,
+    #[serde(default)]
+    background: Option<String>,
+    #[serde(default)]
+    success_criteria: Option<String>,
+}
+
+#[async_trait]
+impl Tool for ScheduleTool {
+    fn name(&self) -> &str {
+        "schedule"
+    }
+
+    fn description(&self) -> &str {
+        "Schedule a task for the ambient agent to execute later. Use this for work that \
+         should happen in the future (e.g. 'run tests at 3am', 'check CI results in 2 hours', \
+         'deploy to staging tomorrow morning'). The ambient agent will wake at the scheduled \
+         time and execute the task with the context you provide. Include enough detail that \
+         the ambient agent can complete the task without further input from you."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["task"],
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "Clear description of what the ambient agent should do. Be specific enough that it can act without further input."
+                },
+                "wake_in_minutes": {
+                    "type": "integer",
+                    "description": "Minutes from now to execute the task. Use this or wake_at."
+                },
+                "wake_at": {
+                    "type": "string",
+                    "description": "ISO 8601 timestamp for when to execute (e.g. '2025-03-15T09:00:00Z'). Use this or wake_in_minutes."
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["low", "normal", "high"],
+                    "description": "Task priority (default: normal). High priority tasks are executed first."
+                },
+                "relevant_files": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "File paths relevant to this task. Helps the ambient agent know where to look."
+                },
+                "background": {
+                    "type": "string",
+                    "description": "Background context the ambient agent needs. Include relevant decisions, constraints, or information from the current session."
+                },
+                "success_criteria": {
+                    "type": "string",
+                    "description": "How to know the task is done. What should the ambient agent verify?"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let params: ScheduleToolInput = serde_json::from_value(input)?;
+
+        if params.wake_in_minutes.is_none() && params.wake_at.is_none() {
+            anyhow::bail!(
+                "Either wake_in_minutes or wake_at is required. \
+                 This tool is for scheduling future tasks."
+            );
+        }
+
+        let wake_at = if let Some(ref ts) = params.wake_at {
+            Some(
+                ts.parse::<chrono::DateTime<Utc>>()
+                    .map_err(|e| anyhow::anyhow!("Invalid wake_at timestamp: {}", e))?,
+            )
+        } else {
+            None
+        };
+
+        let working_dir = ctx.working_dir.as_ref().map(|p| p.display().to_string());
+
+        let git_branch = ctx
+            .working_dir
+            .as_ref()
+            .and_then(|wd| {
+                std::process::Command::new("git")
+                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                    .current_dir(wd)
+                    .output()
+                    .ok()
+            })
+            .and_then(|out| {
+                if out.status.success() {
+                    String::from_utf8(out.stdout)
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                } else {
+                    None
+                }
+            });
+
+        let request = ScheduleRequest {
+            wake_in_minutes: params.wake_in_minutes,
+            wake_at,
+            context: params.task.clone(),
+            priority: parse_priority(params.priority.as_deref()),
+            working_dir: working_dir.clone(),
+            task_description: Some(params.task.clone()),
+            relevant_files: params.relevant_files.clone(),
+            git_branch,
+            additional_context: {
+                let mut parts = Vec::new();
+                if let Some(ref bg) = params.background {
+                    parts.push(format!("Background: {}", bg));
+                }
+                if let Some(ref sc) = params.success_criteria {
+                    parts.push(format!("Success criteria: {}", sc));
+                }
+                parts.push(format!("Scheduled by session: {}", ctx.session_id));
+                Some(parts.join("\n"))
+            },
+        };
+
+        let mut manager = AmbientManager::new()?;
+        let id = manager.schedule(request)?;
+
+        let when = if let Some(ref ts) = params.wake_at {
+            ts.clone()
+        } else if let Some(mins) = params.wake_in_minutes {
+            format!("in {}", crate::ambient::format_minutes_human(mins))
+        } else {
+            "unspecified".to_string()
+        };
+
+        let mut summary = format!("Scheduled task '{}' for {} (id: {})", params.task, when, id);
+        if let Some(ref wd) = working_dir {
+            summary.push_str(&format!("\nWorking directory: {}", wd));
+        }
+        if !params.relevant_files.is_empty() {
+            summary.push_str(&format!(
+                "\nRelevant files: {}",
+                params.relevant_files.join(", ")
+            ));
+        }
+
+        Ok(ToolOutput::new(summary).with_title(format!("scheduled: {}", params.task)))
     }
 }
 

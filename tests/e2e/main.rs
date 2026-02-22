@@ -1172,6 +1172,11 @@ fn test_ambient_scheduled_queue() {
         priority: Priority::Low,
         created_by_session: "test".to_string(),
         created_at: now,
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
     });
 
     queue.push(ScheduledItem {
@@ -1181,6 +1186,11 @@ fn test_ambient_scheduled_queue() {
         priority: Priority::High,
         created_by_session: "test".to_string(),
         created_at: now,
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
     });
 
     queue.push(ScheduledItem {
@@ -1190,6 +1200,11 @@ fn test_ambient_scheduled_queue() {
         priority: Priority::Normal,
         created_by_session: "test".to_string(),
         created_at: now,
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
     });
 
     assert_eq!(queue.len(), 3);

@@ -78,6 +78,16 @@ pub struct ScheduledItem {
     pub priority: Priority,
     pub created_by_session: String,
     pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relevant_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_context: Option<String>,
 }
 
 /// Persistent ambient state
@@ -120,6 +130,16 @@ pub struct ScheduleRequest {
     pub wake_at: Option<DateTime<Utc>>,
     pub context: String,
     pub priority: Priority,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relevant_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_context: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -453,6 +473,11 @@ impl AmbientManager {
             priority: request.priority,
             created_by_session: String::new(), // filled in by caller if needed
             created_at: Utc::now(),
+            working_dir: request.working_dir,
+            task_description: request.task_description,
+            relevant_files: request.relevant_files,
+            git_branch: request.git_branch,
+            additional_context: request.additional_context,
         };
 
         self.queue.push(item);
@@ -763,6 +788,26 @@ pub fn build_ambient_system_prompt(
                 format_duration_rough(age),
                 priority,
             ));
+            if let Some(ref dir) = item.working_dir {
+                prompt.push_str(&format!("  Working dir: {}\n", dir));
+            }
+            if let Some(ref desc) = item.task_description {
+                prompt.push_str(&format!("  Details: {}\n", desc));
+            }
+            if !item.relevant_files.is_empty() {
+                prompt.push_str(&format!(
+                    "  Files: {}\n",
+                    item.relevant_files.join(", ")
+                ));
+            }
+            if let Some(ref branch) = item.git_branch {
+                prompt.push_str(&format!("  Branch: {}\n", branch));
+            }
+            if let Some(ref ctx) = item.additional_context {
+                for line in ctx.lines() {
+                    prompt.push_str(&format!("  {}\n", line));
+                }
+            }
         }
     }
     prompt.push('\n');
@@ -994,6 +1039,11 @@ mod tests {
             priority: Priority::Low,
             created_by_session: "test".into(),
             created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
         });
 
         queue.push(ScheduledItem {
@@ -1003,6 +1053,11 @@ mod tests {
             priority: Priority::High,
             created_by_session: "test".into(),
             created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
         });
 
         assert_eq!(queue.len(), 2);
@@ -1032,6 +1087,11 @@ mod tests {
             priority: Priority::Low,
             created_by_session: "test".into(),
             created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
         });
 
         queue.push(ScheduledItem {
@@ -1041,6 +1101,11 @@ mod tests {
             priority: Priority::High,
             created_by_session: "test".into(),
             created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
         });
 
         let ready = queue.pop_ready();
@@ -1089,6 +1154,11 @@ mod tests {
                 wake_at: None,
                 context: "check CI".into(),
                 priority: Priority::Normal,
+                working_dir: None,
+                task_description: None,
+                relevant_files: Vec::new(),
+                git_branch: None,
+                additional_context: None,
             }),
             started_at: Utc::now() - Duration::seconds(10),
             ended_at: Utc::now(),
@@ -1184,6 +1254,11 @@ mod tests {
             priority: Priority::High,
             created_by_session: "session_abc".into(),
             created_at: Utc::now() - Duration::minutes(10),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
         }];
 
         let health = MemoryGraphHealth {
@@ -1251,6 +1326,11 @@ mod tests {
             priority: Priority::Normal,
             created_by_session: "test".into(),
             created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
         });
 
         let items = queue.items();
