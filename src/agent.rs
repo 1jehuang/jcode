@@ -1469,10 +1469,14 @@ impl Agent {
     }
 
     /// Run turns until no more tool calls
+    /// Maximum number of context-limit compaction retries before giving up.
+    const MAX_CONTEXT_LIMIT_RETRIES: u32 = 5;
+
     async fn run_turn(&mut self, print_output: bool) -> Result<String> {
         self.set_log_context();
         let mut final_text = String::new();
         let trace = trace_enabled();
+        let mut context_limit_retries = 0u32;
 
         loop {
             let repaired = self.repair_missing_tool_outputs();
@@ -1560,11 +1564,19 @@ impl Agent {
                 Ok(stream) => stream,
                 Err(e) => {
                     if self.try_auto_compact_after_context_limit(&e.to_string()) {
+                        context_limit_retries += 1;
+                        if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                            logging::warn("Context-limit compaction retry limit reached; giving up");
+                            return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                        }
                         continue;
                     }
                     return Err(e);
                 }
             };
+
+            // Successful API call - reset retry counter
+            context_limit_retries = 0;
 
             logging::info(&format!(
                 "API stream opened in {:.2}s",
@@ -1600,6 +1612,11 @@ impl Agent {
                     Err(e) => {
                         let err_str = e.to_string();
                         if self.try_auto_compact_after_context_limit(&err_str) {
+                            context_limit_retries += 1;
+                            if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                                logging::warn("Context-limit compaction retry limit reached; giving up");
+                                return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                            }
                             retry_after_compaction = true;
                             break;
                         }
@@ -1807,6 +1824,11 @@ impl Agent {
                             eprintln!("[trace] stream_error {}", message);
                         }
                         if self.try_auto_compact_after_context_limit(&message) {
+                            context_limit_retries += 1;
+                            if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                                logging::warn("Context-limit compaction retry limit reached; giving up");
+                                return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                            }
                             retry_after_compaction = true;
                             break;
                         }
@@ -2128,6 +2150,7 @@ impl Agent {
     async fn run_turn_streaming(&mut self, event_tx: broadcast::Sender<ServerEvent>) -> Result<()> {
         self.set_log_context();
         let trace = trace_enabled();
+        let mut context_limit_retries = 0u32;
 
         loop {
             let repaired = self.repair_missing_tool_outputs();
@@ -2215,11 +2238,19 @@ impl Agent {
                 Ok(stream) => stream,
                 Err(e) => {
                     if self.try_auto_compact_after_context_limit(&e.to_string()) {
+                        context_limit_retries += 1;
+                        if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                            logging::warn("Context-limit compaction retry limit reached; giving up");
+                            return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                        }
                         continue;
                     }
                     return Err(e);
                 }
             };
+
+            // Successful API call - reset retry counter
+            context_limit_retries = 0;
 
             logging::info(&format!(
                 "API stream opened in {:.2}s",
@@ -2249,6 +2280,11 @@ impl Agent {
                     Err(e) => {
                         let err_str = e.to_string();
                         if self.try_auto_compact_after_context_limit(&err_str) {
+                            context_limit_retries += 1;
+                            if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                                logging::warn("Context-limit compaction retry limit reached; giving up");
+                                return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                            }
                             retry_after_compaction = true;
                             break;
                         }
@@ -2397,6 +2433,11 @@ impl Agent {
                     }
                     StreamEvent::Error { message, .. } => {
                         if self.try_auto_compact_after_context_limit(&message) {
+                            context_limit_retries += 1;
+                            if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                                logging::warn("Context-limit compaction retry limit reached; giving up");
+                                return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                            }
                             retry_after_compaction = true;
                             break;
                         }
@@ -2687,6 +2728,7 @@ impl Agent {
     ) -> Result<()> {
         self.set_log_context();
         let trace = trace_enabled();
+        let mut context_limit_retries = 0u32;
 
         loop {
             let repaired = self.repair_missing_tool_outputs();
@@ -2774,11 +2816,19 @@ impl Agent {
                 Ok(stream) => stream,
                 Err(e) => {
                     if self.try_auto_compact_after_context_limit(&e.to_string()) {
+                        context_limit_retries += 1;
+                        if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                            logging::warn("Context-limit compaction retry limit reached; giving up");
+                            return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                        }
                         continue;
                     }
                     return Err(e);
                 }
             };
+
+            // Successful API call - reset retry counter
+            context_limit_retries = 0;
 
             logging::info(&format!(
                 "API stream opened in {:.2}s",
@@ -2807,6 +2857,11 @@ impl Agent {
                     Err(e) => {
                         let err_str = e.to_string();
                         if self.try_auto_compact_after_context_limit(&err_str) {
+                            context_limit_retries += 1;
+                            if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                                logging::warn("Context-limit compaction retry limit reached; giving up");
+                                return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                            }
                             retry_after_compaction = true;
                             break;
                         }
@@ -2953,6 +3008,11 @@ impl Agent {
                     }
                     StreamEvent::Error { message, .. } => {
                         if self.try_auto_compact_after_context_limit(&message) {
+                            context_limit_retries += 1;
+                            if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                                logging::warn("Context-limit compaction retry limit reached; giving up");
+                                return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                            }
                             retry_after_compaction = true;
                             break;
                         }

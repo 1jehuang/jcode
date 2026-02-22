@@ -2,13 +2,26 @@
 //!
 //! Used for memory relevance verification and other quick tasks that don't
 //! need the full Agent SDK infrastructure.
+//!
+//! Automatically selects the best available backend:
+//! - OpenAI (gpt-5.3-codex-spark) if Codex credentials are available
+//! - Claude (claude-haiku-4-5-20241022) if Claude credentials are available
 
 use crate::auth;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// Default sidecar model identifier for fast memory checks.
-pub const SIDECAR_FAST_MODEL: &str = "gpt-5.3-codex-spark";
+/// Preferred sidecar model (fast + cheap) when OpenAI creds are available.
+pub const SIDECAR_OPENAI_MODEL: &str = "gpt-5.3-codex-spark";
+
+/// Fallback sidecar model when only Claude creds are available.
+const SIDECAR_CLAUDE_MODEL: &str = "claude-haiku-4-5-20241022";
+
+/// OpenAI Responses API
+const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
+const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
+const OPENAI_RESPONSES_PATH: &str = "responses";
+const OPENAI_ORIGINATOR: &str = "codex_cli_rs";
 
 /// Claude Messages API endpoint (with beta=true for OAuth)
 const CLAUDE_API_URL: &str = "https://api.anthropic.com/v1/messages?beta=true";
@@ -27,21 +40,40 @@ const CLAUDE_CODE_JCODE_NOTICE: &str =
 /// Maximum tokens for sidecar responses (keep small for speed/cost)
 const DEFAULT_MAX_TOKENS: u32 = 1024;
 
+/// Which backend the sidecar is using
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SidecarBackend {
+    OpenAI,
+    Claude,
+}
+
 /// Lightweight client for fast sidecar calls
 #[derive(Clone)]
 pub struct HaikuSidecar {
     client: reqwest::Client,
     model: String,
     max_tokens: u32,
+    backend: SidecarBackend,
 }
 
 impl HaikuSidecar {
-    /// Create a new Haiku sidecar client
+    /// Create a new sidecar client, auto-selecting the best available backend.
+    /// Prefers OpenAI (codex-spark) if creds exist, falls back to Claude.
     pub fn new() -> Self {
+        let (backend, model) = if auth::codex::load_credentials().is_ok() {
+            (SidecarBackend::OpenAI, SIDECAR_OPENAI_MODEL.to_string())
+        } else if auth::claude::load_credentials().is_ok() {
+            (SidecarBackend::Claude, SIDECAR_CLAUDE_MODEL.to_string())
+        } else {
+            // Default to Claude - will fail on use with a clear error
+            (SidecarBackend::Claude, SIDECAR_CLAUDE_MODEL.to_string())
+        };
+
         Self {
             client: reqwest::Client::new(),
-            model: SIDECAR_FAST_MODEL.to_string(),
+            model,
             max_tokens: DEFAULT_MAX_TOKENS,
+            backend,
         }
     }
 
@@ -51,16 +83,112 @@ impl HaikuSidecar {
         self
     }
 
-    /// Simple completion - send a prompt, get a response
+    /// Simple completion - send a prompt, get a response.
+    /// Routes to the correct API based on the detected backend.
     pub async fn complete(&self, system: &str, user_message: &str) -> Result<String> {
+        match self.backend {
+            SidecarBackend::OpenAI => self.complete_openai(system, user_message).await,
+            SidecarBackend::Claude => self.complete_claude(system, user_message).await,
+        }
+    }
+
+    /// Complete via OpenAI Responses API
+    async fn complete_openai(&self, system: &str, user_message: &str) -> Result<String> {
+        let creds = auth::codex::load_credentials()
+            .context("Failed to load OpenAI/Codex credentials for sidecar")?;
+
+        let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
+        let base = if is_chatgpt_mode {
+            CHATGPT_API_BASE
+        } else {
+            OPENAI_API_BASE
+        };
+        let url = format!("{}/{}", base.trim_end_matches('/'), OPENAI_RESPONSES_PATH);
+
+        let mut instructions = String::new();
+        if !system.is_empty() {
+            instructions.push_str(system);
+        }
+
+        let request = serde_json::json!({
+            "model": self.model,
+            "instructions": instructions,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": user_message,
+                }],
+            }],
+            "stream": false,
+            "store": false,
+        });
+
+        let mut builder = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", creds.access_token))
+            .header("Content-Type", "application/json");
+
+        if is_chatgpt_mode {
+            builder = builder.header("originator", OPENAI_ORIGINATOR);
+            if let Some(ref account_id) = creds.account_id {
+                builder = builder.header("chatgpt-account-id", account_id);
+            }
+        }
+
+        let response = builder
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send request to OpenAI API")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            anyhow::bail!("OpenAI API error ({}): {}", status, error_text);
+        }
+
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse OpenAI API response")?;
+
+        // Extract text from Responses API output
+        let mut text = String::new();
+        if let Some(output) = result.get("output").and_then(|v| v.as_array()) {
+            for item in output {
+                let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if item_type == "message" {
+                    if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
+                        for block in content {
+                            let block_type =
+                                block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            if block_type == "output_text" || block_type == "text" {
+                                if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                                    text.push_str(t);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(text)
+    }
+
+    /// Complete via Claude Messages API
+    async fn complete_claude(&self, system: &str, user_message: &str) -> Result<String> {
         let creds = auth::claude::load_credentials()
             .context("Failed to load Claude credentials for sidecar")?;
 
-        let request = MessagesRequest {
+        let request = ClaudeMessagesRequest {
             model: &self.model,
             max_tokens: self.max_tokens,
-            system: build_system_param(system),
-            messages: vec![Message {
+            system: build_claude_system_param(system),
+            messages: vec![ClaudeMessage {
                 role: "user",
                 content: user_message,
             }],
@@ -85,17 +213,16 @@ impl HaikuSidecar {
             anyhow::bail!("Claude API error ({}): {}", status, error_text);
         }
 
-        let result: MessagesResponse = response
+        let result: ClaudeMessagesResponse = response
             .json()
             .await
             .context("Failed to parse Claude API response")?;
 
-        // Extract text from response
         let text = result
             .content
             .into_iter()
             .filter_map(|block| {
-                if let ContentBlock::Text { text } = block {
+                if let ClaudeContentBlock::Text { text } = block {
                     Some(text)
                 } else {
                     None
@@ -217,6 +344,9 @@ impl Default for HaikuSidecar {
     }
 }
 
+/// The public model constant for backward compatibility
+pub const SIDECAR_FAST_MODEL: &str = SIDECAR_OPENAI_MODEL;
+
 /// A memory extracted by the sidecar
 #[derive(Debug, Clone)]
 pub struct ExtractedMemory {
@@ -225,66 +355,67 @@ pub struct ExtractedMemory {
     pub trust: String,
 }
 
-// API types
+// Claude API types
 
 #[derive(Serialize)]
-struct MessagesRequest<'a> {
+struct ClaudeMessagesRequest<'a> {
     model: &'a str,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<ApiSystem<'a>>,
-    messages: Vec<Message<'a>>,
+    system: Option<ClaudeApiSystem<'a>>,
+    messages: Vec<ClaudeMessage<'a>>,
 }
 
 #[derive(Serialize)]
-struct Message<'a> {
+struct ClaudeMessage<'a> {
     role: &'a str,
     content: &'a str,
 }
 
 #[derive(Serialize)]
 #[serde(untagged)]
-enum ApiSystem<'a> {
+enum ClaudeApiSystem<'a> {
+    #[allow(dead_code)]
     Text(&'a str),
-    Blocks(Vec<ApiSystemBlock<'a>>),
+    Blocks(Vec<ClaudeApiSystemBlock<'a>>),
 }
 
 #[derive(Serialize)]
-struct ApiSystemBlock<'a> {
+struct ClaudeApiSystemBlock<'a> {
     #[serde(rename = "type")]
     block_type: &'static str,
     text: &'a str,
 }
 
-fn build_system_param(system: &str) -> Option<ApiSystem<'_>> {
+fn build_claude_system_param(system: &str) -> Option<ClaudeApiSystem<'_>> {
     let mut blocks = Vec::new();
-    blocks.push(ApiSystemBlock {
+    blocks.push(ClaudeApiSystemBlock {
         block_type: "text",
         text: CLAUDE_CODE_IDENTITY,
     });
-    blocks.push(ApiSystemBlock {
+    blocks.push(ClaudeApiSystemBlock {
         block_type: "text",
         text: CLAUDE_CODE_JCODE_NOTICE,
     });
     if !system.is_empty() {
-        blocks.push(ApiSystemBlock {
+        blocks.push(ClaudeApiSystemBlock {
             block_type: "text",
             text: system,
         });
     }
-    Some(ApiSystem::Blocks(blocks))
+    Some(ClaudeApiSystem::Blocks(blocks))
 }
 
 #[derive(Deserialize)]
-struct MessagesResponse {
-    content: Vec<ContentBlock>,
+struct ClaudeMessagesResponse {
+    content: Vec<ClaudeContentBlock>,
     #[allow(dead_code)]
-    usage: Option<Usage>,
+    usage: Option<ClaudeUsage>,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
-enum ContentBlock {
+enum ClaudeContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(other)]
@@ -293,7 +424,7 @@ enum ContentBlock {
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
-struct Usage {
+struct ClaudeUsage {
     input_tokens: u32,
     output_tokens: u32,
 }
@@ -305,5 +436,21 @@ mod tests {
     #[test]
     fn test_sidecar_fast_model() {
         assert_eq!(SIDECAR_FAST_MODEL, "gpt-5.3-codex-spark");
+    }
+
+    #[test]
+    fn test_backend_selection_prefers_openai() {
+        // If both creds exist, OpenAI should be preferred
+        let has_openai = crate::auth::codex::load_credentials().is_ok();
+        let has_claude = crate::auth::claude::load_credentials().is_ok();
+
+        let sidecar = HaikuSidecar::new();
+        if has_openai {
+            assert_eq!(sidecar.backend, SidecarBackend::OpenAI);
+            assert_eq!(sidecar.model, SIDECAR_OPENAI_MODEL);
+        } else if has_claude {
+            assert_eq!(sidecar.backend, SidecarBackend::Claude);
+            assert_eq!(sidecar.model, SIDECAR_CLAUDE_MODEL);
+        }
     }
 }
