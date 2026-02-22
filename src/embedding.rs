@@ -311,7 +311,11 @@ pub fn maybe_unload_if_idle(idle_for: Duration) -> bool {
             let trimmed = unsafe { malloc_trim(0) };
             crate::logging::info(&format!(
                 "malloc_trim after model unload: {}",
-                if trimmed == 1 { "released pages" } else { "no pages to release" }
+                if trimmed == 1 {
+                    "released pages"
+                } else {
+                    "no pages to release"
+                }
             ));
         }
     }
@@ -409,6 +413,26 @@ pub fn models_dir() -> Result<PathBuf> {
 
 /// Download the model files if they don't exist
 fn download_model(model_dir: &PathBuf) -> Result<()> {
+    // `reqwest::blocking` owns an internal Tokio runtime. If this function is
+    // called from an async task, dropping that runtime on the async worker
+    // thread can panic. Run downloads on a dedicated OS thread instead.
+    let model_dir = model_dir.clone();
+    match std::thread::spawn(move || download_model_blocking(&model_dir)).join() {
+        Ok(result) => result,
+        Err(panic) => {
+            let panic_msg = if let Some(msg) = panic.downcast_ref::<&str>() {
+                (*msg).to_string()
+            } else if let Some(msg) = panic.downcast_ref::<String>() {
+                msg.clone()
+            } else {
+                "unknown panic payload".to_string()
+            };
+            anyhow::bail!("Embedding model download thread panicked: {}", panic_msg);
+        }
+    }
+}
+
+fn download_model_blocking(model_dir: &PathBuf) -> Result<()> {
     use std::io::Write;
 
     crate::logging::info("Downloading embedding model (one-time setup)...");
