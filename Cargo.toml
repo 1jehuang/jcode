@@ -108,6 +108,9 @@ jemalloc = ["tikv-jemallocator"]
 embeddings = ["tract-onnx", "tract-hir", "tokenizers"]
 pdf = ["pdf-extract"]
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [profile.release]
 opt-level = 1
 debug = 0

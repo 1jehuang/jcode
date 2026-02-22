@@ -2,6 +2,14 @@
 
 This document describes how jcode achieves cross-platform support for Linux, macOS, and Windows.
 
+## Status
+
+- **Transport layer**: Implemented (`src/transport/`)
+- **Platform module**: Implemented (`src/platform.rs`)
+- **Windows transport**: Implemented but untested (`src/transport/windows.rs`)
+- **Windows platform**: Implemented (`src/platform.rs` has `#[cfg(windows)]` branches)
+- **Windows CI**: Not yet set up
+
 ## Design Principle
 
 **Zero cost on Unix.** The abstraction layer uses `#[cfg]` compile-time gates and type aliases so that Linux and macOS code paths compile to the exact same binary as before. Windows gets its own implementations behind `#[cfg(windows)]`. No traits, no dynamic dispatch, no runtime branching.
@@ -15,8 +23,8 @@ The transport layer abstracts IPC (Inter-Process Communication). On Unix, jcode 
 ```
 src/transport/
   mod.rs        - conditional re-exports (cfg-gated)
-  unix.rs       - type aliases + helpers wrapping tokio Unix sockets
-  windows.rs    - named pipe server/client using tokio
+  unix.rs       - type aliases wrapping tokio Unix sockets (zero-cost)
+  windows.rs    - named pipe Listener/Stream with split support
 ```
 
 ### Unix (Linux + macOS)
@@ -24,149 +32,97 @@ src/transport/
 Unix transport is a thin re-export of existing types:
 
 ```rust
-// transport/unix.rs
 pub use tokio::net::UnixListener as Listener;
 pub use tokio::net::UnixStream as Stream;
 pub use tokio::net::unix::OwnedWriteHalf as WriteHalf;
 pub use tokio::net::unix::OwnedReadHalf as ReadHalf;
-
-// For synchronous IPC (used by communicate tool)
 pub use std::os::unix::net::UnixStream as SyncStream;
 ```
 
-The application code changes from `use tokio::net::UnixStream` to `use crate::transport::Stream` - same type, different import path.
+The compiled binary is byte-for-byte identical to what it was before the abstraction.
 
 ### Windows
 
-Windows transport uses named pipes via `tokio::net::windows::named_pipe`:
+Windows transport provides custom types wrapping `tokio::net::windows::named_pipe`:
 
-```rust
-// transport/windows.rs
-// Wraps NamedPipeServer/NamedPipeClient to match the Listener/Stream interface
-```
+- **`Listener`**: Wraps `NamedPipeServer` with an accept loop that creates new pipe instances for each connection (named pipes are single-client, so a new instance is created after each accept)
+- **`Stream`**: Enum over `NamedPipeServer` (accepted) or `NamedPipeClient` (connected), implementing `AsyncRead + AsyncWrite`
+- **`ReadHalf` / `WriteHalf`**: Created via `stream.into_split()` using `Arc<Mutex<Stream>>` since named pipes don't support native kernel-level splitting
+- **`SyncStream`**: Opens the named pipe as a regular file for blocking I/O
 
-Named pipe paths follow the convention:
-- Main socket: `\\.\pipe\jcode-<name>`
-- Debug socket: `\\.\pipe\jcode-<name>-debug`
+Socket paths are converted to pipe names: `/run/user/1000/jcode.sock` becomes `\\.\pipe\jcode`.
 
-### Address Abstraction
+### API Surface
 
-Socket paths on Unix vs pipe names on Windows:
+Both platforms export the same interface:
 
-```rust
-// transport/mod.rs
-#[cfg(unix)]
-pub type Address = std::path::PathBuf;  // e.g. /run/user/1000/jcode.sock
-
-#[cfg(windows)]
-pub type Address = String;  // e.g. \\.\pipe\jcode-main
-```
-
-Conversion functions in `server.rs` and `registry.rs` produce the right address type per platform.
-
-## Files Affected by Transport Migration
-
-| File | What changes |
-|------|-------------|
-| `src/server.rs` | `UnixListener::bind` -> `transport::Listener::bind` |
-| `src/tui/backend.rs` | `UnixStream::connect` -> `transport::Stream::connect`, `OwnedWriteHalf` -> `transport::WriteHalf` |
-| `src/tui/client.rs` | `UnixStream` -> `transport::Stream` |
-| `src/tui/app.rs` | `OwnedWriteHalf` -> `transport::WriteHalf` |
-| `src/tool/communicate.rs` | `std::os::unix::net::UnixStream` -> `transport::SyncStream` |
-| `src/tool/debug_socket.rs` | `tokio::net::UnixStream` -> `transport::Stream` |
-| `src/main.rs` | `UnixStream::connect` -> `transport::Stream::connect` for health checks |
+| Export | Unix | Windows |
+|--------|------|---------|
+| `Listener` | `tokio::net::UnixListener` | Custom struct wrapping `NamedPipeServer` |
+| `Stream` | `tokio::net::UnixStream` | Enum over `NamedPipeServer`/`NamedPipeClient` |
+| `ReadHalf` | `tokio::net::unix::OwnedReadHalf` | `Arc<Mutex<Stream>>` wrapper |
+| `WriteHalf` | `tokio::net::unix::OwnedWriteHalf` | `Arc<Mutex<Stream>>` wrapper |
+| `SyncStream` | `std::os::unix::net::UnixStream` | `std::fs::File` wrapper |
 
 ## Platform Module (`src/platform.rs`)
 
-Non-IPC OS abstractions, all using `#[cfg]` gates:
+Centralizes all non-IPC OS-specific operations:
 
-### Process Replacement (`exec`)
+| Function | Unix | Windows |
+|----------|------|---------|
+| `symlink_or_copy(src, dst)` | `std::os::unix::fs::symlink()` | Try `symlink_file/dir`, fall back to copy |
+| `atomic_symlink_swap(src, dst, temp)` | Create temp symlink + rename | Remove + copy (best effort) |
+| `set_permissions_owner_only(path)` | `chmod 600` | No-op |
+| `set_permissions_executable(path)` | `chmod 755` | No-op |
+| `is_process_running(pid)` | `kill(pid, 0)` | Returns `true` (stub) |
+| `replace_process(cmd)` | `exec()` (replaces process) | `spawn()` + `exit()` |
 
-Unix uses `CommandExt::exec()` to replace the current process. Windows spawns a child and exits.
+## Files Migrated
 
-```rust
-pub fn replace_process(cmd: &mut std::process::Command) -> ! {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        let err = cmd.exec();
-        panic!("exec failed: {err}");
-    }
-    #[cfg(windows)]
-    {
-        let status = cmd.status().expect("failed to spawn process");
-        std::process::exit(status.code().unwrap_or(1));
-    }
-}
-```
+All OS-specific code has been moved out of application files into the transport and platform modules:
 
-### Signal Handling
-
-Unix: `tokio::signal::unix` for SIGHUP, SIGTERM, SIGINT, SIGQUIT.
-Windows: `tokio::signal::ctrl_c()` + `SetConsoleCtrlHandler` for close events.
-
-### Symlinks
-
-Unix: `std::os::unix::fs::symlink()`.
-Windows: `std::fs::copy()` (symlinks require elevated privileges). Junction points for directories if needed.
-
-### File Permissions
-
-Unix: `PermissionsExt::set_mode(0o600)` for sensitive files.
-Windows: No-op (or Windows DACL APIs for production hardening later).
-
-### Process Liveness
-
-Unix: `libc::kill(pid, 0)` to check if alive.
-Windows: `OpenProcess` + `GetExitCodeProcess` via `windows-sys` crate.
+| File | What was migrated |
+|------|------------------|
+| `src/server.rs` | `UnixListener`, `UnixStream`, `OwnedReadHalf`, `OwnedWriteHalf` |
+| `src/tui/backend.rs` | `UnixStream`, `OwnedWriteHalf`, `OwnedReadHalf` |
+| `src/tui/client.rs` | `UnixStream`, `OwnedWriteHalf` |
+| `src/tui/app.rs` | `UnixListener`, `OwnedWriteHalf`, file permissions |
+| `src/tool/communicate.rs` | `std::os::unix::net::UnixStream` |
+| `src/tool/debug_socket.rs` | `tokio::net::UnixStream` |
+| `src/main.rs` | `UnixStream` (health checks), all `exec()` calls, file permissions |
+| `src/build.rs` | Symlinks, executable permissions |
+| `src/update.rs` | Symlinks, permissions, atomic swap |
+| `src/auth/oauth.rs` | Credential file permissions |
+| `src/skill.rs` | Symlink creation |
+| `src/video_export.rs` | Frame symlinks |
+| `src/ambient.rs` | Process liveness check |
+| `src/registry.rs` | Process liveness check |
+| `src/session.rs` | Process liveness check |
 
 ## Dependencies
 
-New dependencies for Windows support:
-
 ```toml
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_Foundation"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 ```
 
 The `tokio` dependency already includes named pipe support on Windows (part of `features = ["full"]`).
 
 ## What Doesn't Change
 
-The vast majority of the codebase is platform-agnostic and requires no changes:
+The vast majority of the codebase is platform-agnostic:
 
 - All provider code (HTTP-based)
 - All tool implementations (except bash tool's shell selection)
-- TUI rendering (crossterm + ratatui are already cross-platform)
+- TUI rendering (crossterm + ratatui already cross-platform)
 - Agent logic, memory, sessions, config
 - MCP client/server protocol
 - JSON serialization, protocol handling
 
-## Shell Tool Considerations
+## Remaining Work
 
-The `bash` tool currently executes commands via `/bin/bash`. On Windows:
-- Default to `cmd.exe` or `pwsh.exe` (PowerShell)
-- Common Unix commands (`grep`, `cat`, `ls`) don't exist natively
-- Path separators differ (`\` vs `/`)
-
-This is handled at the tool level, not the transport level. The tool can detect the platform and choose the appropriate shell.
-
-## Build & CI
-
-Cross-compilation from Linux:
-```bash
-# Install Windows target
-rustup target add x86_64-pc-windows-msvc
-
-# Cross-compile (requires cross or cargo-xwin)
-cargo xwin build --release --target x86_64-pc-windows-msvc
-```
-
-CI should run tests on both Linux and Windows runners to catch platform-specific regressions.
-
-## Migration Strategy
-
-1. **Phase 1: Transport abstraction** - Create `src/transport/`, migrate all IPC code. Unix behavior unchanged.
-2. **Phase 2: Platform module** - Create `src/platform.rs` for exec, signals, symlinks, permissions.
-3. **Phase 3: Windows implementation** - Implement named pipe transport + platform functions.
-4. **Phase 4: CI & testing** - Add Windows CI, test IPC roundtrip, basic flows.
+1. **Windows CI** - Add GitHub Actions Windows runner, test compilation and basic IPC
+2. **Shell tool** - Detect platform and use `cmd.exe` or `pwsh.exe` on Windows
+3. **Self-update** - Handle Windows exe replacement (can't overwrite running binary)
+4. **Process liveness** - Implement real `is_process_running` on Windows via `OpenProcess`
+5. **Testing** - Run full test suite on Windows
