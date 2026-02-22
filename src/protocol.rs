@@ -829,4 +829,87 @@ mod tests {
             _ => panic!("wrong request type"),
         }
     }
+
+    #[test]
+    fn test_stdin_response_roundtrip() {
+        let req = Request::StdinResponse {
+            id: 99,
+            request_id: "stdin-call_abc-1".to_string(),
+            input: "my_password".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"type\":\"stdin_response\""));
+        assert!(json.contains("\"request_id\":\"stdin-call_abc-1\""));
+        assert!(json.contains("\"input\":\"my_password\""));
+
+        let decoded: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.id(), 99);
+        match decoded {
+            Request::StdinResponse {
+                request_id, input, ..
+            } => {
+                assert_eq!(request_id, "stdin-call_abc-1");
+                assert_eq!(input, "my_password");
+            }
+            _ => panic!("expected StdinResponse"),
+        }
+    }
+
+    #[test]
+    fn test_stdin_response_deserialize_from_json() {
+        let json = r#"{"type":"stdin_response","id":5,"request_id":"req-42","input":"hello world"}"#;
+        let decoded: Request = serde_json::from_str(json).unwrap();
+        assert_eq!(decoded.id(), 5);
+        match decoded {
+            Request::StdinResponse {
+                request_id, input, ..
+            } => {
+                assert_eq!(request_id, "req-42");
+                assert_eq!(input, "hello world");
+            }
+            _ => panic!("expected StdinResponse"),
+        }
+    }
+
+    #[test]
+    fn test_stdin_request_event_roundtrip() {
+        let event = ServerEvent::StdinRequest {
+            request_id: "stdin-xyz-1".to_string(),
+            prompt: "Password: ".to_string(),
+            is_password: true,
+            tool_call_id: "call_abc".to_string(),
+        };
+        let json = encode_event(&event);
+        assert!(json.contains("\"type\":\"stdin_request\""));
+        assert!(json.contains("\"is_password\":true"));
+
+        let decoded: ServerEvent = serde_json::from_str(json.trim()).unwrap();
+        match decoded {
+            ServerEvent::StdinRequest {
+                request_id,
+                prompt,
+                is_password,
+                tool_call_id,
+            } => {
+                assert_eq!(request_id, "stdin-xyz-1");
+                assert_eq!(prompt, "Password: ");
+                assert!(is_password);
+                assert_eq!(tool_call_id, "call_abc");
+            }
+            _ => panic!("expected StdinRequest"),
+        }
+    }
+
+    #[test]
+    fn test_stdin_request_event_defaults() {
+        // is_password defaults to false when not present
+        let json = r#"{"type":"stdin_request","request_id":"r1","prompt":"","tool_call_id":"tc1"}"#;
+        let decoded: ServerEvent = serde_json::from_str(json).unwrap();
+        match decoded {
+            ServerEvent::StdinRequest { is_password, .. } => {
+                assert!(!is_password, "is_password should default to false");
+            }
+            _ => panic!("expected StdinRequest"),
+        }
+    }
 }

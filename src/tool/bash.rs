@@ -391,3 +391,189 @@ impl BashTool {
             })))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool::StdinInputRequest;
+    use serde_json::json;
+    use tokio::sync::mpsc;
+
+    fn make_ctx(stdin_tx: Option<mpsc::UnboundedSender<StdinInputRequest>>) -> ToolContext {
+        ToolContext {
+            session_id: "test-session".to_string(),
+            message_id: "test-msg".to_string(),
+            tool_call_id: "test-call".to_string(),
+            working_dir: Some(std::path::PathBuf::from("/tmp")),
+            stdin_request_tx: stdin_tx,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_basic_command_no_stdin() {
+        let tool = BashTool::new();
+        let input = json!({"command": "echo hello"});
+        let ctx = make_ctx(None);
+        let result = tool.execute(input, ctx).await.unwrap();
+        assert!(result.output.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_basic_command_with_unused_stdin_channel() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let tool = BashTool::new();
+        let input = json!({"command": "echo world"});
+        let ctx = make_ctx(Some(tx));
+        let result = tool.execute(input, ctx).await.unwrap();
+        assert!(result.output.contains("world"));
+    }
+
+    #[tokio::test]
+    async fn test_stdin_forwarding_single_line() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<StdinInputRequest>();
+        let tool = BashTool::new();
+
+        // "head -n1" reads one line from stdin and prints it
+        let input = json!({"command": "head -n1", "timeout": 10000});
+        let ctx = make_ctx(Some(tx));
+
+        // Spawn the tool execution
+        let tool_handle = tokio::spawn(async move {
+            tool.execute(input, ctx).await
+        });
+
+        // Wait for the stdin request to arrive
+        let req = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            rx.recv(),
+        )
+        .await
+        .expect("timed out waiting for stdin request")
+        .expect("channel closed");
+
+        assert!(req.request_id.starts_with("stdin-test-call-"));
+        assert_eq!(req.is_password, false);
+
+        // Send the response
+        req.response_tx.send("test_input_line".to_string()).unwrap();
+
+        // Wait for tool to finish
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tool_handle,
+        )
+        .await
+        .expect("tool timed out")
+        .expect("tool panicked")
+        .expect("tool errored");
+
+        assert!(
+            result.output.contains("test_input_line"),
+            "output should contain the input we sent: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stdin_forwarding_multiple_lines() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<StdinInputRequest>();
+        let tool = BashTool::new();
+
+        // "head -n2" reads two lines
+        let input = json!({"command": "head -n2", "timeout": 15000});
+        let ctx = make_ctx(Some(tx));
+
+        let tool_handle = tokio::spawn(async move {
+            tool.execute(input, ctx).await
+        });
+
+        // First line
+        let req1 = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            rx.recv(),
+        )
+        .await
+        .expect("timed out waiting for first stdin request")
+        .expect("channel closed");
+        assert!(req1.request_id.ends_with("-1"), "first request should end with -1: {}", req1.request_id);
+        req1.response_tx.send("line_one".to_string()).unwrap();
+
+        // Second line
+        let req2 = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            rx.recv(),
+        )
+        .await
+        .expect("timed out waiting for second stdin request")
+        .expect("channel closed");
+        assert!(req2.request_id.ends_with("-2"), "second request should end with -2: {}", req2.request_id);
+        req2.response_tx.send("line_two".to_string()).unwrap();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tool_handle,
+        )
+        .await
+        .expect("tool timed out")
+        .expect("tool panicked")
+        .expect("tool errored");
+
+        assert!(result.output.contains("line_one"), "missing line_one in: {}", result.output);
+        assert!(result.output.contains("line_two"), "missing line_two in: {}", result.output);
+    }
+
+    #[tokio::test]
+    async fn test_stdin_not_triggered_for_non_blocking_command() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<StdinInputRequest>();
+        let tool = BashTool::new();
+
+        // This command doesn't read stdin at all
+        let input = json!({"command": "echo no_stdin_needed", "timeout": 5000});
+        let ctx = make_ctx(Some(tx));
+
+        let result = tool.execute(input, ctx).await.unwrap();
+        assert!(result.output.contains("no_stdin_needed"));
+
+        // No stdin request should have been sent
+        assert!(
+            rx.try_recv().is_err(),
+            "no stdin request should be sent for a command that doesn't read stdin"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_command_timeout_with_stdin_channel() {
+        let (tx, _rx) = mpsc::unbounded_channel::<StdinInputRequest>();
+        let tool = BashTool::new();
+
+        // cat will block forever on stdin, but we set a short timeout
+        // and never respond to the stdin request
+        let input = json!({"command": "cat", "timeout": 2000});
+        let ctx = make_ctx(Some(tx));
+
+        let result = tool.execute(input, ctx).await;
+        assert!(result.is_err(), "should timeout");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("timed out"),
+            "error should mention timeout: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stderr_captured_with_stdin() {
+        let (tx, _rx) = mpsc::unbounded_channel::<StdinInputRequest>();
+        let tool = BashTool::new();
+
+        let input = json!({"command": "echo stderr_msg >&2", "timeout": 5000});
+        let ctx = make_ctx(Some(tx));
+
+        let result = tool.execute(input, ctx).await.unwrap();
+        assert!(
+            result.output.contains("stderr_msg"),
+            "stderr should be captured: {}",
+            result.output
+        );
+    }
+}
