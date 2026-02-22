@@ -9038,9 +9038,14 @@ impl App {
             "claude-opus-4-6[1m]",
             "claude-sonnet-4-6",
             "claude-sonnet-4-6[1m]",
-            "anthropic/claude-opus-4.6",
-            "anthropic/claude-sonnet-4.6",
             "moonshotai/kimi-k2.5",
+        ];
+
+        const CLAUDE_OAUTH_ONLY_MODELS: &[&str] = &[
+            "claude-opus-4-6",
+            "claude-opus-4-6[1m]",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-6[1m]",
         ];
 
         // Find the latest recommended model's created timestamp from OpenRouter cache,
@@ -9095,7 +9100,9 @@ impl App {
                         selected_route: 0,
                         is_current: is_this_current,
                         recommended: RECOMMENDED_MODELS.contains(&name.as_str())
-                            && (*effort == "xhigh" || *effort == "high"),
+                            && (*effort == "xhigh" || *effort == "high")
+                            && (!CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
+                                || entry_routes.iter().any(|r| r.api_method == "oauth" && r.available)),
                         old: old_threshold_secs > 0
                             && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
                         created_date: or_created.map(|t| format_created(t)),
@@ -9106,12 +9113,15 @@ impl App {
                 let or_created = crate::provider::openrouter::model_created_timestamp(name);
                 let is_old = old_threshold_secs > 0
                     && or_created.map(|t| t < old_threshold_secs).unwrap_or(false);
+                let is_recommended = RECOMMENDED_MODELS.contains(&name.as_str())
+                    && (!CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
+                        || entry_routes.iter().any(|r| r.api_method == "oauth" && r.available));
                 models.push(super::ModelEntry {
                     name: name.clone(),
                     routes: entry_routes,
                     selected_route: 0,
                     is_current: *name == current_model,
-                    recommended: RECOMMENDED_MODELS.contains(&name.as_str()),
+                    recommended: is_recommended,
                     old: is_old,
                     created_date: or_created.map(|t| format_created(t)),
                     effort: None,
