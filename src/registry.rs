@@ -100,21 +100,46 @@ impl ServerRegistry {
         servers
     }
 
-    /// Clean up stale entries (servers that are no longer running)
+    /// Clean up stale entries (servers that are no longer running or have been superseded)
     pub async fn cleanup_stale(&mut self) -> Result<Vec<String>> {
         let mut removed = Vec::new();
 
+        // First pass: remove entries whose process is dead
         let names: Vec<_> = self.servers.keys().cloned().collect();
-        for name in names {
-            if let Some(info) = self.servers.get(&name) {
-                // Check if process is still running
+        for name in &names {
+            if let Some(info) = self.servers.get(name) {
                 let pid = info.pid;
                 if !is_process_running(pid) {
-                    // Also clean up socket files
                     let _ = fs::remove_file(&info.socket).await;
                     let _ = fs::remove_file(&info.debug_socket).await;
                     removed.push(name.clone());
-                    self.servers.remove(&name);
+                    self.servers.remove(name);
+                }
+            }
+        }
+
+        // Second pass: if multiple entries share the same socket path (happens
+        // after server exec/reload), keep only the newest one.
+        let remaining: Vec<_> = self.servers.keys().cloned().collect();
+        let mut socket_to_newest: std::collections::HashMap<PathBuf, (String, String)> =
+            std::collections::HashMap::new();
+        for name in &remaining {
+            if let Some(info) = self.servers.get(name) {
+                let entry = socket_to_newest
+                    .entry(info.socket.clone())
+                    .or_insert_with(|| (name.clone(), info.started_at.clone()));
+                if info.started_at > entry.1 {
+                    *entry = (name.clone(), info.started_at.clone());
+                }
+            }
+        }
+        for name in &remaining {
+            if let Some(info) = self.servers.get(name) {
+                if let Some((newest_name, _)) = socket_to_newest.get(&info.socket) {
+                    if newest_name != name {
+                        removed.push(name.clone());
+                        self.servers.remove(name);
+                    }
                 }
             }
         }

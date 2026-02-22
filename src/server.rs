@@ -5514,6 +5514,7 @@ async fn execute_debug_command(
     agent: Arc<Mutex<Agent>>,
     command: &str,
     debug_jobs: Arc<RwLock<HashMap<String, DebugJob>>>,
+    server_identity: Option<&ServerIdentity>,
 ) -> Result<String> {
     let trimmed = command.trim();
 
@@ -5909,7 +5910,7 @@ async fn execute_debug_command(
 
     if trimmed == "state" {
         let agent = agent.lock().await;
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "session_id": agent.session_id(),
             "messages": agent.message_count(),
             "is_canary": agent.is_canary(),
@@ -5917,6 +5918,11 @@ async fn execute_debug_command(
             "model": agent.provider_model(),
             "upstream_provider": agent.last_upstream_provider(),
         });
+        if let Some(identity) = server_identity {
+            payload["server_name"] = serde_json::json!(identity.name);
+            payload["server_icon"] = serde_json::json!(identity.icon);
+            payload["server_version"] = serde_json::json!(identity.version);
+        }
         return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
     }
 
@@ -6727,6 +6733,8 @@ async fn handle_debug_client(
                                     "status": member_info.map(|m| m.status.clone()),
                                     "detail": member_info.and_then(|m| m.detail.clone()),
                                     "token_usage": token_usage,
+                                    "server_name": server_identity.name,
+                                    "server_icon": server_identity.icon,
                                 }));
                             }
                             Ok(serde_json::to_string_pretty(&out)
@@ -6761,6 +6769,8 @@ async fn handle_debug_client(
                                     "status_changed_secs_ago": member.last_status_change.elapsed().as_secs(),
                                     "provider": provider,
                                     "model": model,
+                                    "server_name": server_identity.name,
+                                    "server_icon": server_identity.icon,
                                 }));
                             }
                             Ok(serde_json::to_string_pretty(&out)
@@ -8078,7 +8088,7 @@ async fn handle_debug_client(
                                 .await
                             {
                                 Ok((_session, agent)) => {
-                                    execute_debug_command(agent, cmd, Arc::clone(&debug_jobs)).await
+                                    execute_debug_command(agent, cmd, Arc::clone(&debug_jobs), Some(&server_identity)).await
                                 }
                                 Err(e) => Err(e),
                             }
