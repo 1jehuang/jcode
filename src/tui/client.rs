@@ -1340,10 +1340,14 @@ impl TuiState for ClientApp {
     fn info_widget_data(&self) -> super::info_widget::InfoWidgetData {
         // Check provider type
         let provider_name = self.provider_name.to_lowercase();
-        let has_creds = crate::auth::claude::has_credentials();
-        // OAuth providers: Claude, or unknown/remote (default to OAuth if credentials exist)
-        let is_oauth_provider = provider_name.contains("claude")
-            || ((provider_name == "unknown" || provider_name == "remote") && has_creds);
+        let has_anthropic_creds = crate::auth::claude::has_credentials();
+        let has_openai_creds = crate::auth::codex::load_credentials().is_ok();
+        // Anthropic OAuth: Claude provider, or unknown/remote with Anthropic credentials
+        let is_anthropic_oauth = provider_name.contains("claude")
+            || ((provider_name == "unknown" || provider_name == "remote")
+                && has_anthropic_creds
+                && !has_openai_creds);
+        let is_openai_provider = provider_name.contains("openai");
         let is_api_key_provider = provider_name.contains("openrouter");
 
         let output_tps = if self.is_processing {
@@ -1352,8 +1356,8 @@ impl TuiState for ClientApp {
             None
         };
 
-        let usage_info = if is_oauth_provider {
-            // OAuth providers (Claude) - fetch subscription usage
+        let usage_info = if is_anthropic_oauth {
+            // Anthropic OAuth - fetch subscription usage
             let usage = crate::usage::get_sync();
             Some(super::info_widget::UsageInfo {
                 provider: super::info_widget::UsageProvider::Anthropic,
@@ -1367,9 +1371,12 @@ impl TuiState for ClientApp {
                 output_tps,
                 available: true,
             })
-        } else if is_api_key_provider || self.total_input_tokens > 0 || self.total_output_tokens > 0
+        } else if is_api_key_provider
+            || is_openai_provider
+            || self.total_input_tokens > 0
+            || self.total_output_tokens > 0
         {
-            // API-key providers or if we have token counts
+            // API-key providers, OpenAI, or if we have token counts
             Some(super::info_widget::UsageInfo {
                 provider: super::info_widget::UsageProvider::CostBased,
                 five_hour: 0.0,
@@ -1389,7 +1396,7 @@ impl TuiState for ClientApp {
         // Determine authentication method for client mode
         let auth_method = if provider_name.contains("claude") || provider_name.contains("anthropic")
         {
-            if has_creds {
+            if has_anthropic_creds {
                 super::info_widget::AuthMethod::AnthropicOAuth
             } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
                 super::info_widget::AuthMethod::AnthropicApiKey

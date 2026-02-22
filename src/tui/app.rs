@@ -12691,10 +12691,12 @@ impl super::TuiState for App {
             // Check if current provider uses OAuth (Anthropic OAuth or OpenAI Codex)
             let provider_name = self.provider.name().to_lowercase();
             // Also check for "remote" provider with OAuth credentials (selfdev/client mode)
-            let has_oauth_creds = crate::auth::claude::has_credentials();
-            let is_oauth_provider = provider_name.contains("anthropic")
+            let has_anthropic_oauth = crate::auth::claude::has_credentials();
+            let has_openai_oauth = crate::auth::codex::load_credentials().is_ok();
+            let is_anthropic_oauth = provider_name.contains("anthropic")
                 || provider_name.contains("claude")
-                || (provider_name == "remote" && has_oauth_creds);
+                || (provider_name == "remote" && has_anthropic_oauth && !has_openai_oauth);
+            let is_openai_provider = provider_name.contains("openai");
             let is_api_key_provider = provider_name.contains("openrouter");
 
             let output_tps = if self.is_processing {
@@ -12703,10 +12705,8 @@ impl super::TuiState for App {
                 None
             };
 
-            if is_oauth_provider {
+            if is_anthropic_oauth {
                 let usage = crate::usage::get_sync();
-                // Show widget for OAuth providers even if data is still loading
-                // (will show 0% until first fetch completes, then updates)
                 Some(super::info_widget::UsageInfo {
                     provider: super::info_widget::UsageProvider::Anthropic,
                     five_hour: usage.five_hour,
@@ -12719,9 +12719,8 @@ impl super::TuiState for App {
                     output_tps,
                     available: true,
                 })
-            } else if is_api_key_provider {
-                // Show costs for API-key providers like OpenRouter
-                // Always available to show $0.00 until tokens are used
+            } else if is_api_key_provider || is_openai_provider {
+                // Show costs for API-key providers (OpenRouter) and OpenAI
                 Some(super::info_widget::UsageInfo {
                     provider: super::info_widget::UsageProvider::CostBased,
                     five_hour: 0.0,

@@ -403,6 +403,17 @@ pub enum UsageProvider {
     CostBased,
 }
 
+impl UsageProvider {
+    pub fn label(&self) -> &'static str {
+        match self {
+            UsageProvider::None => "",
+            UsageProvider::Anthropic => "Anthropic",
+            UsageProvider::OpenAI => "OpenAI",
+            UsageProvider::CostBased => "",
+        }
+    }
+}
+
 /// Authentication method used to access the model
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AuthMethod {
@@ -2554,10 +2565,31 @@ fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
             let five_hr_left = 100u8.saturating_sub(five_hr_used);
             let seven_day_left = 100u8.saturating_sub(seven_day_used);
 
-            vec![
-                render_labeled_bar("5-hour", five_hr_used, five_hr_left, None, inner.width),
-                render_labeled_bar("Weekly", seven_day_used, seven_day_left, None, inner.width),
-            ]
+            let mut lines = Vec::new();
+            let label = info.provider.label();
+            if !label.is_empty() {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("{} limits", label),
+                    Style::default()
+                        .fg(Color::Rgb(140, 140, 150))
+                        .add_modifier(ratatui::style::Modifier::DIM),
+                )]));
+            }
+            lines.push(render_labeled_bar(
+                "5-hour",
+                five_hr_used,
+                five_hr_left,
+                None,
+                inner.width,
+            ));
+            lines.push(render_labeled_bar(
+                "Weekly",
+                seven_day_used,
+                seven_day_left,
+                None,
+                inner.width,
+            ));
+            lines
         }
     }
 }
@@ -2757,7 +2789,16 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
                     }
                 }
                 _ => {
-                    // Subscription usage bars
+                    // Subscription usage bars with provider label
+                    let label = info.provider.label();
+                    if !label.is_empty() {
+                        lines.push(Line::from(vec![Span::styled(
+                            format!("{} limits", label),
+                            Style::default()
+                                .fg(Color::Rgb(140, 140, 150))
+                                .add_modifier(ratatui::style::Modifier::DIM),
+                        )]));
+                    }
                     let five_hr_used = (info.five_hour * 100.0).round().clamp(0.0, 100.0) as u8;
                     let seven_day_used = (info.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
                     let five_hr_left = 100u8.saturating_sub(five_hr_used);
@@ -3028,7 +3069,14 @@ fn compact_background_height(data: &InfoWidgetData) -> u16 {
 fn compact_usage_height(data: &InfoWidgetData) -> u16 {
     if let Some(info) = &data.usage_info {
         if info.available {
-            return 2; // Two lines: 5-hour and Weekly bars
+            match info.provider {
+                UsageProvider::CostBased => return 2,
+                _ => {
+                    let label = info.provider.label();
+                    let label_line = if label.is_empty() { 0 } else { 1 };
+                    return 2 + label_line;
+                }
+            }
         }
     }
     0
@@ -4545,10 +4593,31 @@ fn render_usage_compact(info: &UsageInfo, width: u16) -> Vec<Line<'static>> {
     let five_hr_left = 100u8.saturating_sub(five_hr_used);
     let seven_day_left = 100u8.saturating_sub(seven_day_used);
 
-    vec![
-        render_labeled_bar("5-hour", five_hr_used, five_hr_left, None, width),
-        render_labeled_bar("Weekly", seven_day_used, seven_day_left, None, width),
-    ]
+    let mut lines = Vec::new();
+    let label = info.provider.label();
+    if !label.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            format!("{} limits", label),
+            Style::default()
+                .fg(Color::Rgb(140, 140, 150))
+                .add_modifier(ratatui::style::Modifier::DIM),
+        )]));
+    }
+    lines.push(render_labeled_bar(
+        "5-hour",
+        five_hr_used,
+        five_hr_left,
+        None,
+        width,
+    ));
+    lines.push(render_labeled_bar(
+        "Weekly",
+        seven_day_used,
+        seven_day_left,
+        None,
+        width,
+    ));
+    lines
 }
 
 /// Render a labeled progress bar with color-coded status
