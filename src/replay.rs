@@ -545,7 +545,11 @@ impl Default for AutoEditOpts {
 
 fn truncate_for_timeline(s: &str) -> String {
     if s.len() > 500 {
-        format!("{}...", &s[..497])
+        let mut end = 497;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
     } else {
         s.to_string()
     }
