@@ -813,11 +813,23 @@ async fn run_main(mut args: Args) -> Result<()> {
                     if let Some(model) = args.model.as_deref() {
                         cmd.arg("--model").arg(model);
                     }
-                    let mut child = cmd
-                        .arg("serve")
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::piped())
-                        .spawn()?;
+                    let mut child = {
+                        let mut cmd = cmd;
+                        cmd.arg("serve")
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::piped());
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::process::CommandExt;
+                            unsafe {
+                                cmd.pre_exec(|| {
+                                    libc::setsid();
+                                    Ok(())
+                                });
+                            }
+                        }
+                        cmd.spawn()?
+                    };
 
                     // Wait for server to be ready (up to 10 seconds)
                     let start = std::time::Instant::now();
@@ -3010,13 +3022,23 @@ async fn run_canary_wrapper(
 
         // Spawn server as detached daemon (not tied to this client's lifecycle)
         let cwd = std::env::current_dir().unwrap_or_default();
-        std::process::Command::new(&binary_path)
-            .arg("serve")
+        let mut cmd = std::process::Command::new(&binary_path);
+        cmd.arg("serve")
             .current_dir(&cwd)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .stdin(std::process::Stdio::null())
-            .spawn()?;
+            .stdin(std::process::Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+        }
+        cmd.spawn()?;
 
         // Wait for server to be ready
         let start = std::time::Instant::now();
