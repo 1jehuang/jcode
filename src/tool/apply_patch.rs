@@ -18,10 +18,28 @@ struct ApplyPatchInput {
     patch_text: String,
 }
 
-struct UpdatePatch {
-    path: String,
-    move_to: Option<String>,
-    lines: Vec<String>,
+#[derive(Debug, Clone)]
+struct UpdateFileChunk {
+    change_context: Option<String>,
+    old_lines: Vec<String>,
+    new_lines: Vec<String>,
+    is_end_of_file: bool,
+}
+
+#[derive(Debug)]
+enum PatchHunk {
+    AddFile {
+        path: String,
+        contents: String,
+    },
+    DeleteFile {
+        path: String,
+    },
+    UpdateFile {
+        path: String,
+        move_to: Option<String>,
+        chunks: Vec<UpdateFileChunk>,
+    },
 }
 
 #[async_trait]
@@ -49,72 +67,62 @@ impl Tool for ApplyPatchTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: ApplyPatchInput = serde_json::from_value(input)?;
-        let parsed = parse_apply_patch(&params.patch_text)?;
-
-        let mut unified = String::new();
-        for patch in &parsed.updates {
-            unified.push_str(&format!("--- a/{}\n", patch.path));
-            unified.push_str(&format!("+++ b/{}\n", patch.path));
-            for line in &patch.lines {
-                unified.push_str(line);
-                unified.push('\n');
-            }
-        }
-
-        for (path, lines) in &parsed.adds {
-            let added_lines: Vec<String> = lines
-                .iter()
-                .map(|line| {
-                    if let Some(stripped) = line.strip_prefix('+') {
-                        format!("+{}", stripped)
-                    } else if line.starts_with("+++") || line.starts_with("---") {
-                        format!("+{}", line)
-                    } else {
-                        format!("+{}", line)
-                    }
-                })
-                .collect();
-
-            let count = added_lines.len();
-            unified.push_str("--- /dev/null\n");
-            unified.push_str(&format!("+++ b/{}\n", path));
-            unified.push_str(&format!("@@ -0,0 +1,{} @@\n", count));
-            for line in &added_lines {
-                unified.push_str(line);
-                unified.push('\n');
-            }
-        }
+        let hunks = parse_apply_patch(&params.patch_text)?;
 
         let mut results = Vec::new();
-        if !unified.trim().is_empty() {
-            let patch_tool = super::patch::PatchTool::new();
-            let patch_result = patch_tool
-                .execute(
-                    json!({"patch_text": unified}),
-                    ctx.for_subcall("patch".to_string()),
-                )
-                .await?;
-            results.push(patch_result.output);
-        }
 
-        for path in &parsed.deletes {
-            let display = path.clone();
-            let resolved = ctx.resolve_path(Path::new(path));
-            if std::fs::remove_file(&resolved).is_ok() {
-                results.push(format!("✓ {}: deleted", display));
-            } else {
-                results.push(format!("✗ {}: failed to delete", display));
-            }
-        }
-
-        for patch in &parsed.updates {
-            if let Some(move_to) = &patch.move_to {
-                let from = ctx.resolve_path(Path::new(&patch.path));
-                let to = ctx.resolve_path(Path::new(move_to));
-                if let Err(err) = std::fs::rename(&from, &to) {
-                    results.push(format!("✗ {}: move failed ({})", patch.path, err));
-                } else {
-                    results.push(format!("✓ {}: moved to {}", patch.path, move_to));
+        for hunk in &hunks {
+            match hunk {
+                PatchHunk::AddFile { path, contents } => {
+                    let resolved = ctx.resolve_path(Path::new(path));
+                    if let Some(parent) = resolved.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    tokio::fs::write(&resolved, contents).await?;
+                    results.push(format!("✓ {}: created", path));
+                }
+                PatchHunk::DeleteFile { path } => {
+                    let resolved = ctx.resolve_path(Path::new(path));
+                    if std::fs::remove_file(&resolved).is_ok() {
+                        results.push(format!("✓ {}: deleted", path));
+                    } else {
+                        results.push(format!("✗ {}: failed to delete", path));
+                    }
+                }
+                PatchHunk::UpdateFile {
+                    path,
+                    move_to,
+                    chunks,
+                } => {
+                    let resolved = ctx.resolve_path(Path::new(path));
+                    match apply_update_chunks(&resolved, chunks).await {
+                        Ok(new_contents) => {
+                            if let Some(dest) = move_to {
+                                let dest_resolved = ctx.resolve_path(Path::new(dest));
+                                if let Some(parent) = dest_resolved.parent() {
+                                    tokio::fs::create_dir_all(parent).await?;
+                                }
+                                tokio::fs::write(&dest_resolved, &new_contents).await?;
+                                let _ = tokio::fs::remove_file(&resolved).await;
+                                results.push(format!(
+                                    "✓ {}: modified ({} hunks), moved to {}",
+                                    path,
+                                    chunks.len(),
+                                    dest
+                                ));
+                            } else {
+                                tokio::fs::write(&resolved, &new_contents).await?;
+                                results.push(format!(
+                                    "✓ {}: modified ({} hunks)",
+                                    path,
+                                    chunks.len()
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            results.push(format!("✗ {}: {}", path, e));
+                        }
+                    }
                 }
             }
         }
@@ -127,27 +135,211 @@ impl Tool for ApplyPatchTool {
     }
 }
 
-struct ParsedApplyPatch {
-    updates: Vec<UpdatePatch>,
-    adds: Vec<(String, Vec<String>)>,
-    deletes: Vec<String>,
-}
+async fn apply_update_chunks(
+    path: &Path,
+    chunks: &[UpdateFileChunk],
+) -> Result<String> {
+    let original_contents = tokio::fs::read_to_string(path).await?;
+    let mut original_lines: Vec<String> = original_contents.split('\n').map(String::from).collect();
 
-fn parse_apply_patch(input: &str) -> Result<ParsedApplyPatch> {
-    let lines: Vec<&str> = input.lines().collect();
-    if lines.is_empty() || lines[0].trim() != "*** Begin Patch" {
-        anyhow::bail!("Patch must start with *** Begin Patch");
+    if original_lines.last().is_some_and(String::is_empty) {
+        original_lines.pop();
     }
 
-    let mut updates = Vec::new();
-    let mut adds = Vec::new();
-    let mut deletes = Vec::new();
+    let replacements = compute_replacements(&original_lines, path, chunks)?;
+    let mut new_lines = apply_replacements(original_lines, &replacements);
 
-    let mut i = 1;
+    if !new_lines.last().is_some_and(String::is_empty) {
+        new_lines.push(String::new());
+    }
+    Ok(new_lines.join("\n"))
+}
+
+fn compute_replacements(
+    original_lines: &[String],
+    path: &Path,
+    chunks: &[UpdateFileChunk],
+) -> Result<Vec<(usize, usize, Vec<String>)>> {
+    let mut replacements: Vec<(usize, usize, Vec<String>)> = Vec::new();
+    let mut line_index: usize = 0;
+
+    for chunk in chunks {
+        if let Some(ctx_line) = &chunk.change_context {
+            if let Some(idx) = seek_sequence(
+                original_lines,
+                std::slice::from_ref(ctx_line),
+                line_index,
+                false,
+            ) {
+                line_index = idx + 1;
+            } else {
+                anyhow::bail!(
+                    "Failed to find context '{}' in {}",
+                    ctx_line,
+                    path.display()
+                );
+            }
+        }
+
+        if chunk.old_lines.is_empty() {
+            let insertion_idx = if original_lines.last().is_some_and(String::is_empty) {
+                original_lines.len() - 1
+            } else {
+                original_lines.len()
+            };
+            replacements.push((insertion_idx, 0, chunk.new_lines.clone()));
+            continue;
+        }
+
+        let mut pattern: &[String] = &chunk.old_lines;
+        let mut found =
+            seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file);
+
+        let mut new_slice: &[String] = &chunk.new_lines;
+
+        if found.is_none() && pattern.last().is_some_and(String::is_empty) {
+            pattern = &pattern[..pattern.len() - 1];
+            if new_slice.last().is_some_and(String::is_empty) {
+                new_slice = &new_slice[..new_slice.len() - 1];
+            }
+            found = seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file);
+        }
+
+        if let Some(start_idx) = found {
+            replacements.push((start_idx, pattern.len(), new_slice.to_vec()));
+            line_index = start_idx + pattern.len();
+        } else {
+            anyhow::bail!(
+                "Failed to find expected lines in {}:\n{}",
+                path.display(),
+                chunk.old_lines.join("\n"),
+            );
+        }
+    }
+
+    replacements.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+    Ok(replacements)
+}
+
+fn apply_replacements(
+    mut lines: Vec<String>,
+    replacements: &[(usize, usize, Vec<String>)],
+) -> Vec<String> {
+    for (start_idx, old_len, new_segment) in replacements.iter().rev() {
+        let start_idx = *start_idx;
+        let old_len = *old_len;
+
+        for _ in 0..old_len {
+            if start_idx < lines.len() {
+                lines.remove(start_idx);
+            }
+        }
+
+        for (offset, new_line) in new_segment.iter().enumerate() {
+            lines.insert(start_idx + offset, new_line.clone());
+        }
+    }
+
+    lines
+}
+
+fn seek_sequence(
+    lines: &[String],
+    pattern: &[String],
+    start: usize,
+    eof: bool,
+) -> Option<usize> {
+    if pattern.is_empty() {
+        return Some(start);
+    }
+
+    if pattern.len() > lines.len() {
+        return None;
+    }
+
+    let search_start = if eof && lines.len() >= pattern.len() {
+        lines.len() - pattern.len()
+    } else {
+        start
+    };
+
+    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
+        if lines[i..i + pattern.len()] == *pattern {
+            return Some(i);
+        }
+    }
+
+    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
+        let mut ok = true;
+        for (p_idx, pat) in pattern.iter().enumerate() {
+            if lines[i + p_idx].trim_end() != pat.trim_end() {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            return Some(i);
+        }
+    }
+
+    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
+        let mut ok = true;
+        for (p_idx, pat) in pattern.iter().enumerate() {
+            if lines[i + p_idx].trim() != pat.trim() {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            return Some(i);
+        }
+    }
+
+    None
+}
+
+fn parse_apply_patch(input: &str) -> Result<Vec<PatchHunk>> {
+    let lines: Vec<&str> = input.lines().collect();
+
+    let start = lines
+        .iter()
+        .position(|l| l.trim() == "*** Begin Patch")
+        .ok_or_else(|| anyhow::anyhow!("Patch must contain *** Begin Patch"))?;
+
+    let mut hunks = Vec::new();
+    let mut i = start + 1;
+
     while i < lines.len() {
         let line = lines[i].trim_end();
         if line.trim() == "*** End Patch" {
             break;
+        }
+
+        if let Some(path) = line.strip_prefix("*** Add File: ") {
+            let path = path.trim().to_string();
+            i += 1;
+            let mut contents = String::new();
+            while i < lines.len() {
+                let current = lines[i];
+                if current.starts_with("*** ") {
+                    break;
+                }
+                if let Some(added) = current.strip_prefix('+') {
+                    contents.push_str(added);
+                    contents.push('\n');
+                }
+                i += 1;
+            }
+            hunks.push(PatchHunk::AddFile { path, contents });
+            continue;
+        }
+
+        if let Some(path) = line.strip_prefix("*** Delete File: ") {
+            hunks.push(PatchHunk::DeleteFile {
+                path: path.trim().to_string(),
+            });
+            i += 1;
+            continue;
         }
 
         if let Some(path) = line.strip_prefix("*** Update File: ") {
@@ -162,56 +354,355 @@ fn parse_apply_patch(input: &str) -> Result<ParsedApplyPatch> {
                 }
             }
 
-            let mut content = Vec::new();
+            let mut chunks = Vec::new();
+            let mut is_first_chunk = true;
+
             while i < lines.len() {
                 let current = lines[i].trim_end();
-                if current.starts_with("*** ") {
+
+                if current.starts_with("*** ") && current != "*** End of File" {
                     break;
                 }
-                content.push(current.to_string());
-                i += 1;
+
+                if current.trim().is_empty()
+                    && !current.starts_with(' ')
+                    && !current.starts_with('+')
+                    && !current.starts_with('-')
+                {
+                    i += 1;
+                    continue;
+                }
+
+                let change_context;
+                if current == "@@" {
+                    change_context = None;
+                    i += 1;
+                } else if let Some(ctx) = current.strip_prefix("@@ ") {
+                    change_context = Some(ctx.to_string());
+                    i += 1;
+                } else if is_first_chunk {
+                    change_context = None;
+                } else {
+                    break;
+                }
+
+                let mut old_lines = Vec::new();
+                let mut new_lines = Vec::new();
+                let mut is_end_of_file = false;
+                let mut had_diff_lines = false;
+
+                while i < lines.len() {
+                    let cl = lines[i];
+
+                    if cl == "*** End of File" {
+                        is_end_of_file = true;
+                        i += 1;
+                        break;
+                    }
+
+                    if cl.starts_with("*** ") || cl.starts_with("@@") {
+                        break;
+                    }
+
+                    if let Some(content) = cl.strip_prefix(' ') {
+                        old_lines.push(content.to_string());
+                        new_lines.push(content.to_string());
+                        had_diff_lines = true;
+                    } else if let Some(content) = cl.strip_prefix('+') {
+                        new_lines.push(content.to_string());
+                        had_diff_lines = true;
+                    } else if let Some(content) = cl.strip_prefix('-') {
+                        old_lines.push(content.to_string());
+                        had_diff_lines = true;
+                    } else if cl.is_empty() {
+                        old_lines.push(String::new());
+                        new_lines.push(String::new());
+                        had_diff_lines = true;
+                    } else {
+                        if had_diff_lines {
+                            break;
+                        }
+                        i += 1;
+                        continue;
+                    }
+
+                    i += 1;
+                }
+
+                if had_diff_lines || change_context.is_some() {
+                    chunks.push(UpdateFileChunk {
+                        change_context,
+                        old_lines,
+                        new_lines,
+                        is_end_of_file,
+                    });
+                }
+
+                is_first_chunk = false;
             }
 
-            updates.push(UpdatePatch {
+            if chunks.is_empty() {
+                anyhow::bail!("Update file hunk for '{}' has no changes", path);
+            }
+
+            hunks.push(PatchHunk::UpdateFile {
                 path,
                 move_to,
-                lines: content,
+                chunks,
             });
-            continue;
-        }
-
-        if let Some(path) = line.strip_prefix("*** Add File: ") {
-            let path = path.trim().to_string();
-            i += 1;
-            let mut content = Vec::new();
-            while i < lines.len() {
-                let current = lines[i].trim_end();
-                if current.starts_with("*** ") {
-                    break;
-                }
-                content.push(current.to_string());
-                i += 1;
-            }
-            adds.push((path, content));
-            continue;
-        }
-
-        if let Some(path) = line.strip_prefix("*** Delete File: ") {
-            deletes.push(path.trim().to_string());
-            i += 1;
             continue;
         }
 
         i += 1;
     }
 
-    if updates.is_empty() && adds.is_empty() && deletes.is_empty() {
+    if hunks.is_empty() {
         anyhow::bail!("No valid patch directives found");
     }
 
-    Ok(ParsedApplyPatch {
-        updates,
-        adds,
-        deletes,
-    })
+    Ok(hunks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn write_temp(content: &str) -> NamedTempFile {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f
+    }
+
+    #[test]
+    fn test_parse_add_file() {
+        let patch = "*** Begin Patch\n*** Add File: hello.txt\n+Hello world\n+Second line\n*** End Patch";
+        let hunks = parse_apply_patch(patch).unwrap();
+        assert_eq!(hunks.len(), 1);
+        match &hunks[0] {
+            PatchHunk::AddFile { path, contents } => {
+                assert_eq!(path, "hello.txt");
+                assert_eq!(contents, "Hello world\nSecond line\n");
+            }
+            _ => panic!("Expected AddFile"),
+        }
+    }
+
+    #[test]
+    fn test_parse_delete_file() {
+        let patch = "*** Begin Patch\n*** Delete File: old.txt\n*** End Patch";
+        let hunks = parse_apply_patch(patch).unwrap();
+        assert_eq!(hunks.len(), 1);
+        match &hunks[0] {
+            PatchHunk::DeleteFile { path } => {
+                assert_eq!(path, "old.txt");
+            }
+            _ => panic!("Expected DeleteFile"),
+        }
+    }
+
+    #[test]
+    fn test_parse_update_file_simple() {
+        let patch = "*** Begin Patch\n*** Update File: test.py\n@@\n foo\n-bar\n+baz\n*** End Patch";
+        let hunks = parse_apply_patch(patch).unwrap();
+        assert_eq!(hunks.len(), 1);
+        match &hunks[0] {
+            PatchHunk::UpdateFile { path, chunks, .. } => {
+                assert_eq!(path, "test.py");
+                assert_eq!(chunks.len(), 1);
+                assert_eq!(chunks[0].old_lines, vec!["foo", "bar"]);
+                assert_eq!(chunks[0].new_lines, vec!["foo", "baz"]);
+            }
+            _ => panic!("Expected UpdateFile"),
+        }
+    }
+
+    #[test]
+    fn test_parse_update_with_context() {
+        let patch = "*** Begin Patch\n*** Update File: test.py\n@@ def my_func():\n-    pass\n+    return 42\n*** End Patch";
+        let hunks = parse_apply_patch(patch).unwrap();
+        match &hunks[0] {
+            PatchHunk::UpdateFile { chunks, .. } => {
+                assert_eq!(chunks[0].change_context, Some("def my_func():".to_string()));
+                assert_eq!(chunks[0].old_lines, vec!["    pass"]);
+                assert_eq!(chunks[0].new_lines, vec!["    return 42"]);
+            }
+            _ => panic!("Expected UpdateFile"),
+        }
+    }
+
+    #[test]
+    fn test_parse_update_with_move() {
+        let patch = "*** Begin Patch\n*** Update File: old.py\n*** Move to: new.py\n@@\n-old_line\n+new_line\n*** End Patch";
+        let hunks = parse_apply_patch(patch).unwrap();
+        match &hunks[0] {
+            PatchHunk::UpdateFile {
+                path,
+                move_to,
+                chunks,
+            } => {
+                assert_eq!(path, "old.py");
+                assert_eq!(move_to, &Some("new.py".to_string()));
+                assert_eq!(chunks.len(), 1);
+            }
+            _ => panic!("Expected UpdateFile"),
+        }
+    }
+
+    #[test]
+    fn test_parse_multiple_chunks() {
+        let patch = "*** Begin Patch\n*** Update File: test.py\n@@\n foo\n-bar\n+BAR\n@@\n baz\n-qux\n+QUX\n*** End Patch";
+        let hunks = parse_apply_patch(patch).unwrap();
+        match &hunks[0] {
+            PatchHunk::UpdateFile { chunks, .. } => {
+                assert_eq!(chunks.len(), 2);
+                assert_eq!(chunks[0].old_lines, vec!["foo", "bar"]);
+                assert_eq!(chunks[0].new_lines, vec!["foo", "BAR"]);
+                assert_eq!(chunks[1].old_lines, vec!["baz", "qux"]);
+                assert_eq!(chunks[1].new_lines, vec!["baz", "QUX"]);
+            }
+            _ => panic!("Expected UpdateFile"),
+        }
+    }
+
+    #[test]
+    fn test_parse_end_of_file() {
+        let patch = "*** Begin Patch\n*** Update File: test.py\n@@\n last_line\n+new_last_line\n*** End of File\n*** End Patch";
+        let hunks = parse_apply_patch(patch).unwrap();
+        match &hunks[0] {
+            PatchHunk::UpdateFile { chunks, .. } => {
+                assert!(chunks[0].is_end_of_file);
+            }
+            _ => panic!("Expected UpdateFile"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_update_simple() {
+        let f = write_temp("foo\nbar\n");
+        let chunks = vec![UpdateFileChunk {
+            change_context: None,
+            old_lines: vec!["foo".to_string(), "bar".to_string()],
+            new_lines: vec!["foo".to_string(), "baz".to_string()],
+            is_end_of_file: false,
+        }];
+        let result = apply_update_chunks(f.path(), &chunks).await.unwrap();
+        assert_eq!(result, "foo\nbaz\n");
+    }
+
+    #[tokio::test]
+    async fn test_apply_update_multiple_chunks() {
+        let f = write_temp("foo\nbar\nbaz\nqux\n");
+        let chunks = vec![
+            UpdateFileChunk {
+                change_context: None,
+                old_lines: vec!["foo".to_string(), "bar".to_string()],
+                new_lines: vec!["foo".to_string(), "BAR".to_string()],
+                is_end_of_file: false,
+            },
+            UpdateFileChunk {
+                change_context: None,
+                old_lines: vec!["baz".to_string(), "qux".to_string()],
+                new_lines: vec!["baz".to_string(), "QUX".to_string()],
+                is_end_of_file: false,
+            },
+        ];
+        let result = apply_update_chunks(f.path(), &chunks).await.unwrap();
+        assert_eq!(result, "foo\nBAR\nbaz\nQUX\n");
+    }
+
+    #[tokio::test]
+    async fn test_apply_update_with_context_header() {
+        let f = write_temp("class Foo:\n    def bar(self):\n        pass\n    def baz(self):\n        pass\n");
+        let chunks = vec![UpdateFileChunk {
+            change_context: Some("def baz(self):".to_string()),
+            old_lines: vec!["        pass".to_string()],
+            new_lines: vec!["        return 42".to_string()],
+            is_end_of_file: false,
+        }];
+        let result = apply_update_chunks(f.path(), &chunks).await.unwrap();
+        assert_eq!(
+            result,
+            "class Foo:\n    def bar(self):\n        pass\n    def baz(self):\n        return 42\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_update_append_at_eof() {
+        let f = write_temp("foo\nbar\nbaz\n");
+        let chunks = vec![UpdateFileChunk {
+            change_context: None,
+            old_lines: vec![],
+            new_lines: vec!["quux".to_string()],
+            is_end_of_file: false,
+        }];
+        let result = apply_update_chunks(f.path(), &chunks).await.unwrap();
+        assert_eq!(result, "foo\nbar\nbaz\nquux\n");
+    }
+
+    #[test]
+    fn test_seek_sequence_exact() {
+        let lines: Vec<String> = vec!["foo", "bar", "baz"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let pattern: Vec<String> = vec!["bar", "baz"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(seek_sequence(&lines, &pattern, 0, false), Some(1));
+    }
+
+    #[test]
+    fn test_seek_sequence_whitespace_tolerant() {
+        let lines: Vec<String> = vec!["foo   ", "bar\t"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let pattern: Vec<String> = vec!["foo", "bar"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(seek_sequence(&lines, &pattern, 0, false), Some(0));
+    }
+
+    #[test]
+    fn test_seek_sequence_eof() {
+        let lines: Vec<String> = vec!["a", "b", "c", "d"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let pattern: Vec<String> = vec!["c", "d"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(seek_sequence(&lines, &pattern, 0, true), Some(2));
+    }
+
+    #[test]
+    fn test_parse_no_begin() {
+        let result = parse_apply_patch("random text");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_heredoc_wrapper() {
+        let patch = "<<'EOF'\n*** Begin Patch\n*** Add File: test.txt\n+hello\n*** End Patch\nEOF";
+        let hunks = parse_apply_patch(patch).unwrap();
+        assert_eq!(hunks.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_update_without_explicit_at() {
+        let patch = "*** Begin Patch\n*** Update File: file.py\n import foo\n+bar\n*** End Patch";
+        let hunks = parse_apply_patch(patch).unwrap();
+        match &hunks[0] {
+            PatchHunk::UpdateFile { chunks, .. } => {
+                assert_eq!(chunks.len(), 1);
+                assert!(chunks[0].change_context.is_none());
+            }
+            _ => panic!("Expected UpdateFile"),
+        }
+    }
 }
