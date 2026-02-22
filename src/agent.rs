@@ -704,6 +704,10 @@ impl Agent {
         self.session.messages.len()
     }
 
+    pub fn last_message_role(&self) -> Option<Role> {
+        self.session.messages.last().map(|m| m.role.clone())
+    }
+
     /// Build a transcript string for memory extraction
     /// This is a standalone method so it can be called before spawning async tasks
     pub fn build_transcript_for_extraction(&self) -> String {

@@ -2328,7 +2328,29 @@ async fn handle_client(
                 };
 
                 let was_interrupted = match &result {
-                    Ok(status) => matches!(status, crate::session::SessionStatus::Crashed { .. }),
+                    Ok(status) => {
+                        // A session is "interrupted" if it crashed OR if it was still
+                        // Active (server died without clean shutdown, e.g. during reload)
+                        // and the last saved message was from the user (meaning the
+                        // assistant response was never completed/saved).
+                        match status {
+                            crate::session::SessionStatus::Crashed { .. } => true,
+                            crate::session::SessionStatus::Active => {
+                                let agent_guard = agent.lock().await;
+                                let last_is_user = agent_guard.last_message_role()
+                                    .map(|r| r == crate::message::Role::User)
+                                    .unwrap_or(false);
+                                if last_is_user {
+                                    crate::logging::info(&format!(
+                                        "Session {} was Active with pending user message - treating as interrupted",
+                                        session_id
+                                    ));
+                                }
+                                last_is_user
+                            }
+                            _ => false,
+                        }
+                    }
                     Err(_) => false,
                 };
 
