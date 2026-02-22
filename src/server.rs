@@ -985,8 +985,10 @@ impl Server {
         // Only run on selfdev servers to avoid non-selfdev servers picking up
         // rebuild-signal and exec'ing, which would kill all their client connections
         if is_selfdev_env() {
-            tokio::spawn(async {
-                monitor_selfdev_signals().await;
+            let signal_sessions = Arc::clone(&self.sessions);
+            let signal_swarm_members = Arc::clone(&self.swarm_members);
+            tokio::spawn(async move {
+                monitor_selfdev_signals(signal_sessions, signal_swarm_members).await;
             });
         }
 
@@ -2329,24 +2331,35 @@ async fn handle_client(
 
                 let was_interrupted = match &result {
                     Ok(status) => {
-                        // A session is "interrupted" if it crashed OR if it was still
-                        // Active (server died without clean shutdown, e.g. during reload)
-                        // and the last saved message was from the user (meaning the
-                        // assistant response was never completed/saved).
                         match status {
                             crate::session::SessionStatus::Crashed { .. } => true,
                             crate::session::SessionStatus::Active => {
                                 let agent_guard = agent.lock().await;
-                                let last_is_user = agent_guard.last_message_role()
-                                    .map(|r| r == crate::message::Role::User)
+                                let last_role = agent_guard.last_message_role();
+                                let last_is_user = last_role
+                                    .as_ref()
+                                    .map(|r| *r == crate::message::Role::User)
                                     .unwrap_or(false);
+                                let last_is_reload_interrupted = last_role
+                                    .as_ref()
+                                    .map(|r| *r == crate::message::Role::Assistant)
+                                    .unwrap_or(false)
+                                    && agent_guard.last_message_text()
+                                        .map(|t| t.ends_with("[generation interrupted - server reloading]"))
+                                        .unwrap_or(false);
                                 if last_is_user {
                                     crate::logging::info(&format!(
                                         "Session {} was Active with pending user message - treating as interrupted",
                                         session_id
                                     ));
                                 }
-                                last_is_user
+                                if last_is_reload_interrupted {
+                                    crate::logging::info(&format!(
+                                        "Session {} was interrupted by reload - will auto-resume",
+                                        session_id
+                                    ));
+                                }
+                                last_is_user || last_is_reload_interrupted
                             }
                             _ => false,
                         }
@@ -9010,10 +9023,14 @@ fn normalize_model_arg(model: String) -> Option<String> {
     }
 }
 
-/// Monitor for selfdev signal files and exec into new binary
-/// The server directly execs into the new binary instead of exiting
+/// Monitor for selfdev signal files and exec into new binary.
+/// Before exec'ing, gracefully stops all active generations so partial
+/// responses are checkpointed to disk and can be resumed.
 /// NOTE: This should only be called on selfdev servers (guarded at call site)
-async fn monitor_selfdev_signals() {
+async fn monitor_selfdev_signals(
+    sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+) {
     use std::process::Command as ProcessCommand;
     use tokio::time::{interval, Duration};
 
@@ -9037,13 +9054,18 @@ async fn monitor_selfdev_signals() {
         if rebuild_path.exists() {
             if let Ok(_hash) = std::fs::read_to_string(&rebuild_path) {
                 let _ = std::fs::remove_file(&rebuild_path);
-                crate::logging::info("Server: reload signal received, exec'ing into canary binary");
+                crate::logging::info("Server: reload signal received");
+
+                // Gracefully stop all active generations before exec'ing
+                graceful_shutdown_sessions(&sessions, &swarm_members).await;
 
                 // Get canary binary path
                 if let Ok(binary) = crate::build::canary_binary_path() {
                     if binary.exists() {
-                        // Small delay for filesystem sync
-                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        crate::logging::info(&format!(
+                            "Server: exec'ing into canary binary {:?}",
+                            binary
+                        ));
 
                         // Exec into the new binary with serve mode
                         let err = crate::platform::replace_process(ProcessCommand::new(&binary).arg("serve"));
@@ -9065,15 +9087,14 @@ async fn monitor_selfdev_signals() {
         if rollback_path.exists() {
             if let Ok(_hash) = std::fs::read_to_string(&rollback_path) {
                 let _ = std::fs::remove_file(&rollback_path);
-                crate::logging::info(
-                    "Server: rollback signal received, exec'ing into stable binary",
-                );
+                crate::logging::info("Server: rollback signal received");
+
+                // Gracefully stop all active generations before exec'ing
+                graceful_shutdown_sessions(&sessions, &swarm_members).await;
 
                 // Get stable binary path
                 if let Ok(binary) = crate::build::stable_binary_path() {
                     if binary.exists() {
-                        std::thread::sleep(std::time::Duration::from_millis(200));
-
                         let err = crate::platform::replace_process(ProcessCommand::new(&binary).arg("serve"));
 
                         crate::logging::error(&format!(
@@ -9084,6 +9105,79 @@ async fn monitor_selfdev_signals() {
                 }
                 std::process::exit(43);
             }
+        }
+    }
+}
+
+/// Signal all active sessions to gracefully stop generation and checkpoint.
+/// Waits up to 10 seconds for processing to finish.
+async fn graceful_shutdown_sessions(
+    sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) {
+    // Find which sessions are actively processing
+    let running_sessions: Vec<String> = {
+        let members = swarm_members.read().await;
+        members
+            .iter()
+            .filter(|(_, m)| m.status == "running")
+            .map(|(id, _)| id.clone())
+            .collect()
+    };
+
+    if running_sessions.is_empty() {
+        crate::logging::info("Server: no active generations, proceeding with reload");
+        return;
+    }
+
+    crate::logging::info(&format!(
+        "Server: signaling {} active session(s) to checkpoint: {:?}",
+        running_sessions.len(),
+        running_sessions
+    ));
+
+    // Signal graceful shutdown on all active sessions
+    {
+        let sessions_guard = sessions.read().await;
+        for session_id in &running_sessions {
+            if let Some(agent_arc) = sessions_guard.get(session_id) {
+                let agent = agent_arc.lock().await;
+                agent.request_graceful_shutdown();
+            }
+        }
+    }
+
+    // Wait for all sessions to finish processing (poll swarm member status)
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+    let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
+
+    loop {
+        poll_interval.tick().await;
+
+        let still_running: usize = {
+            let members = swarm_members.read().await;
+            running_sessions
+                .iter()
+                .filter(|id| {
+                    members
+                        .get(*id)
+                        .map(|m| m.status == "running")
+                        .unwrap_or(false)
+                })
+                .count()
+        };
+
+        if still_running == 0 {
+            crate::logging::info("Server: all sessions checkpointed, proceeding with reload");
+            break;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            crate::logging::warn(&format!(
+                "Server: {} session(s) still running after 10s timeout, proceeding with reload anyway",
+                still_running
+            ));
+            break;
         }
     }
 }

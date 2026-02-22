@@ -61,6 +61,7 @@ pub type SoftInterruptQueue = Arc<std::sync::Mutex<Vec<SoftInterruptMessage>>>;
 /// Set by the server when the client sends BackgroundTool request.
 /// Uses std::sync so it can be set without async from outside the agent lock.
 pub type BackgroundToolSignal = Arc<std::sync::atomic::AtomicBool>;
+pub type GracefulShutdownSignal = Arc<std::sync::atomic::AtomicBool>;
 
 /// Token usage from the last API request
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -89,6 +90,8 @@ pub struct Agent {
     soft_interrupt_queue: SoftInterruptQueue,
     /// Signal from client to move the currently executing tool to background
     background_tool_signal: BackgroundToolSignal,
+    /// Signal to gracefully stop generation (checkpoint partial response and exit)
+    graceful_shutdown: GracefulShutdownSignal,
     /// Client-side cache tracking for detecting append-only violations
     cache_tracker: CacheTracker,
     /// Last token usage from API request (for debug socket queries)
@@ -190,6 +193,7 @@ impl Agent {
             pending_alerts: Vec::new(),
             soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             background_tool_signal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            graceful_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cache_tracker: CacheTracker::new(),
             last_usage: TokenUsage::default(),
             locked_tools: None,
@@ -222,6 +226,7 @@ impl Agent {
             pending_alerts: Vec::new(),
             soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             background_tool_signal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            graceful_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cache_tracker: CacheTracker::new(),
             last_usage: TokenUsage::default(),
             locked_tools: None,
@@ -493,6 +498,18 @@ impl Agent {
         Arc::clone(&self.background_tool_signal)
     }
 
+    pub fn graceful_shutdown_signal(&self) -> GracefulShutdownSignal {
+        Arc::clone(&self.graceful_shutdown)
+    }
+
+    pub fn request_graceful_shutdown(&self) {
+        self.graceful_shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn is_graceful_shutdown(&self) -> bool {
+        self.graceful_shutdown.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Check if there are pending soft interrupts
     pub fn has_soft_interrupts(&self) -> bool {
         self.soft_interrupt_queue
@@ -706,6 +723,19 @@ impl Agent {
 
     pub fn last_message_role(&self) -> Option<Role> {
         self.session.messages.last().map(|m| m.role.clone())
+    }
+
+    /// Get the text content of the last message (first Text block)
+    pub fn last_message_text(&self) -> Option<&str> {
+        self.session.messages.last().and_then(|m| {
+            m.content.iter().find_map(|block| {
+                if let ContentBlock::Text { text, .. } = block {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+        })
     }
 
     /// Build a transcript string for memory extraction
@@ -2911,6 +2941,14 @@ impl Agent {
                     StreamEvent::TextDelta(text) => {
                         let _ = event_tx.send(ServerEvent::TextDelta { text: text.clone() });
                         text_content.push_str(&text);
+                        if self.is_graceful_shutdown() {
+                            logging::info("Graceful shutdown during streaming - checkpointing partial response");
+                            let _ = event_tx.send(ServerEvent::TextDelta {
+                                text: "\n\n[generation interrupted - server reloading]".to_string(),
+                            });
+                            text_content.push_str("\n\n[generation interrupted - server reloading]");
+                            break;
+                        }
                     }
                     StreamEvent::ToolUseStart { id, name } => {
                         let _ = event_tx.send(ServerEvent::ToolStart {
@@ -3133,6 +3171,28 @@ impl Agent {
                 break;
             }
 
+            // If graceful shutdown was signaled during streaming and we have tool calls,
+            // we need to provide tool results for them (API requires tool_use -> tool_result)
+            // then exit cleanly
+            if self.is_graceful_shutdown() {
+                logging::info(&format!(
+                    "Graceful shutdown - skipping {} tool call(s)",
+                    tool_calls.len()
+                ));
+                for tc in &tool_calls {
+                    self.add_message(
+                        Role::User,
+                        vec![ContentBlock::ToolResult {
+                            tool_use_id: tc.id.clone(),
+                            content: "[Skipped - server reloading]".to_string(),
+                            is_error: Some(true),
+                        }],
+                    );
+                }
+                self.session.save()?;
+                break;
+            }
+
             logging::info(&format!(
                 "Turn has {} tool calls to execute",
                 tool_calls.len()
@@ -3259,7 +3319,9 @@ impl Agent {
                 self.background_tool_signal.store(false, std::sync::atomic::Ordering::SeqCst);
 
                 // Wait for tool completion OR background signal from user (Alt+B)
+                // OR graceful shutdown signal from server reload
                 let bg_signal = Arc::clone(&self.background_tool_signal);
+                let shutdown_signal = Arc::clone(&self.graceful_shutdown);
                 let tool_result;
                 let mut tool_handle = tool_handle;
                 tokio::select! {
@@ -3273,7 +3335,9 @@ impl Agent {
                     _ = async {
                         loop {
                             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                            if bg_signal.load(std::sync::atomic::Ordering::SeqCst) {
+                            if bg_signal.load(std::sync::atomic::Ordering::SeqCst)
+                                || shutdown_signal.load(std::sync::atomic::Ordering::SeqCst)
+                            {
                                 break;
                             }
                         }
@@ -3331,6 +3395,52 @@ impl Agent {
                             self.session.save()?;
                         }
                     }
+                } else if self.is_graceful_shutdown() {
+                    // Server reload - abort tool and save interrupted result
+                    logging::info(&format!(
+                        "Tool '{}' interrupted by server reload after {:.1}s",
+                        tc.name,
+                        tool_elapsed.as_secs_f64()
+                    ));
+                    tool_handle.abort();
+
+                    let interrupted_msg = format!(
+                        "[Tool '{}' interrupted by server reload after {:.1}s]",
+                        tc.name,
+                        tool_elapsed.as_secs_f64()
+                    );
+
+                    let _ = event_tx.send(ServerEvent::ToolDone {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        output: interrupted_msg.clone(),
+                        error: Some("interrupted by reload".to_string()),
+                    });
+
+                    self.add_message_with_duration(
+                        Role::User,
+                        vec![ContentBlock::ToolResult {
+                            tool_use_id: tc.id.clone(),
+                            content: interrupted_msg,
+                            is_error: Some(true),
+                        }],
+                        Some(tool_elapsed.as_millis() as u64),
+                    );
+                    self.session.save()?;
+
+                    // Add results for any remaining tools too
+                    for remaining_tc in &tool_calls[(tool_index + 1)..] {
+                        self.add_message(
+                            Role::User,
+                            vec![ContentBlock::ToolResult {
+                                tool_use_id: remaining_tc.id.clone(),
+                                content: "[Skipped - server reloading]".to_string(),
+                                is_error: Some(true),
+                            }],
+                        );
+                    }
+                    self.session.save()?;
+                    return Ok(());
                 } else {
                     // User pressed Alt+B — move tool to background
                     logging::info(&format!(
