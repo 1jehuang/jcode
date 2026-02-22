@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 /// Preferred sidecar model (fast + cheap) when OpenAI creds are available.
 pub const SIDECAR_OPENAI_MODEL: &str = "gpt-5.3-codex-spark";
+const SIDECAR_OPENAI_CHATGPT_MODEL: &str = "gpt-5.3-codex";
 
 /// Fallback sidecar model when only Claude creds are available.
 const SIDECAR_CLAUDE_MODEL: &str = "claude-haiku-4-5-20241022";
@@ -111,7 +112,11 @@ impl HaikuSidecar {
         }
 
         let request = serde_json::json!({
-            "model": self.model,
+            "model": if is_chatgpt_mode && self.model == SIDECAR_OPENAI_MODEL {
+                SIDECAR_OPENAI_CHATGPT_MODEL
+            } else {
+                &self.model
+            },
             "instructions": instructions,
             "input": [{
                 "type": "message",

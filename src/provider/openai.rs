@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use tokio::sync::{mpsc, RwLock};
@@ -42,6 +42,10 @@ const WEBSOCKET_FALLBACK_NOTICE: &str = "falling back from websockets to https t
 const WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS: u64 = 45;
 const WEBSOCKET_IDLE_TIMEOUT_SECS: u64 = 30;
 const WEBSOCKET_COMPLETION_TIMEOUT_SECS: u64 = 90;
+static FALLBACK_TOOL_CALL_COUNTER: AtomicU64 = AtomicU64::new(1);
+static RECOVERED_TEXT_WRAPPED_TOOL_CALLS: AtomicU64 = AtomicU64::new(0);
+static NORMALIZED_NULL_TOOL_ARGUMENTS: AtomicU64 = AtomicU64::new(0);
+static REWRITTEN_ORPHAN_TOOL_OUTPUTS: AtomicU64 = AtomicU64::new(0);
 
 /// Available OpenAI/Codex models
 const AVAILABLE_MODELS: &[&str] = &[
@@ -323,11 +327,87 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
                 "type": "function",
                 "name": t.name,
                 "description": t.description,
-                "strict": false,
+                "strict": true,
                 "parameters": t.input_schema,
             })
         })
         .collect()
+}
+
+fn parse_text_wrapped_tool_call(text: &str) -> Option<(String, String, String, String)> {
+    let marker = "to=functions.";
+    let marker_idx = text.find(marker)?;
+    let after_marker = &text[marker_idx + marker.len()..];
+
+    let mut tool_name_end = 0usize;
+    for (idx, ch) in after_marker.char_indices() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            tool_name_end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if tool_name_end == 0 {
+        return None;
+    }
+
+    let tool_name = after_marker[..tool_name_end].to_string();
+    let remaining = &after_marker[tool_name_end..];
+    let mut fallback: Option<(String, String, String, String)> = None;
+    for (brace_idx, ch) in remaining.char_indices() {
+        if ch != '{' {
+            continue;
+        }
+        let slice = &remaining[brace_idx..];
+        let mut stream = serde_json::Deserializer::from_str(slice).into_iter::<Value>();
+        let parsed = match stream.next() {
+            Some(Ok(value)) => value,
+            Some(Err(_)) => continue,
+            None => continue,
+        };
+        let consumed = stream.byte_offset();
+        if !parsed.is_object() {
+            continue;
+        }
+
+        let prefix = text[..marker_idx].trim_end().to_string();
+        let suffix = remaining[brace_idx + consumed..].trim().to_string();
+        let args = serde_json::to_string(&parsed).ok()?;
+        if suffix.is_empty() {
+            return Some((prefix, tool_name.clone(), args, suffix));
+        }
+        if fallback.is_none() {
+            fallback = Some((prefix, tool_name.clone(), args, suffix));
+        }
+    }
+
+    fallback
+}
+
+fn orphan_tool_output_to_user_message(item: &Value, missing_output: &str) -> Option<Value> {
+    let output_value = item.get("output")?;
+    let output = if let Some(text) = output_value.as_str() {
+        text.trim().to_string()
+    } else {
+        output_value.to_string()
+    };
+    if output.is_empty() || output == missing_output {
+        return None;
+    }
+
+    let call_id = item
+        .get("call_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown_call");
+
+    Some(serde_json::json!({
+        "type": "message",
+        "role": "user",
+        "content": [{
+            "type": "input_text",
+            "text": format!("[Recovered orphaned tool output: {}]\n{}", call_id, output)
+        }]
+    }))
 }
 
 fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
@@ -500,14 +580,41 @@ fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
         ));
     }
 
+    let mut rewritten_pending_orphans = 0usize;
     if !pending_outputs.is_empty() {
-        skipped_results += pending_outputs.len();
+        let mut pending_entries: Vec<(String, String)> =
+            std::mem::take(&mut pending_outputs).into_iter().collect();
+        pending_entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (call_id, output) in pending_entries {
+            let orphan_item = serde_json::json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": output,
+            });
+            if let Some(message_item) =
+                orphan_tool_output_to_user_message(&orphan_item, &missing_output)
+            {
+                items.push(message_item);
+                rewritten_pending_orphans += 1;
+            } else {
+                skipped_results += 1;
+            }
+        }
     }
 
     if injected_missing > 0 {
         crate::logging::info(&format!(
             "[openai] Injected {} synthetic tool output(s) to prevent API error",
             injected_missing
+        ));
+    }
+    if rewritten_pending_orphans > 0 {
+        let total = REWRITTEN_ORPHAN_TOOL_OUTPUTS
+            .fetch_add(rewritten_pending_orphans as u64, Ordering::Relaxed)
+            + rewritten_pending_orphans as u64;
+        crate::logging::info(&format!(
+            "[openai] Rewrote {} pending orphaned tool output(s) as user messages (total={})",
+            rewritten_pending_orphans, total
         ));
     }
     if skipped_results > 0 {
@@ -596,7 +703,9 @@ fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
     let mut ordered: Vec<Value> = Vec::with_capacity(normalized.len());
     let mut used_outputs: HashSet<String> = HashSet::new();
     let mut injected_ordered = 0usize;
-    let mut dropped_orphans = 0usize;
+    let mut dropped_duplicate_outputs = 0usize;
+    let mut rewritten_orphans = 0usize;
+    let mut skipped_empty_orphans = 0usize;
 
     for item in normalized {
         let kind = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -627,11 +736,16 @@ fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
         if kind == "function_call_output" {
             if let Some(call_id) = item.get("call_id").and_then(|v| v.as_str()) {
                 if used_outputs.contains(call_id) {
-                    dropped_orphans += 1;
+                    dropped_duplicate_outputs += 1;
                     continue;
                 }
             }
-            dropped_orphans += 1;
+            if let Some(message_item) = orphan_tool_output_to_user_message(&item, &missing_output) {
+                ordered.push(message_item);
+                rewritten_orphans += 1;
+            } else {
+                skipped_empty_orphans += 1;
+            }
             continue;
         }
 
@@ -644,10 +758,25 @@ fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
             injected_ordered
         ));
     }
-    if dropped_orphans > 0 {
+    if dropped_duplicate_outputs > 0 {
         crate::logging::info(&format!(
-            "[openai] Dropped {} orphaned tool output(s) during re-ordering",
-            dropped_orphans
+            "[openai] Dropped {} duplicate tool output(s) during re-ordering",
+            dropped_duplicate_outputs
+        ));
+    }
+    if rewritten_orphans > 0 {
+        let total = REWRITTEN_ORPHAN_TOOL_OUTPUTS
+            .fetch_add(rewritten_orphans as u64, Ordering::Relaxed)
+            + rewritten_orphans as u64;
+        crate::logging::info(&format!(
+            "[openai] Rewrote {} orphaned tool output(s) as user messages (total={})",
+            rewritten_orphans, total
+        ));
+    }
+    if skipped_empty_orphans > 0 {
+        crate::logging::info(&format!(
+            "[openai] Skipped {} empty orphaned tool output(s) during re-ordering",
+            skipped_empty_orphans
         ));
     }
 
@@ -764,17 +893,35 @@ fn handle_openai_output_item(
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let arguments = item
+            let raw_arguments = item
                 .get("arguments")
-                .and_then(|v| v.as_str())
-                .or_else(|| item.get("input").and_then(|v| v.as_str()))
-                .unwrap_or("{}");
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .or_else(|| {
+                    item.get("input").and_then(|v| {
+                        if v.is_object() || v.is_array() {
+                            Some(v.to_string())
+                        } else {
+                            v.as_str().map(|s| s.to_string())
+                        }
+                    })
+                })
+                .unwrap_or_else(|| "{}".to_string());
+            let arguments = if raw_arguments.trim() == "null" {
+                let total = NORMALIZED_NULL_TOOL_ARGUMENTS.fetch_add(1, Ordering::Relaxed) + 1;
+                crate::logging::warn(&format!(
+                    "[openai] Normalized null tool arguments to empty object (total={})",
+                    total
+                ));
+                "{}".to_string()
+            } else {
+                raw_arguments
+            };
 
             pending.push_back(StreamEvent::ToolUseStart {
                 id: call_id.clone(),
                 name,
             });
-            pending.push_back(StreamEvent::ToolInputDelta(arguments.to_string()));
+            pending.push_back(StreamEvent::ToolInputDelta(arguments));
             pending.push_back(StreamEvent::ToolUseEnd);
             return pending.pop_front();
         }
@@ -794,6 +941,32 @@ fn handle_openai_output_item(
                 }
             }
             if !text.is_empty() {
+                if let Some((prefix, tool_name, arguments, suffix)) =
+                    parse_text_wrapped_tool_call(&text)
+                {
+                    let total =
+                        RECOVERED_TEXT_WRAPPED_TOOL_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+                    crate::logging::warn(&format!(
+                        "[openai] Recovered text-wrapped tool call for '{}' (total={})",
+                        tool_name, total
+                    ));
+                    if !prefix.is_empty() {
+                        pending.push_back(StreamEvent::TextDelta(prefix));
+                    }
+                    pending.push_back(StreamEvent::ToolUseStart {
+                        id: format!(
+                            "fallback_text_call_{}",
+                            FALLBACK_TOOL_CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
+                        ),
+                        name: tool_name,
+                    });
+                    pending.push_back(StreamEvent::ToolInputDelta(arguments));
+                    pending.push_back(StreamEvent::ToolUseEnd);
+                    if !suffix.is_empty() {
+                        pending.push_back(StreamEvent::TextDelta(suffix));
+                    }
+                    return pending.pop_front();
+                }
                 return Some(StreamEvent::TextDelta(text));
             }
         }
@@ -1129,7 +1302,10 @@ impl Provider for OpenAIProvider {
     }
 
     fn reasoning_effort(&self) -> Option<String> {
-        self.reasoning_effort.try_read().ok().and_then(|g| g.clone())
+        self.reasoning_effort
+            .try_read()
+            .ok()
+            .and_then(|g| g.clone())
     }
 
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
@@ -1139,7 +1315,9 @@ impl Provider for OpenAIProvider {
                 *guard = normalized;
                 Ok(())
             }
-            Err(_) => Err(anyhow::anyhow!("Failed to acquire lock for reasoning effort")),
+            Err(_) => Err(anyhow::anyhow!(
+                "Failed to acquire lock for reasoning effort"
+            )),
         }
     }
 
@@ -1646,6 +1824,8 @@ fn is_websocket_fallback_notice(data: &str) -> bool {
 mod tests {
     use super::*;
     use crate::auth::codex::CodexCredentials;
+    const BRIGHT_PEARL_WRAPPED_TOOL_CALL_FIXTURE: &str =
+        include_str!("../../tests/fixtures/openai/bright_pearl_wrapped_tool_call.txt");
 
     #[test]
     fn test_openai_supports_codex_models() {
@@ -1857,5 +2037,150 @@ mod tests {
         assert!(is_retryable_error(
             "falling back from websockets to https transport. stream disconnected before completion"
         ));
+    }
+
+    #[test]
+    fn test_build_tools_sets_strict_true() {
+        let defs = vec![ToolDefinition {
+            name: "bash".to_string(),
+            description: "run shell".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["command"],
+                "properties": { "command": { "type": "string" } }
+            }),
+        }];
+        let api_tools = build_tools(&defs);
+        assert_eq!(api_tools.len(), 1);
+        assert_eq!(api_tools[0]["strict"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn test_parse_text_wrapped_tool_call_prefers_trailing_json_object() {
+        let text = "Status update\nassistant to=functions.batch commentary {}json\n{\"tool_calls\":[{\"tool\":\"read\",\"file_path\":\"src/main.rs\"}]}";
+        let parsed = parse_text_wrapped_tool_call(text).expect("should parse wrapped tool call");
+        assert_eq!(parsed.1, "batch");
+        assert!(parsed.0.contains("Status update"));
+        let args: Value = serde_json::from_str(&parsed.2).expect("valid args json");
+        assert!(args.get("tool_calls").is_some());
+    }
+
+    #[test]
+    fn test_handle_openai_output_item_normalizes_null_arguments() {
+        let item = serde_json::json!({
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "bash",
+            "arguments": "null",
+        });
+        let mut saw_text_delta = false;
+        let mut pending = VecDeque::new();
+        let first = handle_openai_output_item(item, &mut saw_text_delta, &mut pending)
+            .expect("expected tool event");
+
+        match first {
+            StreamEvent::ToolUseStart { id, name } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "bash");
+            }
+            _ => panic!("expected ToolUseStart"),
+        }
+        match pending.pop_front() {
+            Some(StreamEvent::ToolInputDelta(delta)) => assert_eq!(delta, "{}"),
+            _ => panic!("expected ToolInputDelta"),
+        }
+        assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEnd)));
+    }
+
+    #[test]
+    fn test_handle_openai_output_item_recovers_bright_pearl_fixture() {
+        let item = serde_json::json!({
+            "type": "message",
+            "content": [{
+                "type": "output_text",
+                "text": BRIGHT_PEARL_WRAPPED_TOOL_CALL_FIXTURE,
+            }],
+        });
+
+        let mut saw_text_delta = false;
+        let mut pending = VecDeque::new();
+        let mut events = Vec::new();
+
+        if let Some(first) = handle_openai_output_item(item, &mut saw_text_delta, &mut pending) {
+            events.push(first);
+        }
+        while let Some(ev) = pending.pop_front() {
+            events.push(ev);
+        }
+
+        let mut saw_prefix = false;
+        let mut saw_tool = false;
+        let mut saw_input = false;
+
+        for event in events {
+            match event {
+                StreamEvent::TextDelta(text) => {
+                    if text.contains("Status: I detected pre-existing local edits") {
+                        saw_prefix = true;
+                    }
+                }
+                StreamEvent::ToolUseStart { name, .. } => {
+                    if name == "batch" {
+                        saw_tool = true;
+                    }
+                }
+                StreamEvent::ToolInputDelta(delta) => {
+                    let args: Value = serde_json::from_str(&delta).expect("valid tool args");
+                    let calls = args
+                        .get("tool_calls")
+                        .and_then(|v| v.as_array())
+                        .expect("tool_calls array");
+                    assert_eq!(calls.len(), 3);
+                    saw_input = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_prefix);
+        assert!(saw_tool);
+        assert!(saw_input);
+    }
+
+    #[test]
+    fn test_build_responses_input_rewrites_orphan_tool_output_as_user_message() {
+        let messages = vec![ChatMessage::tool_result(
+            "call_orphan",
+            "orphan result",
+            false,
+        )];
+
+        let items = build_responses_input(&messages);
+        let mut saw_rewritten_message = false;
+
+        for item in &items {
+            assert_ne!(
+                item.get("type").and_then(|v| v.as_str()),
+                Some("function_call_output")
+            );
+            if item.get("type").and_then(|v| v.as_str()) == Some("message")
+                && item.get("role").and_then(|v| v.as_str()) == Some("user")
+            {
+                if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
+                    for part in content {
+                        if part.get("type").and_then(|v| v.as_str()) == Some("input_text") {
+                            let text = part.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            if text.contains("[Recovered orphaned tool output: call_orphan]")
+                                && text.contains("orphan result")
+                            {
+                                saw_rewritten_message = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(saw_rewritten_message);
     }
 }

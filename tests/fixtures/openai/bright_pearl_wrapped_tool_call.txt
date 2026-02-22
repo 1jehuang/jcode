@@ -1,0 +1,5 @@
+Status: I detected pre-existing local edits in unrelated files; I will leave those untouched and only change targeted files for this perf work.
+
+Next I am inspecting session-lookup/resume internals (session.rs, client connect path, self-dev path) to pinpoint the slow path before running profiles.
+to=functions.batch commentary {}json
+{"tool_calls":[{"tool":"read","file_path":"src/session.rs","offset":0,"limit":420},{"tool":"read","file_path":"src/main.rs","offset":2320,"limit":220},{"tool":"read","file_path":"src/main.rs","offset":2860,"limit":360}]}

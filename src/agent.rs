@@ -27,6 +27,8 @@ use std::time::Instant;
 use tokio::sync::{broadcast, mpsc};
 
 const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
+static RECOVERED_TEXT_WRAPPED_TOOL_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 fn tool_output_to_content_blocks(
     tool_use_id: String,
@@ -159,9 +161,7 @@ impl Agent {
                 }
             }
             Err(_) => {
-                logging::warn(
-                    "Context-limit auto-recovery skipped: compaction manager lock busy",
-                );
+                logging::warn("Context-limit auto-recovery skipped: compaction manager lock busy");
                 return false;
             }
         };
@@ -503,11 +503,13 @@ impl Agent {
     }
 
     pub fn request_graceful_shutdown(&self) {
-        self.graceful_shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.graceful_shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn is_graceful_shutdown(&self) -> bool {
-        self.graceful_shutdown.load(std::sync::atomic::Ordering::SeqCst)
+        self.graceful_shutdown
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Check if there are pending soft interrupts
@@ -641,6 +643,103 @@ impl Agent {
         let _ = self.session.save();
 
         Some(combined)
+    }
+
+    fn parse_text_wrapped_tool_call(
+        text: &str,
+    ) -> Option<(String, String, serde_json::Value, String)> {
+        let marker = "to=functions.";
+        let marker_idx = text.find(marker)?;
+        let after_marker = &text[marker_idx + marker.len()..];
+
+        let mut tool_name_end = 0usize;
+        for (idx, ch) in after_marker.char_indices() {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                tool_name_end = idx + ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if tool_name_end == 0 {
+            return None;
+        }
+
+        let tool_name = after_marker[..tool_name_end].to_string();
+        let remaining = &after_marker[tool_name_end..];
+        let mut fallback: Option<(String, String, serde_json::Value, String)> = None;
+
+        for (brace_idx, ch) in remaining.char_indices() {
+            if ch != '{' {
+                continue;
+            }
+            let slice = &remaining[brace_idx..];
+            let mut stream =
+                serde_json::Deserializer::from_str(slice).into_iter::<serde_json::Value>();
+            let parsed = match stream.next() {
+                Some(Ok(value)) => value,
+                Some(Err(_)) | None => continue,
+            };
+            let consumed = stream.byte_offset();
+            if !parsed.is_object() {
+                continue;
+            }
+
+            let prefix = text[..marker_idx].trim_end().to_string();
+            let suffix = remaining[brace_idx + consumed..].trim().to_string();
+            if suffix.is_empty() {
+                return Some((prefix, tool_name.clone(), parsed, suffix));
+            }
+            if fallback.is_none() {
+                fallback = Some((prefix, tool_name.clone(), parsed, suffix));
+            }
+        }
+
+        fallback
+    }
+
+    fn recover_text_wrapped_tool_call(
+        &self,
+        text_content: &mut String,
+        tool_calls: &mut Vec<ToolCall>,
+    ) -> bool {
+        if !tool_calls.is_empty() || text_content.trim().is_empty() {
+            return false;
+        }
+
+        let Some((prefix, tool_name, arguments, suffix)) =
+            Self::parse_text_wrapped_tool_call(text_content)
+        else {
+            return false;
+        };
+
+        let mut sanitized = String::new();
+        if !prefix.is_empty() {
+            sanitized.push_str(&prefix);
+        }
+        if !suffix.is_empty() {
+            if !sanitized.is_empty() {
+                sanitized.push('\n');
+            }
+            sanitized.push_str(&suffix);
+        }
+        *text_content = sanitized;
+
+        let call_id = format!("fallback_text_call_{}", id::new_id("call"));
+        let recovered_total = RECOVERED_TEXT_WRAPPED_TOOL_CALLS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        logging::warn(&format!(
+            "[agent] Recovered text-wrapped tool call for '{}' ({}, total={})",
+            tool_name, call_id, recovered_total
+        ));
+        tool_calls.push(ToolCall {
+            id: call_id,
+            name: tool_name,
+            input: arguments,
+            intent: None,
+        });
+
+        true
     }
 
     pub fn session_id(&self) -> &str {
@@ -1613,8 +1712,13 @@ impl Agent {
                     if self.try_auto_compact_after_context_limit(&e.to_string()) {
                         context_limit_retries += 1;
                         if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                            logging::warn("Context-limit compaction retry limit reached; giving up");
-                            return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                            logging::warn(
+                                "Context-limit compaction retry limit reached; giving up",
+                            );
+                            return Err(anyhow::anyhow!(
+                                "Context limit exceeded after {} compaction retries",
+                                Self::MAX_CONTEXT_LIMIT_RETRIES
+                            ));
                         }
                         continue;
                     }
@@ -1661,8 +1765,13 @@ impl Agent {
                         if self.try_auto_compact_after_context_limit(&err_str) {
                             context_limit_retries += 1;
                             if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                                logging::warn("Context-limit compaction retry limit reached; giving up");
-                                return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                                logging::warn(
+                                    "Context-limit compaction retry limit reached; giving up",
+                                );
+                                return Err(anyhow::anyhow!(
+                                    "Context limit exceeded after {} compaction retries",
+                                    Self::MAX_CONTEXT_LIMIT_RETRIES
+                                ));
                             }
                             retry_after_compaction = true;
                             break;
@@ -1855,7 +1964,7 @@ impl Agent {
                             message_id: self.session.id.clone(),
                             tool_call_id: request_id.clone(),
                             working_dir: self.working_dir().map(PathBuf::from),
-            stdin_request_tx: self.stdin_request_tx.clone(),
+                            stdin_request_tx: self.stdin_request_tx.clone(),
                         };
                         let tool_result = self.registry.execute(&tool_name, input, ctx).await;
                         let native_result = match tool_result {
@@ -1874,8 +1983,13 @@ impl Agent {
                         if self.try_auto_compact_after_context_limit(&message) {
                             context_limit_retries += 1;
                             if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                                logging::warn("Context-limit compaction retry limit reached; giving up");
-                                return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                                logging::warn(
+                                    "Context-limit compaction retry limit reached; giving up",
+                                );
+                                return Err(anyhow::anyhow!(
+                                    "Context limit exceeded after {} compaction retries",
+                                    Self::MAX_CONTEXT_LIMIT_RETRIES
+                                ));
                             }
                             retry_after_compaction = true;
                             break;
@@ -1931,6 +2045,8 @@ impl Agent {
                 cache_read_input_tokens: usage_cache_read,
                 cache_creation_input_tokens: usage_cache_creation,
             };
+
+            self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
 
             // Add assistant message to history
             let mut content_blocks = Vec::new();
@@ -2077,7 +2193,7 @@ impl Agent {
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
                     working_dir: self.working_dir().map(PathBuf::from),
-            stdin_request_tx: self.stdin_request_tx.clone(),
+                    stdin_request_tx: self.stdin_request_tx.clone(),
                 };
 
                 if trace {
@@ -2289,8 +2405,13 @@ impl Agent {
                     if self.try_auto_compact_after_context_limit(&e.to_string()) {
                         context_limit_retries += 1;
                         if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                            logging::warn("Context-limit compaction retry limit reached; giving up");
-                            return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                            logging::warn(
+                                "Context-limit compaction retry limit reached; giving up",
+                            );
+                            return Err(anyhow::anyhow!(
+                                "Context limit exceeded after {} compaction retries",
+                                Self::MAX_CONTEXT_LIMIT_RETRIES
+                            ));
                         }
                         continue;
                     }
@@ -2331,8 +2452,13 @@ impl Agent {
                         if self.try_auto_compact_after_context_limit(&err_str) {
                             context_limit_retries += 1;
                             if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                                logging::warn("Context-limit compaction retry limit reached; giving up");
-                                return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                                logging::warn(
+                                    "Context-limit compaction retry limit reached; giving up",
+                                );
+                                return Err(anyhow::anyhow!(
+                                    "Context limit exceeded after {} compaction retries",
+                                    Self::MAX_CONTEXT_LIMIT_RETRIES
+                                ));
                             }
                             retry_after_compaction = true;
                             break;
@@ -2466,7 +2592,7 @@ impl Agent {
                             message_id: self.session.id.clone(),
                             tool_call_id: request_id.clone(),
                             working_dir: self.working_dir().map(PathBuf::from),
-            stdin_request_tx: self.stdin_request_tx.clone(),
+                            stdin_request_tx: self.stdin_request_tx.clone(),
                         };
                         let tool_result = self.registry.execute(&tool_name, input, ctx).await;
                         let native_result = match tool_result {
@@ -2485,8 +2611,13 @@ impl Agent {
                         if self.try_auto_compact_after_context_limit(&message) {
                             context_limit_retries += 1;
                             if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                                logging::warn("Context-limit compaction retry limit reached; giving up");
-                                return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                                logging::warn(
+                                    "Context-limit compaction retry limit reached; giving up",
+                                );
+                                return Err(anyhow::anyhow!(
+                                    "Context limit exceeded after {} compaction retries",
+                                    Self::MAX_CONTEXT_LIMIT_RETRIES
+                                ));
                             }
                             retry_after_compaction = true;
                             break;
@@ -2531,6 +2662,8 @@ impl Agent {
                 cache_read_input_tokens: usage_cache_read,
                 cache_creation_input_tokens: usage_cache_creation,
             };
+
+            self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
 
             // Add assistant message to history
             let mut content_blocks = Vec::new();
@@ -2694,7 +2827,7 @@ impl Agent {
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
                     working_dir: self.working_dir().map(PathBuf::from),
-            stdin_request_tx: self.stdin_request_tx.clone(),
+                    stdin_request_tx: self.stdin_request_tx.clone(),
                 };
 
                 if trace {
@@ -2869,8 +3002,13 @@ impl Agent {
                     if self.try_auto_compact_after_context_limit(&e.to_string()) {
                         context_limit_retries += 1;
                         if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                            logging::warn("Context-limit compaction retry limit reached; giving up");
-                            return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                            logging::warn(
+                                "Context-limit compaction retry limit reached; giving up",
+                            );
+                            return Err(anyhow::anyhow!(
+                                "Context limit exceeded after {} compaction retries",
+                                Self::MAX_CONTEXT_LIMIT_RETRIES
+                            ));
                         }
                         continue;
                     }
@@ -2910,8 +3048,13 @@ impl Agent {
                         if self.try_auto_compact_after_context_limit(&err_str) {
                             context_limit_retries += 1;
                             if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                                logging::warn("Context-limit compaction retry limit reached; giving up");
-                                return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                                logging::warn(
+                                    "Context-limit compaction retry limit reached; giving up",
+                                );
+                                return Err(anyhow::anyhow!(
+                                    "Context limit exceeded after {} compaction retries",
+                                    Self::MAX_CONTEXT_LIMIT_RETRIES
+                                ));
                             }
                             retry_after_compaction = true;
                             break;
@@ -2946,7 +3089,8 @@ impl Agent {
                             let _ = event_tx.send(ServerEvent::TextDelta {
                                 text: "\n\n[generation interrupted - server reloading]".to_string(),
                             });
-                            text_content.push_str("\n\n[generation interrupted - server reloading]");
+                            text_content
+                                .push_str("\n\n[generation interrupted - server reloading]");
                             break;
                         }
                     }
@@ -3051,7 +3195,7 @@ impl Agent {
                             message_id: self.session.id.clone(),
                             tool_call_id: request_id.clone(),
                             working_dir: self.working_dir().map(PathBuf::from),
-            stdin_request_tx: self.stdin_request_tx.clone(),
+                            stdin_request_tx: self.stdin_request_tx.clone(),
                         };
                         let tool_result = self.registry.execute(&tool_name, input, ctx).await;
                         let native_result = match tool_result {
@@ -3070,8 +3214,13 @@ impl Agent {
                         if self.try_auto_compact_after_context_limit(&message) {
                             context_limit_retries += 1;
                             if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                                logging::warn("Context-limit compaction retry limit reached; giving up");
-                                return Err(anyhow::anyhow!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES));
+                                logging::warn(
+                                    "Context-limit compaction retry limit reached; giving up",
+                                );
+                                return Err(anyhow::anyhow!(
+                                    "Context limit exceeded after {} compaction retries",
+                                    Self::MAX_CONTEXT_LIMIT_RETRIES
+                                ));
                             }
                             retry_after_compaction = true;
                             break;
@@ -3115,6 +3264,8 @@ impl Agent {
                 cache_read_input_tokens: usage_cache_read,
                 cache_creation_input_tokens: usage_cache_creation,
             };
+
+            self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
 
             // Add assistant message to history
             let mut content_blocks = Vec::new();
@@ -3297,7 +3448,7 @@ impl Agent {
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
                     working_dir: self.working_dir().map(PathBuf::from),
-            stdin_request_tx: self.stdin_request_tx.clone(),
+                    stdin_request_tx: self.stdin_request_tx.clone(),
                 };
 
                 if trace {
@@ -3312,11 +3463,14 @@ impl Agent {
                 let tool_name_for_spawn = tc.name.clone();
                 let tool_input_for_spawn = tc.input.clone();
                 let tool_handle = tokio::spawn(async move {
-                    registry_clone.execute(&tool_name_for_spawn, tool_input_for_spawn, ctx).await
+                    registry_clone
+                        .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
+                        .await
                 });
 
                 // Reset background signal before waiting
-                self.background_tool_signal.store(false, std::sync::atomic::Ordering::SeqCst);
+                self.background_tool_signal
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
 
                 // Wait for tool completion OR background signal from user (Alt+B)
                 // OR graceful shutdown signal from server reload
@@ -3456,8 +3610,7 @@ impl Agent {
                     let bg_msg = format!(
                         "Tool '{}' was moved to background by the user (task_id: {}). \
                          Use the `bg` tool with action 'status' or 'output' to check on it.",
-                        tc.name,
-                        bg_info.task_id
+                        tc.name, bg_info.task_id
                     );
 
                     let _ = event_tx.send(ServerEvent::ToolDone {
@@ -3478,7 +3631,8 @@ impl Agent {
                     );
                     self.session.save()?;
 
-                    self.background_tool_signal.store(false, std::sync::atomic::Ordering::SeqCst);
+                    self.background_tool_signal
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
                 }
 
                 // NOTE: We do NOT inject between tools (non-urgent) because that would
