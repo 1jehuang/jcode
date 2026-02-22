@@ -1254,11 +1254,11 @@ mod tests {
             priority: Priority::High,
             created_by_session: "session_abc".into(),
             created_at: Utc::now() - Duration::minutes(10),
-            working_dir: None,
-            task_description: None,
-            relevant_files: Vec::new(),
-            git_branch: None,
-            additional_context: None,
+            working_dir: Some("/home/user/project".into()),
+            task_description: Some("Check CI status for the main branch".into()),
+            relevant_files: vec!["src/main.rs".into()],
+            git_branch: Some("main".into()),
+            additional_context: Some("Background: Tests were flaky yesterday".into()),
         }];
 
         let health = MemoryGraphHealth {
@@ -1311,6 +1311,11 @@ mod tests {
         assert!(prompt.contains("rejected ambient refactoring"));
         assert!(prompt.contains("openai-oauth"));
         assert!(prompt.contains("~85k"));
+        assert!(prompt.contains("Working dir: /home/user/project"));
+        assert!(prompt.contains("Details: Check CI status for the main branch"));
+        assert!(prompt.contains("Files: src/main.rs"));
+        assert!(prompt.contains("Branch: main"));
+        assert!(prompt.contains("Tests were flaky yesterday"));
     }
 
     #[test]

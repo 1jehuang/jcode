@@ -1192,4 +1192,67 @@ mod tests {
             .to_string()
             .contains("request_permission is only available to ambient sessions"));
     }
+
+    #[test]
+    fn test_schedule_tool_input_deserialization() {
+        let input = json!({
+            "task": "Run the full test suite and report results",
+            "wake_in_minutes": 120,
+            "priority": "high",
+            "relevant_files": ["src/main.rs", "tests/e2e/main.rs"],
+            "background": "We just merged PR #42 which changed the parser",
+            "success_criteria": "All tests pass, or a summary of failures is stored"
+        });
+
+        let parsed: ScheduleToolInput = serde_json::from_value(input).unwrap();
+        assert_eq!(parsed.task, "Run the full test suite and report results");
+        assert_eq!(parsed.wake_in_minutes, Some(120));
+        assert!(parsed.wake_at.is_none());
+        assert_eq!(parsed.priority.as_deref(), Some("high"));
+        assert_eq!(parsed.relevant_files.len(), 2);
+        assert_eq!(
+            parsed.background.as_deref(),
+            Some("We just merged PR #42 which changed the parser")
+        );
+        assert_eq!(
+            parsed.success_criteria.as_deref(),
+            Some("All tests pass, or a summary of failures is stored")
+        );
+    }
+
+    #[test]
+    fn test_schedule_tool_input_minimal() {
+        let input = json!({
+            "task": "Check CI",
+            "wake_in_minutes": 30
+        });
+
+        let parsed: ScheduleToolInput = serde_json::from_value(input).unwrap();
+        assert_eq!(parsed.task, "Check CI");
+        assert_eq!(parsed.wake_in_minutes, Some(30));
+        assert!(parsed.relevant_files.is_empty());
+        assert!(parsed.background.is_none());
+        assert!(parsed.success_criteria.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_schedule_tool_requires_time() {
+        let tool = ScheduleTool::new();
+        let input = json!({
+            "task": "Do something eventually"
+        });
+        let ctx = ToolContext {
+            session_id: "test_session".to_string(),
+            message_id: "msg_1".to_string(),
+            tool_call_id: "call_1".to_string(),
+            working_dir: None,
+            stdin_request_tx: None,
+        };
+
+        let err = tool
+            .execute(input, ctx)
+            .await
+            .expect_err("should require wake_in_minutes or wake_at");
+        assert!(err.to_string().contains("wake_in_minutes"));
+    }
 }
