@@ -971,6 +971,9 @@ impl Server {
                 sessions: Vec::new(),
             };
             registry.register(info);
+            // Run cleanup again after registering to deduplicate entries
+            // that share the same socket (e.g. after server exec/reload)
+            let _ = registry.cleanup_stale().await;
             let _ = registry.save().await;
             crate::logging::info(&format!(
                 "Registered as {} in server registry",
