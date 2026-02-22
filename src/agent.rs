@@ -742,6 +742,74 @@ impl Agent {
         true
     }
 
+    fn should_continue_after_stop_reason(stop_reason: &str) -> bool {
+        let reason = stop_reason.trim().to_ascii_lowercase();
+        if reason.is_empty() {
+            return false;
+        }
+
+        if matches!(reason.as_str(), "stop" | "end_turn" | "tool_use") {
+            return false;
+        }
+
+        reason.contains("incomplete")
+            || reason.contains("max_output_tokens")
+            || reason.contains("max_tokens")
+            || reason.contains("length")
+            || reason.contains("trunc")
+    }
+
+    fn continuation_prompt_for_stop_reason(stop_reason: &str) -> String {
+        format!(
+            "[System reminder: your previous response ended before completion (stop_reason: {}). Continue exactly where you left off, do not repeat completed content, and if the next step is a tool call, emit the tool call now.]",
+            stop_reason.trim()
+        )
+    }
+
+    fn maybe_continue_incomplete_response(
+        &mut self,
+        stop_reason: Option<&str>,
+        attempts: &mut u32,
+    ) -> Result<bool> {
+        let Some(stop_reason) = stop_reason
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+        else {
+            return Ok(false);
+        };
+
+        if !Self::should_continue_after_stop_reason(stop_reason) {
+            return Ok(false);
+        }
+
+        if *attempts >= Self::MAX_INCOMPLETE_CONTINUATION_ATTEMPTS {
+            logging::warn(&format!(
+                "Response ended with stop_reason='{}' after {} continuation attempts; returning partial output",
+                stop_reason,
+                attempts
+            ));
+            return Ok(false);
+        }
+
+        *attempts += 1;
+        logging::warn(&format!(
+            "Response ended with stop_reason='{}'; requesting continuation (attempt {}/{})",
+            stop_reason,
+            attempts,
+            Self::MAX_INCOMPLETE_CONTINUATION_ATTEMPTS
+        ));
+
+        self.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: Self::continuation_prompt_for_stop_reason(stop_reason),
+                cache_control: None,
+            }],
+        );
+        self.session.save()?;
+        Ok(true)
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session.id
     }
@@ -1617,12 +1685,14 @@ impl Agent {
     /// Run turns until no more tool calls
     /// Maximum number of context-limit compaction retries before giving up.
     const MAX_CONTEXT_LIMIT_RETRIES: u32 = 5;
+    const MAX_INCOMPLETE_CONTINUATION_ATTEMPTS: u32 = 3;
 
     async fn run_turn(&mut self, print_output: bool) -> Result<String> {
         self.set_log_context();
         let mut final_text = String::new();
         let trace = trace_enabled();
         let mut context_limit_retries = 0u32;
+        let mut incomplete_continuations = 0u32;
 
         loop {
             let repaired = self.repair_missing_tool_outputs();
@@ -1749,6 +1819,7 @@ impl Agent {
             let mut usage_cache_read: Option<u64> = None;
             let mut usage_cache_creation: Option<u64> = None;
             let mut saw_message_end = false;
+            let mut stop_reason: Option<String> = None;
             let mut _thinking_start: Option<Instant> = None;
             let store_reasoning_content = self.provider.name() == "openrouter";
             let mut reasoning_content = String::new();
@@ -1913,8 +1984,13 @@ impl Agent {
                             );
                         }
                     }
-                    StreamEvent::MessageEnd { .. } => {
+                    StreamEvent::MessageEnd {
+                        stop_reason: reason,
+                    } => {
                         saw_message_end = true;
+                        if reason.is_some() {
+                            stop_reason = reason;
+                        }
                         // Don't break yet - wait for SessionId which comes after MessageEnd
                         // (but stream close will also end the loop for providers without SessionId)
                     }
@@ -2086,6 +2162,12 @@ impl Agent {
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
+                if self.maybe_continue_incomplete_response(
+                    stop_reason.as_deref(),
+                    &mut incomplete_continuations,
+                )? {
+                    continue;
+                }
                 logging::info("Turn complete - no tool calls, returning");
                 if print_output {
                     println!();
@@ -2316,6 +2398,7 @@ impl Agent {
         self.set_log_context();
         let trace = trace_enabled();
         let mut context_limit_retries = 0u32;
+        let mut incomplete_continuations = 0u32;
 
         loop {
             let repaired = self.repair_missing_tool_outputs();
@@ -2435,6 +2518,7 @@ impl Agent {
             let mut usage_output: Option<u64> = None;
             let mut usage_cache_read: Option<u64> = None;
             let mut usage_cache_creation: Option<u64> = None;
+            let mut stop_reason: Option<String> = None;
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
             let store_reasoning_content = self.provider.name() == "openrouter";
@@ -2574,7 +2658,13 @@ impl Agent {
                             );
                         }
                     }
-                    StreamEvent::MessageEnd { .. } => {}
+                    StreamEvent::MessageEnd {
+                        stop_reason: reason,
+                    } => {
+                        if reason.is_some() {
+                            stop_reason = reason;
+                        }
+                    }
                     StreamEvent::SessionId(sid) => {
                         self.provider_session_id = Some(sid.clone());
                         self.session.provider_session_id = Some(sid.clone());
@@ -2706,6 +2796,12 @@ impl Agent {
             // Injecting before tool_results would break the API requirement that
             // tool_use must be immediately followed by tool_result.
             if tool_calls.is_empty() {
+                if self.maybe_continue_incomplete_response(
+                    stop_reason.as_deref(),
+                    &mut incomplete_continuations,
+                )? {
+                    continue;
+                }
                 logging::info("Turn complete - no tool calls");
                 // === INJECTION POINT B: No tools, turn complete ===
                 if let Some(content) = self.inject_soft_interrupts() {
@@ -2913,6 +3009,7 @@ impl Agent {
         self.set_log_context();
         let trace = trace_enabled();
         let mut context_limit_retries = 0u32;
+        let mut incomplete_continuations = 0u32;
 
         loop {
             let repaired = self.repair_missing_tool_outputs();
@@ -3032,6 +3129,7 @@ impl Agent {
             let mut usage_output: Option<u64> = None;
             let mut usage_cache_read: Option<u64> = None;
             let mut usage_cache_creation: Option<u64> = None;
+            let mut stop_reason: Option<String> = None;
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
             let store_reasoning_content = self.provider.name() == "openrouter";
@@ -3177,7 +3275,13 @@ impl Agent {
                             );
                         }
                     }
-                    StreamEvent::MessageEnd { .. } => {}
+                    StreamEvent::MessageEnd {
+                        stop_reason: reason,
+                    } => {
+                        if reason.is_some() {
+                            stop_reason = reason;
+                        }
+                    }
                     StreamEvent::SessionId(sid) => {
                         self.provider_session_id = Some(sid.clone());
                         self.session.provider_session_id = Some(sid.clone());
@@ -3308,6 +3412,12 @@ impl Agent {
             // Injecting before tool_results would break the API requirement that
             // tool_use must be immediately followed by tool_result.
             if tool_calls.is_empty() {
+                if self.maybe_continue_incomplete_response(
+                    stop_reason.as_deref(),
+                    &mut incomplete_continuations,
+                )? {
+                    continue;
+                }
                 logging::info("Turn complete - no tool calls");
                 // === INJECTION POINT B: No tools, turn complete ===
                 if let Some(content) = self.inject_soft_interrupts() {

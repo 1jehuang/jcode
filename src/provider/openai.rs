@@ -8,7 +8,7 @@ use crate::message::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{SinkExt, Stream, StreamExt};
+use futures::{SinkExt, Stream};
 use reqwest::header::HeaderValue;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
@@ -42,6 +42,7 @@ const WEBSOCKET_FALLBACK_NOTICE: &str = "falling back from websockets to https t
 const WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS: u64 = 45;
 const WEBSOCKET_IDLE_TIMEOUT_SECS: u64 = 30;
 const WEBSOCKET_COMPLETION_TIMEOUT_SECS: u64 = 90;
+const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 16_384;
 static FALLBACK_TOOL_CALL_COUNTER: AtomicU64 = AtomicU64::new(1);
 static RECOVERED_TEXT_WRAPPED_TOOL_CALLS: AtomicU64 = AtomicU64::new(0);
 static NORMALIZED_NULL_TOOL_ARGUMENTS: AtomicU64 = AtomicU64::new(0);
@@ -138,6 +139,7 @@ pub struct OpenAIProvider {
     model: Arc<RwLock<String>>,
     prompt_cache_key: Option<String>,
     prompt_cache_retention: Option<String>,
+    max_output_tokens: Option<u32>,
     reasoning_effort: Arc<RwLock<Option<String>>>,
     transport_mode: OpenAITransportMode,
     websocket_disabled: Arc<AtomicBool>,
@@ -175,6 +177,7 @@ impl OpenAIProvider {
             }
             None => None,
         };
+        let max_output_tokens = Self::load_max_output_tokens();
         let reasoning_effort = crate::config::config()
             .provider
             .openai_reasoning_effort
@@ -190,6 +193,7 @@ impl OpenAIProvider {
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key,
             prompt_cache_retention,
+            max_output_tokens,
             reasoning_effort: Arc::new(RwLock::new(reasoning_effort)),
             transport_mode,
             websocket_disabled: Arc::new(AtomicBool::new(false)),
@@ -260,6 +264,44 @@ impl OpenAIProvider {
                 Some("xhigh".to_string())
             }
         }
+    }
+
+    fn parse_max_output_tokens(raw: Option<&str>) -> Option<u32> {
+        let raw = match raw {
+            Some(value) => value.trim(),
+            None => return Some(DEFAULT_MAX_OUTPUT_TOKENS),
+        };
+        if raw.is_empty() {
+            return Some(DEFAULT_MAX_OUTPUT_TOKENS);
+        }
+        match raw.parse::<u32>() {
+            Ok(0) => None,
+            Ok(value) => Some(value),
+            Err(_) => {
+                crate::logging::warn(&format!(
+                    "Invalid JCODE_OPENAI_MAX_OUTPUT_TOKENS='{}'; using default {}",
+                    raw, DEFAULT_MAX_OUTPUT_TOKENS
+                ));
+                Some(DEFAULT_MAX_OUTPUT_TOKENS)
+            }
+        }
+    }
+
+    fn load_max_output_tokens() -> Option<u32> {
+        let raw = std::env::var("JCODE_OPENAI_MAX_OUTPUT_TOKENS").ok();
+        let parsed = Self::parse_max_output_tokens(raw.as_deref());
+        if raw.is_some() {
+            match parsed {
+                Some(value) => crate::logging::info(&format!(
+                    "OpenAI max_output_tokens configured to {}",
+                    value
+                )),
+                None => crate::logging::info(
+                    "OpenAI max_output_tokens disabled (JCODE_OPENAI_MAX_OUTPUT_TOKENS=0)",
+                ),
+            }
+        }
+        parsed
     }
 
     fn responses_url(credentials: &CodexCredentials) -> String {
@@ -1018,12 +1060,16 @@ fn parse_openai_response_event(
             }
         }
         "response.completed" => {
+            let stop_reason = event
+                .response
+                .as_ref()
+                .and_then(extract_stop_reason_from_response);
             if let Some(response) = event.response {
                 if let Some(usage_event) = extract_usage_from_response(&response) {
                     pending.push_back(usage_event);
                 }
             }
-            pending.push_back(StreamEvent::MessageEnd { stop_reason: None });
+            pending.push_back(StreamEvent::MessageEnd { stop_reason });
             return pending.pop_front();
         }
         "response.failed" | "response.error" | "error" => {
@@ -1042,6 +1088,26 @@ fn parse_openai_response_event(
     }
 
     None
+}
+
+fn extract_stop_reason_from_response(response: &Value) -> Option<String> {
+    let status = response.get("status").and_then(|v| v.as_str());
+    if status == Some("completed") {
+        return None;
+    }
+
+    let incomplete_reason = response
+        .get("incomplete_details")
+        .and_then(|v| v.get("reason"))
+        .and_then(|v| v.as_str());
+
+    if let Some(reason) = incomplete_reason {
+        return Some(reason.to_string());
+    }
+
+    status
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
 }
 
 fn handle_openai_output_item(
@@ -1308,6 +1374,12 @@ impl Provider for OpenAIProvider {
             "include": ["reasoning.encrypted_content"],
         });
 
+        if !is_chatgpt_mode {
+            if let Some(max_output_tokens) = self.max_output_tokens {
+                request["max_output_tokens"] = serde_json::json!(max_output_tokens);
+            }
+        }
+
         if let Some(ref effort) = *self.reasoning_effort.read().await {
             request["reasoning"] = serde_json::json!({ "effort": effort });
         }
@@ -1512,6 +1584,7 @@ impl Provider for OpenAIProvider {
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key: self.prompt_cache_key.clone(),
             prompt_cache_retention: self.prompt_cache_retention.clone(),
+            max_output_tokens: self.max_output_tokens,
             reasoning_effort: Arc::new(RwLock::new(self.reasoning_effort())),
             transport_mode: self.transport_mode,
             websocket_disabled: Arc::clone(&self.websocket_disabled),
@@ -1578,7 +1651,7 @@ async fn stream_response(
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<(), OpenAIStreamFailure> {
     let access_token = openai_access_token(&credentials).await?;
-    let mut creds = credentials.read().await;
+    let creds = credentials.read().await;
     let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
     let url = OpenAIProvider::responses_url(&creds);
     let account_id = creds.account_id.clone();
@@ -1636,11 +1709,15 @@ async fn stream_response(
 
     // Stream the response
     let mut stream = OpenAIResponsesStream::new(response.bytes_stream());
+    let mut saw_message_end = false;
 
     use futures::StreamExt;
     while let Some(result) = stream.next().await {
         match result {
             Ok(event) => {
+                if matches!(event, StreamEvent::MessageEnd { .. }) {
+                    saw_message_end = true;
+                }
                 if let StreamEvent::Error { message, .. } = &event {
                     if is_retryable_error(&message.to_lowercase()) {
                         return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
@@ -1659,6 +1736,12 @@ async fn stream_response(
                 return Ok(());
             }
         }
+    }
+
+    if !saw_message_end {
+        return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+            "OpenAI HTTPS stream ended before message completion marker"
+        )));
     }
 
     Ok(())
@@ -1973,6 +2056,7 @@ fn is_retryable_error(error_str: &str) -> bool {
         || error_str.contains("unexpected eof")
         || error_str.contains("incomplete message")
         || error_str.contains("stream disconnected before completion")
+        || error_str.contains("ended before message completion marker")
         || error_str.contains("falling back from websockets to https transport")
         // Server errors (5xx)
         || error_str.contains("500 internal server error")
@@ -2206,6 +2290,66 @@ mod tests {
         assert!(is_retryable_error(
             "falling back from websockets to https transport. stream disconnected before completion"
         ));
+        assert!(is_retryable_error(
+            "OpenAI HTTPS stream ended before message completion marker"
+        ));
+    }
+
+    #[test]
+    fn test_parse_max_output_tokens_defaults_to_safe_value() {
+        assert_eq!(
+            OpenAIProvider::parse_max_output_tokens(None),
+            Some(DEFAULT_MAX_OUTPUT_TOKENS)
+        );
+        assert_eq!(
+            OpenAIProvider::parse_max_output_tokens(Some("")),
+            Some(DEFAULT_MAX_OUTPUT_TOKENS)
+        );
+    }
+
+    #[test]
+    fn test_parse_max_output_tokens_allows_disable_and_override() {
+        assert_eq!(OpenAIProvider::parse_max_output_tokens(Some("0")), None);
+        assert_eq!(
+            OpenAIProvider::parse_max_output_tokens(Some("32768")),
+            Some(32768)
+        );
+        assert_eq!(
+            OpenAIProvider::parse_max_output_tokens(Some("not-a-number")),
+            Some(DEFAULT_MAX_OUTPUT_TOKENS)
+        );
+    }
+
+    #[test]
+    fn test_parse_openai_response_completed_captures_incomplete_stop_reason() {
+        let data = r#"{"type":"response.completed","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}"#;
+        let mut saw_text_delta = false;
+        let mut pending = VecDeque::new();
+
+        let event = parse_openai_response_event(data, &mut saw_text_delta, &mut pending)
+            .expect("expected message end");
+        match event {
+            StreamEvent::MessageEnd { stop_reason } => {
+                assert_eq!(stop_reason.as_deref(), Some("max_output_tokens"));
+            }
+            other => panic!("expected MessageEnd, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_openai_response_completed_without_stop_reason() {
+        let data = r#"{"type":"response.completed","response":{"status":"completed"}}"#;
+        let mut saw_text_delta = false;
+        let mut pending = VecDeque::new();
+
+        let event = parse_openai_response_event(data, &mut saw_text_delta, &mut pending)
+            .expect("expected message end");
+        match event {
+            StreamEvent::MessageEnd { stop_reason } => {
+                assert!(stop_reason.is_none());
+            }
+            other => panic!("expected MessageEnd, got {:?}", other),
+        }
     }
 
     #[test]
