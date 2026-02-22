@@ -3786,7 +3786,8 @@ impl App {
                     }
                     // Handle background task completion notifications
                     bus_event = bus_receiver.recv() => {
-                        if let Ok(BusEvent::BackgroundTaskCompleted(task)) = bus_event {
+                        match bus_event {
+                            Ok(BusEvent::BackgroundTaskCompleted(task)) => {
                             // Only show notifications for tasks from this session
                             if task.session_id == self.session.id {
                                 let status_str = match task.status {
@@ -3828,6 +3829,11 @@ impl App {
                                     let _ = self.session.save();
                                 }
                             }
+                            }
+                            Ok(BusEvent::UsageReport(results)) => {
+                                self.handle_usage_report(results);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -4154,6 +4160,8 @@ impl App {
             // Reset reconnect counter after handling reconnection
             reconnect_attempts = 0;
 
+            let mut bus_receiver_remote = Bus::global().subscribe();
+
             // Main event loop
             loop {
                 let desired_redraw = super::redraw_interval(&self);
@@ -4314,6 +4322,11 @@ impl App {
                                 self.handle_mouse_event(mouse);
                             }
                             _ => {}
+                        }
+                    }
+                    bus_event = bus_receiver_remote.recv() => {
+                        if let Ok(BusEvent::UsageReport(results)) = bus_event {
+                            self.handle_usage_report(results);
                         }
                     }
                 }
@@ -6497,6 +6510,7 @@ impl App {
             "rebuild" => "`/rebuild`\nRun full update flow (git pull + cargo build + tests).",
             "split" => "`/split`\nSplit the current session into a new window. Clones the full conversation history so both sessions continue from the same point.",
             "info" => "`/info`\nShow session metadata and token usage.",
+            "usage" => "`/usage`\nFetch and display subscription usage limits for all connected OAuth providers (Anthropic, OpenAI/ChatGPT).\nShows 5-hour and 7-day windows, reset times, and extra usage status.",
             "version" => "`/version`\nShow jcode version/build details.",
             "quit" => "`/quit`\nExit jcode.",
             "config" => {
@@ -6593,6 +6607,7 @@ impl App {
                      • `/model <name>@<provider>` - Pin OpenRouter provider (`@auto` clears)\n\
                      • `/effort` - Show current reasoning effort level\n\
                      • `/effort <level>` - Set effort (none|low|medium|high|xhigh)\n\
+                     • `/usage` - Show subscription usage limits for all connected providers\n\
                      • `/memory [on|off|status]` - Toggle memory features for this session\n\
                      • `/swarm [on|off|status]` - Toggle swarm features for this session\n\
                      • `/reload` - Smart reload (client/server if newer binary exists)\n\
@@ -6743,6 +6758,17 @@ impl App {
 
         if trimmed == "/fix" {
             self.run_fix_command();
+            return;
+        }
+
+        if trimmed == "/usage" {
+            self.push_display_message(DisplayMessage::system(
+                "Fetching usage limits from all providers...".to_string(),
+            ));
+            tokio::spawn(async move {
+                let results = crate::usage::fetch_all_provider_usage().await;
+                Bus::global().publish(BusEvent::UsageReport(results));
+            });
             return;
         }
 
@@ -8228,6 +8254,53 @@ impl App {
         }
     }
 
+    fn handle_usage_report(&mut self, results: Vec<crate::usage::ProviderUsage>) {
+        if results.is_empty() {
+            self.push_display_message(DisplayMessage::system(
+                "No providers with OAuth credentials found.\n\
+                 Use `/login claude` or `/login openai` to authenticate."
+                    .to_string(),
+            ));
+            return;
+        }
+
+        let mut output = String::from("**Subscription Usage**\n");
+
+        for provider in &results {
+            output.push_str(&format!("\n**{}**\n", provider.provider_name));
+
+            if let Some(ref err) = provider.error {
+                output.push_str(&format!("  ⚠ {}\n", err));
+                continue;
+            }
+
+            if provider.limits.is_empty() && provider.extra_info.is_empty() {
+                output.push_str("  No usage data available\n");
+                continue;
+            }
+
+            for limit in &provider.limits {
+                let bar = crate::usage::format_usage_bar(limit.usage_percent, 15);
+                let reset_info = if let Some(ref ts) = limit.resets_at {
+                    let relative = crate::usage::format_reset_time(ts);
+                    format!(" (resets in {})", relative)
+                } else {
+                    String::new()
+                };
+                output.push_str(&format!(
+                    "  {} {}{}\n",
+                    limit.name, bar, reset_info
+                ));
+            }
+
+            for (key, value) in &provider.extra_info {
+                output.push_str(&format!("  {}: {}\n", key, value));
+            }
+        }
+
+        self.push_display_message(DisplayMessage::system(output));
+    }
+
     fn run_fix_command(&mut self) {
         let mut actions: Vec<String> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
@@ -9078,6 +9151,11 @@ impl App {
             "claude-sonnet-4-6[1m]",
         ];
 
+        const OPENAI_OAUTH_ONLY_MODELS: &[&str] = &[
+            "gpt-5.3-codex-spark",
+            "gpt-5.3-codex",
+        ];
+
         // Find the latest recommended model's created timestamp from OpenRouter cache,
         // then mark anything more than 1 month older as "old".
         let latest_recommended_ts: Option<u64> = RECOMMENDED_MODELS
@@ -9131,7 +9209,8 @@ impl App {
                         is_current: is_this_current,
                         recommended: RECOMMENDED_MODELS.contains(&name.as_str())
                             && (*effort == "xhigh" || *effort == "high")
-                            && (!CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
+                            && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
+                                || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str()))
                                 || entry_routes.iter().any(|r| r.api_method == "oauth" && r.available)),
                         old: old_threshold_secs > 0
                             && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
@@ -9144,7 +9223,8 @@ impl App {
                 let is_old = old_threshold_secs > 0
                     && or_created.map(|t| t < old_threshold_secs).unwrap_or(false);
                 let is_recommended = RECOMMENDED_MODELS.contains(&name.as_str())
-                    && (!CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
+                    && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
+                        || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str()))
                         || entry_routes.iter().any(|r| r.api_method == "oauth" && r.available));
                 models.push(super::ModelEntry {
                     name: name.clone(),
@@ -11551,6 +11631,7 @@ impl App {
             ("/swarm".into(), "Toggle swarm feature (on/off/status)"),
             ("/version".into(), "Show current version"),
             ("/info".into(), "Show session info and tokens"),
+            ("/usage".into(), "Show subscription usage limits"),
             ("/reload".into(), "Smart reload (if newer binary exists)"),
             ("/rebuild".into(), "Full rebuild (git pull + build + tests)"),
             ("/split".into(), "Split session into a new window"),

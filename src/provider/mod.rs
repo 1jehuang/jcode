@@ -951,7 +951,7 @@ impl Provider for MultiProvider {
             routes.push(ModelRoute {
                 model: model.to_string(),
                 provider: "OpenAI".to_string(),
-                api_method: "api-key".to_string(),
+                api_method: "oauth".to_string(),
                 available,
                 detail,
             });
