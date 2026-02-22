@@ -4861,14 +4861,22 @@ fn build_idle_usage_line(app: &dyn TuiState) -> Line<'static> {
             ])
         }
         _ => {
-            // Show subscription usage bars inline
+            // Show subscription usage bars inline with provider label
             let five_hr = (usage.five_hour * 100.0).round() as u8;
             let seven_day = (usage.seven_day * 100.0).round() as u8;
 
             let five_hr_color = usage_color(five_hr);
             let seven_day_color = usage_color(seven_day);
 
-            Line::from(vec![
+            let mut spans = Vec::new();
+            let label = usage.provider.label();
+            if !label.is_empty() {
+                spans.push(Span::styled(
+                    format!("{} ", label),
+                    Style::default().fg(DIM_COLOR),
+                ));
+            }
+            spans.extend([
                 Span::styled("5hr:", Style::default().fg(DIM_COLOR)),
                 Span::styled(format!("{}%", five_hr), Style::default().fg(five_hr_color)),
                 Span::styled(" · 7d:", Style::default().fg(DIM_COLOR)),
@@ -4876,7 +4884,8 @@ fn build_idle_usage_line(app: &dyn TuiState) -> Line<'static> {
                     format!("{}%", seven_day),
                     Style::default().fg(seven_day_color),
                 ),
-            ])
+            ]);
+            Line::from(spans)
         }
     }
 }
