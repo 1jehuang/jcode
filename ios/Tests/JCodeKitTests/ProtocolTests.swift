@@ -40,7 +40,7 @@ func encodeRequest(_ req: Request) throws -> [String: Any] {
     return try JSONSerialization.jsonObject(with: data) as! [String: Any]
 }
 
-// MARK: - Request Encoding
+func runProtocolTests() { do {
 
 print("Protocol Tests")
 print("==============")
@@ -217,12 +217,12 @@ do {
     }
 }
 
-// MARK: - Results
-
 print("")
 if failed == 0 {
-    print("All \(passed) assertions passed ✅")
+    print("All \(passed) protocol assertions passed ✅")
 } else {
     print("\(passed) passed, \(failed) FAILED ❌")
-    exit(1)
 }
+
+} catch { print("  UNEXPECTED ERROR: \(error)"); failed += 1 }
+} // end runProtocolTests
