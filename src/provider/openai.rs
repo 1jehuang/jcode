@@ -323,15 +323,184 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
     tools
         .iter()
         .map(|t| {
+            let supports_strict = schema_supports_strict(&t.input_schema);
+            let parameters = if supports_strict {
+                strict_normalize_schema(&t.input_schema)
+            } else {
+                t.input_schema.clone()
+            };
             serde_json::json!({
                 "type": "function",
                 "name": t.name,
                 "description": t.description,
-                "strict": true,
-                "parameters": t.input_schema,
+                "strict": supports_strict,
+                "parameters": parameters,
             })
         })
         .collect()
+}
+
+fn schema_supports_strict(schema: &Value) -> bool {
+    fn check_map(map: &serde_json::Map<String, Value>) -> bool {
+        let is_object_typed = match map.get("type") {
+            Some(Value::String(t)) => t == "object",
+            Some(Value::Array(types)) => types.iter().any(|v| v.as_str() == Some("object")),
+            _ => false,
+        };
+        let has_properties = map
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .map(|props| !props.is_empty())
+            .unwrap_or(false);
+
+        if is_object_typed && !has_properties {
+            return false;
+        }
+        if is_object_typed {
+            if matches!(map.get("additionalProperties"), Some(Value::Bool(true))) {
+                return false;
+            }
+            if matches!(map.get("additionalProperties"), Some(Value::Object(_))) {
+                return false;
+            }
+        }
+
+        map.values().all(schema_supports_strict)
+    }
+
+    match schema {
+        Value::Object(map) => check_map(map),
+        Value::Array(items) => items.iter().all(schema_supports_strict),
+        _ => true,
+    }
+}
+
+fn strict_normalize_schema(schema: &Value) -> Value {
+    fn make_schema_nullable(schema: Value) -> Value {
+        match schema {
+            Value::Object(mut map) => {
+                if let Some(Value::String(t)) = map.get("type").cloned() {
+                    if t != "null" {
+                        map.insert(
+                            "type".to_string(),
+                            Value::Array(vec![Value::String(t), Value::String("null".to_string())]),
+                        );
+                    }
+                    return Value::Object(map);
+                }
+
+                if let Some(Value::Array(mut types)) = map.get("type").cloned() {
+                    if !types.iter().any(|v| v.as_str() == Some("null")) {
+                        types.push(Value::String("null".to_string()));
+                    }
+                    map.insert("type".to_string(), Value::Array(types));
+                    return Value::Object(map);
+                }
+
+                if let Some(Value::Array(mut any_of)) = map.get("anyOf").cloned() {
+                    if !any_of.iter().any(|v| {
+                        v.get("type")
+                            .and_then(|t| t.as_str())
+                            .map(|t| t == "null")
+                            .unwrap_or(false)
+                    }) {
+                        any_of.push(serde_json::json!({ "type": "null" }));
+                    }
+                    map.insert("anyOf".to_string(), Value::Array(any_of));
+                    return Value::Object(map);
+                }
+
+                serde_json::json!({
+                    "anyOf": [
+                        Value::Object(map),
+                        { "type": "null" }
+                    ]
+                })
+            }
+            other => serde_json::json!({
+                "anyOf": [
+                    other,
+                    { "type": "null" }
+                ]
+            }),
+        }
+    }
+
+    fn normalize_map(map: &serde_json::Map<String, Value>) -> serde_json::Map<String, Value> {
+        let mut out = serde_json::Map::new();
+        for (key, value) in map {
+            let normalized = match key.as_str() {
+                "properties" | "$defs" | "definitions" | "patternProperties" => match value {
+                    Value::Object(children) => {
+                        let mut rewritten = serde_json::Map::new();
+                        for (child_key, child_value) in children {
+                            rewritten
+                                .insert(child_key.clone(), strict_normalize_schema(child_value));
+                        }
+                        Value::Object(rewritten)
+                    }
+                    _ => strict_normalize_schema(value),
+                },
+                "items" | "contains" | "if" | "then" | "else" | "not" => {
+                    strict_normalize_schema(value)
+                }
+                "allOf" | "anyOf" | "oneOf" | "prefixItems" => match value {
+                    Value::Array(items) => {
+                        Value::Array(items.iter().map(strict_normalize_schema).collect())
+                    }
+                    _ => strict_normalize_schema(value),
+                },
+                _ => strict_normalize_schema(value),
+            };
+            out.insert(key.clone(), normalized);
+        }
+
+        let is_object_typed = match out.get("type") {
+            Some(Value::String(t)) => t == "object",
+            Some(Value::Array(types)) => types.iter().any(|v| v.as_str() == Some("object")),
+            _ => false,
+        };
+
+        if let Some(Value::Object(properties)) = out.get("properties") {
+            let existing_required: std::collections::HashSet<String> = out
+                .get("required")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let mut required_all: Vec<String> = properties.keys().cloned().collect();
+            required_all.sort();
+
+            if let Some(Value::Object(props_mut)) = out.get_mut("properties") {
+                for (prop_name, prop_schema) in props_mut.iter_mut() {
+                    if !existing_required.contains(prop_name) {
+                        *prop_schema = make_schema_nullable(prop_schema.clone());
+                    }
+                }
+            }
+
+            out.insert(
+                "required".to_string(),
+                Value::Array(required_all.into_iter().map(Value::String).collect()),
+            );
+        }
+
+        if is_object_typed || out.contains_key("properties") {
+            out.insert("additionalProperties".to_string(), Value::Bool(false));
+        }
+
+        out
+    }
+
+    match schema {
+        Value::Object(map) => Value::Object(normalize_map(map)),
+        Value::Array(items) => Value::Array(items.iter().map(strict_normalize_schema).collect()),
+        _ => schema.clone(),
+    }
 }
 
 fn parse_text_wrapped_tool_call(text: &str) -> Option<(String, String, String, String)> {
@@ -2053,6 +2222,80 @@ mod tests {
         let api_tools = build_tools(&defs);
         assert_eq!(api_tools.len(), 1);
         assert_eq!(api_tools[0]["strict"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn test_build_tools_disables_strict_for_free_form_object_nodes() {
+        let defs = vec![ToolDefinition {
+            name: "batch".to_string(),
+            description: "batch calls".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["tool_calls"],
+                "properties": {
+                    "tool_calls": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["tool", "parameters"],
+                            "properties": {
+                                "tool": { "type": "string" },
+                                "parameters": { "type": "object" }
+                            }
+                        }
+                    }
+                }
+            }),
+        }];
+        let api_tools = build_tools(&defs);
+        assert_eq!(api_tools.len(), 1);
+        assert_eq!(api_tools[0]["strict"], serde_json::json!(false));
+        assert_eq!(
+            api_tools[0]["parameters"]["properties"]["tool_calls"]["items"]["properties"]
+                ["parameters"]["type"],
+            serde_json::json!("object")
+        );
+    }
+
+    #[test]
+    fn test_build_tools_normalizes_object_schema_additional_properties() {
+        let defs = vec![ToolDefinition {
+            name: "edit".to_string(),
+            description: "apply edit".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "options": {
+                        "type": "object",
+                        "properties": {
+                            "force": { "type": "boolean" }
+                        }
+                    },
+                    "description": {
+                        "type": "string"
+                    }
+                },
+                "required": ["path"]
+            }),
+        }];
+        let api_tools = build_tools(&defs);
+        assert_eq!(
+            api_tools[0]["parameters"]["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            api_tools[0]["parameters"]["properties"]["options"]["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            api_tools[0]["parameters"]["required"],
+            serde_json::json!(["description", "options", "path"])
+        );
+        assert_eq!(
+            api_tools[0]["parameters"]["properties"]["description"]["type"],
+            serde_json::json!(["string", "null"])
+        );
     }
 
     #[test]
