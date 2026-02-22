@@ -81,6 +81,7 @@ async fn main() -> Result<()> {
         message_id: session_id.clone(),
         tool_call_id: String::new(),
         working_dir: Some(workspace.clone()),
+        stdin_request_tx: None,
     };
 
     let mut cases = Vec::new();

@@ -1000,6 +1000,7 @@ mod tests {
             message_id: "msg_1".to_string(),
             tool_call_id: "call_1".to_string(),
             working_dir: None,
+            stdin_request_tx: None,
         };
 
         let err = tool

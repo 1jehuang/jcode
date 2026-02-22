@@ -137,6 +137,16 @@ pub enum Request {
     #[serde(rename = "compact")]
     Compact { id: u64 },
 
+    /// Send stdin input to a running command that requested it
+    #[serde(rename = "stdin_response")]
+    StdinResponse {
+        id: u64,
+        /// Matches the request_id from StdinRequest
+        request_id: String,
+        /// The user's input (line of text)
+        input: String,
+    },
+
     // === Agent-to-agent communication ===
     /// Register as an external agent
     #[serde(rename = "agent_register")]
@@ -603,6 +613,20 @@ pub enum ServerEvent {
         /// Whether compaction was started successfully
         success: bool,
     },
+
+    /// A running command is waiting for stdin input from the user
+    #[serde(rename = "stdin_request")]
+    StdinRequest {
+        /// Unique request ID for matching the response
+        request_id: String,
+        /// The last line(s) of output (the prompt, e.g. "Password: ")
+        prompt: String,
+        /// Whether the input should be masked (password field)
+        #[serde(default)]
+        is_password: bool,
+        /// Tool call ID this is associated with
+        tool_call_id: String,
+    },
 }
 
 /// Summary of a tool call for the comm_summary response
@@ -710,6 +734,7 @@ impl Request {
             Request::SetFeature { id, .. } => *id,
             Request::Split { id } => *id,
             Request::Compact { id } => *id,
+            Request::StdinResponse { id, .. } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,
             Request::AgentCapabilities { id } => *id,

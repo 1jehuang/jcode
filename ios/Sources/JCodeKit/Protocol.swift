@@ -18,6 +18,7 @@ public enum Request: Encodable, Sendable {
     case cancelSoftInterrupts(id: UInt64)
     case backgroundTool(id: UInt64)
     case split(id: UInt64)
+    case stdinResponse(id: UInt64, requestId: String, input: String)
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: DynamicCodingKey.self)
@@ -97,6 +98,12 @@ public enum Request: Encodable, Sendable {
         case let .split(id):
             try container.encode("split", forKey: .key("type"))
             try container.encode(id, forKey: .key("id"))
+
+        case let .stdinResponse(id, requestId, input):
+            try container.encode("stdin_response", forKey: .key("type"))
+            try container.encode(id, forKey: .key("id"))
+            try container.encode(requestId, forKey: .key("request_id"))
+            try container.encode(input, forKey: .key("input"))
         }
     }
 }
@@ -128,6 +135,7 @@ public enum ServerEvent: Decodable, Sendable {
     case memoryInjected(count: Int, prompt: String, promptChars: Int, computedAgeMs: UInt64)
     case splitResponse(id: UInt64, newSessionId: String, newSessionName: String)
     case compactResult(id: UInt64, message: String, success: Bool)
+    case stdinRequest(requestId: String, prompt: String, isPassword: Bool, toolCallId: String)
     case unknown(type: String, raw: String)
 
     enum CodingKeys: String, CodingKey {
@@ -261,6 +269,13 @@ public enum ServerEvent: Decodable, Sendable {
             let message = try container.decode(String.self, forKey: .key("message"))
             let success = try container.decode(Bool.self, forKey: .key("success"))
             self = .compactResult(id: id, message: message, success: success)
+
+        case "stdin_request":
+            let requestId = try container.decode(String.self, forKey: .key("request_id"))
+            let prompt = try container.decodeIfPresent(String.self, forKey: .key("prompt")) ?? ""
+            let isPassword = try container.decodeIfPresent(Bool.self, forKey: .key("is_password")) ?? false
+            let toolCallId = try container.decodeIfPresent(String.self, forKey: .key("tool_call_id")) ?? ""
+            self = .stdinRequest(requestId: requestId, prompt: prompt, isPassword: isPassword, toolCallId: toolCallId)
 
         default:
             let raw = String(describing: try? JSONSerialization.data(withJSONObject: [:]))

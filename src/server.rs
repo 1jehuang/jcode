@@ -1660,6 +1660,37 @@ async fn handle_client(
         debug_state.register(client_debug_id.clone(), debug_cmd_tx);
     }
 
+    let stdin_responses: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    // Set up stdin request forwarding: tools send StdinInputRequest, we forward to TUI
+    let (stdin_req_tx, mut stdin_req_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::tool::StdinInputRequest>();
+    {
+        let mut agent_guard = agent.lock().await;
+        agent_guard.set_stdin_request_tx(stdin_req_tx);
+    }
+    let stdin_forwarder = {
+        let client_event_tx = client_event_tx.clone();
+        let stdin_responses = stdin_responses.clone();
+        let tool_call_id = String::new();
+        tokio::spawn(async move {
+            while let Some(req) = stdin_req_rx.recv().await {
+                let request_id = req.request_id.clone();
+                stdin_responses
+                    .lock()
+                    .await
+                    .insert(request_id.clone(), req.response_tx);
+                let _ = client_event_tx.send(ServerEvent::StdinRequest {
+                    request_id,
+                    prompt: req.prompt,
+                    is_password: req.is_password,
+                    tool_call_id: tool_call_id.clone(),
+                });
+            }
+        })
+    };
+
     loop {
         line.clear();
         tokio::select! {
@@ -2824,6 +2855,13 @@ async fn handle_client(
 
             // Agent-to-agent communication
             Request::AgentRegister { id, .. } => {
+                let _ = client_event_tx.send(ServerEvent::Done { id });
+            }
+
+            Request::StdinResponse { id, request_id, input } => {
+                if let Some(tx) = stdin_responses.lock().await.remove(&request_id) {
+                    let _ = tx.send(input);
+                }
                 let _ = client_event_tx.send(ServerEvent::Done { id });
             }
 

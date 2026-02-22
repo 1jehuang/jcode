@@ -101,6 +101,8 @@ pub struct Agent {
     system_prompt_override: Option<String>,
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
+    /// Channel for tools to request stdin input from the user
+    stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::tool::StdinInputRequest>>,
 }
 
 impl Agent {
@@ -193,6 +195,7 @@ impl Agent {
             locked_tools: None,
             system_prompt_override: None,
             memory_enabled: crate::config::config().features.memory,
+            stdin_request_tx: None,
         };
         agent.session.model = Some(agent.provider.model());
         agent.seed_compaction_from_session();
@@ -224,6 +227,7 @@ impl Agent {
             locked_tools: None,
             system_prompt_override: None,
             memory_enabled: crate::config::config().features.memory,
+            stdin_request_tx: None,
         };
         if let Some(model) = agent.session.model.clone() {
             if let Err(e) = agent.provider.set_model(&model) {
@@ -1170,6 +1174,14 @@ impl Agent {
         self.memory_enabled
     }
 
+    /// Set the stdin request channel for interactive stdin forwarding
+    pub fn set_stdin_request_tx(
+        &mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::tool::StdinInputRequest>,
+    ) {
+        self.stdin_request_tx = Some(tx);
+    }
+
     async fn tool_definitions(&mut self) -> Vec<ToolDefinition> {
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
@@ -1237,6 +1249,7 @@ impl Agent {
             message_id: self.session.id.clone(),
             tool_call_id: call_id,
             working_dir: self.working_dir().map(PathBuf::from),
+            stdin_request_tx: self.stdin_request_tx.clone(),
         };
         self.registry.execute(name, input, ctx).await
     }
@@ -1808,6 +1821,7 @@ impl Agent {
                             message_id: self.session.id.clone(),
                             tool_call_id: request_id.clone(),
                             working_dir: self.working_dir().map(PathBuf::from),
+            stdin_request_tx: self.stdin_request_tx.clone(),
                         };
                         let tool_result = self.registry.execute(&tool_name, input, ctx).await;
                         let native_result = match tool_result {
@@ -2029,6 +2043,7 @@ impl Agent {
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
                     working_dir: self.working_dir().map(PathBuf::from),
+            stdin_request_tx: self.stdin_request_tx.clone(),
                 };
 
                 if trace {
@@ -2417,6 +2432,7 @@ impl Agent {
                             message_id: self.session.id.clone(),
                             tool_call_id: request_id.clone(),
                             working_dir: self.working_dir().map(PathBuf::from),
+            stdin_request_tx: self.stdin_request_tx.clone(),
                         };
                         let tool_result = self.registry.execute(&tool_name, input, ctx).await;
                         let native_result = match tool_result {
@@ -2644,6 +2660,7 @@ impl Agent {
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
                     working_dir: self.working_dir().map(PathBuf::from),
+            stdin_request_tx: self.stdin_request_tx.clone(),
                 };
 
                 if trace {
@@ -2992,6 +3009,7 @@ impl Agent {
                             message_id: self.session.id.clone(),
                             tool_call_id: request_id.clone(),
                             working_dir: self.working_dir().map(PathBuf::from),
+            stdin_request_tx: self.stdin_request_tx.clone(),
                         };
                         let tool_result = self.registry.execute(&tool_name, input, ctx).await;
                         let native_result = match tool_result {
@@ -3215,6 +3233,7 @@ impl Agent {
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
                     working_dir: self.working_dir().map(PathBuf::from),
+            stdin_request_tx: self.stdin_request_tx.clone(),
                 };
 
                 if trace {

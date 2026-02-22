@@ -673,6 +673,10 @@ pub struct App {
     ambient_system_prompt: Option<String>,
     /// Pending login flow: if set, next input is intercepted as OAuth code or API key
     pending_login: Option<PendingLogin>,
+    /// Pending stdin request from a running command (request_id, prompt, is_password)
+    pending_stdin_request: Option<(String, String, bool)>,
+    /// Stdin response ready to send back (request_id, input) - consumed by event loop
+    stdin_response_pending: Option<(String, String)>,
 }
 
 impl ScrollTestState {
@@ -923,6 +927,8 @@ impl App {
             streaming_md_renderer: RefCell::new(IncrementalMarkdownRenderer::new(None)),
             ambient_system_prompt: None,
             pending_login: None,
+            pending_stdin_request: None,
+            stdin_response_pending: None,
         }
     }
 
@@ -4296,6 +4302,9 @@ impl App {
                                     if let Some(spec) = self.pending_model_switch.take() {
                                         let _ = remote.set_model(&spec).await;
                                     }
+                                    if let Some((request_id, input)) = self.stdin_response_pending.take() {
+                                        let _ = remote.send_stdin_response(&request_id, &input).await;
+                                    }
                                 }
                             }
                             Some(Ok(Event::Paste(text))) => {
@@ -5179,6 +5188,21 @@ impl App {
                     self.set_status_notice("Compaction failed");
                 }
                 false
+            }
+            ServerEvent::StdinRequest {
+                request_id,
+                prompt,
+                is_password,
+                ..
+            } => {
+                let prompt_display = if prompt.is_empty() {
+                    "Command is waiting for input".to_string()
+                } else {
+                    prompt.clone()
+                };
+                self.set_status_notice(format!("⌨ {}", prompt_display));
+                self.pending_stdin_request = Some((request_id, prompt, is_password));
+                true
             }
             _ => false,
         }
@@ -6506,6 +6530,12 @@ impl App {
 
         if let Some(pending) = self.pending_login.take() {
             self.handle_login_input(pending, input);
+            return;
+        }
+
+        if let Some((request_id, _prompt, _is_password)) = self.pending_stdin_request.take() {
+            self.push_display_message(DisplayMessage::system(format!("stdin> {}", input)));
+            self.stdin_response_pending = Some((request_id, input));
             return;
         }
 
@@ -10110,6 +10140,7 @@ impl App {
                             message_id: self.session_id().to_string(),
                             tool_call_id: request_id.clone(),
                             working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
+                            stdin_request_tx: None,
                         };
                         let tool_result = self.registry.execute(&tool_name, input, ctx).await;
                         let native_result = match tool_result {
@@ -10247,6 +10278,7 @@ impl App {
                             message_id: message_id.clone(),
                             tool_call_id: tc.id.clone(),
                             working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
+                            stdin_request_tx: None,
                         };
 
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
@@ -10832,6 +10864,7 @@ impl App {
                                             message_id: self.session_id().to_string(),
                                             tool_call_id: request_id.clone(),
                                             working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
+                            stdin_request_tx: None,
                                         };
                                         let tool_result = self.registry.execute(&tool_name, input, ctx).await;
                                         let native_result = match tool_result {
@@ -11006,6 +11039,7 @@ impl App {
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
                     working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
+                            stdin_request_tx: None,
                 };
 
                 Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {

@@ -102,12 +102,21 @@ impl ToolOutput {
     }
 }
 
+/// A request for stdin input from a running command
+pub struct StdinInputRequest {
+    pub request_id: String,
+    pub prompt: String,
+    pub is_password: bool,
+    pub response_tx: tokio::sync::oneshot::Sender<String>,
+}
+
 #[derive(Clone)]
 pub struct ToolContext {
     pub session_id: String,
     pub message_id: String,
     pub tool_call_id: String,
     pub working_dir: Option<PathBuf>,
+    pub stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<StdinInputRequest>>,
 }
 
 impl ToolContext {
@@ -117,6 +126,7 @@ impl ToolContext {
             message_id: self.message_id.clone(),
             tool_call_id,
             working_dir: self.working_dir.clone(),
+            stdin_request_tx: self.stdin_request_tx.clone(),
         }
     }
 
@@ -778,6 +788,7 @@ mod tests {
             message_id: "test".to_string(),
             tool_call_id: "test".to_string(),
             working_dir: Some(std::path::PathBuf::from("/tmp")),
+            stdin_request_tx: None,
         };
 
         let result = registry

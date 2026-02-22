@@ -372,6 +372,17 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Send stdin input back to a running command
+    pub async fn send_stdin_response(&mut self, request_id: &str, input: &str) -> Result<()> {
+        let request = Request::StdinResponse {
+            id: self.next_request_id,
+            request_id: request_id.to_string(),
+            input: input.to_string(),
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
     /// Cancel the current generation on the server
     pub async fn cancel(&mut self) -> Result<()> {
         let request = Request::Cancel {

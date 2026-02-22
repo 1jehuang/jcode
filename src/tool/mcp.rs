@@ -346,6 +346,7 @@ mod tests {
             message_id: "test-message".to_string(),
             tool_call_id: "test-tool-call".to_string(),
             working_dir: None,
+            stdin_request_tx: None,
         }
     }
 

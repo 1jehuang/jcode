@@ -48,6 +48,7 @@ mod server;
 mod session;
 mod sidecar;
 mod skill;
+mod stdin_detect;
 mod storage;
 mod telegram;
 mod todo;
@@ -389,6 +390,17 @@ enum Command {
     #[command(subcommand)]
     Ambient(AmbientCommand),
 
+    /// Generate a pairing code for iOS/web client
+    Pair {
+        /// List paired devices instead of generating a code
+        #[arg(long)]
+        list: bool,
+
+        /// Revoke a paired device by name or ID
+        #[arg(long)]
+        revoke: Option<String>,
+    },
+
     /// Review and respond to pending ambient permission requests
     Permissions,
 
@@ -684,6 +696,9 @@ async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::Ambient(subcmd)) => {
             run_ambient_command(subcmd).await?;
+        }
+        Some(Command::Pair { list, revoke }) => {
+            run_pair_command(list, revoke)?;
         }
         Some(Command::Permissions) => {
             tui::permissions::run_permissions()?;
@@ -1929,6 +1944,72 @@ async fn debug_start_server(arg: &str, socket_path: Option<String>) -> Result<()
         eprintln!("  [display]");
         eprintln!("  debug_socket = true");
     }
+
+    Ok(())
+}
+
+fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
+    let mut registry = gateway::DeviceRegistry::load();
+
+    if list {
+        if registry.devices.is_empty() {
+            eprintln!("No paired devices.");
+        } else {
+            eprintln!("\x1b[1mPaired devices:\x1b[0m\n");
+            for device in &registry.devices {
+                let last_seen = &device.last_seen;
+                eprintln!(
+                    "  \x1b[36m{}\x1b[0m  ({})",
+                    device.name, device.id
+                );
+                eprintln!("    Paired: {}  Last seen: {}", device.paired_at, last_seen);
+                if let Some(ref apns) = device.apns_token {
+                    eprintln!("    APNs: {}...", &apns[..apns.len().min(16)]);
+                }
+                eprintln!();
+            }
+        }
+        return Ok(());
+    }
+
+    if let Some(ref target) = revoke {
+        let before = registry.devices.len();
+        registry.devices.retain(|d| d.id != *target && d.name != *target);
+        if registry.devices.len() < before {
+            registry.save()?;
+            eprintln!("\x1b[32m✓\x1b[0m Revoked device: {}", target);
+        } else {
+            eprintln!("\x1b[31m✗\x1b[0m No device found matching: {}", target);
+        }
+        return Ok(());
+    }
+
+    let gw_config = &crate::config::config().gateway;
+
+    if !gw_config.enabled {
+        eprintln!("\x1b[33m⚠\x1b[0m  Gateway is disabled. Enable it in ~/.jcode/config.toml:\n");
+        eprintln!("    \x1b[2m[gateway]\x1b[0m");
+        eprintln!("    \x1b[2menabled = true\x1b[0m");
+        eprintln!("    \x1b[2mport = {}\x1b[0m\n", gw_config.port);
+        eprintln!("  Then restart the jcode server.\n");
+    }
+
+    let code = registry.generate_pairing_code();
+
+    eprintln!();
+    eprintln!("  \x1b[1;36m┌─────────────────────────┐\x1b[0m");
+    eprintln!("  \x1b[1;36m│\x1b[0m                         \x1b[1;36m│\x1b[0m");
+    eprintln!("  \x1b[1;36m│\x1b[0m   Pairing code:         \x1b[1;36m│\x1b[0m");
+    eprintln!("  \x1b[1;36m│\x1b[0m                         \x1b[1;36m│\x1b[0m");
+    eprintln!("  \x1b[1;36m│\x1b[0m      \x1b[1;37m{} {}\x1b[0m          \x1b[1;36m│\x1b[0m", &code[..3], &code[3..]);
+    eprintln!("  \x1b[1;36m│\x1b[0m                         \x1b[1;36m│\x1b[0m");
+    eprintln!("  \x1b[1;36m│\x1b[0m   \x1b[2mExpires in 5 minutes\x1b[0m   \x1b[1;36m│\x1b[0m");
+    eprintln!("  \x1b[1;36m│\x1b[0m                         \x1b[1;36m│\x1b[0m");
+    eprintln!("  \x1b[1;36m└─────────────────────────┘\x1b[0m");
+    eprintln!();
+    eprintln!("  Enter this code in the jcode iOS app to pair.");
+    eprintln!("  Gateway: \x1b[36m{}:{}\x1b[0m", gw_config.bind_addr, gw_config.port);
+    eprintln!();
 
     Ok(())
 }
