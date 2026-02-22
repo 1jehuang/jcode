@@ -12,3 +12,8 @@ pub fn is_socket_path(path: &std::path::Path) -> bool {
 pub fn remove_socket(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
 }
+
+/// Create a connected pair of UnixStreams (for in-process bridging).
+pub fn stream_pair() -> std::io::Result<(Stream, Stream)> {
+    Stream::pair()
+}

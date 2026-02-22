@@ -1326,9 +1326,134 @@ impl Server {
             }
         });
 
+        // Spawn WebSocket gateway for iOS/web clients (if enabled)
+        let _gateway_handle = self.spawn_gateway();
+
         // Wait for both to complete (they won't normally)
         let _ = tokio::join!(main_handle, debug_handle);
         Ok(())
+    }
+
+    /// Spawn the WebSocket gateway if enabled in config.
+    /// Returns a task handle that accepts gateway clients and feeds them
+    /// into handle_client just like Unix socket connections.
+    fn spawn_gateway(
+        &self,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let gw_config = &crate::config::config().gateway;
+        if !gw_config.enabled {
+            return None;
+        }
+
+        let config = crate::gateway::GatewayConfig {
+            port: gw_config.port,
+            bind_addr: gw_config.bind_addr.clone(),
+            enabled: true,
+        };
+
+        let (client_tx, mut client_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::gateway::GatewayClient>();
+
+        // Spawn the TCP/WebSocket listener
+        tokio::spawn(async move {
+            if let Err(e) = crate::gateway::run_gateway(config, client_tx).await {
+                crate::logging::error(&format!("Gateway error: {}", e));
+            }
+        });
+
+        // Spawn a task that receives gateway clients and plugs them into handle_client
+        let gw_sessions = Arc::clone(&self.sessions);
+        let gw_event_tx = self.event_tx.clone();
+        let gw_provider = Arc::clone(&self.provider);
+        let gw_is_processing = Arc::clone(&self.is_processing);
+        let gw_session_id = Arc::clone(&self.session_id);
+        let gw_client_count = Arc::clone(&self.client_count);
+        let gw_client_connections = Arc::clone(&self.client_connections);
+        let gw_swarm_members = Arc::clone(&self.swarm_members);
+        let gw_swarms_by_id = Arc::clone(&self.swarms_by_id);
+        let gw_shared_context = Arc::clone(&self.shared_context);
+        let gw_swarm_plans = Arc::clone(&self.swarm_plans);
+        let gw_swarm_coordinators = Arc::clone(&self.swarm_coordinators);
+        let gw_file_touches = Arc::clone(&self.file_touches);
+        let gw_channel_subscriptions = Arc::clone(&self.channel_subscriptions);
+        let gw_client_debug_state = Arc::clone(&self.client_debug_state);
+        let gw_client_debug_response_tx = self.client_debug_response_tx.clone();
+        let gw_event_history = Arc::clone(&self.event_history);
+        let gw_event_counter = Arc::clone(&self.event_counter);
+        let gw_server_name = self.identity.name.clone();
+        let gw_server_icon = self.identity.icon.clone();
+        let gw_ambient_runner = self.ambient_runner.clone();
+        let gw_mcp_pool = Arc::clone(&self.mcp_pool);
+
+        let handle = tokio::spawn(async move {
+            while let Some(gw_client) = client_rx.recv().await {
+                let sessions = Arc::clone(&gw_sessions);
+                let event_tx = gw_event_tx.clone();
+                let provider = Arc::clone(&gw_provider);
+                let is_processing = Arc::clone(&gw_is_processing);
+                let session_id = Arc::clone(&gw_session_id);
+                let client_count = Arc::clone(&gw_client_count);
+                let client_connections = Arc::clone(&gw_client_connections);
+                let swarm_members = Arc::clone(&gw_swarm_members);
+                let swarms_by_id = Arc::clone(&gw_swarms_by_id);
+                let shared_context = Arc::clone(&gw_shared_context);
+                let swarm_plans = Arc::clone(&gw_swarm_plans);
+                let swarm_coordinators = Arc::clone(&gw_swarm_coordinators);
+                let file_touches = Arc::clone(&gw_file_touches);
+                let channel_subscriptions = Arc::clone(&gw_channel_subscriptions);
+                let client_debug_state = Arc::clone(&gw_client_debug_state);
+                let client_debug_response_tx = gw_client_debug_response_tx.clone();
+                let event_history = Arc::clone(&gw_event_history);
+                let event_counter = Arc::clone(&gw_event_counter);
+                let server_name = gw_server_name.clone();
+                let server_icon = gw_server_icon.clone();
+                let ambient_runner = gw_ambient_runner.clone();
+                let mcp_pool = Arc::clone(&gw_mcp_pool);
+
+                *client_count.write().await += 1;
+
+                crate::logging::info(&format!(
+                    "Gateway client connected: {} ({})",
+                    gw_client.device_name, gw_client.device_id
+                ));
+
+                tokio::spawn(async move {
+                    let result = handle_client(
+                        gw_client.stream,
+                        sessions,
+                        event_tx,
+                        provider,
+                        is_processing,
+                        session_id,
+                        Arc::clone(&client_count),
+                        client_connections,
+                        swarm_members,
+                        swarms_by_id,
+                        shared_context,
+                        swarm_plans,
+                        swarm_coordinators,
+                        file_touches,
+                        channel_subscriptions,
+                        client_debug_state,
+                        client_debug_response_tx,
+                        event_history,
+                        event_counter,
+                        server_name,
+                        server_icon,
+                        mcp_pool,
+                    )
+                    .await;
+
+                    *client_count.write().await -= 1;
+
+                    if let Err(e) = result {
+                        crate::logging::error(&format!("Gateway client error: {}", e));
+                    }
+                });
+            }
+        });
+
+        Some(handle)
     }
 }
 

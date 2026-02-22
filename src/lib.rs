@@ -11,6 +11,7 @@ pub mod channel;
 pub mod compaction;
 pub mod config;
 pub mod embedding;
+pub mod gateway;
 pub mod id;
 pub mod import;
 pub mod logging;

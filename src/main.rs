@@ -27,6 +27,7 @@ mod channel;
 mod compaction;
 mod config;
 mod embedding;
+mod gateway;
 mod id;
 mod logging;
 mod mcp;
