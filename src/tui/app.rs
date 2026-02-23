@@ -5125,6 +5125,24 @@ impl App {
                 point: _,
                 tools_skipped,
             } => {
+                // Flush any in-progress streaming text as an assistant message first,
+                // so the interleave message appears AFTER the preceding response.
+                if let Some(chunk) = self.stream_buffer.flush() {
+                    self.streaming_text.push_str(&chunk);
+                }
+                if !self.streaming_text.is_empty() {
+                    let duration = self.processing_started.map(|s| s.elapsed().as_secs_f32());
+                    let flushed = self.take_streaming_text();
+                    self.push_display_message(DisplayMessage {
+                        role: "assistant".to_string(),
+                        content: flushed,
+                        tool_calls: vec![],
+                        duration_secs: duration,
+                        title: None,
+                        tool_data: None,
+                    });
+                    self.push_turn_footer(duration);
+                }
                 // When injected, NOW add the message to display_messages
                 // (it was previously only in the queue preview area)
                 self.pending_soft_interrupts.clear();
