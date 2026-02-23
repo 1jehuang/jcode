@@ -1215,6 +1215,10 @@ fn hot_reload(session_id: &str) -> Result<()> {
     }
 
     // Build command with --resume flag
+    // In self-dev mode, preserve the self-dev subcommand so the session
+    // continues in self-dev mode after reload.
+    let is_selfdev = std::env::var("JCODE_SELFDEV_MODE").is_ok();
+
     // Retry on ENOENT in case binary is being replaced by a concurrent cargo build
     for attempt in 0..3 {
         if attempt > 0 {
@@ -1223,12 +1227,12 @@ fn hot_reload(session_id: &str) -> Result<()> {
                 continue;
             }
         }
-        let err = crate::platform::replace_process(
-            ProcessCommand::new(&exe)
-                .arg("--resume")
-                .arg(session_id)
-                .current_dir(&cwd),
-        );
+        let mut cmd = ProcessCommand::new(&exe);
+        if is_selfdev {
+            cmd.arg("self-dev");
+        }
+        cmd.arg("--resume").arg(session_id).current_dir(&cwd);
+        let err = crate::platform::replace_process(&mut cmd);
 
         if err.kind() == std::io::ErrorKind::NotFound && attempt < 2 {
             crate::logging::warn(&format!(
@@ -2006,17 +2010,8 @@ fn resolve_connect_host(bind_addr: &str) -> String {
     bind_addr.to_string()
 }
 
-fn detect_tailscale_dns_name() -> Option<String> {
-    let output = std::process::Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+fn parse_tailscale_dns_name(status_json: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(status_json).ok()?;
     let dns_name = value
         .get("Self")?
         .get("DNSName")?
@@ -2030,6 +2025,19 @@ fn detect_tailscale_dns_name() -> Option<String> {
     } else {
         Some(dns_name)
     }
+}
+
+fn detect_tailscale_dns_name() -> Option<String> {
+    let output = std::process::Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    parse_tailscale_dns_name(&output.stdout)
 }
 
 fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
@@ -3412,6 +3420,27 @@ mod tests {
         assert_eq!(ProviderChoice::Copilot.as_arg_value(), "copilot");
         assert_eq!(ProviderChoice::Antigravity.as_arg_value(), "antigravity");
         assert_eq!(ProviderChoice::Auto.as_arg_value(), "auto");
+    }
+
+    #[test]
+    fn test_parse_tailscale_dns_name_trims_trailing_dot() {
+        let payload = br#"{"Self":{"DNSName":"yashmacbook.tailabc.ts.net."}}"#;
+        let parsed = parse_tailscale_dns_name(payload);
+        assert_eq!(parsed.as_deref(), Some("yashmacbook.tailabc.ts.net"));
+    }
+
+    #[test]
+    fn test_parse_tailscale_dns_name_handles_missing_or_empty() {
+        let missing = br#"{"Self":{}}"#;
+        assert!(parse_tailscale_dns_name(missing).is_none());
+
+        let empty = br#"{"Self":{"DNSName":"   "}}"#;
+        assert!(parse_tailscale_dns_name(empty).is_none());
+    }
+
+    #[test]
+    fn test_parse_tailscale_dns_name_invalid_json() {
+        assert!(parse_tailscale_dns_name(b"not-json").is_none());
     }
 }
 
