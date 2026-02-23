@@ -184,10 +184,6 @@ impl SelfDevTool {
 
         // Update manifest - track what we're testing
         let mut manifest = build::BuildManifest::load()?;
-        let stable_hash = manifest
-            .stable
-            .clone()
-            .unwrap_or_else(|| "none".to_string());
         manifest.canary = Some(hash.clone());
         manifest.canary_status = Some(build::CanaryStatus::Testing);
         manifest.save()?;
@@ -216,17 +212,20 @@ impl SelfDevTool {
         let info = format!("reload:{}", hash);
         std::fs::write(&info_path, &info)?;
 
-        // Write signal file for TUI to pick up
+        // Write signal file for server/TUI to pick up
         let signal_path = crate::storage::jcode_dir()?.join("rebuild-signal");
         std::fs::write(&signal_path, &hash)?;
 
-        Ok(ToolOutput::new(format!(
-            "Reloading with canary build {}.\n\
-             Stable: {} (safety net)\n\n\
-             **Restarting...** The session will continue automatically.\n\
-             After reload, immediately continue your work — do not stop and wait for user input.",
-            hash, stable_hash
-        )))
+        // Block until the server picks up the signal and triggers graceful shutdown.
+        // The agent's tool execution loop will abort this task when the shutdown
+        // signal fires, recording "interrupted by reload" as the tool result.
+        // On restart, the continuation message provides the real reload outcome.
+        //
+        // We don't return a ToolOutput here because the reload hasn't happened yet.
+        // The actual result comes after the process restarts.
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
     }
 
     async fn do_status(&self) -> Result<ToolOutput> {
@@ -357,11 +356,10 @@ impl SelfDevTool {
         let signal_path = crate::storage::jcode_dir()?.join("rollback-signal");
         std::fs::write(&signal_path, &stable_hash)?;
 
-        Ok(ToolOutput::new(format!(
-            "Rolling back to stable build {}.\n\n\
-             **Restarting...** The session will continue automatically.",
-            stable_hash
-        )))
+        // Block until the server picks up the signal and triggers graceful shutdown.
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
     }
 
     async fn do_socket_info(&self) -> Result<ToolOutput> {

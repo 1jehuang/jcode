@@ -3746,17 +3746,29 @@ impl Agent {
                     ));
                     tool_handle.abort();
 
-                    let interrupted_msg = format!(
-                        "[Tool '{}' interrupted by server reload after {:.1}s]",
-                        tc.name,
-                        tool_elapsed.as_secs_f64()
-                    );
+                    // For selfdev reload/rollback, the interruption is intentional -
+                    // the tool triggered the reload and blocked waiting for shutdown.
+                    // Use a non-error message so the conversation history is clean.
+                    let is_selfdev_reload = tc.name == "selfdev";
+                    let interrupted_msg = if is_selfdev_reload {
+                        "Reload initiated. Process restarting...".to_string()
+                    } else {
+                        format!(
+                            "[Tool '{}' interrupted by server reload after {:.1}s]",
+                            tc.name,
+                            tool_elapsed.as_secs_f64()
+                        )
+                    };
 
                     let _ = event_tx.send(ServerEvent::ToolDone {
                         id: tc.id.clone(),
                         name: tc.name.clone(),
                         output: interrupted_msg.clone(),
-                        error: Some("interrupted by reload".to_string()),
+                        error: if is_selfdev_reload {
+                            None
+                        } else {
+                            Some("interrupted by reload".to_string())
+                        },
                     });
 
                     self.add_message_with_duration(
@@ -3764,7 +3776,7 @@ impl Agent {
                         vec![ContentBlock::ToolResult {
                             tool_use_id: tc.id.clone(),
                             content: interrupted_msg,
-                            is_error: Some(true),
+                            is_error: Some(!is_selfdev_reload),
                         }],
                         Some(tool_elapsed.as_millis() as u64),
                     );
