@@ -1811,6 +1811,8 @@ impl Agent {
             }));
 
             let mut text_content = String::new();
+            #[allow(unused_variables)]
+            let mut text_wrapped_detected = false;
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut current_tool: Option<ToolCall> = None;
             let mut current_tool_input = String::new();
@@ -2511,6 +2513,7 @@ impl Agent {
             ));
 
             let mut text_content = String::new();
+            let mut text_wrapped_detected = false;
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut current_tool: Option<ToolCall> = None;
             let mut current_tool_input = String::new();
@@ -2570,8 +2573,19 @@ impl Agent {
                         });
                     }
                     StreamEvent::TextDelta(text) => {
-                        let _ = event_tx.send(ServerEvent::TextDelta { text: text.clone() });
                         text_content.push_str(&text);
+                        if !text_wrapped_detected {
+                            if text_content.contains("to=functions.") {
+                                text_wrapped_detected = true;
+                                let marker_idx = text_content.find("to=functions.").unwrap();
+                                let clean_prefix = text_content[..marker_idx].trim_end().to_string();
+                                let _ = event_tx.send(ServerEvent::TextReplace {
+                                    text: clean_prefix,
+                                });
+                            } else {
+                                let _ = event_tx.send(ServerEvent::TextDelta { text: text.clone() });
+                            }
+                        }
                     }
                     StreamEvent::ToolUseStart { id, name } => {
                         let _ = event_tx.send(ServerEvent::ToolStart {
@@ -3142,6 +3156,7 @@ impl Agent {
             ));
 
             let mut text_content = String::new();
+            let mut text_wrapped_detected = false;
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut current_tool: Option<ToolCall> = None;
             let mut current_tool_input = String::new();
@@ -3200,8 +3215,19 @@ impl Agent {
                         });
                     }
                     StreamEvent::TextDelta(text) => {
-                        let _ = event_tx.send(ServerEvent::TextDelta { text: text.clone() });
                         text_content.push_str(&text);
+                        if !text_wrapped_detected {
+                            if text_content.contains("to=functions.") {
+                                text_wrapped_detected = true;
+                                let marker_idx = text_content.find("to=functions.").unwrap();
+                                let clean_prefix = text_content[..marker_idx].trim_end().to_string();
+                                let _ = event_tx.send(ServerEvent::TextReplace {
+                                    text: clean_prefix,
+                                });
+                            } else {
+                                let _ = event_tx.send(ServerEvent::TextDelta { text: text.clone() });
+                            }
+                        }
                         if self.is_graceful_shutdown() {
                             logging::info("Graceful shutdown during streaming - checkpointing partial response");
                             let _ = event_tx.send(ServerEvent::TextDelta {
