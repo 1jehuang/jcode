@@ -1,0 +1,460 @@
+//! Windows setup hints: hotkey registration and WezTerm suggestion.
+//!
+//! On Windows, every 3rd launch, jcode nudges the user to:
+//! 1. Set up Alt+; as a global hotkey to launch jcode
+//! 2. Install WezTerm for a better terminal experience (inline images, graphics)
+//!
+//! Each nudge can be dismissed permanently with "Don't ask again".
+//! State is persisted in `~/.jcode/setup_hints.json`.
+
+use crate::storage;
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::io::{self, IsTerminal, Write};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SetupHintsState {
+    pub launch_count: u64,
+    pub hotkey_configured: bool,
+    pub hotkey_dismissed: bool,
+    pub wezterm_configured: bool,
+    pub wezterm_dismissed: bool,
+}
+
+impl SetupHintsState {
+    fn path() -> Result<PathBuf> {
+        Ok(storage::jcode_dir()?.join("setup_hints.json"))
+    }
+
+    pub fn load() -> Self {
+        Self::path()
+            .ok()
+            .and_then(|p| storage::read_json(&p).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let path = Self::path()?;
+        storage::write_json(&path, self)
+    }
+}
+
+/// Detect which terminal the user is currently running in (Windows).
+#[cfg(windows)]
+fn detect_terminal() -> &'static str {
+    if std::env::var("WT_SESSION").is_ok() {
+        "windows-terminal"
+    } else if std::env::var("WEZTERM_EXECUTABLE").is_ok()
+        || std::env::var("WEZTERM_PANE").is_ok()
+    {
+        "wezterm"
+    } else if std::env::var("ALACRITTY_WINDOW_ID").is_ok() {
+        "alacritty"
+    } else {
+        "unknown"
+    }
+}
+
+#[cfg(not(windows))]
+fn detect_terminal() -> &'static str {
+    "non-windows"
+}
+
+/// Check if WezTerm is installed (Windows).
+#[cfg(windows)]
+fn is_wezterm_installed() -> bool {
+    std::process::Command::new("where")
+        .arg("wezterm")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn is_wezterm_installed() -> bool {
+    false
+}
+
+/// Check if winget is available (Windows).
+#[cfg(windows)]
+fn is_winget_available() -> bool {
+    std::process::Command::new("where")
+        .arg("winget")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn is_winget_available() -> bool {
+    false
+}
+
+/// Create a global hotkey shortcut (.lnk) in the Start Menu.
+///
+/// Uses PowerShell to create a shortcut with a hotkey property.
+/// The shortcut launches jcode in the best available terminal.
+#[cfg(windows)]
+fn create_hotkey_shortcut(use_wezterm: bool) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let exe_path = exe.to_string_lossy();
+
+    let (target, arguments) = if use_wezterm {
+        ("wezterm".to_string(), format!("start -- \"{}\"", exe_path))
+    } else {
+        ("wt.exe".to_string(), format!("-p \"Command Prompt\" \"{}\"", exe_path))
+    };
+
+    let shortcut_dir = format!(
+        "{}\\Microsoft\\Windows\\Start Menu\\Programs",
+        std::env::var("APPDATA").unwrap_or_else(|_| "C:\\Users\\Default\\AppData\\Roaming".into())
+    );
+
+    let ps_script = format!(
+        r#"
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut("{dir}\jcode.lnk")
+$shortcut.TargetPath = "{target}"
+$shortcut.Arguments = '{args}'
+$shortcut.Hotkey = "Alt+;"
+$shortcut.Description = "Launch jcode AI coding agent"
+$shortcut.Save()
+Write-Output "OK"
+"#,
+        dir = shortcut_dir,
+        target = target,
+        args = arguments,
+    );
+
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &ps_script])
+        .output()?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("OK") {
+            return Ok(());
+        }
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    anyhow::bail!("Failed to create shortcut: {}", stderr.trim())
+}
+
+#[cfg(not(windows))]
+fn create_hotkey_shortcut(_use_wezterm: bool) -> Result<()> {
+    anyhow::bail!("Hotkey setup is only supported on Windows")
+}
+
+/// Install WezTerm via winget.
+#[cfg(windows)]
+fn install_wezterm() -> Result<()> {
+    eprintln!("  Installing WezTerm via winget...");
+    eprintln!("  (Windows may ask for permission to install)\n");
+
+    let status = std::process::Command::new("winget")
+        .args(["install", "-e", "--id", "wez.wezterm", "--accept-source-agreements"])
+        .status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("winget install failed (exit code: {:?})", status.code())
+    }
+}
+
+#[cfg(not(windows))]
+fn install_wezterm() -> Result<()> {
+    anyhow::bail!("WezTerm install is only supported on Windows via winget")
+}
+
+/// Read a single-character choice from the user.
+fn read_choice() -> String {
+    let mut input = String::new();
+    let _ = io::stdin().read_line(&mut input);
+    input.trim().to_lowercase()
+}
+
+/// Show the hotkey setup nudge. Returns true if something was set up.
+fn nudge_hotkey(state: &mut SetupHintsState) -> bool {
+    let terminal = detect_terminal();
+    let using_wezterm = terminal == "wezterm" || is_wezterm_installed();
+
+    let terminal_name = if using_wezterm {
+        "WezTerm"
+    } else {
+        "Windows Terminal"
+    };
+
+    eprintln!("\x1b[36m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
+    eprintln!("\x1b[36m│\x1b[0m \x1b[1m💡 Set up Alt+; to launch jcode from anywhere?\x1b[0m              \x1b[36m│\x1b[0m");
+    eprintln!("\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m");
+    eprintln!("\x1b[36m│\x1b[0m    Creates a global hotkey - no extra software needed.       \x1b[36m│\x1b[0m");
+    eprintln!("\x1b[36m│\x1b[0m    Opens jcode in {:<39}    \x1b[36m│\x1b[0m", format!("{}.", terminal_name));
+    eprintln!("\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m");
+    eprintln!("\x1b[36m│\x1b[0m    \x1b[32m[y]\x1b[0m Set up   \x1b[90m[n]\x1b[0m Not now   \x1b[90m[d]\x1b[0m Don't ask again        \x1b[36m│\x1b[0m");
+    eprintln!("\x1b[36m└─────────────────────────────────────────────────────────────┘\x1b[0m");
+    eprint!("\x1b[36m  >\x1b[0m ");
+    let _ = io::stderr().flush();
+
+    let choice = read_choice();
+
+    match choice.as_str() {
+        "y" | "yes" => {
+            eprint!("\n");
+            match create_hotkey_shortcut(using_wezterm) {
+                Ok(()) => {
+                    state.hotkey_configured = true;
+                    let _ = state.save();
+                    eprintln!("  \x1b[32m✓\x1b[0m Created hotkey (\x1b[1mAlt+;\x1b[0m) → {} + jcode", terminal_name);
+                    eprintln!();
+                    true
+                }
+                Err(e) => {
+                    eprintln!("  \x1b[31m✗\x1b[0m Failed to create hotkey: {}", e);
+                    eprintln!("    You can set it up manually later with: \x1b[1mjcode setup-hotkey\x1b[0m");
+                    eprintln!();
+                    false
+                }
+            }
+        }
+        "d" | "dont" => {
+            state.hotkey_dismissed = true;
+            let _ = state.save();
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Show the WezTerm install nudge. Returns true if WezTerm was installed.
+fn nudge_wezterm(state: &mut SetupHintsState) -> bool {
+    let terminal = detect_terminal();
+
+    let current_terminal = match terminal {
+        "windows-terminal" => "Windows Terminal",
+        "alacritty" => "Alacritty",
+        _ => "your current terminal",
+    };
+
+    eprintln!("\x1b[36m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
+    eprintln!("\x1b[36m│\x1b[0m \x1b[1m💡 WezTerm gives jcode superpowers\x1b[0m                         \x1b[36m│\x1b[0m");
+    eprintln!("\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m");
+    eprintln!("\x1b[36m│\x1b[0m    {} can't render inline images.          \x1b[36m│\x1b[0m", format!("{:<30}", current_terminal));
+    eprintln!("\x1b[36m│\x1b[0m    WezTerm supports graphics, diagrams, and more.           \x1b[36m│\x1b[0m");
+    eprintln!("\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m");
+    eprintln!("\x1b[36m│\x1b[0m    \x1b[32m[y]\x1b[0m Install   \x1b[90m[n]\x1b[0m Not now   \x1b[90m[d]\x1b[0m Don't ask again       \x1b[36m│\x1b[0m");
+    eprintln!("\x1b[36m└─────────────────────────────────────────────────────────────┘\x1b[0m");
+    eprint!("\x1b[36m  >\x1b[0m ");
+    let _ = io::stderr().flush();
+
+    let choice = read_choice();
+
+    match choice.as_str() {
+        "y" | "yes" => {
+            eprint!("\n");
+            if !is_winget_available() {
+                eprintln!("  \x1b[33m⚠\x1b[0m  winget not found. Install WezTerm manually:");
+                eprintln!("     https://wezfurlong.org/wezterm/install/windows.html");
+                eprintln!();
+                eprintln!("     Or install winget first: https://aka.ms/getwinget");
+                eprintln!();
+                return false;
+            }
+
+            match install_wezterm() {
+                Ok(()) => {
+                    state.wezterm_configured = true;
+                    let _ = state.save();
+                    eprintln!("  \x1b[32m✓\x1b[0m WezTerm installed!");
+
+                    if state.hotkey_configured {
+                        eprintln!("  Updating hotkey to use WezTerm...");
+                        match create_hotkey_shortcut(true) {
+                            Ok(()) => {
+                                eprintln!("  \x1b[32m✓\x1b[0m Hotkey updated: \x1b[1mAlt+;\x1b[0m → WezTerm + jcode");
+                            }
+                            Err(e) => {
+                                eprintln!("  \x1b[33m⚠\x1b[0m  Could not update hotkey: {}", e);
+                            }
+                        }
+                    }
+                    eprintln!();
+                    true
+                }
+                Err(e) => {
+                    eprintln!("  \x1b[31m✗\x1b[0m Failed to install WezTerm: {}", e);
+                    eprintln!("    Install manually: https://wezfurlong.org/wezterm/install/windows.html");
+                    eprintln!();
+                    false
+                }
+            }
+        }
+        "d" | "dont" => {
+            state.wezterm_dismissed = true;
+            let _ = state.save();
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Prompt the user to try out their new hotkey.
+fn prompt_try_it_out(installed_wezterm: bool) {
+    eprintln!("\x1b[32m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
+    eprintln!("\x1b[32m│\x1b[0m \x1b[1m✨ All set! Try it out:\x1b[0m                                     \x1b[32m│\x1b[0m");
+    eprintln!("\x1b[32m│\x1b[0m                                                             \x1b[32m│\x1b[0m");
+    eprintln!("\x1b[32m│\x1b[0m    Press \x1b[1mAlt+;\x1b[0m from anywhere to launch jcode.                \x1b[32m│\x1b[0m");
+    if installed_wezterm {
+        eprintln!("\x1b[32m│\x1b[0m    It will open in \x1b[1mWezTerm\x1b[0m with full graphics support.      \x1b[32m│\x1b[0m");
+    }
+    eprintln!("\x1b[32m│\x1b[0m                                                             \x1b[32m│\x1b[0m");
+    eprintln!("\x1b[32m│\x1b[0m    \x1b[90m(Starting jcode normally in 3 seconds...)\x1b[0m                 \x1b[32m│\x1b[0m");
+    eprintln!("\x1b[32m└─────────────────────────────────────────────────────────────┘\x1b[0m");
+    eprintln!();
+
+    std::thread::sleep(std::time::Duration::from_secs(3));
+}
+
+/// Manual `jcode setup-hotkey` command.
+///
+/// Runs the full interactive setup flow regardless of launch count.
+pub fn run_setup_hotkey() -> Result<()> {
+    if !cfg!(windows) {
+        eprintln!("Global hotkey setup is currently only supported on Windows.");
+        eprintln!();
+        eprintln!("On Linux/macOS, add a keybinding in your desktop environment:");
+        eprintln!("  - niri: bindings in ~/.config/niri/config.kdl");
+        eprintln!("  - GNOME: Settings > Keyboard > Custom Shortcuts");
+        eprintln!("  - KDE: System Settings > Shortcuts > Custom Shortcuts");
+        eprintln!("  - macOS: Shortcuts.app or System Settings > Keyboard > Shortcuts");
+        return Ok(());
+    }
+
+    let mut state = SetupHintsState::load();
+    let terminal = detect_terminal();
+    let already_using_wezterm = terminal == "wezterm";
+
+    eprintln!("\x1b[1mjcode setup-hotkey\x1b[0m");
+    eprintln!();
+
+    eprintln!("  Detected terminal: {}", match terminal {
+        "windows-terminal" => "Windows Terminal",
+        "wezterm" => "WezTerm",
+        "alacritty" => "Alacritty",
+        _ => "Unknown",
+    });
+
+    if is_wezterm_installed() && !already_using_wezterm {
+        eprintln!("  WezTerm: \x1b[32minstalled\x1b[0m");
+    } else if already_using_wezterm {
+        eprintln!("  WezTerm: \x1b[32mactive\x1b[0m");
+    } else {
+        eprintln!("  WezTerm: \x1b[90mnot installed\x1b[0m");
+    }
+    eprintln!();
+
+    // Step 1: WezTerm
+    let mut installed_wezterm = false;
+    if !already_using_wezterm && !is_wezterm_installed() {
+        eprintln!("  WezTerm provides the best jcode experience (inline images, graphics).");
+        eprint!("  Install WezTerm? \x1b[32m[y]\x1b[0m/\x1b[90m[n]\x1b[0m: ");
+        let _ = io::stderr().flush();
+        let choice = read_choice();
+        if choice == "y" || choice == "yes" {
+            if !is_winget_available() {
+                eprintln!("\n  \x1b[33m⚠\x1b[0m  winget not found. Install WezTerm manually:");
+                eprintln!("     https://wezfurlong.org/wezterm/install/windows.html\n");
+            } else {
+                match install_wezterm() {
+                    Ok(()) => {
+                        state.wezterm_configured = true;
+                        installed_wezterm = true;
+                        eprintln!("  \x1b[32m✓\x1b[0m WezTerm installed!\n");
+                    }
+                    Err(e) => {
+                        eprintln!("  \x1b[31m✗\x1b[0m Install failed: {}\n", e);
+                    }
+                }
+            }
+        }
+        eprintln!();
+    }
+
+    // Step 2: Hotkey
+    let use_wezterm = already_using_wezterm || is_wezterm_installed();
+    let terminal_name = if use_wezterm { "WezTerm" } else { "Windows Terminal" };
+
+    eprintln!("  Setting up \x1b[1mAlt+;\x1b[0m → {} + jcode...", terminal_name);
+
+    match create_hotkey_shortcut(use_wezterm) {
+        Ok(()) => {
+            state.hotkey_configured = true;
+            let _ = state.save();
+            eprintln!("  \x1b[32m✓\x1b[0m Created hotkey (\x1b[1mAlt+;\x1b[0m)");
+            eprintln!();
+            prompt_try_it_out(installed_wezterm);
+        }
+        Err(e) => {
+            eprintln!("  \x1b[31m✗\x1b[0m Failed: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
+/// Main entry point: check if we should show setup hints.
+///
+/// Called early in startup, before the TUI is initialized.
+/// Only runs on Windows. Shows at most one nudge per launch.
+/// Returns quickly if not on Windows or if it's not time to nudge.
+pub fn maybe_show_setup_hints() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        return;
+    }
+
+    let mut state = SetupHintsState::load();
+    state.launch_count += 1;
+    let _ = state.save();
+
+    if state.launch_count % 3 != 0 {
+        return;
+    }
+
+    let terminal = detect_terminal();
+    let already_using_wezterm = terminal == "wezterm";
+
+    if already_using_wezterm {
+        state.wezterm_configured = true;
+        state.wezterm_dismissed = true;
+        let _ = state.save();
+    }
+
+    let mut did_setup_hotkey = false;
+    let mut did_install_wezterm = false;
+
+    if !state.hotkey_configured && !state.hotkey_dismissed {
+        did_setup_hotkey = nudge_hotkey(&mut state);
+    }
+
+    if did_setup_hotkey && !state.wezterm_configured && !state.wezterm_dismissed && !already_using_wezterm {
+        did_install_wezterm = nudge_wezterm(&mut state);
+    } else if !did_setup_hotkey && !state.wezterm_configured && !state.wezterm_dismissed && !already_using_wezterm {
+        if state.hotkey_configured || state.hotkey_dismissed {
+            did_install_wezterm = nudge_wezterm(&mut state);
+        }
+    }
+
+    if did_setup_hotkey {
+        prompt_try_it_out(did_install_wezterm);
+    }
+}

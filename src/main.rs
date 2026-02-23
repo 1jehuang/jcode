@@ -47,6 +47,7 @@ mod replay;
 mod safety;
 mod server;
 mod session;
+mod setup_hints;
 mod sidecar;
 mod skill;
 mod stdin_detect;
@@ -406,6 +407,9 @@ enum Command {
     /// Review and respond to pending ambient permission requests
     Permissions,
 
+    /// Set up a global hotkey (Alt+;) to launch jcode (Windows)
+    SetupHotkey,
+
     /// Replay a saved session in the TUI
     Replay {
         /// Session ID, name, or path to session JSON file
@@ -703,6 +707,9 @@ async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Permissions) => {
             tui::permissions::run_permissions()?;
         }
+        Some(Command::SetupHotkey) => {
+            setup_hints::run_setup_hotkey()?;
+        }
         Some(Command::Replay {
             session,
             export,
@@ -728,6 +735,9 @@ async fn run_main(mut args: Args) -> Result<()> {
             .await?;
         }
         None => {
+            // Show Windows setup hints (hotkey, WezTerm) every 3rd launch
+            setup_hints::maybe_show_setup_hints();
+
             // Auto-detect jcode repo and enable self-dev mode
             let cwd = std::env::current_dir()?;
             let in_jcode_repo = build::is_jcode_repo(&cwd);
