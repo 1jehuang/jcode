@@ -38,6 +38,7 @@ use std::time::Instant;
 
 const DEFAULT_RENDER_WIDTH: u32 = 1600;
 const DEFAULT_RENDER_HEIGHT: u32 = 1200;
+const DEFAULT_PICKER_FONT_SIZE: (u16, u16) = (8, 16);
 
 /// When true, mermaid placeholders include image hashes even without a
 /// terminal image protocol (used by the video export pipeline so it can
@@ -1121,11 +1122,101 @@ pub fn debug_test_scroll(content: Option<&str>) -> ScrollTestResult {
     }
 }
 
-/// Initialize the global picker by querying terminal capabilities.
-/// Should be called early in app startup, after entering alternate screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickerInitMode {
+    Fast,
+    Probe,
+}
+
+fn parse_env_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn picker_init_mode_from_probe_env(raw: Option<&str>) -> PickerInitMode {
+    if let Some(raw) = raw {
+        if parse_env_bool(raw) == Some(true) {
+            return PickerInitMode::Probe;
+        }
+    }
+    PickerInitMode::Fast
+}
+
+fn picker_init_mode_from_env() -> PickerInitMode {
+    picker_init_mode_from_probe_env(std::env::var("JCODE_MERMAID_PICKER_PROBE").ok().as_deref())
+}
+
+fn infer_protocol_from_env(
+    term: Option<&str>,
+    term_program: Option<&str>,
+    lc_terminal: Option<&str>,
+    kitty_window_id: Option<&str>,
+) -> Option<ProtocolType> {
+    if kitty_window_id.is_some() {
+        return Some(ProtocolType::Kitty);
+    }
+
+    let term = term.unwrap_or("").to_ascii_lowercase();
+    let term_program = term_program.unwrap_or("").to_ascii_lowercase();
+    let lc_terminal = lc_terminal.unwrap_or("").to_ascii_lowercase();
+
+    if term.contains("kitty")
+        || term_program.contains("kitty")
+        || term_program.contains("wezterm")
+        || term_program.contains("ghostty")
+    {
+        return Some(ProtocolType::Kitty);
+    }
+
+    if term_program.contains("iterm")
+        || term.contains("iterm")
+        || lc_terminal.contains("iterm")
+        || lc_terminal.contains("wezterm")
+    {
+        return Some(ProtocolType::Iterm2);
+    }
+
+    if term.contains("sixel") {
+        return Some(ProtocolType::Sixel);
+    }
+
+    None
+}
+
+fn fast_picker() -> Picker {
+    let mut picker = Picker::from_fontsize(DEFAULT_PICKER_FONT_SIZE);
+    if let Some(protocol) = infer_protocol_from_env(
+        std::env::var("TERM").ok().as_deref(),
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        std::env::var("LC_TERMINAL").ok().as_deref(),
+        std::env::var("KITTY_WINDOW_ID").ok().as_deref(),
+    ) {
+        picker.set_protocol_type(protocol);
+    }
+    picker
+}
+
+/// Initialize the global picker.
+/// By default this uses a fast non-blocking path and avoids terminal probing.
+/// Set JCODE_MERMAID_PICKER_PROBE=1 to force full stdio capability probing.
 /// Also triggers cache eviction on first call.
 pub fn init_picker() {
-    PICKER.get_or_init(|| Picker::from_query_stdio().ok());
+    PICKER.get_or_init(|| match picker_init_mode_from_env() {
+        PickerInitMode::Fast => Some(fast_picker()),
+        PickerInitMode::Probe => match Picker::from_query_stdio() {
+            Ok(picker) => Some(picker),
+            Err(err) => {
+                crate::logging::warn(&format!(
+                    "Mermaid picker probe failed ({}); using fast picker fallback",
+                    err
+                ));
+                Some(fast_picker())
+            }
+        },
+    });
     // Evict old cache files once per process
     CACHE_EVICTED.get_or_init(|| {
         evict_old_cache();
@@ -2627,6 +2718,67 @@ mod tests {
         assert!(is_mermaid_lang("mermaid-js"));
         assert!(!is_mermaid_lang("rust"));
         assert!(!is_mermaid_lang("python"));
+    }
+
+    #[test]
+    fn test_picker_init_mode_from_probe_env() {
+        assert_eq!(picker_init_mode_from_probe_env(None), PickerInitMode::Fast);
+        assert_eq!(
+            picker_init_mode_from_probe_env(Some("1")),
+            PickerInitMode::Probe
+        );
+        assert_eq!(
+            picker_init_mode_from_probe_env(Some("true")),
+            PickerInitMode::Probe
+        );
+        assert_eq!(
+            picker_init_mode_from_probe_env(Some("yes")),
+            PickerInitMode::Probe
+        );
+        assert_eq!(
+            picker_init_mode_from_probe_env(Some("0")),
+            PickerInitMode::Fast
+        );
+        assert_eq!(
+            picker_init_mode_from_probe_env(Some("off")),
+            PickerInitMode::Fast
+        );
+        assert_eq!(
+            picker_init_mode_from_probe_env(Some("garbage")),
+            PickerInitMode::Fast
+        );
+    }
+
+    #[test]
+    fn test_infer_protocol_from_env() {
+        assert_eq!(
+            infer_protocol_from_env(Some("xterm-kitty"), None, None, None),
+            Some(ProtocolType::Kitty)
+        );
+        assert_eq!(
+            infer_protocol_from_env(None, Some("WezTerm"), None, None),
+            Some(ProtocolType::Kitty)
+        );
+        assert_eq!(
+            infer_protocol_from_env(None, Some("iTerm.app"), None, None),
+            Some(ProtocolType::Iterm2)
+        );
+        assert_eq!(
+            infer_protocol_from_env(None, None, Some("iTerm2"), None),
+            Some(ProtocolType::Iterm2)
+        );
+        assert_eq!(
+            infer_protocol_from_env(Some("xterm-sixel"), None, None, None),
+            Some(ProtocolType::Sixel)
+        );
+        assert_eq!(
+            infer_protocol_from_env(Some("xterm-256color"), None, None, Some("17")),
+            Some(ProtocolType::Kitty)
+        );
+        assert_eq!(
+            infer_protocol_from_env(Some("xterm-256color"), None, None, None),
+            None
+        );
     }
 
     #[test]

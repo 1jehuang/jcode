@@ -1060,7 +1060,7 @@ async fn run_tui(
     debug_socket: bool,
 ) -> Result<()> {
     let terminal = init_tui_terminal()?;
-    // Initialize mermaid image picker (queries terminal for graphics protocol support)
+    // Initialize mermaid image picker (fast default, optional probe via env)
     crate::tui::mermaid::init_picker();
     let mouse_capture = crate::config::config().display.mouse_capture;
     // Enable Kitty keyboard protocol for unambiguous key reporting (Ctrl+J != Enter, etc.)
@@ -2354,7 +2354,7 @@ async fn run_client() -> Result<()> {
 /// Run TUI client connected to server
 async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
     let terminal = init_tui_terminal()?;
-    // Initialize mermaid image picker (queries terminal for graphics protocol support)
+    // Initialize mermaid image picker (fast default, optional probe via env)
     crate::tui::mermaid::init_picker();
     let mouse_capture = crate::config::config().display.mouse_capture;
     let keyboard_enhanced = tui::enable_keyboard_enhancement();
@@ -3122,7 +3122,7 @@ async fn run_canary_wrapper(
 
     // Run client TUI
     let terminal = init_tui_terminal()?;
-    // Initialize mermaid image picker (queries terminal for graphics protocol support)
+    // Initialize mermaid image picker (fast default, optional probe via env)
     crate::tui::mermaid::init_picker();
     let mouse_capture = crate::config::config().display.mouse_capture;
     let keyboard_enhanced = tui::enable_keyboard_enhancement();
