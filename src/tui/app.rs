@@ -675,10 +675,6 @@ pub struct App {
     ambient_system_prompt: Option<String>,
     /// Pending login flow: if set, next input is intercepted as OAuth code or API key
     pending_login: Option<PendingLogin>,
-    /// Pending stdin request from a running command (request_id, prompt, is_password)
-    pending_stdin_request: Option<(String, String, bool)>,
-    /// Stdin response ready to send back (request_id, input) - consumed by event loop
-    stdin_response_pending: Option<(String, String)>,
 }
 
 impl ScrollTestState {
@@ -930,8 +926,6 @@ impl App {
             streaming_md_renderer: RefCell::new(IncrementalMarkdownRenderer::new(None)),
             ambient_system_prompt: None,
             pending_login: None,
-            pending_stdin_request: None,
-            stdin_response_pending: None,
         }
     }
 
@@ -4325,9 +4319,6 @@ impl App {
                                     if let Some(spec) = self.pending_model_switch.take() {
                                         let _ = remote.set_model(&spec).await;
                                     }
-                                    if let Some((request_id, input)) = self.stdin_response_pending.take() {
-                                        let _ = remote.send_stdin_response(&request_id, &input).await;
-                                    }
                                 }
                             }
                             Some(Ok(Event::Paste(text))) => {
@@ -5232,19 +5223,10 @@ impl App {
                 false
             }
             ServerEvent::StdinRequest {
-                request_id,
-                prompt,
-                is_password,
                 ..
             } => {
-                let prompt_display = if prompt.is_empty() {
-                    "Command is waiting for input (type to respond, /commands still work)".to_string()
-                } else {
-                    format!("{} (/commands still work)", prompt)
-                };
-                self.set_status_notice(format!("⌨ {}", prompt_display));
-                self.pending_stdin_request = Some((request_id, prompt, is_password));
-                true
+                self.set_status_notice("⌨ Interactive terminal detected (command will timeout)");
+                false
             }
             _ => false,
         }
@@ -6597,15 +6579,6 @@ impl App {
         }
 
         let trimmed = input.trim();
-        let is_slash_command = trimmed.starts_with('/') && trimmed.len() > 1;
-
-        if !is_slash_command {
-            if let Some((request_id, _prompt, _is_password)) = self.pending_stdin_request.take() {
-                self.push_display_message(DisplayMessage::system(format!("stdin> {}", input)));
-                self.stdin_response_pending = Some((request_id, input));
-                return;
-            }
-        }
         if let Some(topic) = trimmed
             .strip_prefix("/help ")
             .or_else(|| trimmed.strip_prefix("/? "))
