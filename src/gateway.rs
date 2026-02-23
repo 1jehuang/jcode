@@ -111,8 +111,7 @@ impl DeviceRegistry {
 
         // Clean up expired codes
         let now_str = now.to_rfc3339();
-        self.pending_codes
-            .retain(|c| c.expires_at > now_str);
+        self.pending_codes.retain(|c| c.expires_at > now_str);
 
         self.pending_codes.push(PairingCode {
             code: code.clone(),
@@ -227,7 +226,10 @@ pub async fn run_gateway(
 
         tokio::spawn(async move {
             if let Err(e) = handle_ws_connection(tcp_stream, peer_addr, registry, client_tx).await {
-                logging::error(&format!("Gateway connection error from {}: {}", peer_addr, e));
+                logging::error(&format!(
+                    "Gateway connection error from {}: {}",
+                    peer_addr, e
+                ));
             }
         });
     }
@@ -440,11 +442,8 @@ mod tests {
         let mut registry = DeviceRegistry::default();
 
         // Pair a device
-        let token = registry.pair_device(
-            "test-device-1".to_string(),
-            "Test iPhone".to_string(),
-            None,
-        );
+        let token =
+            registry.pair_device("test-device-1".to_string(), "Test iPhone".to_string(), None);
 
         // Validate correct token
         assert!(registry.validate_token(&token).is_some());

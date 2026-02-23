@@ -280,11 +280,8 @@ pub fn load_scroll_keys() -> ScrollKeys {
         default_prompt_down,
         "Alt+]",
     );
-    let (bookmark, bookmark_label) = parse_or_default(
-        &cfg.keybindings.scroll_bookmark,
-        default_bookmark,
-        "Ctrl+G",
-    );
+    let (bookmark, bookmark_label) =
+        parse_or_default(&cfg.keybindings.scroll_bookmark, default_bookmark, "Ctrl+G");
 
     ScrollKeys {
         up,

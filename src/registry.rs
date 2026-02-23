@@ -197,7 +197,6 @@ fn is_process_running(pid: u32) -> bool {
     crate::platform::is_process_running(pid)
 }
 
-
 /// Unregister a server from the registry
 pub async fn unregister_server(name: &str) -> Result<()> {
     let mut registry = ServerRegistry::load().await?;

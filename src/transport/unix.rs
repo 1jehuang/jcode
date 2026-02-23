@@ -1,7 +1,7 @@
+pub use tokio::net::unix::OwnedReadHalf as ReadHalf;
+pub use tokio::net::unix::OwnedWriteHalf as WriteHalf;
 pub use tokio::net::UnixListener as Listener;
 pub use tokio::net::UnixStream as Stream;
-pub use tokio::net::unix::OwnedWriteHalf as WriteHalf;
-pub use tokio::net::unix::OwnedReadHalf as ReadHalf;
 
 pub use std::os::unix::net::UnixStream as SyncStream;
 

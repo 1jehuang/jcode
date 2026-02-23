@@ -31,7 +31,11 @@ fn get_terminal_font() -> (String, f64) {
         for line in conf.lines() {
             let line = line.trim();
             if line.starts_with("font_family ") {
-                family = line.strip_prefix("font_family ").unwrap_or("").trim().to_string();
+                family = line
+                    .strip_prefix("font_family ")
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
             }
             if line.starts_with("font_size ") {
                 if let Ok(s) = line.strip_prefix("font_size ").unwrap_or("").trim().parse() {
@@ -254,7 +258,11 @@ fn buffers_equal(a: &Buffer, b: &Buffer) -> bool {
         for x in 0..a.area.width {
             let ca = &a[(x, y)];
             let cb = &b[(x, y)];
-            if ca.symbol() != cb.symbol() || ca.fg != cb.fg || ca.bg != cb.bg || ca.modifier != cb.modifier {
+            if ca.symbol() != cb.symbol()
+                || ca.fg != cb.fg
+                || ca.bg != cb.bg
+                || ca.modifier != cb.modifier
+            {
                 return false;
             }
         }
@@ -295,10 +303,22 @@ fn color_to_bg_hex(color: Color) -> String {
 
 fn indexed_color_to_hex(idx: u8) -> String {
     match idx {
-        0 => "#000000", 1 => "#cd3131", 2 => "#0dbc79", 3 => "#e5e510",
-        4 => "#2472c8", 5 => "#bc3fbc", 6 => "#11a8cd", 7 => "#e5e5e5",
-        8 => "#666666", 9 => "#f14c4c", 10 => "#23d18b", 11 => "#f5f543",
-        12 => "#3b8eea", 13 => "#d670d6", 14 => "#29b8db", 15 => "#ffffff",
+        0 => "#000000",
+        1 => "#cd3131",
+        2 => "#0dbc79",
+        3 => "#e5e510",
+        4 => "#2472c8",
+        5 => "#bc3fbc",
+        6 => "#11a8cd",
+        7 => "#e5e5e5",
+        8 => "#666666",
+        9 => "#f14c4c",
+        10 => "#23d18b",
+        11 => "#f5f543",
+        12 => "#3b8eea",
+        13 => "#d670d6",
+        14 => "#29b8db",
+        15 => "#ffffff",
         16..=231 => {
             let idx = idx - 16;
             let r = (idx / 36) * 51;
@@ -356,15 +376,15 @@ fn find_mermaid_regions(buf: &Buffer) -> Vec<MermaidRegion> {
         // Try both marker formats
         let (hash, marker_byte_pos) = if let Some(start) = row_text.find("\x00MERMAID_IMAGE:") {
             let after = start + "\x00MERMAID_IMAGE:".len();
-            let h = row_text[after..].find('\x00').and_then(|end| {
-                u64::from_str_radix(&row_text[after..after + end], 16).ok()
-            });
+            let h = row_text[after..]
+                .find('\x00')
+                .and_then(|end| u64::from_str_radix(&row_text[after..after + end], 16).ok());
             (h, Some(start))
         } else if let Some(start) = row_text.find("JMERMAID:") {
             let after = start + "JMERMAID:".len();
-            let h = row_text[after..].find(":END").and_then(|end| {
-                u64::from_str_radix(&row_text[after..after + end], 16).ok()
-            });
+            let h = row_text[after..]
+                .find(":END")
+                .and_then(|end| u64::from_str_radix(&row_text[after..after + end], 16).ok());
             (h, Some(start))
         } else {
             (None, None)
@@ -445,7 +465,8 @@ fn buffer_to_svg(
     // Find mermaid image regions
     let mermaid_regions = find_mermaid_regions(buf);
     // Track which cell ranges to skip (row -> (start_x, end_x))
-    let mut skip_ranges: std::collections::HashMap<u16, Vec<(u16, u16)>> = std::collections::HashMap::new();
+    let mut skip_ranges: std::collections::HashMap<u16, Vec<(u16, u16)>> =
+        std::collections::HashMap::new();
     for region in &mermaid_regions {
         for r in region.start_row..(region.start_row + region.height) {
             skip_ranges
@@ -551,7 +572,12 @@ fn buffer_to_svg(
                     let cy = y as u32 * cell_h + cell_h / 2;
                     svg.push_str(&format!(
                         r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#,
-                        start_x as u32 * cell_w, cy, x as u32 * cell_w, cy, fg, stroke_w
+                        start_x as u32 * cell_w,
+                        cy,
+                        x as u32 * cell_w,
+                        cy,
+                        fg,
+                        stroke_w
                     ));
                     continue;
                 }
@@ -665,8 +691,8 @@ fn xml_escape(s: &str) -> String {
 }
 
 fn is_box_drawing(ch: char) -> bool {
-    ('\u{2500}'..='\u{257F}').contains(&ch)
-        || ('\u{2580}'..='\u{259F}').contains(&ch) // block elements
+    ('\u{2500}'..='\u{257F}').contains(&ch) || ('\u{2580}'..='\u{259F}').contains(&ch)
+    // block elements
 }
 
 /// Render a single box-drawing character as SVG path/line elements.
@@ -712,7 +738,15 @@ fn box_drawing_to_svg(
             let r = cw.min(ch_h) / 2;
             return Some(format!(
                 r#"<path d="M {right},{cy} L {arcx},{cy} A {r},{r} 0 0 0 {cx},{arcy} L {cx},{b}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
-                right = right, cy = cy, arcx = cx + r, r = r, cx = cx, arcy = cy + r, b = b, color = color, t = t
+                right = right,
+                cy = cy,
+                arcx = cx + r,
+                r = r,
+                cx = cx,
+                arcy = cy + r,
+                b = b,
+                color = color,
+                t = t
             ));
         }
         '╮' => {
@@ -720,7 +754,15 @@ fn box_drawing_to_svg(
             let r = cw.min(ch_h) / 2;
             return Some(format!(
                 r#"<path d="M {px},{cy} L {arcx},{cy} A {r},{r} 0 0 1 {cx},{arcy} L {cx},{b}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
-                px = px, cy = cy, arcx = cx - r, r = r, cx = cx, arcy = cy + r, b = b, color = color, t = t
+                px = px,
+                cy = cy,
+                arcx = cx - r,
+                r = r,
+                cx = cx,
+                arcy = cy + r,
+                b = b,
+                color = color,
+                t = t
             ));
         }
         '╰' => {
@@ -728,7 +770,15 @@ fn box_drawing_to_svg(
             let r = cw.min(ch_h) / 2;
             return Some(format!(
                 r#"<path d="M {cx},{py} L {cx},{arcy} A {r},{r} 0 0 0 {arcx},{cy} L {right},{cy}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
-                cx = cx, py = py, arcy = cy - r, r = r, arcx = cx + r, cy = cy, right = right, color = color, t = t
+                cx = cx,
+                py = py,
+                arcy = cy - r,
+                r = r,
+                arcx = cx + r,
+                cy = cy,
+                right = right,
+                color = color,
+                t = t
             ));
         }
         '╯' => {
@@ -736,7 +786,15 @@ fn box_drawing_to_svg(
             let r = cw.min(ch_h) / 2;
             return Some(format!(
                 r#"<path d="M {cx},{py} L {cx},{arcy} A {r},{r} 0 0 1 {arcx},{cy} L {px},{cy}" fill="none" stroke="{color}" stroke-width="{t}" stroke-linecap="round"/>"#,
-                cx = cx, py = py, arcy = cy - r, r = r, arcx = cx - r, cy = cy, px = px, color = color, t = t
+                cx = cx,
+                py = py,
+                arcy = cy - r,
+                r = r,
+                arcx = cx - r,
+                cy = cy,
+                px = px,
+                color = color,
+                t = t
             ));
         }
         // Heavy lines
@@ -759,8 +817,18 @@ fn box_drawing_to_svg(
                     r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#,
                     r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#,
                 ),
-                px, cy - g, right, cy - g, color, t,
-                px, cy + g, right, cy + g, color, t,
+                px,
+                cy - g,
+                right,
+                cy - g,
+                color,
+                t,
+                px,
+                cy + g,
+                right,
+                cy + g,
+                color,
+                t,
             ));
         }
         '║' => {
@@ -770,8 +838,18 @@ fn box_drawing_to_svg(
                     r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#,
                     r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}"/>"#,
                 ),
-                cx - g, py, cx - g, b, color, t,
-                cx + g, py, cx + g, b, color, t,
+                cx - g,
+                py,
+                cx - g,
+                b,
+                color,
+                t,
+                cx + g,
+                py,
+                cx + g,
+                b,
+                color,
+                t,
             ));
         }
         // Block elements
@@ -784,25 +862,41 @@ fn box_drawing_to_svg(
         '▀' => {
             return Some(format!(
                 r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#,
-                px, py, cw, ch_h / 2, color
+                px,
+                py,
+                cw,
+                ch_h / 2,
+                color
             ));
         }
         '▄' => {
             return Some(format!(
                 r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#,
-                px, py + ch_h / 2, cw, ch_h / 2, color
+                px,
+                py + ch_h / 2,
+                cw,
+                ch_h / 2,
+                color
             ));
         }
         '▌' => {
             return Some(format!(
                 r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#,
-                px, py, cw / 2, ch_h, color
+                px,
+                py,
+                cw / 2,
+                ch_h,
+                color
             ));
         }
         '▐' => {
             return Some(format!(
                 r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#,
-                px + cw / 2, py, cw / 2, ch_h, color
+                px + cw / 2,
+                py,
+                cw / 2,
+                ch_h,
+                color
             ));
         }
         '░' | '▒' | '▓' => {
@@ -848,5 +942,3 @@ fn box_drawing_to_svg(
     }
     Some(svg)
 }
-
-

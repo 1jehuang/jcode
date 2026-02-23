@@ -270,9 +270,12 @@ impl BackgroundTaskManager {
             let duration_secs = started_at.elapsed().as_secs_f64();
 
             let (status, exit_code, error, output_text) = match tool_result {
-                Ok(Ok(output)) => {
-                    (BackgroundTaskStatus::Completed, Some(0), None, output.output)
-                }
+                Ok(Ok(output)) => (
+                    BackgroundTaskStatus::Completed,
+                    Some(0),
+                    None,
+                    output.output,
+                ),
                 Ok(Err(e)) => (
                     BackgroundTaskStatus::Failed,
                     None,
@@ -323,10 +326,7 @@ impl BackgroundTaskManager {
                 duration_secs,
             }));
 
-            Ok(TaskResult {
-                exit_code,
-                error,
-            })
+            Ok(TaskResult { exit_code, error })
         });
 
         let running_task = RunningTask {

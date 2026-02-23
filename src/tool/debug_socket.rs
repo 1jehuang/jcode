@@ -6,12 +6,12 @@
 use crate::protocol::{Request, ServerEvent};
 use crate::server;
 use crate::tool::{Tool, ToolContext, ToolOutput};
+use crate::transport::Stream;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use crate::transport::Stream;
 
 #[derive(Debug, Deserialize)]
 struct DebugSocketInput {

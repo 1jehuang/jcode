@@ -364,10 +364,7 @@ async fn fetch_openai_usage_report() -> Option<ProviderUsage> {
                 } else if let Some(s) = value.as_str() {
                     extra_info.push((humanize_key(key), s.to_string()));
                 } else if let Some(b) = value.as_bool() {
-                    extra_info.push((
-                        humanize_key(key),
-                        if b { "yes" } else { "no" }.to_string(),
-                    ));
+                    extra_info.push((humanize_key(key), if b { "yes" } else { "no" }.to_string()));
                 }
             }
         }
@@ -422,7 +419,9 @@ pub fn format_reset_time(timestamp: &str) -> String {
         } else {
             format!("{}m", minutes)
         }
-    } else if let Ok(reset) = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.fZ") {
+    } else if let Ok(reset) =
+        chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.fZ")
+    {
         let reset_utc = reset.and_utc();
         let now = chrono::Utc::now();
         let duration = reset_utc.signed_duration_since(now);

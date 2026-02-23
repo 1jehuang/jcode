@@ -2,7 +2,9 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions};
+use tokio::net::windows::named_pipe::{
+    ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
+};
 use tokio::sync::Mutex;
 
 /// Convert a filesystem path to a Windows named pipe path.
@@ -10,10 +12,7 @@ use tokio::sync::Mutex;
 /// e.g. `/run/user/1000/jcode.sock` -> `\\.\pipe\jcode`
 /// e.g. `/run/user/1000/jcode/myserver.sock` -> `\\.\pipe\jcode-myserver`
 fn path_to_pipe_name(path: &Path) -> String {
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("jcode");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("jcode");
     format!(r"\\.\pipe\{}", stem)
 }
 
@@ -64,7 +63,10 @@ impl Stream {
         loop {
             match ClientOptions::new().open(&pipe_name) {
                 Ok(client) => return Ok(Stream::Client(client)),
-                Err(e) if e.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32) => {
+                Err(e)
+                    if e.raw_os_error()
+                        == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32) =>
+                {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(e) => return Err(e),
@@ -75,13 +77,18 @@ impl Stream {
     pub fn into_split(self) -> (ReadHalf, WriteHalf) {
         let shared = Arc::new(Mutex::new(self));
         (
-            ReadHalf { inner: Arc::clone(&shared) },
+            ReadHalf {
+                inner: Arc::clone(&shared),
+            },
             WriteHalf { inner: shared },
         )
     }
 
     pub fn split(&mut self) -> (SplitReadRef<'_>, SplitWriteRef<'_>) {
-        (SplitReadRef { stream: self }, SplitWriteRef { stream: self })
+        (
+            SplitReadRef { stream: self },
+            SplitWriteRef { stream: self },
+        )
     }
 
     pub fn pair() -> io::Result<(Self, Self)> {
@@ -257,10 +264,7 @@ impl SyncStream {
     pub fn connect(path: &Path) -> io::Result<Self> {
         use std::fs::OpenOptions;
         let pipe_name = path_to_pipe_name(path);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&pipe_name)?;
+        let file = OpenOptions::new().read(true).write(true).open(&pipe_name)?;
         Ok(Self { handle: file })
     }
 }

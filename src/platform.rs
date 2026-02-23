@@ -12,8 +12,7 @@ pub fn symlink_or_copy(src: &Path, dst: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         if src.is_dir() {
-            std::os::windows::fs::symlink_dir(src, dst)
-                .or_else(|_| copy_dir_recursive(src, dst))
+            std::os::windows::fs::symlink_dir(src, dst).or_else(|_| copy_dir_recursive(src, dst))
         } else {
             std::os::windows::fs::symlink_file(src, dst)
                 .or_else(|_| std::fs::copy(src, dst).map(|_| ()))

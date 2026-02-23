@@ -484,7 +484,11 @@ impl Config {
             }
         } else if let Ok(v) = std::env::var("JCODE_SHOW_DIFFS") {
             if let Some(parsed) = parse_env_bool(&v) {
-                self.display.diff_mode = if parsed { DiffDisplayMode::Inline } else { DiffDisplayMode::Off };
+                self.display.diff_mode = if parsed {
+                    DiffDisplayMode::Inline
+                } else {
+                    DiffDisplayMode::Off
+                };
             }
         }
         if let Ok(v) = std::env::var("JCODE_PIN_IMAGES") {

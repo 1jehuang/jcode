@@ -2578,12 +2578,13 @@ impl Agent {
                             if text_content.contains("to=functions.") {
                                 text_wrapped_detected = true;
                                 let marker_idx = text_content.find("to=functions.").unwrap();
-                                let clean_prefix = text_content[..marker_idx].trim_end().to_string();
-                                let _ = event_tx.send(ServerEvent::TextReplace {
-                                    text: clean_prefix,
-                                });
+                                let clean_prefix =
+                                    text_content[..marker_idx].trim_end().to_string();
+                                let _ =
+                                    event_tx.send(ServerEvent::TextReplace { text: clean_prefix });
                             } else {
-                                let _ = event_tx.send(ServerEvent::TextDelta { text: text.clone() });
+                                let _ =
+                                    event_tx.send(ServerEvent::TextDelta { text: text.clone() });
                             }
                         }
                     }
@@ -3220,12 +3221,13 @@ impl Agent {
                             if text_content.contains("to=functions.") {
                                 text_wrapped_detected = true;
                                 let marker_idx = text_content.find("to=functions.").unwrap();
-                                let clean_prefix = text_content[..marker_idx].trim_end().to_string();
-                                let _ = event_tx.send(ServerEvent::TextReplace {
-                                    text: clean_prefix,
-                                });
+                                let clean_prefix =
+                                    text_content[..marker_idx].trim_end().to_string();
+                                let _ =
+                                    event_tx.send(ServerEvent::TextReplace { text: clean_prefix });
                             } else {
-                                let _ = event_tx.send(ServerEvent::TextDelta { text: text.clone() });
+                                let _ =
+                                    event_tx.send(ServerEvent::TextDelta { text: text.clone() });
                             }
                         }
                         if self.is_graceful_shutdown() {

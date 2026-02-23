@@ -11,6 +11,7 @@ use super::{DisplayMessage, ProcessingStatus, TuiState};
 use crate::message::ToolCall;
 use crate::protocol::{NotificationType, Request, ServerEvent};
 use crate::server;
+use crate::transport::Stream;
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
@@ -20,7 +21,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use crate::transport::Stream;
 use tokio::time::interval;
 
 /// Check if client-side diffs are enabled (default: true, disable with JCODE_SHOW_DIFFS=0)

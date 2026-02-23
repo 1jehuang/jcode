@@ -228,9 +228,9 @@ pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
 
     // Final done if we haven't emitted one
     if !events.is_empty() {
-        let last_is_done = events.last().map_or(false, |e| {
-            matches!(e.kind, TimelineEventKind::Done)
-        });
+        let last_is_done = events
+            .last()
+            .map_or(false, |e| matches!(e.kind, TimelineEventKind::Done));
         if !last_is_done {
             events.push(TimelineEvent {
                 t,
@@ -285,7 +285,12 @@ pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, Replay
 
                 for (i, chunk) in chunks.iter().enumerate() {
                     let chunk_delay = if i == 0 { delay } else { ms_per_chunk };
-                    out.push((chunk_delay, ReplayEvent::Server(ServerEvent::TextDelta { text: chunk.clone() })));
+                    out.push((
+                        chunk_delay,
+                        ReplayEvent::Server(ServerEvent::TextDelta {
+                            text: chunk.clone(),
+                        }),
+                    ));
                 }
             }
             TimelineEventKind::ToolStart { name, input } => {
@@ -305,9 +310,7 @@ pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, Replay
                 if !input_str.is_empty() && input_str != "null" {
                     out.push((
                         0,
-                        ReplayEvent::Server(ServerEvent::ToolInput {
-                            delta: input_str,
-                        }),
+                        ReplayEvent::Server(ServerEvent::ToolInput { delta: input_str }),
                     ));
                 }
 
@@ -359,7 +362,10 @@ pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, Replay
                 ));
             }
             TimelineEventKind::Done => {
-                out.push((delay, ReplayEvent::Server(ServerEvent::Done { id: turn_id })));
+                out.push((
+                    delay,
+                    ReplayEvent::Server(ServerEvent::Done { id: turn_id }),
+                ));
                 turn_id += 1;
             }
         }
@@ -470,9 +476,7 @@ pub fn auto_edit_timeline(timeline: &[TimelineEvent], opts: &AutoEditOpts) -> Ve
                 let clamped = (*duration).min(opts.think_max_ms);
                 out.push(TimelineEvent {
                     t: new_t,
-                    kind: TimelineEventKind::Thinking {
-                        duration: clamped,
-                    },
+                    kind: TimelineEventKind::Thinking { duration: clamped },
                 });
                 continue;
             }
@@ -693,7 +697,10 @@ mod tests {
         let replay_events = timeline_to_replay_events(&events);
 
         // First should be UserMessage
-        assert!(matches!(&replay_events[0].1, ReplayEvent::UserMessage { .. }));
+        assert!(matches!(
+            &replay_events[0].1,
+            ReplayEvent::UserMessage { .. }
+        ));
 
         // Second should be StartProcessing
         assert!(matches!(&replay_events[1].1, ReplayEvent::StartProcessing));
@@ -780,10 +787,17 @@ mod tests {
             ReplayEvent::Server(ServerEvent::ToolInput { delta }) => Some(delta.clone()),
             _ => None,
         });
-        assert!(input_delta.is_some(), "Should have ToolInput with batch params");
+        assert!(
+            input_delta.is_some(),
+            "Should have ToolInput with batch params"
+        );
         let parsed: serde_json::Value = serde_json::from_str(&input_delta.unwrap()).unwrap();
         let tool_calls = parsed.get("tool_calls").and_then(|v| v.as_array());
-        assert_eq!(tool_calls.map(|a| a.len()), Some(3), "Batch should have 3 tool calls");
+        assert_eq!(
+            tool_calls.map(|a| a.len()),
+            Some(3),
+            "Batch should have 3 tool calls"
+        );
 
         // Verify IDs match
         let start_id = replay_events.iter().find_map(|(_, e)| match e {
@@ -794,22 +808,64 @@ mod tests {
             ReplayEvent::Server(ServerEvent::ToolDone { id, .. }) => Some(id.clone()),
             _ => None,
         });
-        assert_eq!(start_id, done_id, "Batch ToolStart and ToolDone IDs must match");
+        assert_eq!(
+            start_id, done_id,
+            "Batch ToolStart and ToolDone IDs must match"
+        );
     }
 
     #[test]
     fn test_auto_edit_compresses_tool_spans() {
         let events = vec![
-            TimelineEvent { t: 0, kind: TimelineEventKind::UserMessage { text: "hi".into() } },
-            TimelineEvent { t: 500, kind: TimelineEventKind::Thinking { duration: 800 } },
-            TimelineEvent { t: 1300, kind: TimelineEventKind::StreamText { text: "Let me check.".into(), speed: 80 } },
-            TimelineEvent { t: 2000, kind: TimelineEventKind::ToolStart { name: "file_read".into(), input: serde_json::json!({}) } },
-            TimelineEvent { t: 12000, kind: TimelineEventKind::ToolDone { name: "file_read".into(), output: "ok".into(), is_error: false } },
-            TimelineEvent { t: 13000, kind: TimelineEventKind::StreamText { text: "Done!".into(), speed: 80 } },
-            TimelineEvent { t: 14000, kind: TimelineEventKind::Done },
+            TimelineEvent {
+                t: 0,
+                kind: TimelineEventKind::UserMessage { text: "hi".into() },
+            },
+            TimelineEvent {
+                t: 500,
+                kind: TimelineEventKind::Thinking { duration: 800 },
+            },
+            TimelineEvent {
+                t: 1300,
+                kind: TimelineEventKind::StreamText {
+                    text: "Let me check.".into(),
+                    speed: 80,
+                },
+            },
+            TimelineEvent {
+                t: 2000,
+                kind: TimelineEventKind::ToolStart {
+                    name: "file_read".into(),
+                    input: serde_json::json!({}),
+                },
+            },
+            TimelineEvent {
+                t: 12000,
+                kind: TimelineEventKind::ToolDone {
+                    name: "file_read".into(),
+                    output: "ok".into(),
+                    is_error: false,
+                },
+            },
+            TimelineEvent {
+                t: 13000,
+                kind: TimelineEventKind::StreamText {
+                    text: "Done!".into(),
+                    speed: 80,
+                },
+            },
+            TimelineEvent {
+                t: 14000,
+                kind: TimelineEventKind::Done,
+            },
         ];
 
-        let opts = AutoEditOpts { tool_max_ms: 800, gap_max_ms: 2000, think_max_ms: 1200, response_delay_max_ms: 1000 };
+        let opts = AutoEditOpts {
+            tool_max_ms: 800,
+            gap_max_ms: 2000,
+            think_max_ms: 1200,
+            response_delay_max_ms: 1000,
+        };
         let edited = auto_edit_timeline(&events, &opts);
 
         assert_eq!(edited.len(), events.len());
@@ -817,22 +873,62 @@ mod tests {
         let tool_start_t = edited[3].t;
         let tool_done_t = edited[4].t;
         let tool_span = tool_done_t - tool_start_t;
-        assert!(tool_span <= 800, "Tool span should be compressed to ≤800ms, got {tool_span}ms");
+        assert!(
+            tool_span <= 800,
+            "Tool span should be compressed to ≤800ms, got {tool_span}ms"
+        );
 
-        assert!(edited[5].t > tool_done_t, "Events after tool_done should still be ordered");
+        assert!(
+            edited[5].t > tool_done_t,
+            "Events after tool_done should still be ordered"
+        );
     }
 
     #[test]
     fn test_auto_edit_compresses_inter_prompt_gaps() {
         let events = vec![
-            TimelineEvent { t: 0, kind: TimelineEventKind::UserMessage { text: "first".into() } },
-            TimelineEvent { t: 500, kind: TimelineEventKind::Thinking { duration: 800 } },
-            TimelineEvent { t: 1500, kind: TimelineEventKind::StreamText { text: "response".into(), speed: 80 } },
-            TimelineEvent { t: 2000, kind: TimelineEventKind::Done },
-            TimelineEvent { t: 30000, kind: TimelineEventKind::UserMessage { text: "second".into() } },
-            TimelineEvent { t: 30500, kind: TimelineEventKind::Thinking { duration: 800 } },
-            TimelineEvent { t: 31500, kind: TimelineEventKind::StreamText { text: "response2".into(), speed: 80 } },
-            TimelineEvent { t: 32000, kind: TimelineEventKind::Done },
+            TimelineEvent {
+                t: 0,
+                kind: TimelineEventKind::UserMessage {
+                    text: "first".into(),
+                },
+            },
+            TimelineEvent {
+                t: 500,
+                kind: TimelineEventKind::Thinking { duration: 800 },
+            },
+            TimelineEvent {
+                t: 1500,
+                kind: TimelineEventKind::StreamText {
+                    text: "response".into(),
+                    speed: 80,
+                },
+            },
+            TimelineEvent {
+                t: 2000,
+                kind: TimelineEventKind::Done,
+            },
+            TimelineEvent {
+                t: 30000,
+                kind: TimelineEventKind::UserMessage {
+                    text: "second".into(),
+                },
+            },
+            TimelineEvent {
+                t: 30500,
+                kind: TimelineEventKind::Thinking { duration: 800 },
+            },
+            TimelineEvent {
+                t: 31500,
+                kind: TimelineEventKind::StreamText {
+                    text: "response2".into(),
+                    speed: 80,
+                },
+            },
+            TimelineEvent {
+                t: 32000,
+                kind: TimelineEventKind::Done,
+            },
         ];
 
         let opts = AutoEditOpts::default();
@@ -841,22 +937,43 @@ mod tests {
         let done_t = edited[3].t;
         let next_user_t = edited[4].t;
         let gap = next_user_t - done_t;
-        assert!(gap <= 2000, "Gap between turns should be compressed to ≤2000ms, got {gap}ms");
+        assert!(
+            gap <= 2000,
+            "Gap between turns should be compressed to ≤2000ms, got {gap}ms"
+        );
 
         let total_original = events.last().unwrap().t;
         let total_edited = edited.last().unwrap().t;
-        assert!(total_edited < total_original, "Total time should be shorter: {total_edited} < {total_original}");
+        assert!(
+            total_edited < total_original,
+            "Total time should be shorter: {total_edited} < {total_original}"
+        );
     }
 
     #[test]
     fn test_auto_edit_clamps_thinking() {
         let events = vec![
-            TimelineEvent { t: 0, kind: TimelineEventKind::UserMessage { text: "hi".into() } },
-            TimelineEvent { t: 500, kind: TimelineEventKind::Thinking { duration: 5000 } },
-            TimelineEvent { t: 5500, kind: TimelineEventKind::StreamText { text: "ok".into(), speed: 80 } },
+            TimelineEvent {
+                t: 0,
+                kind: TimelineEventKind::UserMessage { text: "hi".into() },
+            },
+            TimelineEvent {
+                t: 500,
+                kind: TimelineEventKind::Thinking { duration: 5000 },
+            },
+            TimelineEvent {
+                t: 5500,
+                kind: TimelineEventKind::StreamText {
+                    text: "ok".into(),
+                    speed: 80,
+                },
+            },
         ];
 
-        let opts = AutoEditOpts { think_max_ms: 1200, ..Default::default() };
+        let opts = AutoEditOpts {
+            think_max_ms: 1200,
+            ..Default::default()
+        };
         let edited = auto_edit_timeline(&events, &opts);
 
         match &edited[1].kind {
@@ -870,11 +987,29 @@ mod tests {
     #[test]
     fn test_auto_edit_preserves_already_fast_timeline() {
         let events = vec![
-            TimelineEvent { t: 0, kind: TimelineEventKind::UserMessage { text: "hi".into() } },
-            TimelineEvent { t: 200, kind: TimelineEventKind::Thinking { duration: 500 } },
-            TimelineEvent { t: 700, kind: TimelineEventKind::StreamText { text: "hello!".into(), speed: 80 } },
-            TimelineEvent { t: 900, kind: TimelineEventKind::Done },
-            TimelineEvent { t: 1500, kind: TimelineEventKind::UserMessage { text: "bye".into() } },
+            TimelineEvent {
+                t: 0,
+                kind: TimelineEventKind::UserMessage { text: "hi".into() },
+            },
+            TimelineEvent {
+                t: 200,
+                kind: TimelineEventKind::Thinking { duration: 500 },
+            },
+            TimelineEvent {
+                t: 700,
+                kind: TimelineEventKind::StreamText {
+                    text: "hello!".into(),
+                    speed: 80,
+                },
+            },
+            TimelineEvent {
+                t: 900,
+                kind: TimelineEventKind::Done,
+            },
+            TimelineEvent {
+                t: 1500,
+                kind: TimelineEventKind::UserMessage { text: "bye".into() },
+            },
         ];
 
         let opts = AutoEditOpts::default();

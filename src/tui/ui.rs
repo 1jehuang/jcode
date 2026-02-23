@@ -1852,11 +1852,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 if max_diagram >= MIN_DIAGRAM_WIDTH {
                     let ratio = app.diagram_pane_ratio().clamp(25, 70) as u32;
                     let ratio_cap = ((area.width as u32 * ratio) / 100) as u16;
-                    let needed = estimate_pinned_diagram_pane_width(
-                        diagram,
-                        area.height,
-                        MIN_DIAGRAM_WIDTH,
-                    );
+                    let needed =
+                        estimate_pinned_diagram_pane_width(diagram, area.height, MIN_DIAGRAM_WIDTH);
                     let diagram_width = needed
                         .min(ratio_cap)
                         .max(MIN_DIAGRAM_WIDTH)
@@ -1864,8 +1861,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                     let chat_width = area.width.saturating_sub(diagram_width);
                     has_pinned_area = diagram_width > 0 && chat_width > 0;
                     if has_pinned_area {
-                        let chat = Rect { x: area.x, y: area.y, width: chat_width, height: area.height };
-                        let diag = Rect { x: area.x + chat_width, y: area.y, width: diagram_width, height: area.height };
+                        let chat = Rect {
+                            x: area.x,
+                            y: area.y,
+                            width: chat_width,
+                            height: area.height,
+                        };
+                        let diag = Rect {
+                            x: area.x + chat_width,
+                            y: area.y,
+                            width: diagram_width,
+                            height: area.height,
+                        };
                         (chat, Some(diag))
                     } else {
                         (area, None)
@@ -1893,8 +1900,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                     let chat_height = area.height.saturating_sub(diagram_height);
                     has_pinned_area = diagram_height > 0 && chat_height > 0;
                     if has_pinned_area {
-                        let diag = Rect { x: area.x, y: area.y, width: area.width, height: diagram_height };
-                        let chat = Rect { x: area.x, y: area.y + diagram_height, width: area.width, height: chat_height };
+                        let diag = Rect {
+                            x: area.x,
+                            y: area.y,
+                            width: area.width,
+                            height: diagram_height,
+                        };
+                        let chat = Rect {
+                            x: area.x,
+                            y: area.y + diagram_height,
+                            width: area.width,
+                            height: chat_height,
+                        };
                         (chat, Some(diag))
                     } else {
                         (area, None)
@@ -1922,10 +1939,22 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         const MIN_CHAT_WIDTH: u16 = 20;
         let max_diff = chat_area.width.saturating_sub(MIN_CHAT_WIDTH);
         if max_diff >= MIN_DIFF_WIDTH {
-            let diff_width = (chat_area.width * 35 / 100).max(MIN_DIFF_WIDTH).min(max_diff);
+            let diff_width = (chat_area.width * 35 / 100)
+                .max(MIN_DIFF_WIDTH)
+                .min(max_diff);
             let new_chat_width = chat_area.width.saturating_sub(diff_width);
-            let chat = Rect { x: chat_area.x, y: chat_area.y, width: new_chat_width, height: chat_area.height };
-            let diff = Rect { x: chat_area.x + new_chat_width, y: chat_area.y, width: diff_width, height: chat_area.height };
+            let chat = Rect {
+                x: chat_area.x,
+                y: chat_area.y,
+                width: new_chat_width,
+                height: chat_area.height,
+            };
+            let diff = Rect {
+                x: chat_area.x + new_chat_width,
+                y: chat_area.y,
+                width: diff_width,
+                height: chat_area.height,
+            };
             (chat, Some(diff))
         } else {
             (chat_area, None)
@@ -2323,9 +2352,8 @@ fn prepare_messages(app: &dyn TuiState, width: u16, height: u16) -> PreparedMess
         };
         let slide_ease = slide_t * slide_t * (3.0 - 2.0 * slide_t);
         // Slide from animation-centered pad toward header-centered pad
-        let pad_top = (centered_pad as f32
-            + (header_pad as f32 - centered_pad as f32) * slide_ease)
-            as usize;
+        let pad_top =
+            (centered_pad as f32 + (header_pad as f32 - centered_pad as f32) * slide_ease) as usize;
 
         wrapped_lines = Vec::with_capacity(pad_top + content_height);
         for _ in 0..pad_top {
@@ -2741,14 +2769,26 @@ fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>>
         let tag = env!("JCODE_GIT_TAG");
         if tag.is_empty() || tag.contains('-') {
             let full = format!("{} · release · built {}", semver(), build_info);
-            if full.chars().count() <= w { full } else { format!("{} · release", semver()) }
+            if full.chars().count() <= w {
+                full
+            } else {
+                format!("{} · release", semver())
+            }
         } else {
             let full = format!("{} · release {} · built {}", semver(), tag, build_info);
-            if full.chars().count() <= w { full } else { format!("{} · {}", semver(), tag) }
+            if full.chars().count() <= w {
+                full
+            } else {
+                format!("{} · {}", semver(), tag)
+            }
         }
     } else {
         let full = format!("{} · built {}", semver(), build_info);
-        if full.chars().count() <= w { full } else { semver().to_string() }
+        if full.chars().count() <= w {
+            full
+        } else {
+            semver().to_string()
+        }
     };
     let version_line =
         Line::from(Span::styled(version_text, Style::default().fg(DIM_COLOR))).alignment(align);
@@ -2803,12 +2843,19 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     // Line: provider + model + upstream provider if available + hint to switch
     let w = width as usize;
     let model_info = if let Some(ref provider) = upstream {
-        let full = format!("{} · {} via {} · /model to switch", provider_label, model, provider);
+        let full = format!(
+            "{} · {} via {} · /model to switch",
+            provider_label, model, provider
+        );
         if full.chars().count() <= w {
             full
         } else {
             let short = format!("{} · {} via {}", provider_label, model, provider);
-            if short.chars().count() <= w { short } else { format!("{} · {}", provider_label, model) }
+            if short.chars().count() <= w {
+                short
+            } else {
+                format!("{} · {}", provider_label, model)
+            }
         }
     } else {
         let full = format!("{} · {} · /model to switch", provider_label, model);
@@ -2893,8 +2940,11 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
             let short_parts: Vec<String> = mcps
                 .iter()
                 .map(|(name, count)| {
-                    if *count > 0 { format!("{}({})", name, count) }
-                    else { format!("{}(…)", name) }
+                    if *count > 0 {
+                        format!("{}({})", name, count)
+                    } else {
+                        format!("{}(…)", name)
+                    }
                 })
                 .collect();
             let short = format!("mcp: {}", short_parts.join(" "));
@@ -2913,7 +2963,11 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     if !skills.is_empty() {
         let full = format!(
             "skills: {}",
-            skills.iter().map(|s| format!("/{}", s)).collect::<Vec<_>>().join(" ")
+            skills
+                .iter()
+                .map(|s| format!("/{}", s))
+                .collect::<Vec<_>>()
+                .join(" ")
         );
         let skills_text = if full.chars().count() <= w {
             full
@@ -2921,8 +2975,7 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
             format!("skills: {} loaded", skills.len())
         };
         lines.push(
-            Line::from(Span::styled(skills_text, Style::default().fg(DIM_COLOR)))
-                .alignment(align),
+            Line::from(Span::styled(skills_text, Style::default().fg(DIM_COLOR))).alignment(align),
         );
     }
 
@@ -3299,10 +3352,7 @@ pub(crate) fn render_tool_message(
             let sub_results = parse_batch_sub_results(&msg.content);
 
             for (i, call) in calls.iter().enumerate() {
-                let raw_name = call
-                    .get("tool")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
+                let raw_name = call.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
                 let display_name = resolve_display_tool_name(raw_name);
                 let params = call
                     .get("parameters")
@@ -3317,10 +3367,7 @@ pub(crate) fn render_tool_message(
                 };
                 let sub_summary = get_tool_summary(&sub_tc);
 
-                let sub_errored = sub_results
-                    .get(i)
-                    .copied()
-                    .unwrap_or(false);
+                let sub_errored = sub_results.get(i).copied().unwrap_or(false);
                 let (sub_icon, sub_icon_color) = if sub_errored {
                     ("✗", Color::Rgb(220, 100, 100))
                 } else {
@@ -3328,7 +3375,10 @@ pub(crate) fn render_tool_message(
                 };
 
                 lines.push(Line::from(vec![
-                    Span::styled(format!("    {} ", sub_icon), Style::default().fg(sub_icon_color)),
+                    Span::styled(
+                        format!("    {} ", sub_icon),
+                        Style::default().fg(sub_icon_color),
+                    ),
                     Span::styled(display_name.to_string(), Style::default().fg(TOOL_COLOR)),
                     Span::styled(format!(" {}", sub_summary), Style::default().fg(DIM_COLOR)),
                 ]));
@@ -3879,10 +3929,7 @@ fn draw_pinned_diagram(
         ));
     }
     if total > 1 {
-        title_parts.push(Span::styled(
-            " Ctrl+1-9",
-            Style::default().fg(DIM_COLOR),
-        ));
+        title_parts.push(Span::styled(" Ctrl+1-9", Style::default().fg(DIM_COLOR)));
     }
     title_parts.push(Span::styled(
         " Ctrl+H/L focus",
@@ -3901,7 +3948,9 @@ fn draw_pinned_diagram(
         };
         title_parts.push(Span::styled(
             hint,
-            Style::default().fg(ACCENT_COLOR).add_modifier(ratatui::style::Modifier::BOLD),
+            Style::default()
+                .fg(ACCENT_COLOR)
+                .add_modifier(ratatui::style::Modifier::BOLD),
         ));
     }
     if focused {
@@ -3912,7 +3961,9 @@ fn draw_pinned_diagram(
     } else if poor_fit {
         title_parts.push(Span::styled(
             " focus+o open",
-            Style::default().fg(ACCENT_COLOR).add_modifier(ratatui::style::Modifier::BOLD),
+            Style::default()
+                .fg(ACCENT_COLOR)
+                .add_modifier(ratatui::style::Modifier::BOLD),
         ));
     }
 
@@ -3948,8 +3999,7 @@ fn draw_pinned_diagram(
                     false,
                 );
             } else {
-                let render_area =
-                    vcenter_fitted_image(inner, diagram.width, diagram.height);
+                let render_area = vcenter_fitted_image(inner, diagram.width, diagram.height);
                 rendered = super::mermaid::render_image_widget_fit(
                     diagram.hash,
                     render_area,
@@ -4251,8 +4301,7 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
 
     // Display column order: preview = [provider, model, via], full = [model, provider, via]
     // col_widths/col_labels/col_logical in display order
-    let (col_widths, col_labels, col_logical): ([usize; 3], [&str; 3], [usize; 3]) = if is_preview
-    {
+    let (col_widths, col_labels, col_logical): ([usize; 3], [&str; 3], [usize; 3]) = if is_preview {
         (
             [provider_width, model_width, via_width],
             ["PROVIDER", "MODEL", "VIA"],
@@ -4998,9 +5047,7 @@ fn pending_prompt_count(app: &dyn TuiState) -> usize {
             .interleave_message()
             .map(|msg| !msg.is_empty())
             .unwrap_or(false);
-    app.queued_messages().len()
-        + pending_count
-        + if interleave { 1 } else { 0 }
+    app.queued_messages().len() + pending_count + if interleave { 1 } else { 0 }
 }
 
 fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
@@ -5162,10 +5209,7 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
                         let sat = 0.5 + t * 0.4;
                         let val = (0.10 + t * t * 0.90) * (0.55 + coverage * 0.45);
                         let (r, g, b) = hsv_to_rgb(hue, sat, val);
-                        Span::styled(
-                            String::from(ch),
-                            Style::default().fg(Color::Rgb(r, g, b)),
-                        )
+                        Span::styled(String::from(ch), Style::default().fg(Color::Rgb(r, g, b)))
                     }
                 })
                 .collect();
@@ -5287,7 +5331,11 @@ fn sample_dna(
             let ttz = dz / dl;
 
             let (bx, by, bz) = {
-                let up = if ttx.abs() < 0.9 { (1.0f32, 0.0, 0.0) } else { (0.0, 1.0, 0.0) };
+                let up = if ttx.abs() < 0.9 {
+                    (1.0f32, 0.0, 0.0)
+                } else {
+                    (0.0, 1.0, 0.0)
+                };
                 let bx = tty * up.2 - ttz * up.1;
                 let by = ttz * up.0 - ttx * up.2;
                 let bz = ttx * up.1 - tty * up.0;
@@ -5504,102 +5552,207 @@ fn shape_char_3x3(pattern: u16, brightness: f32) -> char {
     let right = (top_r as u8) + (mid_r as u8) + (bot_r as u8);
 
     // brightness 0.0=dark .. 1.0=bright, quantize to 3 levels
-    let bl = if brightness > 0.65 { 2u8 } else if brightness > 0.35 { 1u8 } else { 0u8 };
+    let bl = if brightness > 0.65 {
+        2u8
+    } else if brightness > 0.35 {
+        1u8
+    } else {
+        0u8
+    };
 
     // Full/near-full coverage — density ramp
     if count >= 8 {
-        return match bl { 2 => '@', 1 => '#', _ => '%' };
+        return match bl {
+            2 => '@',
+            1 => '#',
+            _ => '%',
+        };
     }
     if count >= 7 {
-        return match bl { 2 => '#', 1 => '%', _ => '*' };
+        return match bl {
+            2 => '#',
+            1 => '%',
+            _ => '*',
+        };
     }
 
     // Diagonal: top-left to bottom-right
     if top_l && mid_c && bot_r && !top_r && !bot_l {
-        return match bl { 2 => '\\', 1 => '\\', _ => '.' };
+        return match bl {
+            2 => '\\',
+            1 => '\\',
+            _ => '.',
+        };
     }
     // Diagonal: top-right to bottom-left
     if top_r && mid_c && bot_l && !top_l && !bot_r {
-        return match bl { 2 => '/', 1 => '/', _ => '.' };
+        return match bl {
+            2 => '/',
+            1 => '/',
+            _ => '.',
+        };
     }
 
     // Horizontal line (middle row dominant)
     if mid >= 2 && top <= 1 && bot <= 1 && mid > top && mid > bot {
-        return match bl { 2 => '=', 1 => '-', _ => '~' };
+        return match bl {
+            2 => '=',
+            1 => '-',
+            _ => '~',
+        };
     }
     // Top edge
     if top >= 2 && mid <= 1 && bot == 0 {
-        return match bl { 2 => '=', 1 => '-', _ => '~' };
+        return match bl {
+            2 => '=',
+            1 => '-',
+            _ => '~',
+        };
     }
     // Bottom edge
     if bot >= 2 && mid <= 1 && top == 0 {
-        return match bl { 2 => '=', 1 => '_', _ => '.' };
+        return match bl {
+            2 => '=',
+            1 => '_',
+            _ => '.',
+        };
     }
 
     // Vertical line (center column dominant)
     if center >= 2 && left <= 1 && right <= 1 && center > left && center > right {
-        return match bl { 2 => '|', 1 => '|', _ => ':' };
+        return match bl {
+            2 => '|',
+            1 => '|',
+            _ => ':',
+        };
     }
     // Left edge
     if left >= 2 && center <= 1 && right == 0 {
-        return match bl { 2 => '|', 1 => '|', _ => ':' };
+        return match bl {
+            2 => '|',
+            1 => '|',
+            _ => ':',
+        };
     }
     // Right edge
     if right >= 2 && center <= 1 && left == 0 {
-        return match bl { 2 => '|', 1 => '|', _ => ':' };
+        return match bl {
+            2 => '|',
+            1 => '|',
+            _ => ':',
+        };
     }
 
     // Top-heavy shapes
     if top >= 2 && bot == 0 {
-        return match bl { 2 => '"', 1 => '^', _ => '\'' };
+        return match bl {
+            2 => '"',
+            1 => '^',
+            _ => '\'',
+        };
     }
     // Bottom-heavy
     if bot >= 2 && top == 0 {
-        return match bl { 2 => ',', 1 => '.', _ => '.' };
+        return match bl {
+            2 => ',',
+            1 => '.',
+            _ => '.',
+        };
     }
 
     // Left-heavy (curved)
     if left >= 2 && right == 0 {
-        return match bl { 2 => '(', 1 => '(', _ => ':' };
+        return match bl {
+            2 => '(',
+            1 => '(',
+            _ => ':',
+        };
     }
     // Right-heavy (curved)
     if right >= 2 && left == 0 {
-        return match bl { 2 => ')', 1 => ')', _ => ':' };
+        return match bl {
+            2 => ')',
+            1 => ')',
+            _ => ':',
+        };
     }
 
     // Mostly full
     if count >= 6 {
-        return match bl { 2 => '%', 1 => '*', _ => '+' };
+        return match bl {
+            2 => '%',
+            1 => '*',
+            _ => '+',
+        };
     }
     if count >= 5 {
-        return match bl { 2 => '*', 1 => '+', _ => ':' };
+        return match bl {
+            2 => '*',
+            1 => '+',
+            _ => ':',
+        };
     }
 
     // Center blob
     if mid_c && count <= 3 {
-        return match bl { 2 => 'o', 1 => '*', _ => '.' };
+        return match bl {
+            2 => 'o',
+            1 => '*',
+            _ => '.',
+        };
     }
 
     // Sparse diagonal hints
     if top_r && bot_l && count <= 3 {
-        return match bl { 2 => '/', 1 => '/', _ => '.' };
+        return match bl {
+            2 => '/',
+            1 => '/',
+            _ => '.',
+        };
     }
     if top_l && bot_r && count <= 3 {
-        return match bl { 2 => '\\', 1 => '\\', _ => '.' };
+        return match bl {
+            2 => '\\',
+            1 => '\\',
+            _ => '.',
+        };
     }
 
     // Corner dots
     if count == 1 {
-        if bot_c || bot_l || bot_r { return match bl { 2 => '.', _ => '.' }; }
-        if top_c || top_l || top_r { return match bl { 2 => '\'', 1 => '\'', _ => '.' }; }
-        return match bl { 2 => ':', 1 => '.', _ => '.' };
+        if bot_c || bot_l || bot_r {
+            return match bl {
+                2 => '.',
+                _ => '.',
+            };
+        }
+        if top_c || top_l || top_r {
+            return match bl {
+                2 => '\'',
+                1 => '\'',
+                _ => '.',
+            };
+        }
+        return match bl {
+            2 => ':',
+            1 => '.',
+            _ => '.',
+        };
     }
 
     if count <= 3 {
-        return match bl { 2 => ':', 1 => ':', _ => '.' };
+        return match bl {
+            2 => ':',
+            1 => ':',
+            _ => '.',
+        };
     }
 
-    match bl { 2 => '+', 1 => ':', _ => '.' }
+    match bl {
+        2 => '+',
+        1 => ':',
+        _ => '.',
+    }
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
@@ -6307,7 +6460,9 @@ fn parse_batch_sub_results(content: &str) -> Vec<bool> {
             in_section = true;
             current_errored = false;
         } else if in_section
-            && (line.starts_with("Error:") || line.starts_with("error:") || line.starts_with("Failed:"))
+            && (line.starts_with("Error:")
+                || line.starts_with("error:")
+                || line.starts_with("Failed:"))
         {
             current_errored = true;
         }
@@ -6320,11 +6475,9 @@ fn parse_batch_sub_results(content: &str) -> Vec<bool> {
 
 /// Extract a brief summary from a tool call input (file path, command, etc.)
 fn get_tool_summary(tool: &ToolCall) -> String {
-    let truncate = |s: &str, max_chars: usize| {
-        match s.char_indices().nth(max_chars) {
-            Some((byte_idx, _)) => format!("{}...", &s[..byte_idx]),
-            None => s.to_string(),
-        }
+    let truncate = |s: &str, max_chars: usize| match s.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => format!("{}...", &s[..byte_idx]),
+        None => s.to_string(),
     };
 
     match tool.name.as_str() {
@@ -6972,8 +7125,7 @@ fn draw_pinned_content(
                     )];
 
                     if !line.content.is_empty() {
-                        let highlighted =
-                            markdown::highlight_line(line.content.as_str(), file_ext);
+                        let highlighted = markdown::highlight_line(line.content.as_str(), file_ext);
                         for span in highlighted {
                             let tinted = tint_span_with_diff_color(span, base_color);
                             spans.push(tinted);

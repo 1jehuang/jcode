@@ -460,14 +460,24 @@ pub fn model_created_timestamp(model_id: &str) -> Option<u64> {
     let cache: DiskCache = serde_json::from_str(&content).ok()?;
 
     // Exact match
-    if let Some(ts) = cache.models.iter().find(|m| m.id == model_id).and_then(|m| m.created) {
+    if let Some(ts) = cache
+        .models
+        .iter()
+        .find(|m| m.id == model_id)
+        .and_then(|m| m.created)
+    {
         return Some(ts);
     }
 
     // Try OpenRouter-style ID variants for direct provider models
     let candidates = openrouter_id_candidates(model_id);
     for candidate in &candidates {
-        if let Some(ts) = cache.models.iter().find(|m| m.id == *candidate).and_then(|m| m.created) {
+        if let Some(ts) = cache
+            .models
+            .iter()
+            .find(|m| m.id == *candidate)
+            .and_then(|m| m.created)
+        {
             return Some(ts);
         }
     }
@@ -488,7 +498,12 @@ fn openrouter_id_candidates(model: &str) -> Vec<String> {
             dotted.replace_range(pos..pos + 1, ".");
             candidates.push(format!("anthropic/{}", dotted));
         }
-    } else if model.starts_with("gpt-") || model.starts_with("codex-") || model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4") {
+    } else if model.starts_with("gpt-")
+        || model.starts_with("codex-")
+        || model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
+    {
         candidates.push(format!("openai/{}", model));
     }
     candidates

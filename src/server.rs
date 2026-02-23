@@ -15,6 +15,7 @@ use crate::provider::Provider;
 use crate::registry;
 use crate::session::Session;
 use crate::tool::Registry;
+use crate::transport::{Listener, ReadHalf, Stream, WriteHalf};
 use anyhow::Result;
 use futures::future::try_join_all;
 use futures::FutureExt;
@@ -26,7 +27,6 @@ use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use crate::transport::{Listener, Stream, ReadHalf, WriteHalf};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 
 /// Record of a file access by an agent
@@ -781,7 +781,10 @@ impl Server {
                             "[conflict-check] WRITE by {} on {}, swarm_peers: {:?}",
                             &session_id[..8.min(session_id.len())],
                             path.display(),
-                            swarm_session_ids.iter().map(|s| &s[..8.min(s.len())]).collect::<Vec<_>>()
+                            swarm_session_ids
+                                .iter()
+                                .map(|s| &s[..8.min(s.len())])
+                                .collect::<Vec<_>>()
                         ));
                     }
                     let previous_touches: Vec<FileAccess> = if is_write {
@@ -956,7 +959,9 @@ impl Server {
 
         // Register server in the registry so session picker and clients can discover it
         {
-            let mut registry = crate::registry::ServerRegistry::load().await.unwrap_or_default();
+            let mut registry = crate::registry::ServerRegistry::load()
+                .await
+                .unwrap_or_default();
             let _ = registry.cleanup_stale().await;
             let info = crate::registry::ServerInfo {
                 id: self.identity.id.clone(),
@@ -1316,9 +1321,7 @@ impl Server {
     /// Spawn the WebSocket gateway if enabled in config.
     /// Returns a task handle that accepts gateway clients and feeds them
     /// into handle_client just like Unix socket connections.
-    fn spawn_gateway(
-        &self,
-    ) -> Option<tokio::task::JoinHandle<()>> {
+    fn spawn_gateway(&self) -> Option<tokio::task::JoinHandle<()>> {
         let gw_config = &crate::config::config().gateway;
         if !gw_config.enabled {
             return None;
@@ -2330,40 +2333,41 @@ async fn handle_client(
                 };
 
                 let was_interrupted = match &result {
-                    Ok(status) => {
-                        match status {
-                            crate::session::SessionStatus::Crashed { .. } => true,
-                            crate::session::SessionStatus::Active => {
-                                let agent_guard = agent.lock().await;
-                                let last_role = agent_guard.last_message_role();
-                                let last_is_user = last_role
-                                    .as_ref()
-                                    .map(|r| *r == crate::message::Role::User)
+                    Ok(status) => match status {
+                        crate::session::SessionStatus::Crashed { .. } => true,
+                        crate::session::SessionStatus::Active => {
+                            let agent_guard = agent.lock().await;
+                            let last_role = agent_guard.last_message_role();
+                            let last_is_user = last_role
+                                .as_ref()
+                                .map(|r| *r == crate::message::Role::User)
+                                .unwrap_or(false);
+                            let last_is_reload_interrupted = last_role
+                                .as_ref()
+                                .map(|r| *r == crate::message::Role::Assistant)
+                                .unwrap_or(false)
+                                && agent_guard
+                                    .last_message_text()
+                                    .map(|t| {
+                                        t.ends_with("[generation interrupted - server reloading]")
+                                    })
                                     .unwrap_or(false);
-                                let last_is_reload_interrupted = last_role
-                                    .as_ref()
-                                    .map(|r| *r == crate::message::Role::Assistant)
-                                    .unwrap_or(false)
-                                    && agent_guard.last_message_text()
-                                        .map(|t| t.ends_with("[generation interrupted - server reloading]"))
-                                        .unwrap_or(false);
-                                if last_is_user {
-                                    crate::logging::info(&format!(
+                            if last_is_user {
+                                crate::logging::info(&format!(
                                         "Session {} was Active with pending user message - treating as interrupted",
                                         session_id
                                     ));
-                                }
-                                if last_is_reload_interrupted {
-                                    crate::logging::info(&format!(
-                                        "Session {} was interrupted by reload - will auto-resume",
-                                        session_id
-                                    ));
-                                }
-                                last_is_user || last_is_reload_interrupted
                             }
-                            _ => false,
+                            if last_is_reload_interrupted {
+                                crate::logging::info(&format!(
+                                    "Session {} was interrupted by reload - will auto-resume",
+                                    session_id
+                                ));
+                            }
+                            last_is_user || last_is_reload_interrupted
                         }
-                    }
+                        _ => false,
+                    },
                     Err(_) => false,
                 };
 
@@ -2856,8 +2860,7 @@ async fn handle_client(
                         }
                         Err(_) => ServerEvent::CompactResult {
                             id,
-                            message: "⚠ Cannot access compaction manager (lock held)"
-                                .to_string(),
+                            message: "⚠ Cannot access compaction manager (lock held)".to_string(),
                             success: false,
                         },
                     };
@@ -2870,7 +2873,11 @@ async fn handle_client(
                 let _ = client_event_tx.send(ServerEvent::Done { id });
             }
 
-            Request::StdinResponse { id, request_id, input } => {
+            Request::StdinResponse {
+                id,
+                request_id,
+                input,
+            } => {
                 if let Some(tx) = stdin_responses.lock().await.remove(&request_id) {
                     let _ = tx.send(input);
                 }
@@ -8126,7 +8133,13 @@ async fn handle_debug_client(
                                 .await
                             {
                                 Ok((_session, agent)) => {
-                                    execute_debug_command(agent, cmd, Arc::clone(&debug_jobs), Some(&server_identity)).await
+                                    execute_debug_command(
+                                        agent,
+                                        cmd,
+                                        Arc::clone(&debug_jobs),
+                                        Some(&server_identity),
+                                    )
+                                    .await
                                 }
                                 Err(e) => Err(e),
                             }
@@ -9068,7 +9081,9 @@ async fn monitor_selfdev_signals(
                         ));
 
                         // Exec into the new binary with serve mode
-                        let err = crate::platform::replace_process(ProcessCommand::new(&binary).arg("serve"));
+                        let err = crate::platform::replace_process(
+                            ProcessCommand::new(&binary).arg("serve"),
+                        );
 
                         // If we get here, exec failed
                         crate::logging::error(&format!(
@@ -9095,7 +9110,9 @@ async fn monitor_selfdev_signals(
                 // Get stable binary path
                 if let Ok(binary) = crate::build::stable_binary_path() {
                     if binary.exists() {
-                        let err = crate::platform::replace_process(ProcessCommand::new(&binary).arg("serve"));
+                        let err = crate::platform::replace_process(
+                            ProcessCommand::new(&binary).arg("serve"),
+                        );
 
                         crate::logging::error(&format!(
                             "Failed to exec into stable {:?}: {}",

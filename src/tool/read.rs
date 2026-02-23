@@ -1,9 +1,9 @@
 use super::{Tool, ToolContext, ToolOutput};
-use base64::Engine as _;
 use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
 use crate::tui::image::{display_image, ImageDisplayParams, ImageProtocol};
 use anyhow::Result;
 use async_trait::async_trait;
+use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::Path;

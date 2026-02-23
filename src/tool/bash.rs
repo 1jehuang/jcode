@@ -1,4 +1,4 @@
-use super::{Tool, ToolContext, ToolOutput, StdinInputRequest};
+use super::{StdinInputRequest, Tool, ToolContext, ToolOutput};
 use crate::background::TaskResult;
 use crate::stdin_detect::{self, StdinState};
 use anyhow::Result;
@@ -168,7 +168,8 @@ impl Tool for BashTool {
 
                             if state == StdinState::Reading {
                                 request_counter += 1;
-                                let request_id = format!("stdin-{}-{}", tool_call_id, request_counter);
+                                let request_id =
+                                    format!("stdin-{}-{}", tool_call_id, request_counter);
                                 let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
                                 let request = StdinInputRequest {
@@ -202,7 +203,8 @@ impl Tool for BashTool {
                                 // Small delay before checking again
                                 tokio::time::sleep(Duration::from_millis(100)).await;
                             } else {
-                                tokio::time::sleep(Duration::from_millis(STDIN_POLL_INTERVAL_MS)).await;
+                                tokio::time::sleep(Duration::from_millis(STDIN_POLL_INTERVAL_MS))
+                                    .await;
                             }
                         }
                     }
@@ -438,18 +440,13 @@ mod tests {
         let ctx = make_ctx(Some(tx));
 
         // Spawn the tool execution
-        let tool_handle = tokio::spawn(async move {
-            tool.execute(input, ctx).await
-        });
+        let tool_handle = tokio::spawn(async move { tool.execute(input, ctx).await });
 
         // Wait for the stdin request to arrive
-        let req = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            rx.recv(),
-        )
-        .await
-        .expect("timed out waiting for stdin request")
-        .expect("channel closed");
+        let req = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for stdin request")
+            .expect("channel closed");
 
         assert!(req.request_id.starts_with("stdin-test-call-"));
         assert_eq!(req.is_password, false);
@@ -458,14 +455,11 @@ mod tests {
         req.response_tx.send("test_input_line".to_string()).unwrap();
 
         // Wait for tool to finish
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            tool_handle,
-        )
-        .await
-        .expect("tool timed out")
-        .expect("tool panicked")
-        .expect("tool errored");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), tool_handle)
+            .await
+            .expect("tool timed out")
+            .expect("tool panicked")
+            .expect("tool errored");
 
         assert!(
             result.output.contains("test_input_line"),
@@ -483,43 +477,48 @@ mod tests {
         let input = json!({"command": "head -n2", "timeout": 15000});
         let ctx = make_ctx(Some(tx));
 
-        let tool_handle = tokio::spawn(async move {
-            tool.execute(input, ctx).await
-        });
+        let tool_handle = tokio::spawn(async move { tool.execute(input, ctx).await });
 
         // First line
-        let req1 = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            rx.recv(),
-        )
-        .await
-        .expect("timed out waiting for first stdin request")
-        .expect("channel closed");
-        assert!(req1.request_id.ends_with("-1"), "first request should end with -1: {}", req1.request_id);
+        let req1 = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for first stdin request")
+            .expect("channel closed");
+        assert!(
+            req1.request_id.ends_with("-1"),
+            "first request should end with -1: {}",
+            req1.request_id
+        );
         req1.response_tx.send("line_one".to_string()).unwrap();
 
         // Second line
-        let req2 = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            rx.recv(),
-        )
-        .await
-        .expect("timed out waiting for second stdin request")
-        .expect("channel closed");
-        assert!(req2.request_id.ends_with("-2"), "second request should end with -2: {}", req2.request_id);
+        let req2 = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for second stdin request")
+            .expect("channel closed");
+        assert!(
+            req2.request_id.ends_with("-2"),
+            "second request should end with -2: {}",
+            req2.request_id
+        );
         req2.response_tx.send("line_two".to_string()).unwrap();
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            tool_handle,
-        )
-        .await
-        .expect("tool timed out")
-        .expect("tool panicked")
-        .expect("tool errored");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), tool_handle)
+            .await
+            .expect("tool timed out")
+            .expect("tool panicked")
+            .expect("tool errored");
 
-        assert!(result.output.contains("line_one"), "missing line_one in: {}", result.output);
-        assert!(result.output.contains("line_two"), "missing line_two in: {}", result.output);
+        assert!(
+            result.output.contains("line_one"),
+            "missing line_one in: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("line_two"),
+            "missing line_two in: {}",
+            result.output
+        );
     }
 
     #[tokio::test]

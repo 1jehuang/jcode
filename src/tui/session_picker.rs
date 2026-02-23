@@ -830,19 +830,23 @@ impl SessionPicker {
         let (status_icon, status_color, time_label) = match &session.status {
             SessionStatus::Active => ("▶", Color::Rgb(100, 200, 100), "active".to_string()),
             SessionStatus::Closed => ("✓", DIM, format!("closed {}", time_ago)),
-            SessionStatus::Crashed { .. } => {
-                ("💥", Color::Rgb(220, 100, 100), format!("crashed {}", time_ago))
-            }
+            SessionStatus::Crashed { .. } => (
+                "💥",
+                Color::Rgb(220, 100, 100),
+                format!("crashed {}", time_ago),
+            ),
             SessionStatus::Reloaded => ("🔄", USER_CLR, format!("reloaded {}", time_ago)),
-            SessionStatus::Compacted => {
-                ("📦", Color::Rgb(255, 193, 7), format!("compacted {}", time_ago))
-            }
-            SessionStatus::RateLimited => {
-                ("⏳", ACCENT, format!("rate-limited {}", time_ago))
-            }
-            SessionStatus::Error { .. } => {
-                ("❌", Color::Rgb(220, 100, 100), format!("errored {}", time_ago))
-            }
+            SessionStatus::Compacted => (
+                "📦",
+                Color::Rgb(255, 193, 7),
+                format!("compacted {}", time_ago),
+            ),
+            SessionStatus::RateLimited => ("⏳", ACCENT, format!("rate-limited {}", time_ago)),
+            SessionStatus::Error { .. } => (
+                "❌",
+                Color::Rgb(220, 100, 100),
+                format!("errored {}", time_ago),
+            ),
         };
 
         // Line 1: icon + name + status + time context
@@ -859,10 +863,7 @@ impl SessionPicker {
                 format!(" {}", status_icon),
                 Style::default().fg(status_color),
             ),
-            Span::styled(
-                format!("  {}", time_label),
-                Style::default().fg(DIM),
-            ),
+            Span::styled(format!("  {}", time_label), Style::default().fg(DIM)),
         ];
         if in_batch_restore {
             line1_spans.push(Span::styled(
@@ -1135,10 +1136,7 @@ impl SessionPicker {
                         SessionStatus::RateLimited => format!("rate-limited {}", ago),
                         SessionStatus::Error { .. } => format!("errored {}", ago),
                     };
-                    Span::styled(
-                        format!("  {}", label),
-                        Style::default().fg(DIM_COLOR),
-                    )
+                    Span::styled(format!("  {}", label), Style::default().fg(DIM_COLOR))
                 },
             ])
             .alignment(align),
@@ -1260,8 +1258,11 @@ impl SessionPicker {
                     rendered_messages += 1;
                 }
                 "assistant" => {
-                    let md_lines =
-                        super::ui::render_assistant_message(&display_msg, assistant_width, crate::config::DiffDisplayMode::Off);
+                    let md_lines = super::ui::render_assistant_message(
+                        &display_msg,
+                        assistant_width,
+                        crate::config::DiffDisplayMode::Off,
+                    );
                     let mut skip_mermaid_blank = false;
 
                     for line in md_lines {

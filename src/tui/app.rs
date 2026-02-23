@@ -978,9 +978,17 @@ impl App {
         };
         app.remote_provider_model = Some(effective_model.clone());
         // Infer provider name from model string
-        let provider_name = if effective_model.contains("claude") || effective_model.contains("opus") || effective_model.contains("sonnet") || effective_model.contains("haiku") {
+        let provider_name = if effective_model.contains("claude")
+            || effective_model.contains("opus")
+            || effective_model.contains("sonnet")
+            || effective_model.contains("haiku")
+        {
             "anthropic"
-        } else if effective_model.contains("gpt") || effective_model.contains("o1") || effective_model.contains("o3") || effective_model.contains("o4") {
+        } else if effective_model.contains("gpt")
+            || effective_model.contains("o1")
+            || effective_model.contains("o3")
+            || effective_model.contains("o4")
+        {
             "openai"
         } else if effective_model.contains('/') {
             "openrouter"
@@ -1023,10 +1031,7 @@ impl App {
             self.session.is_canary
         };
         let suffix = if is_canary { " [self-dev]" } else { "" };
-        let prefix = self
-            .remote_server_short_name
-            .as_deref()
-            .unwrap_or("jcode");
+        let prefix = self.remote_server_short_name.as_deref().unwrap_or("jcode");
         let _ = crossterm::execute!(
             std::io::stdout(),
             crossterm::terminal::SetTitle(format!(
@@ -1584,7 +1589,9 @@ impl App {
 
     fn jump_diagram(&mut self, index: usize) {
         let total = crate::tui::mermaid::get_active_diagrams().len();
-        if total == 0 { return; }
+        if total == 0 {
+            return;
+        }
         let target = index.min(total - 1);
         self.diagram_index = target;
         self.diagram_scroll_x = 0;
@@ -4061,10 +4068,8 @@ impl App {
                     // with no reload-info file (already consumed above).
                     if has_reload_ctx_for_session || !self.reload_info.is_empty() {
                         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
-                            let marker = jcode_dir.join(format!(
-                                "client-reload-pending-{}",
-                                session_id
-                            ));
+                            let marker =
+                                jcode_dir.join(format!("client-reload-pending-{}", session_id));
                             let info = if self.reload_info.is_empty() {
                                 "reload".to_string()
                             } else {
@@ -4113,17 +4118,15 @@ impl App {
                 has_client_reload_marker
             ));
             if should_queue_reload_continuation {
-                let reload_ctx = session_to_resume
-                    .as_deref()
-                    .and_then(|sid| {
-                        let result = ReloadContext::load_for_session(sid);
-                        crate::logging::info(&format!(
-                            "Reload load_for_session({}) = {:?}",
-                            sid,
-                            result.as_ref().map(|r| r.is_some())
-                        ));
-                        result.ok().flatten()
-                    });
+                let reload_ctx = session_to_resume.as_deref().and_then(|sid| {
+                    let result = ReloadContext::load_for_session(sid);
+                    crate::logging::info(&format!(
+                        "Reload load_for_session({}) = {:?}",
+                        sid,
+                        result.as_ref().map(|r| r.is_some())
+                    ));
+                    result.ok().flatten()
+                });
 
                 if let Some(ctx) = reload_ctx {
                     let action = if ctx.is_rollback {
@@ -4589,8 +4592,7 @@ impl App {
             if sim_time_ms >= next_frame_at {
                 if let Some(start_ms) = self.replay_processing_started_ms {
                     let elapsed_ms = (sim_time_ms - start_ms).max(0.0);
-                    self.replay_elapsed_override =
-                        Some(Duration::from_millis(elapsed_ms as u64));
+                    self.replay_elapsed_override = Some(Duration::from_millis(elapsed_ms as u64));
                 } else {
                     self.replay_elapsed_override = None;
                 }
@@ -4805,7 +4807,8 @@ impl App {
                             self.streaming_text.push_str(&chunk);
                         }
                         if !self.streaming_text.is_empty() {
-                            let duration = self.processing_started.map(|s| s.elapsed().as_secs_f32());
+                            let duration =
+                                self.processing_started.map(|s| s.elapsed().as_secs_f32());
                             let content = self.take_streaming_text();
                             self.push_display_message(DisplayMessage {
                                 role: "assistant".to_string(),
@@ -5017,7 +5020,9 @@ impl App {
                 }
 
                 if was_interrupted == Some(true) && !self.display_messages.is_empty() {
-                    crate::logging::info("Session was interrupted mid-generation, queuing continuation");
+                    crate::logging::info(
+                        "Session was interrupted mid-generation, queuing continuation",
+                    );
                     self.push_display_message(DisplayMessage::system(
                         "⚡ Session was interrupted mid-generation. Continuing...".to_string(),
                     ));
@@ -5468,7 +5473,12 @@ impl App {
         }
 
         // When the model picker preview is visible, arrow keys navigate the picker list
-        if self.picker_state.as_ref().map(|p| p.preview).unwrap_or(false) {
+        if self
+            .picker_state
+            .as_ref()
+            .map(|p| p.preview)
+            .unwrap_or(false)
+        {
             match code {
                 KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
                     return self.handle_picker_key(code, modifiers);
@@ -5825,7 +5835,12 @@ impl App {
                 self.scroll_down(dec);
             }
             KeyCode::Esc => {
-                if self.picker_state.as_ref().map(|p| p.preview).unwrap_or(false) {
+                if self
+                    .picker_state
+                    .as_ref()
+                    .map(|p| p.preview)
+                    .unwrap_or(false)
+                {
                     self.picker_state = None;
                     self.input.clear();
                     self.cursor_pos = 0;
@@ -6155,7 +6170,12 @@ impl App {
         }
 
         // When the model picker preview is visible, arrow keys navigate the picker list
-        if self.picker_state.as_ref().map(|p| p.preview).unwrap_or(false) {
+        if self
+            .picker_state
+            .as_ref()
+            .map(|p| p.preview)
+            .unwrap_or(false)
+        {
             match code {
                 KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
                     return self.handle_picker_key(code, modifiers);
@@ -6232,7 +6252,12 @@ impl App {
                 self.scroll_down(dec);
             }
             KeyCode::Esc => {
-                if self.picker_state.as_ref().map(|p| p.preview).unwrap_or(false) {
+                if self
+                    .picker_state
+                    .as_ref()
+                    .map(|p| p.preview)
+                    .unwrap_or(false)
+                {
                     self.picker_state = None;
                     self.input.clear();
                     self.cursor_pos = 0;
@@ -6421,7 +6446,11 @@ impl App {
             self.input = parts.join("\n\n");
             self.cursor_pos = self.input.len();
             let count = parts.len();
-            self.set_status_notice(&format!("Retrieved {} pending message{} for editing", count, if count == 1 { "" } else { "s" }));
+            self.set_status_notice(&format!(
+                "Retrieved {} pending message{} for editing",
+                count,
+                if count == 1 { "" } else { "s" }
+            ));
         }
         had_pending
     }
@@ -7411,7 +7440,8 @@ impl App {
                         .map(effort_display_label)
                         .unwrap_or("default");
                     self.push_display_message(DisplayMessage::system(format!(
-                        "✓ Reasoning effort → {}", label
+                        "✓ Reasoning effort → {}",
+                        label
                     )));
                     let efforts = self.provider.available_efforts();
                     let idx = new_effort
@@ -7423,7 +7453,8 @@ impl App {
                 }
                 Err(e) => {
                     self.push_display_message(DisplayMessage::error(format!(
-                        "Failed to set effort: {}", e
+                        "Failed to set effort: {}",
+                        e
                     )));
                 }
             }
@@ -7463,7 +7494,8 @@ impl App {
                 "openrouter" => self.start_openrouter_login(),
                 other => {
                     self.push_display_message(DisplayMessage::error(format!(
-                        "Unknown provider '{}'. Use: claude, openai, or openrouter", other
+                        "Unknown provider '{}'. Use: claude, openai, or openrouter",
+                        other
                     )));
                 }
             }
@@ -8123,7 +8155,8 @@ impl App {
                                 self.push_display_message(DisplayMessage::system(
                                     format!("⚡ Emergency truncation: shortened {} large tool result(s). Retrying...", truncated),
                                 ));
-                                return match self.run_turn_interactive(terminal, event_stream).await {
+                                return match self.run_turn_interactive(terminal, event_stream).await
+                                {
                                     Ok(()) => {
                                         self.last_stream_error = None;
                                         true
@@ -8287,10 +8320,7 @@ impl App {
                 } else {
                     String::new()
                 };
-                output.push_str(&format!(
-                    "  {} {}{}\n",
-                    limit.name, bar, reset_info
-                ));
+                output.push_str(&format!("  {} {}{}\n", limit.name, bar, reset_info));
             }
 
             for (key, value) in &provider.extra_info {
@@ -9078,13 +9108,16 @@ impl App {
                         });
                     }
                 } else if crate::provider::ALL_OPENAI_MODELS.contains(&model.as_str()) {
-                    let (available, detail) = if auth.openai == crate::auth::AuthState::NotConfigured {
-                        (false, "no credentials".to_string())
-                    } else if let Some(false) = crate::provider::is_model_available_for_account(model) {
-                        (false, "not available for your plan".to_string())
-                    } else {
-                        (true, String::new())
-                    };
+                    let (available, detail) =
+                        if auth.openai == crate::auth::AuthState::NotConfigured {
+                            (false, "no credentials".to_string())
+                        } else if let Some(false) =
+                            crate::provider::is_model_available_for_account(model)
+                        {
+                            (false, "not available for your plan".to_string())
+                        } else {
+                            (true, String::new())
+                        };
                     routes.push(crate::provider::ModelRoute {
                         model: model.clone(),
                         provider: "OpenAI".to_string(),
@@ -9151,10 +9184,7 @@ impl App {
             "claude-sonnet-4-6[1m]",
         ];
 
-        const OPENAI_OAUTH_ONLY_MODELS: &[&str] = &[
-            "gpt-5.3-codex-spark",
-            "gpt-5.3-codex",
-        ];
+        const OPENAI_OAUTH_ONLY_MODELS: &[&str] = &["gpt-5.3-codex-spark", "gpt-5.3-codex"];
 
         // Find the latest recommended model's created timestamp from OpenRouter cache,
         // then mark anything more than 1 month older as "old".
@@ -9185,8 +9215,7 @@ impl App {
             let mut entry_routes = model_routes.remove(name).unwrap_or_default();
             entry_routes.sort_by_key(|r| route_sort_key(r));
 
-            let is_openai_model =
-                crate::provider::ALL_OPENAI_MODELS.contains(&name.as_str());
+            let is_openai_model = crate::provider::ALL_OPENAI_MODELS.contains(&name.as_str());
 
             if is_openai_model && is_openai && !available_efforts.is_empty() {
                 for effort in &available_efforts {
@@ -9199,8 +9228,8 @@ impl App {
                         other => other,
                     };
                     let display_name = format!("{} ({})", name, effort_label);
-                    let is_this_current = *name == current_model
-                        && current_effort.as_deref() == Some(*effort);
+                    let is_this_current =
+                        *name == current_model && current_effort.as_deref() == Some(*effort);
                     let or_created = crate::provider::openrouter::model_created_timestamp(name);
                     models.push(super::ModelEntry {
                         name: display_name,
@@ -9211,7 +9240,9 @@ impl App {
                             && (*effort == "xhigh" || *effort == "high")
                             && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
                                 || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str()))
-                                || entry_routes.iter().any(|r| r.api_method == "oauth" && r.available)),
+                                || entry_routes
+                                    .iter()
+                                    .any(|r| r.api_method == "oauth" && r.available)),
                         old: old_threshold_secs > 0
                             && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
                         created_date: or_created.map(|t| format_created(t)),
@@ -9225,7 +9256,9 @@ impl App {
                 let is_recommended = RECOMMENDED_MODELS.contains(&name.as_str())
                     && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
                         || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str()))
-                        || entry_routes.iter().any(|r| r.api_method == "oauth" && r.available));
+                        || entry_routes
+                            .iter()
+                            .any(|r| r.api_method == "oauth" && r.available));
                 models.push(super::ModelEntry {
                     name: name.clone(),
                     routes: entry_routes,
@@ -9282,11 +9315,12 @@ impl App {
 
     /// Handle arrow/navigation keys when picker is in preview mode.
     /// Returns Ok(true) if the key was handled, Ok(false) to fall through.
-    fn handle_picker_preview_key(&mut self, code: &KeyCode, modifiers: KeyModifiers) -> Result<bool> {
-        let is_preview = self
-            .picker_state
-            .as_ref()
-            .map_or(false, |p| p.preview);
+    fn handle_picker_preview_key(
+        &mut self,
+        code: &KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Result<bool> {
+        let is_preview = self.picker_state.as_ref().map_or(false, |p| p.preview);
         if !is_preview {
             return Ok(false);
         }
@@ -9369,7 +9403,8 @@ impl App {
                 self.picker_state = None;
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                if matches!(code, KeyCode::Char('k')) && !_modifiers.contains(KeyModifiers::CONTROL) {
+                if matches!(code, KeyCode::Char('k')) && !_modifiers.contains(KeyModifiers::CONTROL)
+                {
                     // Plain 'k' is a filter character, not navigation
                     if let Some(ref mut picker) = self.picker_state {
                         picker.filter.push('k');
@@ -9390,7 +9425,8 @@ impl App {
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if matches!(code, KeyCode::Char('j')) && !_modifiers.contains(KeyModifiers::CONTROL) {
+                if matches!(code, KeyCode::Char('j')) && !_modifiers.contains(KeyModifiers::CONTROL)
+                {
                     // Plain 'j' is a filter character, not navigation
                     if let Some(ref mut picker) = self.picker_state {
                         picker.filter.push('j');
@@ -9475,10 +9511,7 @@ impl App {
                             route.detail.clone()
                         };
                         self.picker_state = None;
-                        self.set_status_notice(format!(
-                            "{} — {}",
-                            name, detail
-                        ));
+                        self.set_status_notice(format!("{} — {}", name, detail));
                         return Ok(());
                     }
 
@@ -11119,7 +11152,7 @@ impl App {
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
                     working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
-                            stdin_request_tx: None,
+                    stdin_request_tx: None,
                 };
 
                 Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
@@ -11603,10 +11636,7 @@ impl App {
             return vec![
                 ("/login claude".into(), "Login to Claude (Anthropic OAuth)"),
                 ("/login openai".into(), "Login to OpenAI (OAuth)"),
-                (
-                    "/login openrouter".into(),
-                    "Login to OpenRouter (API key)",
-                ),
+                ("/login openrouter".into(), "Login to OpenRouter (API key)"),
             ];
         }
 
@@ -12115,8 +12145,8 @@ impl App {
         &self,
         mut rx: tokio::sync::broadcast::Receiver<super::backend::DebugEvent>,
     ) -> tokio::task::JoinHandle<()> {
-        use tokio::io::AsyncWriteExt;
         use crate::transport::Listener;
+        use tokio::io::AsyncWriteExt;
 
         let socket_path = Self::debug_socket_path();
         let initial_snapshot = self.create_debug_snapshot();
@@ -12487,9 +12517,10 @@ impl super::TuiState for App {
         } else {
             let skip = if self.provider.supports_compaction() {
                 let compaction = self.registry.compaction();
-                let result = compaction.try_read().ok().map(|manager| {
-                    (manager.compacted_count(), manager.summary_chars())
-                });
+                let result = compaction
+                    .try_read()
+                    .ok()
+                    .map(|manager| (manager.compacted_count(), manager.summary_chars()));
                 if let Some((cc, sc)) = result {
                     if cc > 0 && sc > 0 {
                         user_count += 1;
@@ -13618,10 +13649,8 @@ mod tests {
     fn configure_test_remote_models(app: &mut App) {
         app.is_remote = true;
         app.remote_provider_model = Some("gpt-5.3-codex".to_string());
-        app.remote_available_models = vec![
-            "gpt-5.3-codex".to_string(),
-            "gpt-5.2-codex".to_string(),
-        ];
+        app.remote_available_models =
+            vec!["gpt-5.3-codex".to_string(), "gpt-5.2-codex".to_string()];
     }
 
     #[test]
@@ -13713,8 +13742,7 @@ mod tests {
         assert_eq!(picker.selected, initial_selected + 1);
 
         // Up arrow should navigate back
-        app.handle_key(KeyCode::Up, KeyModifiers::empty())
-            .unwrap();
+        app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
 
         let picker = app
             .picker_state

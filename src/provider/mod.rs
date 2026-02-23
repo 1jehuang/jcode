@@ -264,10 +264,7 @@ pub fn populate_context_limits(models: HashMap<String, usize>) {
 pub fn populate_account_models(slugs: Vec<String>) {
     if !slugs.is_empty() {
         if let Ok(mut available) = ACCOUNT_AVAILABLE_MODELS.write() {
-            crate::logging::info(&format!(
-                "Account available models: {}",
-                slugs.join(", ")
-            ));
+            crate::logging::info(&format!("Account available models: {}", slugs.join(", ")));
             *available = Some(slugs);
         }
     }

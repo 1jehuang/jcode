@@ -795,10 +795,7 @@ pub fn build_ambient_system_prompt(
                 prompt.push_str(&format!("  Details: {}\n", desc));
             }
             if !item.relevant_files.is_empty() {
-                prompt.push_str(&format!(
-                    "  Files: {}\n",
-                    item.relevant_files.join(", ")
-                ));
+                prompt.push_str(&format!("  Files: {}\n", item.relevant_files.join(", ")));
             }
             if let Some(ref branch) = item.git_branch {
                 prompt.push_str(&format!("  Branch: {}\n", branch));

@@ -135,10 +135,7 @@ impl Tool for ApplyPatchTool {
     }
 }
 
-async fn apply_update_chunks(
-    path: &Path,
-    chunks: &[UpdateFileChunk],
-) -> Result<String> {
+async fn apply_update_chunks(path: &Path, chunks: &[UpdateFileChunk]) -> Result<String> {
     let original_contents = tokio::fs::read_to_string(path).await?;
     let mut original_lines: Vec<String> = original_contents.split('\n').map(String::from).collect();
 
@@ -192,8 +189,7 @@ fn compute_replacements(
         }
 
         let mut pattern: &[String] = &chunk.old_lines;
-        let mut found =
-            seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file);
+        let mut found = seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file);
 
         let mut new_slice: &[String] = &chunk.new_lines;
 
@@ -243,12 +239,7 @@ fn apply_replacements(
     lines
 }
 
-fn seek_sequence(
-    lines: &[String],
-    pattern: &[String],
-    start: usize,
-    eof: bool,
-) -> Option<usize> {
+fn seek_sequence(lines: &[String], pattern: &[String], start: usize, eof: bool) -> Option<usize> {
     if pattern.is_empty() {
         return Some(start);
     }
@@ -477,7 +468,8 @@ mod tests {
 
     #[test]
     fn test_parse_add_file() {
-        let patch = "*** Begin Patch\n*** Add File: hello.txt\n+Hello world\n+Second line\n*** End Patch";
+        let patch =
+            "*** Begin Patch\n*** Add File: hello.txt\n+Hello world\n+Second line\n*** End Patch";
         let hunks = parse_apply_patch(patch).unwrap();
         assert_eq!(hunks.len(), 1);
         match &hunks[0] {
@@ -504,7 +496,8 @@ mod tests {
 
     #[test]
     fn test_parse_update_file_simple() {
-        let patch = "*** Begin Patch\n*** Update File: test.py\n@@\n foo\n-bar\n+baz\n*** End Patch";
+        let patch =
+            "*** Begin Patch\n*** Update File: test.py\n@@\n foo\n-bar\n+baz\n*** End Patch";
         let hunks = parse_apply_patch(patch).unwrap();
         assert_eq!(hunks.len(), 1);
         match &hunks[0] {
@@ -614,7 +607,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_apply_update_with_context_header() {
-        let f = write_temp("class Foo:\n    def bar(self):\n        pass\n    def baz(self):\n        pass\n");
+        let f = write_temp(
+            "class Foo:\n    def bar(self):\n        pass\n    def baz(self):\n        pass\n",
+        );
         let chunks = vec![UpdateFileChunk {
             change_context: Some("def baz(self):".to_string()),
             old_lines: vec!["        pass".to_string()],
@@ -647,10 +642,7 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect();
-        let pattern: Vec<String> = vec!["bar", "baz"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let pattern: Vec<String> = vec!["bar", "baz"].into_iter().map(String::from).collect();
         assert_eq!(seek_sequence(&lines, &pattern, 0, false), Some(1));
     }
 
@@ -660,10 +652,7 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect();
-        let pattern: Vec<String> = vec!["foo", "bar"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let pattern: Vec<String> = vec!["foo", "bar"].into_iter().map(String::from).collect();
         assert_eq!(seek_sequence(&lines, &pattern, 0, false), Some(0));
     }
 
@@ -673,10 +662,7 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect();
-        let pattern: Vec<String> = vec!["c", "d"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let pattern: Vec<String> = vec!["c", "d"].into_iter().map(String::from).collect();
         assert_eq!(seek_sequence(&lines, &pattern, 0, true), Some(2));
     }
 

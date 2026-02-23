@@ -1,11 +1,11 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::plan::PlanItem;
+use crate::transport::SyncStream;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use crate::transport::SyncStream;
 
 fn socket_path() -> std::path::PathBuf {
     crate::storage::runtime_dir().join("jcode.sock")

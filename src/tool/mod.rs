@@ -835,7 +835,10 @@ mod tests {
         let big_output = "x".repeat(8000); // 2000 tokens, well over 30% of 1000
         let output = ToolOutput::new(big_output.clone());
         let result = registry.guard_context_overflow("test", output).await;
-        assert!(result.output.len() < big_output.len(), "Output should be truncated");
+        assert!(
+            result.output.len() < big_output.len(),
+            "Output should be truncated"
+        );
         assert!(
             result.output.contains("TRUNCATED"),
             "Should contain truncation warning"
@@ -875,7 +878,11 @@ mod tests {
 
         let output = ToolOutput::new("x".repeat(100_000));
         let result = registry.guard_context_overflow("test", output).await;
-        assert_eq!(result.output.len(), 100_000, "Zero budget should pass through");
+        assert_eq!(
+            result.output.len(),
+            100_000,
+            "Zero budget should pass through"
+        );
     }
 
     #[tokio::test]

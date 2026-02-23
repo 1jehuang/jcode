@@ -422,7 +422,10 @@ impl CompactionManager {
     /// This variant works with the old API where CompactionManager had its own messages.
     /// Callers should migrate to force_compact_with.
     pub fn force_compact(&mut self, _provider: Arc<dyn Provider>) -> Result<(), String> {
-        Err("force_compact requires messages — use force_compact_with(messages, provider)".to_string())
+        Err(
+            "force_compact requires messages — use force_compact_with(messages, provider)"
+                .to_string(),
+        )
     }
 
     /// Find a safe cutoff point that doesn't split tool call/result pairs.
@@ -690,10 +693,7 @@ impl CompactionManager {
             cutoff = Self::safe_cutoff_static(active, cutoff);
 
             if cutoff > 0 {
-                let remaining: usize = active[cutoff..]
-                    .iter()
-                    .map(Self::message_char_count)
-                    .sum();
+                let remaining: usize = active[cutoff..].iter().map(Self::message_char_count).sum();
                 let remaining_tokens = remaining / CHARS_PER_TOKEN;
                 if remaining_tokens <= self.token_budget {
                     break;
@@ -1126,8 +1126,15 @@ mod tests {
 
         let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
         let action = manager.ensure_context_fits(&messages, provider);
-        assert_eq!(action, CompactionAction::None, "should do nothing below 80%");
-        assert!(!manager.is_compacting(), "should NOT start background compaction below 80%");
+        assert_eq!(
+            action,
+            CompactionAction::None,
+            "should do nothing below 80%"
+        );
+        assert!(
+            !manager.is_compacting(),
+            "should NOT start background compaction below 80%"
+        );
         assert_eq!(manager.compacted_count, 0);
     }
 
@@ -1144,9 +1151,19 @@ mod tests {
 
         let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
         let action = manager.ensure_context_fits(&messages, provider);
-        assert_eq!(action, CompactionAction::BackgroundStarted, "should start background compaction at 85%");
-        assert!(manager.is_compacting(), "SHOULD start background compaction at 85%");
-        assert_eq!(manager.compacted_count, 0, "compacted_count should stay 0 (no hard compact)");
+        assert_eq!(
+            action,
+            CompactionAction::BackgroundStarted,
+            "should start background compaction at 85%"
+        );
+        assert!(
+            manager.is_compacting(),
+            "SHOULD start background compaction at 85%"
+        );
+        assert_eq!(
+            manager.compacted_count, 0,
+            "compacted_count should stay 0 (no hard compact)"
+        );
     }
 
     #[tokio::test]
@@ -1165,9 +1182,18 @@ mod tests {
 
         let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
         let action = manager.ensure_context_fits(&messages, provider);
-        assert!(matches!(action, CompactionAction::HardCompacted(_)), "SHOULD hard-compact at 96%");
-        assert!(manager.compacted_count > 0, "compacted_count should increase after hard compact");
-        assert!(manager.active_summary.is_some(), "should have an emergency summary");
+        assert!(
+            matches!(action, CompactionAction::HardCompacted(_)),
+            "SHOULD hard-compact at 96%"
+        );
+        assert!(
+            manager.compacted_count > 0,
+            "compacted_count should increase after hard compact"
+        );
+        assert!(
+            manager.active_summary.is_some(),
+            "should have an emergency summary"
+        );
     }
 
     #[tokio::test]
@@ -1186,10 +1212,16 @@ mod tests {
 
         let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
         let action = manager.ensure_context_fits(&messages, provider);
-        assert!(matches!(action, CompactionAction::HardCompacted(_)), "MUST hard-compact when over 100%");
+        assert!(
+            matches!(action, CompactionAction::HardCompacted(_)),
+            "MUST hard-compact when over 100%"
+        );
 
         let api_messages = manager.messages_for_api_with(&messages);
-        assert!(api_messages.len() < messages.len(), "API messages should be fewer after hard compact");
+        assert!(
+            api_messages.len() < messages.len(),
+            "API messages should be fewer after hard compact"
+        );
         // First message should be the emergency summary
         match &api_messages[0].content[0] {
             ContentBlock::Text { text, .. } => {
@@ -1213,7 +1245,10 @@ mod tests {
         manager.notify_message_added();
 
         let result = manager.hard_compact_with(&messages);
-        assert!(result.is_err(), "should fail with only 2 messages (MIN_TURNS_TO_KEEP)");
+        assert!(
+            result.is_err(),
+            "should fail with only 2 messages (MIN_TURNS_TO_KEEP)"
+        );
     }
 
     #[test]
@@ -1221,22 +1256,27 @@ mod tests {
         let mut manager = CompactionManager::new().with_budget(1_000);
         let mut messages = Vec::new();
         for i in 0..25 {
-            messages.push(make_text_message(
-                Role::User,
-                &format!("turn {}", i),
-            ));
+            messages.push(make_text_message(Role::User, &format!("turn {}", i)));
             manager.notify_message_added();
         }
         manager.update_observed_input_tokens(950);
 
-        let dropped = manager.hard_compact_with(&messages).expect("should compact");
+        let dropped = manager
+            .hard_compact_with(&messages)
+            .expect("should compact");
         assert!(dropped > 0, "should drop some messages");
         assert!(dropped < 25, "should not drop ALL messages");
 
         let api_messages = manager.messages_for_api_with(&messages);
         // Should have summary + recent turns
-        assert!(api_messages.len() >= 2, "should keep at least MIN_TURNS_TO_KEEP + summary");
-        assert!(api_messages.len() <= 15, "should have dropped a significant number");
+        assert!(
+            api_messages.len() >= 2,
+            "should keep at least MIN_TURNS_TO_KEEP + summary"
+        );
+        assert!(
+            api_messages.len() <= 15,
+            "should have dropped a significant number"
+        );
     }
 
     // ── safe_cutoff_static: tool call/result pair integrity ─────────
@@ -1329,8 +1369,14 @@ mod tests {
 
         // Check the truncated content
         if let ContentBlock::ToolResult { content, .. } = &messages[2].content[0] {
-            assert!(content.len() < big_result.len(), "content should be shorter");
-            assert!(content.contains("truncated for context recovery"), "should have truncation marker");
+            assert!(
+                content.len() < big_result.len(),
+                "content should be shorter"
+            );
+            assert!(
+                content.contains("truncated for context recovery"),
+                "should have truncation marker"
+            );
         } else {
             panic!("expected tool result");
         }
@@ -1339,17 +1385,15 @@ mod tests {
     #[test]
     fn test_emergency_truncate_skips_small_results() {
         let mut manager = CompactionManager::new().with_budget(1_000);
-        let mut messages = vec![
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "tool_1".to_string(),
-                    content: "small output".to_string(),
-                    is_error: Some(false),
-                }],
-                timestamp: None,
-            },
-        ];
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_1".to_string(),
+                content: "small output".to_string(),
+                is_error: Some(false),
+            }],
+            timestamp: None,
+        }];
         manager.notify_message_added();
 
         let truncated = manager.emergency_truncate_with(&mut messages);
@@ -1372,7 +1416,9 @@ mod tests {
         manager.update_observed_input_tokens(480);
 
         // First hard compact
-        let dropped1 = manager.hard_compact_with(&messages).expect("first compact should work");
+        let dropped1 = manager
+            .hard_compact_with(&messages)
+            .expect("first compact should work");
         assert!(dropped1 > 0);
         let count_after_first = manager.compacted_count;
 
@@ -1387,9 +1433,14 @@ mod tests {
         manager.update_observed_input_tokens(490);
 
         // Second hard compact
-        let dropped2 = manager.hard_compact_with(&messages).expect("second compact should work");
+        let dropped2 = manager
+            .hard_compact_with(&messages)
+            .expect("second compact should work");
         assert!(dropped2 > 0);
-        assert!(manager.compacted_count > count_after_first, "compacted_count should increase");
+        assert!(
+            manager.compacted_count > count_after_first,
+            "compacted_count should increase"
+        );
 
         // Summary should mention both compactions
         let api_messages = manager.messages_for_api_with(&messages);
@@ -1414,7 +1465,9 @@ mod tests {
         }
         manager.update_observed_input_tokens(490);
 
-        manager.hard_compact_with(&messages).expect("should compact");
+        manager
+            .hard_compact_with(&messages)
+            .expect("should compact");
 
         let api_msgs = manager.messages_for_api_with(&messages);
         // First message should be the summary
@@ -1446,7 +1499,11 @@ mod tests {
 
         // Without observed tokens, usage should be based on char estimate
         let usage_no_observed = manager.context_usage_with(&messages);
-        assert!(usage_no_observed < 0.2, "char estimate should be low: {}", usage_no_observed);
+        assert!(
+            usage_no_observed < 0.2,
+            "char estimate should be low: {}",
+            usage_no_observed
+        );
 
         // With observed tokens at 160k, should use observed (higher) value
         manager.update_observed_input_tokens(160_000);
@@ -1463,13 +1520,18 @@ mod tests {
         let mut manager = CompactionManager::new().with_budget(1_000);
         let mut messages = Vec::new();
         for i in 0..20 {
-            messages.push(make_text_message(Role::User, &format!("msg {} pad {}", i, "x".repeat(50))));
+            messages.push(make_text_message(
+                Role::User,
+                &format!("msg {} pad {}", i, "x".repeat(50)),
+            ));
             manager.notify_message_added();
         }
         manager.update_observed_input_tokens(960);
 
         // Hard compact should reset observed_input_tokens
-        manager.hard_compact_with(&messages).expect("should compact");
+        manager
+            .hard_compact_with(&messages)
+            .expect("should compact");
         assert!(
             manager.observed_input_tokens.is_none(),
             "observed_input_tokens should be cleared after hard compact"

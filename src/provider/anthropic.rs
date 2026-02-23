@@ -27,8 +27,7 @@ const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
 const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/1.0.0";
 
 /// Beta headers required for OAuth (base)
-const OAUTH_BETA_HEADERS: &str =
-    "oauth-2025-04-20,claude-code-20250219,prompt-caching-2024-07-31";
+const OAUTH_BETA_HEADERS: &str = "oauth-2025-04-20,claude-code-20250219,prompt-caching-2024-07-31";
 
 /// Beta headers with 1M context (requires extra usage enabled)
 const OAUTH_BETA_HEADERS_1M: &str =
@@ -142,7 +141,9 @@ impl AnthropicProvider {
 
         // Trigger background usage fetch so extra_usage is known before first API call
         let _ = tokio::runtime::Handle::try_current().map(|_| {
-            tokio::spawn(async { let _ = crate::usage::get().await; })
+            tokio::spawn(async {
+                let _ = crate::usage::get().await;
+            })
         });
 
         Self {
@@ -274,8 +275,10 @@ impl AnthropicProvider {
                         if dangling.contains(id) {
                             synthetic_results.push(ApiContentBlock::ToolResult {
                                 tool_use_id: id.clone(),
-                                content: ToolResultContent::Text("[Session interrupted before tool execution completed]"
-                                    .to_string()),
+                                content: ToolResultContent::Text(
+                                    "[Session interrupted before tool execution completed]"
+                                        .to_string(),
+                                ),
                                 is_error: true,
                             });
                         }
@@ -426,8 +429,7 @@ impl AnthropicProvider {
                                 let text_block = ToolResultContentBlock::Text {
                                     text: std::mem::take(text),
                                 };
-                                *content =
-                                    ToolResultContent::Blocks(vec![text_block, img_block]);
+                                *content = ToolResultContent::Blocks(vec![text_block, img_block]);
                             }
                             ToolResultContent::Blocks(blocks) => {
                                 blocks.push(img_block);
@@ -526,8 +528,7 @@ impl Provider for AnthropicProvider {
         // Spawn task to handle streaming with retry logic.
         // This includes forced OAuth refresh on auth failures.
         tokio::spawn(async move {
-            run_stream_with_retries(client, token, is_oauth, request, tx, credentials, model)
-                .await;
+            run_stream_with_retries(client, token, is_oauth, request, tx, credentials, model).await;
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))
@@ -610,8 +611,7 @@ impl Provider for AnthropicProvider {
 
         // Spawn task to handle streaming with retry logic
         tokio::spawn(async move {
-            run_stream_with_retries(client, token, is_oauth, request, tx, credentials, model)
-                .await;
+            run_stream_with_retries(client, token, is_oauth, request, tx, credentials, model).await;
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))
@@ -797,16 +797,14 @@ async fn stream_response(
     } else {
         // Direct API keys use x-api-key
         // Include prompt-caching beta header
-        req = req
-            .header("x-api-key", &token)
-            .header(
-                "anthropic-beta",
-                if is_1m_model(model_name) {
-                    "prompt-caching-2024-07-31,context-1m-2025-08-07"
-                } else {
-                    "prompt-caching-2024-07-31"
-                },
-            );
+        req = req.header("x-api-key", &token).header(
+            "anthropic-beta",
+            if is_1m_model(model_name) {
+                "prompt-caching-2024-07-31,context-1m-2025-08-07"
+            } else {
+                "prompt-caching-2024-07-31"
+            },
+        );
     }
 
     let response = req

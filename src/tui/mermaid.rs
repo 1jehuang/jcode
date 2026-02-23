@@ -2345,8 +2345,7 @@ pub fn result_to_content(result: RenderResult, max_width: Option<usize>) -> Merm
             ..
         } => {
             // Check if we have picker/protocol support (or video export mode)
-            if PICKER.get().and_then(|p| *p).is_some()
-                || VIDEO_EXPORT_MODE.load(Ordering::Relaxed)
+            if PICKER.get().and_then(|p| *p).is_some() || VIDEO_EXPORT_MODE.load(Ordering::Relaxed)
             {
                 let max_w = max_width.map(|w| w as u16).unwrap_or(80);
                 let estimated_height = estimate_image_height(width, height, max_w);

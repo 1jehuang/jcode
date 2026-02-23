@@ -26,7 +26,7 @@ pub mod linux {
     pub fn check(pid: u32) -> StdinState {
         // First try /proc/PID/syscall (most accurate - shows exact syscall + fd)
         if let Ok(contents) = std::fs::read_to_string(format!("/proc/{}/syscall", pid)) {
-            // Format: "syscall_nr fd ..." 
+            // Format: "syscall_nr fd ..."
             // read = 0 on x86_64, 63 on aarch64
             // We want: read(0, ...) i.e. syscall read on fd 0 (stdin)
             let parts: Vec<&str> = contents.split_whitespace().collect();
@@ -86,7 +86,9 @@ pub mod linux {
                 if let Ok(name) = entry.file_name().into_string() {
                     if let Ok(child_pid) = name.parse::<u32>() {
                         // Check if this process's parent is our pid
-                        if let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", child_pid)) {
+                        if let Ok(status) =
+                            std::fs::read_to_string(format!("/proc/{}/status", child_pid))
+                        {
                             for line in status.lines() {
                                 if let Some(ppid_str) = line.strip_prefix("PPid:\t") {
                                     if ppid_str.trim().parse::<u32>().ok() == Some(pid) {
@@ -266,7 +268,7 @@ mod windows {
         // For now, use the simpler approach: check if the process has
         // a console handle and its thread is in a wait state via
         // WaitForSingleObject with zero timeout on the process handle
-        
+
         // TODO: implement with windows-sys crate
         // - OpenProcess(PROCESS_QUERY_INFORMATION, pid)
         // - NtQuerySystemInformation for thread states
@@ -310,7 +312,11 @@ mod tests {
         child.kill().ok();
         child.wait().ok();
 
-        assert_eq!(state, StdinState::Reading, "cat should be waiting for stdin");
+        assert_eq!(
+            state,
+            StdinState::Reading,
+            "cat should be waiting for stdin"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -331,7 +337,11 @@ mod tests {
         child.kill().ok();
         child.wait().ok();
 
-        assert_eq!(state, StdinState::NotReading, "sleep should not be reading stdin");
+        assert_eq!(
+            state,
+            StdinState::NotReading,
+            "sleep should not be reading stdin"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -355,7 +365,11 @@ mod tests {
         child.kill().ok();
         child.wait().ok();
 
-        assert_eq!(state, StdinState::Reading, "child cat should be detected via process tree");
+        assert_eq!(
+            state,
+            StdinState::Reading,
+            "child cat should be detected via process tree"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -388,8 +402,16 @@ mod tests {
         // After exit, checking the pid should not report Reading
         let state_after = is_waiting_for_stdin(pid);
 
-        assert_eq!(state_before, StdinState::Reading, "head should be reading before input");
-        assert_ne!(state_after, StdinState::Reading, "head should not be reading after exit");
+        assert_eq!(
+            state_before,
+            StdinState::Reading,
+            "head should be reading before input"
+        );
+        assert_ne!(
+            state_after,
+            StdinState::Reading,
+            "head should not be reading after exit"
+        );
         assert!(status.success(), "head should exit successfully");
     }
 
@@ -434,7 +456,11 @@ mod tests {
 
         // Should be reading first line
         let state1 = linux::check(pid);
-        assert_eq!(state1, StdinState::Reading, "should be waiting for first line");
+        assert_eq!(
+            state1,
+            StdinState::Reading,
+            "should be waiting for first line"
+        );
 
         // Send first line
         if let Some(ref mut stdin) = child.stdin {
@@ -445,7 +471,11 @@ mod tests {
 
         // Should be reading second line
         let state2 = linux::check(pid);
-        assert_eq!(state2, StdinState::Reading, "should be waiting for second line");
+        assert_eq!(
+            state2,
+            StdinState::Reading,
+            "should be waiting for second line"
+        );
 
         // Send second line
         if let Some(ref mut stdin) = child.stdin {

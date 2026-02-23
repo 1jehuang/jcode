@@ -230,26 +230,22 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
     }
 
     // Get latest commit on main branch
-    let url = format!(
-        "https://api.github.com/repos/{}/commits/main",
-        GITHUB_REPO
-    );
+    let url = format!("https://api.github.com/repos/{}/commits/main", GITHUB_REPO);
     let client = reqwest::blocking::Client::builder()
         .timeout(UPDATE_CHECK_TIMEOUT)
         .user_agent("jcode-updater")
         .build()?;
 
-    let response = client.get(&url).send().context("Failed to check main branch")?;
+    let response = client
+        .get(&url)
+        .send()
+        .context("Failed to check main branch")?;
     if !response.status().is_success() {
         anyhow::bail!("GitHub API error checking main: {}", response.status());
     }
 
     let commit: serde_json::Value = response.json().context("Failed to parse commit info")?;
-    let latest_sha = commit["sha"]
-        .as_str()
-        .unwrap_or("")
-        .get(..7)
-        .unwrap_or("");
+    let latest_sha = commit["sha"].as_str().unwrap_or("").get(..7).unwrap_or("");
 
     if latest_sha.is_empty() {
         return Ok(None);
@@ -277,7 +273,10 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
         crate::logging::info("Main channel: cargo found, attempting build from source");
         match build_from_source() {
             Ok(path) => {
-                crate::logging::info(&format!("Main channel: built successfully at {}", path.display()));
+                crate::logging::info(&format!(
+                    "Main channel: built successfully at {}",
+                    path.display()
+                ));
                 // Install the built binary
                 let install_dir = stable_install_dir()?;
                 fs::create_dir_all(&install_dir)?;
@@ -288,7 +287,8 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
                     if let Ok(resolved) = fs::read_link(&current_stable) {
                         metadata.previous_binary = Some(resolved.to_string_lossy().to_string());
                     } else {
-                        let backup = install_dir.join(format!("jcode-backup-{}", std::process::id()));
+                        let backup =
+                            install_dir.join(format!("jcode-backup-{}", std::process::id()));
                         let _ = fs::copy(&current_stable, &backup);
                         metadata.previous_binary = Some(backup.to_string_lossy().to_string());
                     }
@@ -300,7 +300,8 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
                 crate::platform::set_permissions_executable(&dest)?;
 
                 // Atomic symlink swap
-                let temp_symlink = install_dir.join(format!(".jcode-symlink-{}", std::process::id()));
+                let temp_symlink =
+                    install_dir.join(format!(".jcode-symlink-{}", std::process::id()));
                 crate::platform::atomic_symlink_swap(&dest, &current_stable, &temp_symlink)?;
 
                 // Also update the user's binary if it's a symlink or in ~/.local/bin
@@ -348,7 +349,10 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
     // Fallback: use latest stable release if available
     if let Ok(release) = fetch_latest_release_blocking() {
         let asset_name = get_asset_name();
-        let has_asset = release.assets.iter().any(|a| a.name.starts_with(asset_name));
+        let has_asset = release
+            .assets
+            .iter()
+            .any(|a| a.name.starts_with(asset_name));
         if has_asset {
             let release_version = release.tag_name.trim_start_matches('v');
             let current_version = env!("JCODE_VERSION").trim_start_matches('v');
@@ -396,7 +400,10 @@ fn build_from_source() -> Result<PathBuf> {
                 .output()
                 .context("Failed to run git fetch")?;
             if !output.status.success() {
-                anyhow::bail!("git fetch failed: {}", String::from_utf8_lossy(&output.stderr));
+                anyhow::bail!(
+                    "git fetch failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
             let output = std::process::Command::new("git")
                 .args(["reset", "--hard", "origin/main"])
@@ -404,7 +411,10 @@ fn build_from_source() -> Result<PathBuf> {
                 .output()
                 .context("Failed to run git reset")?;
             if !output.status.success() {
-                anyhow::bail!("git reset failed: {}", String::from_utf8_lossy(&output.stderr));
+                anyhow::bail!(
+                    "git reset failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
         }
     } else {
@@ -412,7 +422,9 @@ fn build_from_source() -> Result<PathBuf> {
         crate::logging::info("Main channel: cloning repository...");
         let clone_url = format!("https://github.com/{}.git", GITHUB_REPO);
         let output = std::process::Command::new("git")
-            .args(["clone", "--depth", "1", "--branch", "main", &clone_url, "jcode"])
+            .args([
+                "clone", "--depth", "1", "--branch", "main", &clone_url, "jcode",
+            ])
             .current_dir(&build_dir)
             .output()
             .context("Failed to run git clone")?;

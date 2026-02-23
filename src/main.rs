@@ -12,7 +12,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[cfg(feature = "jemalloc")]
 #[allow(non_upper_case_globals)]
 #[no_mangle]
-pub static malloc_conf: Option<&'static [u8; 50]> = Some(b"dirty_decay_ms:1000,muzzy_decay_ms:1000,narenas:4\0");
+pub static malloc_conf: Option<&'static [u8; 50]> =
+    Some(b"dirty_decay_ms:1000,muzzy_decay_ms:1000,narenas:4\0");
 
 mod agent;
 mod ambient;
@@ -566,9 +567,7 @@ async fn main() -> Result<()> {
                         // Exec into the new binary
                         let args: Vec<String> = std::env::args().skip(1).collect();
                         let err = crate::platform::replace_process(
-                            ProcessCommand::new(&path)
-                                .args(&args)
-                                .arg("--no-update"),
+                            ProcessCommand::new(&path).args(&args).arg("--no-update"),
                         );
                         eprintln!("Failed to exec new binary: {}", err);
                     }
@@ -714,7 +713,18 @@ async fn run_main(mut args: Args) -> Result<()> {
             rows,
             fps,
         }) => {
-            run_replay_command(&session, export, auto_edit, speed, timeline.as_deref(), video.as_deref(), cols, rows, fps).await?;
+            run_replay_command(
+                &session,
+                export,
+                auto_edit,
+                speed,
+                timeline.as_deref(),
+                video.as_deref(),
+                cols,
+                rows,
+                fps,
+            )
+            .await?;
         }
         None => {
             // Auto-detect jcode repo and enable self-dev mode
@@ -775,10 +785,14 @@ async fn run_main(mut args: Args) -> Result<()> {
                     );
                     let has_claude = has_claude.unwrap_or(false);
                     let has_openai = has_openai.unwrap_or(false);
-                    let has_openrouter = provider::openrouter::OpenRouterProvider::has_credentials();
+                    let has_openrouter =
+                        provider::openrouter::OpenRouterProvider::has_credentials();
                     let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
 
-                    if !has_claude && !has_openai && !has_openrouter && !has_api_key
+                    if !has_claude
+                        && !has_openai
+                        && !has_openrouter
+                        && !has_api_key
                         && args.provider == ProviderChoice::Auto
                     {
                         eprintln!("No credentials found. Let's log in!\n");
@@ -835,7 +849,9 @@ async fn run_main(mut args: Args) -> Result<()> {
                     let start = std::time::Instant::now();
                     loop {
                         if start.elapsed() > std::time::Duration::from_secs(10) {
-                            let stderr_output = child.stderr.take()
+                            let stderr_output = child
+                                .stderr
+                                .take()
                                 .and_then(|mut s| {
                                     let mut buf = String::new();
                                     use std::io::Read;
@@ -847,12 +863,17 @@ async fn run_main(mut args: Args) -> Result<()> {
                             if stderr_output.is_empty() {
                                 anyhow::bail!("Server failed to start within 10 seconds. Check logs at ~/.jcode/logs/");
                             } else {
-                                anyhow::bail!("Server failed to start within 10 seconds:\n{}", stderr_output.trim());
+                                anyhow::bail!(
+                                    "Server failed to start within 10 seconds:\n{}",
+                                    stderr_output.trim()
+                                );
                             }
                         }
                         // Check if server process already exited (crashed)
                         if let Some(status) = child.try_wait()? {
-                            let stderr_output = child.stderr.take()
+                            let stderr_output = child
+                                .stderr
+                                .take()
                                 .and_then(|mut s| {
                                     let mut buf = String::new();
                                     use std::io::Read;
@@ -1838,8 +1859,8 @@ async fn debug_list_servers() -> Result<()> {
 
 /// Get server info via debug socket
 async fn get_server_info(debug_socket: &std::path::Path) -> Result<String> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use crate::transport::Stream;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let stream = Stream::connect(debug_socket).await?;
     let (reader, mut writer) = stream.into_split();
@@ -1970,10 +1991,7 @@ fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
             eprintln!("\x1b[1mPaired devices:\x1b[0m\n");
             for device in &registry.devices {
                 let last_seen = &device.last_seen;
-                eprintln!(
-                    "  \x1b[36m{}\x1b[0m  ({})",
-                    device.name, device.id
-                );
+                eprintln!("  \x1b[36m{}\x1b[0m  ({})", device.name, device.id);
                 eprintln!("    Paired: {}  Last seen: {}", device.paired_at, last_seen);
                 if let Some(ref apns) = device.apns_token {
                     eprintln!("    APNs: {}...", &apns[..apns.len().min(16)]);
@@ -1986,7 +2004,9 @@ fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
 
     if let Some(ref target) = revoke {
         let before = registry.devices.len();
-        registry.devices.retain(|d| d.id != *target && d.name != *target);
+        registry
+            .devices
+            .retain(|d| d.id != *target && d.name != *target);
         if registry.devices.len() < before {
             registry.save()?;
             eprintln!("\x1b[32m✓\x1b[0m Revoked device: {}", target);
@@ -2013,14 +2033,21 @@ fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
     eprintln!("  \x1b[1;36m│\x1b[0m                         \x1b[1;36m│\x1b[0m");
     eprintln!("  \x1b[1;36m│\x1b[0m   Pairing code:         \x1b[1;36m│\x1b[0m");
     eprintln!("  \x1b[1;36m│\x1b[0m                         \x1b[1;36m│\x1b[0m");
-    eprintln!("  \x1b[1;36m│\x1b[0m      \x1b[1;37m{} {}\x1b[0m          \x1b[1;36m│\x1b[0m", &code[..3], &code[3..]);
+    eprintln!(
+        "  \x1b[1;36m│\x1b[0m      \x1b[1;37m{} {}\x1b[0m          \x1b[1;36m│\x1b[0m",
+        &code[..3],
+        &code[3..]
+    );
     eprintln!("  \x1b[1;36m│\x1b[0m                         \x1b[1;36m│\x1b[0m");
     eprintln!("  \x1b[1;36m│\x1b[0m   \x1b[2mExpires in 5 minutes\x1b[0m   \x1b[1;36m│\x1b[0m");
     eprintln!("  \x1b[1;36m│\x1b[0m                         \x1b[1;36m│\x1b[0m");
     eprintln!("  \x1b[1;36m└─────────────────────────┘\x1b[0m");
     eprintln!();
     eprintln!("  Enter this code in the jcode iOS app to pair.");
-    eprintln!("  Gateway: \x1b[36m{}:{}\x1b[0m", gw_config.bind_addr, gw_config.port);
+    eprintln!(
+        "  Gateway: \x1b[36m{}:{}\x1b[0m",
+        gw_config.bind_addr, gw_config.port
+    );
     eprintln!();
 
     Ok(())
@@ -2435,7 +2462,13 @@ async fn run_replay_command(
             let date = chrono::Local::now().format("%Y%m%d_%H%M%S");
             let safe_name = session_name
                 .chars()
-                .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .collect::<String>();
             std::path::PathBuf::from(format!("jcode_replay_{}_{}.mp4", safe_name, date))
         } else {
@@ -2443,7 +2476,9 @@ async fn run_replay_command(
         };
         eprintln!(
             "{} Exporting session: {} ({} events)",
-            icon, session_name, timeline.len()
+            icon,
+            session_name,
+            timeline.len()
         );
         video_export::export_video(&session, &timeline, speed, &output_path, cols, rows, fps)
             .await?;
@@ -2701,11 +2736,8 @@ fn run_auto_update() -> Result<()> {
     let exe = std::env::current_exe()?;
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    let err = crate::platform::replace_process(
-        ProcessCommand::new(&exe)
-            .args(&args)
-            .arg("--no-update"),
-    );
+    let err =
+        crate::platform::replace_process(ProcessCommand::new(&exe).args(&args).arg("--no-update"));
 
     Err(anyhow::anyhow!(
         "Failed to exec new binary {:?}: {}",
@@ -2889,8 +2921,8 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
     };
 
     // Use best available binary: prefer release-fast (10s incremental) over release (5min)
-    let target_binary = build::find_dev_binary(&repo_dir)
-        .unwrap_or_else(|| repo_dir.join("target/release/jcode"));
+    let target_binary =
+        build::find_dev_binary(&repo_dir).unwrap_or_else(|| repo_dir.join("target/release/jcode"));
 
     // Only build if explicitly requested with --build flag
     if should_build {

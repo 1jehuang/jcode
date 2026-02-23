@@ -35,7 +35,11 @@ const RETRY_BASE_DELAY_MS: u64 = 1000;
 const TRANSPORT_ERROR_DELAY_MS: u64 = 2000;
 
 /// Available Claude models
-const AVAILABLE_MODELS: &[&str] = &["claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-5-20251101"];
+const AVAILABLE_MODELS: &[&str] = &[
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-opus-4-5-20251101",
+];
 
 /// Native tools that jcode handles locally (not Claude Code built-ins)
 const NATIVE_TOOL_NAMES: &[&str] = &[
