@@ -2575,9 +2575,11 @@ impl Agent {
                     StreamEvent::TextDelta(text) => {
                         text_content.push_str(&text);
                         if !text_wrapped_detected {
-                            if text_content.contains("to=functions.") {
+                            if let Some(marker_idx) = text_content
+                                .find("to=functions.")
+                                .or_else(|| text_content.find("+#+#"))
+                            {
                                 text_wrapped_detected = true;
-                                let marker_idx = text_content.find("to=functions.").unwrap();
                                 let clean_prefix =
                                     text_content[..marker_idx].trim_end().to_string();
                                 let _ =
@@ -2782,6 +2784,9 @@ impl Agent {
                             name: tc.name.clone(),
                         });
                         tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
+                        let _ = event_tx.send(ServerEvent::ToolInput {
+                            delta: tc.input.to_string(),
+                        });
                         let _ = event_tx.send(ServerEvent::ToolExec {
                             id: tc.id.clone(),
                             name: tc.name.clone(),
@@ -3218,9 +3223,11 @@ impl Agent {
                     StreamEvent::TextDelta(text) => {
                         text_content.push_str(&text);
                         if !text_wrapped_detected {
-                            if text_content.contains("to=functions.") {
+                            if let Some(marker_idx) = text_content
+                                .find("to=functions.")
+                                .or_else(|| text_content.find("+#+#"))
+                            {
                                 text_wrapped_detected = true;
-                                let marker_idx = text_content.find("to=functions.").unwrap();
                                 let clean_prefix =
                                     text_content[..marker_idx].trim_end().to_string();
                                 let _ =
@@ -3431,6 +3438,9 @@ impl Agent {
                             name: tc.name.clone(),
                         });
                         tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
+                        let _ = event_tx.send(ServerEvent::ToolInput {
+                            delta: tc.input.to_string(),
+                        });
                         let _ = event_tx.send(ServerEvent::ToolExec {
                             id: tc.id.clone(),
                             name: tc.name.clone(),
