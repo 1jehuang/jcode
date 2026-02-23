@@ -560,6 +560,8 @@ pub struct App {
     remote_server_has_update: Option<bool>,
     // Remote server short name (e.g., "running", "blazing")
     remote_server_short_name: Option<String>,
+    // Remote server icon (e.g., "🔥", "🌫️")
+    remote_server_icon: Option<String>,
     // Current message request ID (for remote mode - to match Done events)
     current_message_id: Option<u64>,
     // Whether running in remote mode
@@ -866,6 +868,7 @@ impl App {
             remote_server_version: None,
             remote_server_has_update: None,
             remote_server_short_name: None,
+            remote_server_icon: None,
             current_message_id: None,
             is_remote: false,
             is_replay: false,
@@ -1024,19 +1027,28 @@ impl App {
         let session_name = crate::id::extract_session_name(session_id)
             .map(|s| s.to_string())
             .unwrap_or_else(|| session_id.to_string());
-        let icon = crate::id::session_icon(&session_name);
+        let session_icon = crate::id::session_icon(&session_name);
         let is_canary = if self.is_remote {
             self.remote_is_canary.unwrap_or(false)
         } else {
             self.session.is_canary
         };
         let suffix = if is_canary { " [self-dev]" } else { "" };
-        let prefix = self.remote_server_short_name.as_deref().unwrap_or("jcode");
+        let server_name = self.remote_server_short_name.as_deref().unwrap_or("jcode");
+        let server_icon = self.remote_server_icon.as_deref().unwrap_or("");
+        let icons = if server_icon.is_empty() {
+            session_icon.to_string()
+        } else {
+            format!("{}{}", server_icon, session_icon)
+        };
         let _ = crossterm::execute!(
             std::io::stdout(),
             crossterm::terminal::SetTitle(format!(
                 "{} {} {}{}",
-                icon, prefix, session_name, suffix
+                super::ui::capitalize(server_name),
+                super::ui::capitalize(&session_name),
+                icons,
+                suffix
             ))
         );
     }
@@ -4649,6 +4661,11 @@ impl App {
                 self.last_stream_activity = Some(Instant::now());
                 false
             }
+            ServerEvent::TextReplace { text } => {
+                self.stream_buffer.flush();
+                self.streaming_text = text;
+                false
+            }
             ServerEvent::ToolStart { id, name } => {
                 if self.streaming_tps_start.is_none() {
                     self.streaming_tps_start = Some(Instant::now());
@@ -4863,14 +4880,7 @@ impl App {
                 false
             }
             ServerEvent::Reloading { .. } => {
-                self.push_display_message(DisplayMessage {
-                    role: "system".to_string(),
-                    content: "🔄 Server reload initiated...".to_string(),
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: Some("Reload".to_string()),
-                    tool_data: None,
-                });
+                self.append_reload_message("🔄 Server reload initiated...");
                 false
             }
             ServerEvent::ReloadProgress {
@@ -4879,14 +4889,13 @@ impl App {
                 success,
                 output,
             } => {
-                // Format the progress message with optional output
-                let status_icon = match success {
-                    Some(true) => "✓",
-                    Some(false) => "✗",
-                    None => "→",
+                // Coalesce progress lines into one reload message to avoid extra spacing.
+                let mut content = if let Some(ok) = success {
+                    let status_icon = if ok { "✓" } else { "✗" };
+                    format!("[{}] {} {}", step, status_icon, message)
+                } else {
+                    format!("[{}] {}", step, message)
                 };
-
-                let mut content = format!("[{}] {}", step, message);
 
                 if let Some(out) = output {
                     if !out.is_empty() {
@@ -4896,14 +4905,7 @@ impl App {
                     }
                 }
 
-                self.push_display_message(DisplayMessage {
-                    role: "system".to_string(),
-                    content,
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: Some(format!("Reload: {} {}", status_icon, step)),
-                    tool_data: None,
-                });
+                self.append_reload_message(&content);
 
                 // Store key reload info for agent notification after reconnect
                 if step == "verify" || step == "git" {
@@ -4928,6 +4930,7 @@ impl App {
                 is_canary,
                 server_version,
                 server_name,
+                server_icon,
                 server_has_update,
                 was_interrupted,
                 ..
@@ -4989,6 +4992,9 @@ impl App {
                 self.remote_server_version = server_version;
                 self.remote_server_has_update = server_has_update;
                 self.remote_server_short_name = server_name;
+                if let Some(icon) = server_icon {
+                    self.remote_server_icon = Some(icon);
+                }
 
                 // Update terminal title (always, since server name may have arrived)
                 self.update_terminal_title();
@@ -5578,9 +5584,7 @@ impl App {
 
                         // Reload server first (if needed), then client
                         if server_needs_reload {
-                            self.push_display_message(DisplayMessage::system(
-                                "Reloading server with newer binary...".to_string(),
-                            ));
+                            self.append_reload_message("Reloading server with newer binary...");
                             remote.reload().await?;
                         }
 
@@ -5614,9 +5618,7 @@ impl App {
 
                     // Handle /server-reload - force reload SERVER (keeps client running)
                     if trimmed == "/server-reload" {
-                        self.push_display_message(DisplayMessage::system(
-                            "Reloading server...".to_string(),
-                        ));
+                        self.append_reload_message("Reloading server...");
                         remote.reload().await?;
                         return Ok(());
                     }
@@ -9121,7 +9123,7 @@ impl App {
                     routes.push(crate::provider::ModelRoute {
                         model: model.clone(),
                         provider: "OpenAI".to_string(),
-                        api_method: "api-key".to_string(),
+                        api_method: "oauth".to_string(),
                         available,
                         detail,
                     });
@@ -11511,6 +11513,34 @@ impl App {
         self.bump_display_messages_version();
     }
 
+    fn append_reload_message(&mut self, line: &str) {
+        if let Some(idx) = self
+            .display_messages
+            .iter()
+            .rposition(Self::is_reload_message)
+        {
+            let msg = &mut self.display_messages[idx];
+            if !msg.content.is_empty() {
+                msg.content.push('\n');
+            }
+            msg.content.push_str(line);
+            msg.title = Some("Reload".to_string());
+            self.bump_display_messages_version();
+        } else {
+            self.push_display_message(
+                DisplayMessage::system(line.to_string()).with_title("Reload"),
+            );
+        }
+    }
+
+    fn is_reload_message(message: &DisplayMessage) -> bool {
+        message.role == "system"
+            && message
+                .title
+                .as_deref()
+                .is_some_and(|title| title == "Reload" || title.starts_with("Reload: "))
+    }
+
     fn clear_display_messages(&mut self) {
         if !self.display_messages.is_empty() {
             self.display_messages.clear();
@@ -12438,6 +12468,10 @@ impl super::TuiState for App {
 
     fn server_display_name(&self) -> Option<String> {
         self.remote_server_short_name.clone()
+    }
+
+    fn server_display_icon(&self) -> Option<String> {
+        self.remote_server_icon.clone()
     }
 
     fn server_sessions(&self) -> Vec<String> {
@@ -14381,6 +14415,46 @@ mod tests {
         if created {
             let _ = std::fs::remove_file(&exe);
         }
+    }
+
+    #[test]
+    fn test_reload_progress_coalesces_into_single_message() {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Reloading { new_socket: None },
+            &mut remote,
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ReloadProgress {
+                step: "init".to_string(),
+                message: "🔄 Starting hot-reload...".to_string(),
+                success: None,
+                output: None,
+            },
+            &mut remote,
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ReloadProgress {
+                step: "verify".to_string(),
+                message: "Binary verified".to_string(),
+                success: Some(true),
+                output: Some("size=68.4MB".to_string()),
+            },
+            &mut remote,
+        );
+
+        assert_eq!(app.display_messages().len(), 1);
+        let reload_msg = &app.display_messages()[0];
+        assert_eq!(reload_msg.role, "system");
+        assert_eq!(reload_msg.title.as_deref(), Some("Reload"));
+        assert_eq!(
+            reload_msg.content,
+            "🔄 Server reload initiated...\n[init] 🔄 Starting hot-reload...\n[verify] ✓ Binary verified\n```\nsize=68.4MB\n```"
+        );
     }
 
     #[test]

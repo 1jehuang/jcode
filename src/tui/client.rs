@@ -139,6 +139,34 @@ impl ClientApp {
         self.bump_display_messages_version();
     }
 
+    fn append_reload_message(&mut self, line: &str) {
+        if let Some(idx) = self
+            .display_messages
+            .iter()
+            .rposition(Self::is_reload_message)
+        {
+            let msg = &mut self.display_messages[idx];
+            if !msg.content.is_empty() {
+                msg.content.push('\n');
+            }
+            msg.content.push_str(line);
+            msg.title = Some("Reload".to_string());
+            self.bump_display_messages_version();
+        } else {
+            self.push_display_message(
+                DisplayMessage::system(line.to_string()).with_title("Reload"),
+            );
+        }
+    }
+
+    fn is_reload_message(message: &DisplayMessage) -> bool {
+        message.role == "system"
+            && message
+                .title
+                .as_deref()
+                .is_some_and(|title| title == "Reload" || title.starts_with("Reload: "))
+    }
+
     fn clear_display_messages(&mut self) {
         if !self.display_messages.is_empty() {
             self.display_messages.clear();
@@ -633,6 +661,9 @@ impl ClientApp {
                 }
                 self.streaming_text.push_str(&text);
             }
+            ServerEvent::TextReplace { text } => {
+                self.streaming_text = text;
+            }
             ServerEvent::ToolStart { id, name } => {
                 if self.streaming_tps_start.is_none() {
                     self.streaming_tps_start = Some(Instant::now());
@@ -768,14 +799,7 @@ impl ClientApp {
                 self.session_id = Some(session_id);
             }
             ServerEvent::Reloading { .. } => {
-                self.push_display_message(DisplayMessage {
-                    role: "system".to_string(),
-                    content: "🔄 Server reload initiated...".to_string(),
-                    tool_calls: Vec::new(),
-                    duration_secs: None,
-                    title: Some("Reload".to_string()),
-                    tool_data: None,
-                });
+                self.append_reload_message("🔄 Server reload initiated...");
             }
             ServerEvent::ReloadProgress {
                 step,
@@ -783,14 +807,13 @@ impl ClientApp {
                 success,
                 output,
             } => {
-                // Format the progress message with optional output
-                let status_icon = match success {
-                    Some(true) => "✓",
-                    Some(false) => "✗",
-                    None => "→",
+                // Coalesce progress lines into one reload message to avoid extra spacing.
+                let mut content = if let Some(ok) = success {
+                    let status_icon = if ok { "✓" } else { "✗" };
+                    format!("[{}] {} {}", step, status_icon, message)
+                } else {
+                    format!("[{}] {}", step, message)
                 };
-
-                let mut content = format!("[{}] {}", step, message);
 
                 if let Some(out) = output {
                     if !out.is_empty() {
@@ -800,14 +823,7 @@ impl ClientApp {
                     }
                 }
 
-                self.push_display_message(DisplayMessage {
-                    role: "system".to_string(),
-                    content,
-                    tool_calls: Vec::new(),
-                    duration_secs: None,
-                    title: Some(format!("Reload: {} {}", status_icon, step)),
-                    tool_data: None,
-                });
+                self.append_reload_message(&content);
 
                 // Store key reload info for agent notification after reconnect
                 // Store info from verify and git steps
@@ -1291,6 +1307,10 @@ impl TuiState for ClientApp {
         None
     }
 
+    fn server_display_icon(&self) -> Option<String> {
+        None
+    }
+
     fn server_sessions(&self) -> Vec<String> {
         Vec::new() // Deprecated client doesn't track server sessions
     }
@@ -1550,5 +1570,39 @@ impl TuiState for ClientApp {
         std::env::current_dir()
             .ok()
             .map(|p| p.display().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_reload_progress_coalesces_into_single_message() {
+        let mut app = ClientApp::new();
+
+        app.handle_server_event(crate::protocol::ServerEvent::Reloading { new_socket: None });
+        app.handle_server_event(crate::protocol::ServerEvent::ReloadProgress {
+            step: "init".to_string(),
+            message: "🔄 Starting hot-reload...".to_string(),
+            success: None,
+            output: None,
+        });
+        app.handle_server_event(crate::protocol::ServerEvent::ReloadProgress {
+            step: "verify".to_string(),
+            message: "Binary verified".to_string(),
+            success: Some(true),
+            output: Some("size=68.4MB".to_string()),
+        });
+
+        assert_eq!(app.display_messages.len(), 1);
+        let reload_msg = &app.display_messages[0];
+        assert_eq!(reload_msg.role, "system");
+        assert_eq!(reload_msg.title.as_deref(), Some("Reload"));
+        assert_eq!(
+            reload_msg.content,
+            "🔄 Server reload initiated...\n[init] 🔄 Starting hot-reload...\n[verify] ✓ Binary verified\n```\nsize=68.4MB\n```"
+        );
     }
 }
