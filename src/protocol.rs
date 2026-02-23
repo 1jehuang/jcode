@@ -328,6 +328,12 @@ pub enum ServerEvent {
     #[serde(rename = "text_delta")]
     TextDelta { text: String },
 
+    /// Replace the current turn's streamed text content
+    /// Used when text-wrapped tool calls are recovered: the garbled text
+    /// shown during streaming is replaced with the clean prefix text.
+    #[serde(rename = "text_replace")]
+    TextReplace { text: String },
+
     /// Tool call started
     #[serde(rename = "tool_start")]
     ToolStart { id: String, name: String },
@@ -857,7 +863,8 @@ mod tests {
 
     #[test]
     fn test_stdin_response_deserialize_from_json() {
-        let json = r#"{"type":"stdin_response","id":5,"request_id":"req-42","input":"hello world"}"#;
+        let json =
+            r#"{"type":"stdin_response","id":5,"request_id":"req-42","input":"hello world"}"#;
         let decoded: Request = serde_json::from_str(json).unwrap();
         assert_eq!(decoded.id(), 5);
         match decoded {

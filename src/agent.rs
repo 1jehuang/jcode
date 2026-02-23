@@ -2753,7 +2753,27 @@ impl Agent {
                 cache_creation_input_tokens: usage_cache_creation,
             };
 
+            let had_tool_calls_before = !tool_calls.is_empty();
             self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
+
+            if !had_tool_calls_before && !tool_calls.is_empty() {
+                if let Some(tc) = tool_calls.last() {
+                    if tc.id.starts_with("fallback_text_call_") {
+                        let _ = event_tx.send(ServerEvent::TextReplace {
+                            text: text_content.clone(),
+                        });
+                        let _ = event_tx.send(ServerEvent::ToolStart {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                        });
+                        tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
+                        let _ = event_tx.send(ServerEvent::ToolExec {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                        });
+                    }
+                }
+            }
 
             // Add assistant message to history
             let mut content_blocks = Vec::new();
@@ -3369,7 +3389,27 @@ impl Agent {
                 cache_creation_input_tokens: usage_cache_creation,
             };
 
+            let had_tool_calls_before = !tool_calls.is_empty();
             self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
+
+            if !had_tool_calls_before && !tool_calls.is_empty() {
+                if let Some(tc) = tool_calls.last() {
+                    if tc.id.starts_with("fallback_text_call_") {
+                        let _ = event_tx.send(ServerEvent::TextReplace {
+                            text: text_content.clone(),
+                        });
+                        let _ = event_tx.send(ServerEvent::ToolStart {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                        });
+                        tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
+                        let _ = event_tx.send(ServerEvent::ToolExec {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                        });
+                    }
+                }
+            }
 
             // Add assistant message to history
             let mut content_blocks = Vec::new();
