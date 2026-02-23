@@ -24,6 +24,10 @@ pub mod linux {
     use super::*;
 
     pub fn check(pid: u32) -> StdinState {
+        check_inner(pid, false)
+    }
+
+    fn check_inner(pid: u32, strict: bool) -> StdinState {
         // First try /proc/PID/syscall (most accurate - shows exact syscall + fd)
         if let Ok(contents) = std::fs::read_to_string(format!("/proc/{}/syscall", pid)) {
             // Format: "syscall_nr fd ..."
@@ -44,24 +48,33 @@ pub mod linux {
         }
 
         // Fallback: /proc/PID/wchan (no special permissions needed)
-        if let Ok(wchan) = std::fs::read_to_string(format!("/proc/{}/wchan", pid)) {
-            let wchan = wchan.trim();
-            // Common wchan values when blocked on terminal/pipe read
-            if wchan == "n_tty_read"
-                || wchan == "wait_woken"
-                || wchan == "pipe_read"
-                || wchan == "unix_stream_read_generic"
-            {
-                // wchan tells us it's reading, but not which fd
-                // Check if stdin (fd 0) points to a pipe or pty
-                if stdin_is_pipe_or_pty(pid) {
-                    return StdinState::Reading;
+        // In strict mode (child processes), skip this fallback since wchan
+        // can't distinguish which fd is being read - a process blocking on
+        // a stdout/stderr pipe would false-positive if fd 0 is also a pipe.
+        if !strict {
+            if let Ok(wchan) = std::fs::read_to_string(format!("/proc/{}/wchan", pid)) {
+                let wchan = wchan.trim();
+                // Common wchan values when blocked on terminal/pipe read
+                if wchan == "n_tty_read"
+                    || wchan == "wait_woken"
+                    || wchan == "pipe_read"
+                    || wchan == "unix_stream_read_generic"
+                {
+                    // wchan tells us it's reading, but not which fd
+                    // Check if stdin (fd 0) points to a pipe or pty
+                    if stdin_is_pipe_or_pty(pid) {
+                        return StdinState::Reading;
+                    }
                 }
+                return StdinState::NotReading;
             }
-            return StdinState::NotReading;
         }
 
-        StdinState::Unknown
+        if strict {
+            StdinState::NotReading
+        } else {
+            StdinState::Unknown
+        }
     }
 
     fn stdin_is_pipe_or_pty(pid: u32) -> bool {
@@ -80,6 +93,12 @@ pub mod linux {
             return result;
         }
 
+        // Get the parent's stdin fd link target so we can verify children
+        // share the same pipe (not just any pipe on fd 0)
+        let parent_stdin_link = std::fs::read_link(format!("/proc/{}/fd/0", pid))
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
+
         // Check child processes
         if let Ok(entries) = std::fs::read_dir("/proc") {
             for entry in entries.flatten() {
@@ -92,7 +111,21 @@ pub mod linux {
                             for line in status.lines() {
                                 if let Some(ppid_str) = line.strip_prefix("PPid:\t") {
                                     if ppid_str.trim().parse::<u32>().ok() == Some(pid) {
-                                        let child_result = check(child_pid);
+                                        // Verify child's fd 0 points to the same pipe as parent
+                                        if let Some(ref parent_link) = parent_stdin_link {
+                                            let child_link = std::fs::read_link(format!(
+                                                "/proc/{}/fd/0",
+                                                child_pid
+                                            ))
+                                            .ok()
+                                            .map(|p| p.to_string_lossy().to_string());
+                                            if child_link.as_deref() != Some(parent_link) {
+                                                continue;
+                                            }
+                                        }
+                                        // Use strict mode: only trust /proc/PID/syscall,
+                                        // not the wchan fallback which can't tell which fd
+                                        let child_result = check_inner(child_pid, true);
                                         if child_result == StdinState::Reading {
                                             return StdinState::Reading;
                                         }

@@ -5238,9 +5238,9 @@ impl App {
                 ..
             } => {
                 let prompt_display = if prompt.is_empty() {
-                    "Command is waiting for input".to_string()
+                    "Command is waiting for input (type to respond, /commands still work)".to_string()
                 } else {
-                    prompt.clone()
+                    format!("{} (/commands still work)", prompt)
                 };
                 self.set_status_notice(format!("⌨ {}", prompt_display));
                 self.pending_stdin_request = Some((request_id, prompt, is_password));
@@ -6596,14 +6596,16 @@ impl App {
             return;
         }
 
-        if let Some((request_id, _prompt, _is_password)) = self.pending_stdin_request.take() {
-            self.push_display_message(DisplayMessage::system(format!("stdin> {}", input)));
-            self.stdin_response_pending = Some((request_id, input));
-            return;
-        }
-
-        // Check for built-in commands
         let trimmed = input.trim();
+        let is_slash_command = trimmed.starts_with('/') && trimmed.len() > 1;
+
+        if !is_slash_command {
+            if let Some((request_id, _prompt, _is_password)) = self.pending_stdin_request.take() {
+                self.push_display_message(DisplayMessage::system(format!("stdin> {}", input)));
+                self.stdin_response_pending = Some((request_id, input));
+                return;
+            }
+        }
         if let Some(topic) = trimmed
             .strip_prefix("/help ")
             .or_else(|| trimmed.strip_prefix("/? "))
