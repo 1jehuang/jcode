@@ -411,7 +411,8 @@ pub fn run_setup_hotkey() -> Result<()> {
 /// Main entry point: check if we should show setup hints.
 ///
 /// Called early in startup, before the TUI is initialized.
-/// Only runs on Windows. Shows at most one nudge per launch.
+/// Only runs on Windows. On every 3rd launch, it can show both nudges
+/// sequentially (hotkey first, then WezTerm).
 /// Returns quickly if not on Windows or if it's not time to nudge.
 pub fn maybe_show_setup_hints() {
     if !cfg!(windows) {
@@ -442,19 +443,18 @@ pub fn maybe_show_setup_hints() {
     let mut did_setup_hotkey = false;
     let mut did_install_wezterm = false;
 
+    // Show hotkey nudge first (if still relevant).
     if !state.hotkey_configured && !state.hotkey_dismissed {
         did_setup_hotkey = nudge_hotkey(&mut state);
     }
 
-    if did_setup_hotkey && !state.wezterm_configured && !state.wezterm_dismissed && !already_using_wezterm {
+    // Then show WezTerm nudge in the same launch (if still relevant).
+    if !state.wezterm_configured && !state.wezterm_dismissed && !already_using_wezterm {
         did_install_wezterm = nudge_wezterm(&mut state);
-    } else if !did_setup_hotkey && !state.wezterm_configured && !state.wezterm_dismissed && !already_using_wezterm {
-        if state.hotkey_configured || state.hotkey_dismissed {
-            did_install_wezterm = nudge_wezterm(&mut state);
-        }
     }
 
-    if did_setup_hotkey {
+    // End-of-setup nudge to validate Alt+; if we created or updated the hotkey path.
+    if did_setup_hotkey || (did_install_wezterm && state.hotkey_configured) {
         prompt_try_it_out(did_install_wezterm);
     }
 }
