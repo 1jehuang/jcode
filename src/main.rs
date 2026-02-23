@@ -735,8 +735,9 @@ async fn run_main(mut args: Args) -> Result<()> {
             .await?;
         }
         None => {
-            // Show Windows setup hints (hotkey, WezTerm) every 3rd launch
-            setup_hints::maybe_show_setup_hints();
+            // Show platform setup hints every 3rd launch and optionally
+            // return a startup message to auto-send in the next TUI session.
+            let startup_message = setup_hints::maybe_show_setup_hints();
 
             // Auto-detect jcode repo and enable self-dev mode
             let cwd = std::env::current_dir()?;
@@ -761,7 +762,14 @@ async fn run_main(mut args: Args) -> Result<()> {
                 eprintln!("\x1b[33m   The default server/client mode now handles all use cases including self-dev.\x1b[0m\n");
                 let (provider, registry) =
                     init_provider_and_registry(&args.provider, args.model.as_deref()).await?;
-                run_tui(provider, registry, args.resume, args.debug_socket).await?;
+                run_tui(
+                    provider,
+                    registry,
+                    args.resume,
+                    args.debug_socket,
+                    startup_message,
+                )
+                .await?;
             } else {
                 // Default: TUI client mode - start server if needed
                 let server_running = if server::socket_path().exists() {
@@ -918,7 +926,7 @@ async fn run_main(mut args: Args) -> Result<()> {
                 }
 
                 eprintln!("Connecting to server...");
-                run_tui_client(args.resume).await?;
+                run_tui_client(args.resume, startup_message).await?;
             }
         }
     }
@@ -1069,6 +1077,7 @@ async fn run_tui(
     registry: tool::Registry,
     resume_session: Option<String>,
     debug_socket: bool,
+    startup_message: Option<String>,
 ) -> Result<()> {
     let terminal = init_tui_terminal()?;
     // Initialize mermaid image picker (fast default, optional probe via env)
@@ -1099,6 +1108,8 @@ async fn run_tui(
     // Restore session if resuming
     if let Some(ref session_id) = resume_session {
         app.restore_session(session_id);
+    } else if let Some(msg) = startup_message {
+        app.queue_startup_message(msg);
     }
 
     // Set current session for panic recovery
@@ -2443,7 +2454,7 @@ async fn run_client() -> Result<()> {
 }
 
 /// Run TUI client connected to server
-async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
+async fn run_tui_client(resume_session: Option<String>, startup_message: Option<String>) -> Result<()> {
     let terminal = init_tui_terminal()?;
     // Initialize mermaid image picker (fast default, optional probe via env)
     crate::tui::mermaid::init_picker();
@@ -2474,7 +2485,12 @@ async fn run_tui_client(resume_session: Option<String>) -> Result<()> {
     }
 
     // Use App in remote mode - same UI, connects to server
-    let app = tui::App::new_for_remote(resume_session).await;
+    let mut app = tui::App::new_for_remote(resume_session.clone()).await;
+    if resume_session.is_none() {
+        if let Some(msg) = startup_message {
+            app.queue_startup_message(msg);
+        }
+    }
     let result = app.run_remote(terminal).await;
 
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);

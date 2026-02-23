@@ -1,8 +1,7 @@
-//! Windows setup hints: hotkey registration and WezTerm suggestion.
+//! Platform setup hints shown on startup.
 //!
-//! On Windows, every 3rd launch, jcode nudges the user to:
-//! 1. Set up Alt+; as a global hotkey to launch jcode
-//! 2. Install WezTerm for a better terminal experience (inline images, graphics)
+//! - Windows: suggest Alt+; hotkey setup and WezTerm install.
+//! - macOS: detect suboptimal terminal and offer guided Ghostty setup via jcode.
 //!
 //! Each nudge can be dismissed permanently with "Don't ask again".
 //! State is persisted in `~/.jcode/setup_hints.json`.
@@ -20,6 +19,8 @@ pub struct SetupHintsState {
     pub hotkey_dismissed: bool,
     pub wezterm_configured: bool,
     pub wezterm_dismissed: bool,
+    pub mac_ghostty_guided: bool,
+    pub mac_ghostty_dismissed: bool,
 }
 
 impl SetupHintsState {
@@ -38,6 +39,96 @@ impl SetupHintsState {
         let path = Self::path()?;
         storage::write_json(&path, self)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MacTerminalKind {
+    Ghostty,
+    Iterm2,
+    AppleTerminal,
+    WezTerm,
+    Warp,
+    Alacritty,
+    Vscode,
+    Unknown,
+}
+
+impl MacTerminalKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ghostty => "Ghostty",
+            Self::Iterm2 => "iTerm2",
+            Self::AppleTerminal => "Terminal.app",
+            Self::WezTerm => "WezTerm",
+            Self::Warp => "Warp",
+            Self::Alacritty => "Alacritty",
+            Self::Vscode => "VS Code terminal",
+            Self::Unknown => "your current terminal",
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn detect_macos_terminal() -> MacTerminalKind {
+    let term_program = std::env::var("TERM_PROGRAM")
+        .unwrap_or_default()
+        .to_lowercase();
+    let term = std::env::var("TERM").unwrap_or_default().to_lowercase();
+
+    if std::env::var("GHOSTTY_RESOURCES_DIR").is_ok()
+        || std::env::var("GHOSTTY_BIN_DIR").is_ok()
+        || term_program == "ghostty"
+        || term.contains("ghostty")
+    {
+        return MacTerminalKind::Ghostty;
+    }
+
+    match term_program.as_str() {
+        "iterm.app" => MacTerminalKind::Iterm2,
+        "apple_terminal" => MacTerminalKind::AppleTerminal,
+        "wezterm" => MacTerminalKind::WezTerm,
+        "vscode" => MacTerminalKind::Vscode,
+        _ => {
+            if term.contains("alacritty") {
+                MacTerminalKind::Alacritty
+            } else if term.contains("warp") {
+                MacTerminalKind::Warp
+            } else {
+                MacTerminalKind::Unknown
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn detect_macos_terminal() -> MacTerminalKind {
+    MacTerminalKind::Unknown
+}
+
+#[cfg(target_os = "macos")]
+fn is_ghostty_installed() -> bool {
+    if std::path::Path::new("/Applications/Ghostty.app").exists() {
+        return true;
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        if home.join("Applications/Ghostty.app").exists() {
+            return true;
+        }
+    }
+
+    std::process::Command::new("which")
+        .arg("ghostty")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_ghostty_installed() -> bool {
+    false
 }
 
 /// Detect which terminal the user is currently running in (Windows).
@@ -321,6 +412,61 @@ fn prompt_try_it_out(installed_wezterm: bool) {
     std::thread::sleep(std::time::Duration::from_secs(3));
 }
 
+fn macos_guided_ghostty_message(current_terminal: MacTerminalKind) -> String {
+    format!(
+        "I want to upgrade my macOS terminal setup for jcode. Please guide me step-by-step, wait for confirmation between steps, and keep each step concise.\n\nCurrent terminal: {}\nGoal: install Ghostty and use it for jcode.\n\nPlease help me with:\n1) Detecting if Homebrew is installed (and installing it if missing)\n2) Installing Ghostty\n3) Launching Ghostty and setting it as my preferred terminal for jcode\n4) Optional: adding a macOS keyboard shortcut/launcher flow for jcode\n5) Verifying jcode runs in Ghostty and that inline images/graphics work\n\nAssume I am not an expert; provide exact commands and where to click in macOS settings when needed.",
+        current_terminal.label()
+    )
+}
+
+fn nudge_macos_ghostty(state: &mut SetupHintsState) -> Option<String> {
+    let terminal = detect_macos_terminal();
+    let using_ghostty = terminal == MacTerminalKind::Ghostty;
+    let ghostty_installed = is_ghostty_installed();
+
+    if using_ghostty {
+        state.mac_ghostty_guided = true;
+        state.mac_ghostty_dismissed = true;
+        let _ = state.save();
+        return None;
+    }
+
+    eprintln!("\x1b[36m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
+    eprintln!("\x1b[36m│\x1b[0m \x1b[1m💡 Better macOS terminal for jcode: Ghostty\x1b[0m                \x1b[36m│\x1b[0m");
+    eprintln!("\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m");
+    eprintln!(
+        "\x1b[36m│\x1b[0m    Current terminal: {:<37} \x1b[36m│\x1b[0m",
+        format!("{}.", terminal.label())
+    );
+    if ghostty_installed {
+        eprintln!("\x1b[36m│\x1b[0m    Ghostty is installed, but you are not using it now.      \x1b[36m│\x1b[0m");
+    } else {
+        eprintln!("\x1b[36m│\x1b[0m    Ghostty offers fast rendering and great jcode UX.         \x1b[36m│\x1b[0m");
+    }
+    eprintln!("\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m");
+    eprintln!("\x1b[36m│\x1b[0m    Let jcode guide you through setup right now?             \x1b[36m│\x1b[0m");
+    eprintln!("\x1b[36m│\x1b[0m    \x1b[32m[y]\x1b[0m Yes      \x1b[90m[n]\x1b[0m Not now      \x1b[90m[d]\x1b[0m Don't ask again    \x1b[36m│\x1b[0m");
+    eprintln!("\x1b[36m└─────────────────────────────────────────────────────────────┘\x1b[0m");
+    eprint!("\x1b[36m  >\x1b[0m ");
+    let _ = io::stderr().flush();
+
+    let choice = read_choice();
+
+    match choice.as_str() {
+        "y" | "yes" => {
+            state.mac_ghostty_guided = true;
+            let _ = state.save();
+            Some(macos_guided_ghostty_message(terminal))
+        }
+        "d" | "dont" => {
+            state.mac_ghostty_dismissed = true;
+            let _ = state.save();
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Manual `jcode setup-hotkey` command.
 ///
 /// Runs the full interactive setup flow regardless of launch count.
@@ -411,16 +557,18 @@ pub fn run_setup_hotkey() -> Result<()> {
 /// Main entry point: check if we should show setup hints.
 ///
 /// Called early in startup, before the TUI is initialized.
-/// Only runs on Windows. On every 3rd launch, it can show both nudges
-/// sequentially (hotkey first, then WezTerm).
-/// Returns quickly if not on Windows or if it's not time to nudge.
-pub fn maybe_show_setup_hints() {
-    if !cfg!(windows) {
-        return;
+/// Returns an optional startup user message to auto-send in jcode.
+///
+/// - Windows: On every 3rd launch, can show hotkey + WezTerm nudges.
+/// - macOS: On every 3rd launch, can suggest Ghostty and optionally hand off
+///   to AI-guided setup by returning a prebuilt prompt.
+pub fn maybe_show_setup_hints() -> Option<String> {
+    if !cfg!(windows) && !cfg!(target_os = "macos") {
+        return None;
     }
 
     if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
-        return;
+        return None;
     }
 
     let mut state = SetupHintsState::load();
@@ -428,7 +576,14 @@ pub fn maybe_show_setup_hints() {
     let _ = state.save();
 
     if state.launch_count % 3 != 0 {
-        return;
+        return None;
+    }
+
+    if cfg!(target_os = "macos") {
+        if !state.mac_ghostty_guided && !state.mac_ghostty_dismissed {
+            return nudge_macos_ghostty(&mut state);
+        }
+        return None;
     }
 
     let terminal = detect_terminal();
@@ -457,4 +612,6 @@ pub fn maybe_show_setup_hints() {
     if did_setup_hotkey || (did_install_wezterm && state.hotkey_configured) {
         prompt_try_it_out(did_install_wezterm);
     }
+
+    None
 }

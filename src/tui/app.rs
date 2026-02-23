@@ -937,6 +937,15 @@ impl App {
         self.pending_turn = true;
     }
 
+    /// Queue a startup message that should be auto-sent when the TUI starts.
+    pub fn queue_startup_message(&mut self, message: String) {
+        if message.trim().is_empty() {
+            return;
+        }
+        self.queued_messages.push(message);
+        self.pending_turn = true;
+    }
+
     /// Create an App instance for remote mode (connecting to server)
     pub async fn new_for_remote(resume_session: Option<String>) -> Self {
         let provider: Arc<dyn Provider> = Arc::new(NullProvider);
@@ -5222,9 +5231,7 @@ impl App {
                 }
                 false
             }
-            ServerEvent::StdinRequest {
-                ..
-            } => {
+            ServerEvent::StdinRequest { .. } => {
                 self.set_status_notice("⌨ Interactive terminal detected (command will timeout)");
                 false
             }
