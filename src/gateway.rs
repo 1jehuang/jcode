@@ -18,7 +18,7 @@ use futures::SinkExt;
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -225,13 +225,40 @@ pub async fn run_gateway(
         let client_tx = client_tx.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_ws_connection(tcp_stream, peer_addr, registry, client_tx).await {
+            if let Err(e) = handle_connection(tcp_stream, peer_addr, registry, client_tx).await {
                 logging::error(&format!(
                     "Gateway connection error from {}: {}",
                     peer_addr, e
                 ));
             }
         });
+    }
+}
+
+/// Route an incoming TCP connection: either plain HTTP (pair/health) or WebSocket.
+///
+/// We peek at the first chunk to check for the Upgrade: websocket header.
+/// Plain HTTP requests get handled inline; WebSocket connections proceed to
+/// the existing auth + bridge flow.
+async fn handle_connection(
+    mut tcp_stream: tokio::net::TcpStream,
+    peer_addr: SocketAddr,
+    registry: Arc<tokio::sync::RwLock<DeviceRegistry>>,
+    client_tx: tokio::sync::mpsc::UnboundedSender<GatewayClient>,
+) -> Result<()> {
+    let mut peek_buf = [0u8; 2048];
+    let n = tcp_stream.peek(&mut peek_buf).await?;
+    let request_head = String::from_utf8_lossy(&peek_buf[..n]);
+
+    let is_websocket = request_head.lines().any(|line| {
+        let lower = line.to_lowercase();
+        lower.starts_with("upgrade:") && lower.contains("websocket")
+    });
+
+    if is_websocket {
+        handle_ws_connection(tcp_stream, peer_addr, registry, client_tx).await
+    } else {
+        handle_http(tcp_stream, peer_addr, registry).await
     }
 }
 
@@ -293,6 +320,8 @@ async fn handle_ws_connection(
 
     let (device_name, device_id) = {
         let mut reg = registry.write().await;
+        // Reload from disk to pick up newly paired devices
+        *reg = DeviceRegistry::load();
         match reg.validate_token(&token) {
             Some(device) => {
                 let name = device.name.clone();
@@ -399,21 +428,149 @@ async fn handle_ws_connection(
 }
 
 // ---------------------------------------------------------------------------
-// HTTP handler for pairing + health (pre-WebSocket upgrade)
+// HTTP handler for POST /pair and GET /health
 // ---------------------------------------------------------------------------
 
-/// Handle HTTP requests that aren't WebSocket upgrades.
-/// Used for POST /pair and GET /health.
-/// This is a simple HTTP handler - we parse the raw HTTP request.
-pub async fn handle_http_request(
-    tcp_stream: &mut tokio::net::TcpStream,
-    _registry: Arc<tokio::sync::RwLock<DeviceRegistry>>,
-) -> Result<bool> {
-    // For now, we only support WebSocket. HTTP endpoints will be added
-    // when we implement the pairing flow over HTTP.
-    // Return false to indicate "not handled, try WebSocket upgrade"
-    let _ = tcp_stream;
-    Ok(false)
+fn http_response(status: u16, status_text: &str, body: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n{}",
+        status, status_text, body.len(), body
+    ).into_bytes()
+}
+
+/// Handle a plain HTTP request (not WebSocket).
+/// Supports:
+///   GET  /health  - server status
+///   POST /pair    - exchange pairing code for auth token
+///   OPTIONS *     - CORS preflight
+async fn handle_http(
+    mut tcp_stream: tokio::net::TcpStream,
+    peer_addr: SocketAddr,
+    registry: Arc<tokio::sync::RwLock<DeviceRegistry>>,
+) -> Result<()> {
+    let mut buf = vec![0u8; 8192];
+    let n = tcp_stream.read(&mut buf).await?;
+    let request = String::from_utf8_lossy(&buf[..n]);
+
+    let first_line = request.lines().next().unwrap_or("");
+    let (method, path) = {
+        let parts: Vec<&str> = first_line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            (parts[0], parts[1])
+        } else {
+            ("", "")
+        }
+    };
+
+    // Strip query params from path for matching
+    let path_base = path.split('?').next().unwrap_or(path);
+
+    logging::info(&format!(
+        "Gateway HTTP: {} {} from {}",
+        method, path_base, peer_addr
+    ));
+
+    let response = match (method, path_base) {
+        ("GET", "/health") => {
+            let body = serde_json::json!({
+                "status": "ok",
+                "version": env!("JCODE_VERSION"),
+                "gateway": true,
+            });
+            http_response(200, "OK", &body.to_string())
+        }
+
+        ("POST", "/pair") => {
+            // Extract JSON body (after \r\n\r\n)
+            let body_str = request.split("\r\n\r\n").nth(1).unwrap_or("");
+            handle_pair_request(body_str, &registry).await
+        }
+
+        ("OPTIONS", _) => {
+            // CORS preflight
+            format!(
+                "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nAccess-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            ).into_bytes()
+        }
+
+        _ => {
+            let body = serde_json::json!({"error": "Not found"});
+            http_response(404, "Not Found", &body.to_string())
+        }
+    };
+
+    tcp_stream.write_all(&response).await?;
+    tcp_stream.shutdown().await?;
+    Ok(())
+}
+
+/// Handle POST /pair request.
+///
+/// Expected JSON body:
+/// ```json
+/// {
+///   "code": "123456",
+///   "device_id": "uuid-here",
+///   "device_name": "Jeremy's iPhone",
+///   "apns_token": "optional-apns-token"
+/// }
+/// ```
+///
+/// Returns:
+/// ```json
+/// {
+///   "token": "hex-auth-token",
+///   "server_name": "jcode",
+///   "server_version": "v0.4.0"
+/// }
+/// ```
+async fn handle_pair_request(
+    body: &str,
+    registry: &Arc<tokio::sync::RwLock<DeviceRegistry>>,
+) -> Vec<u8> {
+    #[derive(serde::Deserialize)]
+    struct PairRequest {
+        code: String,
+        device_id: String,
+        device_name: String,
+        apns_token: Option<String>,
+    }
+
+    let req: PairRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => {
+            let body = serde_json::json!({"error": format!("Invalid JSON: {}", e)});
+            return http_response(400, "Bad Request", &body.to_string());
+        }
+    };
+
+    let mut reg = registry.write().await;
+
+    // Reload from disk - pairing codes are generated by `jcode pair` CLI
+    *reg = DeviceRegistry::load();
+
+    if !reg.validate_code(&req.code) {
+        let body = serde_json::json!({"error": "Invalid or expired pairing code"});
+        return http_response(401, "Unauthorized", &body.to_string());
+    }
+
+    let token = reg.pair_device(
+        req.device_id.clone(),
+        req.device_name.clone(),
+        req.apns_token,
+    );
+
+    logging::info(&format!(
+        "Gateway: paired device '{}' ({})",
+        req.device_name, req.device_id
+    ));
+
+    let body = serde_json::json!({
+        "token": token,
+        "server_name": "jcode",
+        "server_version": env!("JCODE_VERSION"),
+    });
+    http_response(200, "OK", &body.to_string())
 }
 
 #[cfg(test)]
