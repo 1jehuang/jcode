@@ -11211,6 +11211,9 @@ impl App {
                         // Listen for subagent status updates
                         bus_event = bus_receiver.recv() => {
                             if let Ok(BusEvent::SubagentStatus(status)) = bus_event {
+                                if status.session_id != self.session.id {
+                                    continue;
+                                }
                                 let display = if let Some(model) = &status.model {
                                     format!("{} · {}", status.status, model)
                                 } else {

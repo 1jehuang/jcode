@@ -8,12 +8,14 @@
 
 use chrono::Local;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 static LOGGER: Mutex<Option<Logger>> = Mutex::new(None);
+static TASK_LOG_CONTEXTS: OnceLock<Mutex<HashMap<String, LogContext>>> = OnceLock::new();
 
 /// Thread-local logging context
 #[derive(Default, Clone)]
@@ -30,6 +32,12 @@ thread_local! {
 
 /// Set the logging context for the current thread
 pub fn set_context(ctx: LogContext) {
+    if with_task_context_mut(|task_ctx| {
+        *task_ctx = ctx.clone();
+    }) {
+        return;
+    }
+
     LOG_CONTEXT.with(|c| {
         *c.borrow_mut() = ctx;
     });
@@ -37,6 +45,12 @@ pub fn set_context(ctx: LogContext) {
 
 /// Update just the session in the current context
 pub fn set_session(session: &str) {
+    if with_task_context_mut(|ctx| {
+        ctx.session = Some(session.to_string());
+    }) {
+        return;
+    }
+
     LOG_CONTEXT.with(|c| {
         c.borrow_mut().session = Some(session.to_string());
     });
@@ -44,6 +58,12 @@ pub fn set_session(session: &str) {
 
 /// Update just the server in the current context
 pub fn set_server(server: &str) {
+    if with_task_context_mut(|ctx| {
+        ctx.server = Some(server.to_string());
+    }) {
+        return;
+    }
+
     LOG_CONTEXT.with(|c| {
         c.borrow_mut().server = Some(server.to_string());
     });
@@ -51,6 +71,13 @@ pub fn set_server(server: &str) {
 
 /// Update provider and model in the current context
 pub fn set_provider_info(provider: &str, model: &str) {
+    if with_task_context_mut(|ctx| {
+        ctx.provider = Some(provider.to_string());
+        ctx.model = Some(model.to_string());
+    }) {
+        return;
+    }
+
     LOG_CONTEXT.with(|c| {
         let mut ctx = c.borrow_mut();
         ctx.provider = Some(provider.to_string());
@@ -60,6 +87,14 @@ pub fn set_provider_info(provider: &str, model: &str) {
 
 /// Clear the logging context for the current thread
 pub fn clear_context() {
+    if let Some(task_id) = current_task_id() {
+        if let Some(store) = TASK_LOG_CONTEXTS.get() {
+            if let Ok(mut contexts) = store.lock() {
+                contexts.remove(&task_id);
+            }
+        }
+    }
+
     LOG_CONTEXT.with(|c| {
         *c.borrow_mut() = LogContext::default();
     });
@@ -67,37 +102,68 @@ pub fn clear_context() {
 
 /// Get the current context as a prefix string
 fn context_prefix() -> String {
-    LOG_CONTEXT.with(|c| {
-        let ctx = c.borrow();
-        let mut parts = Vec::new();
+    if let Some(task_ctx) = task_context_snapshot() {
+        return context_prefix_for(&task_ctx);
+    }
 
-        if let Some(ref server) = ctx.server {
-            parts.push(format!("srv:{}", server));
-        }
-        if let Some(ref session) = ctx.session {
-            // Truncate session name if too long
-            let short = if session.len() > 20 {
-                &session[..20]
-            } else {
-                session
-            };
-            parts.push(format!("ses:{}", short));
-        }
-        if let Some(ref provider) = ctx.provider {
-            parts.push(format!("prv:{}", provider));
-        }
-        if let Some(ref model) = ctx.model {
-            // Just use first part of model name
-            let short = model.split('-').next().unwrap_or(model);
-            parts.push(format!("mod:{}", short));
-        }
+    LOG_CONTEXT.with(|c| context_prefix_for(&c.borrow()))
+}
 
-        if parts.is_empty() {
-            String::new()
+fn current_task_id() -> Option<String> {
+    tokio::task::try_id().map(|id| id.to_string())
+}
+
+fn with_task_context_mut(update: impl FnOnce(&mut LogContext)) -> bool {
+    let Some(task_id) = current_task_id() else {
+        return false;
+    };
+
+    let store = TASK_LOG_CONTEXTS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut contexts) = store.lock() {
+        let ctx = contexts.entry(task_id).or_default();
+        update(ctx);
+        true
+    } else {
+        false
+    }
+}
+
+fn task_context_snapshot() -> Option<LogContext> {
+    let task_id = current_task_id()?;
+    let store = TASK_LOG_CONTEXTS.get()?;
+    let contexts = store.lock().ok()?;
+    contexts.get(&task_id).cloned()
+}
+
+fn context_prefix_for(ctx: &LogContext) -> String {
+    let mut parts = Vec::new();
+
+    if let Some(ref server) = ctx.server {
+        parts.push(format!("srv:{}", server));
+    }
+    if let Some(ref session) = ctx.session {
+        // Truncate session name if too long
+        let short = if session.len() > 20 {
+            &session[..20]
         } else {
-            format!("[{}] ", parts.join("|"))
-        }
-    })
+            session
+        };
+        parts.push(format!("ses:{}", short));
+    }
+    if let Some(ref provider) = ctx.provider {
+        parts.push(format!("prv:{}", provider));
+    }
+    if let Some(ref model) = ctx.model {
+        // Just use first part of model name
+        let short = model.split('-').next().unwrap_or(model);
+        parts.push(format!("mod:{}", short));
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("[{}] ", parts.join("|"))
+    }
 }
 
 pub struct Logger {
