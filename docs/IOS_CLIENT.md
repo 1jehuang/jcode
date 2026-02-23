@@ -673,10 +673,42 @@ Borrow the MacBook for initial setup, then iterate.
 - **Tailscale provides encryption** - WireGuard tunnel encrypts all traffic. TLS only needed for non-Tailscale fallback connections.
 - **Auth tokens** stored in iOS Keychain, server stores only hashes
 - **Pairing codes** are time-limited (5 min) and single-use
-- **Device revocation** via `jcode devices revoke <name>`
+- **Device revocation** via `jcode pair --revoke <name-or-id>`
 - **No credentials on the phone** - API keys, OAuth tokens stay on the server
 - **Tool approval** for destructive actions even when triggered from iOS
 - **Rate limiting** on the WebSocket gateway to prevent abuse
+
+---
+
+## Practical Setup: iPhone -> yashmacbook -> Xcode
+
+For the current implementation, the iOS side in this repo is `JCodeKit` (networking + protocol layer), and the server-side gateway/pairing flow is live. Use this sequence to get reliable access to your Mac from iPhone:
+
+1. On `yashmacbook`, enable gateway in `~/.jcode/config.toml`:
+
+```toml
+[gateway]
+enabled = true
+port = 7643
+bind_addr = "0.0.0.0"
+```
+
+2. Restart jcode server on `yashmacbook`.
+3. Ensure Tailscale is logged in on both iPhone and `yashmacbook`.
+4. Generate pairing code on `yashmacbook`:
+
+```bash
+jcode pair
+```
+
+5. In iOS client, connect to the host printed by `jcode pair` (or set `JCODE_GATEWAY_HOST` on Mac to force the exact hostname shown).
+6. Pair with the 6-digit code, then connect over WebSocket.
+7. Ask jcode to run Xcode workflows on the Mac via tools, for example:
+   - `xcodebuild -list`
+   - `xcodebuild -scheme <Scheme> -destination 'platform=iOS Simulator,name=iPhone 15' build`
+   - `xed .` (open current project in Xcode)
+
+Because jcode executes tools on `yashmacbook`, this gives you "use Xcode through iPhone" behavior: the phone is the control surface, Mac runs Xcode/build commands.
 
 ---
 

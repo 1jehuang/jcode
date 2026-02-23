@@ -1985,17 +1985,51 @@ async fn debug_start_server(arg: &str, socket_path: Option<String>) -> Result<()
 fn resolve_connect_host(bind_addr: &str) -> String {
     // If binding to all interfaces, show a concrete hostname hint for remote clients.
     if bind_addr == "0.0.0.0" || bind_addr == "::" {
-        return std::env::var("JCODE_GATEWAY_HOST")
+        if let Some(host) = std::env::var("JCODE_GATEWAY_HOST")
             .ok()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| {
-                std::env::var("HOSTNAME")
-                    .ok()
-                    .filter(|s| !s.trim().is_empty())
-            })
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return host;
+        }
+
+        if let Some(host) = detect_tailscale_dns_name() {
+            return host;
+        }
+
+        return std::env::var("HOSTNAME")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "<your-mac-hostname>".to_string());
     }
     bind_addr.to_string()
+}
+
+fn detect_tailscale_dns_name() -> Option<String> {
+    let output = std::process::Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let dns_name = value
+        .get("Self")?
+        .get("DNSName")?
+        .as_str()?
+        .trim()
+        .trim_end_matches('.')
+        .to_string();
+
+    if dns_name.is_empty() {
+        None
+    } else {
+        Some(dns_name)
+    }
 }
 
 fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {

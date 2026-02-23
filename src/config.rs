@@ -633,6 +633,24 @@ impl Config {
             }
         }
 
+        // Gateway (iOS/web)
+        if let Ok(v) = std::env::var("JCODE_GATEWAY_ENABLED") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.gateway.enabled = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_GATEWAY_PORT") {
+            if let Ok(parsed) = v.trim().parse::<u16>() {
+                self.gateway.port = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_GATEWAY_BIND_ADDR") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                self.gateway.bind_addr = trimmed.to_string();
+            }
+        }
+
         // Provider
         if let Ok(v) = std::env::var("JCODE_MODEL") {
             self.provider.default_model = Some(v);
@@ -770,6 +788,14 @@ work_branch_prefix = "ambient/"
 # Show ambient cycle in a terminal window (default: false)
 # visible = false
 
+[gateway]
+# Enable WebSocket gateway for iOS/web clients
+enabled = false
+# TCP port for gateway listener
+port = 7643
+# Bind address (0.0.0.0 for LAN/Tailscale reachability)
+bind_addr = "0.0.0.0"
+
 [safety]
 # Notification settings for ambient mode events
 
@@ -853,6 +879,10 @@ desktop_notifications = true
 - OpenAI reasoning effort: {}
 - OpenAI transport: {}
 
+**Gateway:**
+- Enabled: {}
+- Bind address: {}:{}
+
 **Ambient:**
 - Enabled: {}
 - Provider: {}
@@ -874,7 +904,7 @@ desktop_notifications = true
 - Discord replies: {}
 
 *Edit the config file or set environment variables to customize.*
-*Environment variables (e.g., `JCODE_SCROLL_UP_KEY`) override file settings.*"#,
+*Environment variables (e.g., `JCODE_SCROLL_UP_KEY`, `JCODE_GATEWAY_ENABLED`) override file settings.*"#,
             path,
             self.keybindings.scroll_up,
             self.keybindings.scroll_down,
@@ -909,6 +939,9 @@ desktop_notifications = true
                 .openai_transport
                 .as_deref()
                 .unwrap_or("(auto)"),
+            self.gateway.enabled,
+            self.gateway.bind_addr,
+            self.gateway.port,
             self.ambient.enabled,
             self.ambient.provider.as_deref().unwrap_or("(auto)"),
             self.ambient
