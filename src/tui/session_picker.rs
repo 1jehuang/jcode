@@ -3,8 +3,8 @@
 //! Shows a list of sessions on the left, with a preview of the selected session's
 //! conversation on the right. Sessions are grouped by server for multi-server support.
 
-use crate::id::session_icon;
-use crate::message::{ContentBlock, Role};
+use crate::id::{extract_session_name, session_icon};
+use crate::message::Role;
 use crate::registry::{self, ServerInfo};
 use crate::session::{self, CrashedSessionsInfo, Session, SessionStatus};
 use crate::storage;
@@ -18,8 +18,13 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
     Frame,
 };
-use std::collections::{HashMap, HashSet};
+use serde::Deserialize;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::fs::File;
+use std::io::BufReader;
 use std::io::IsTerminal;
+use std::path::Path;
 use std::time::Duration;
 
 /// Session info for display
@@ -69,6 +74,9 @@ pub struct PreviewMessage {
 }
 
 const SEARCH_CONTENT_BUDGET_BYTES: usize = 12_000;
+const DEFAULT_SESSION_SCAN_LIMIT: usize = 300;
+const MIN_SESSION_SCAN_LIMIT: usize = 50;
+const MAX_SESSION_SCAN_LIMIT: usize = 10_000;
 
 fn push_with_byte_budget(dst: &mut String, src: &str, budget: &mut usize) {
     if *budget == 0 || src.is_empty() {
@@ -122,6 +130,161 @@ fn build_search_index(
     combined.to_lowercase()
 }
 
+fn session_scan_limit() -> usize {
+    std::env::var("JCODE_SESSION_PICKER_MAX_SESSIONS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .map(|n| n.clamp(MIN_SESSION_SCAN_LIMIT, MAX_SESSION_SCAN_LIMIT))
+        .unwrap_or(DEFAULT_SESSION_SCAN_LIMIT)
+}
+
+fn session_sort_key(stem: &str) -> u64 {
+    // Most session IDs look like:
+    //   session_<timestamp_ms>_<random>
+    // or:
+    //   session_<name>_<timestamp_ms>
+    for part in stem.split('_') {
+        if part.len() == 13 && part.as_bytes().iter().all(|b| b.is_ascii_digit()) {
+            if let Ok(ts) = part.parse::<u64>() {
+                return ts;
+            }
+        }
+    }
+
+    // Fallback for older/custom IDs
+    stem.split('_')
+        .rev()
+        .find_map(|part| part.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn collect_recent_session_stems(sessions_dir: &Path, scan_limit: usize) -> Result<Vec<String>> {
+    let mut top_k: BinaryHeap<Reverse<(u64, String)>> = BinaryHeap::new();
+
+    for entry in std::fs::read_dir(sessions_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.extension().map(|e| e == "json").unwrap_or(false) {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+
+        let candidate = (session_sort_key(stem), stem.to_string());
+        if top_k.len() < scan_limit {
+            top_k.push(Reverse(candidate));
+            continue;
+        }
+
+        if let Some(smallest) = top_k.peek() {
+            if candidate > smallest.0 {
+                top_k.pop();
+                top_k.push(Reverse(candidate));
+            }
+        }
+    }
+
+    let mut candidates: Vec<(u64, String)> = top_k.into_iter().map(|rev| rev.0).collect();
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    Ok(candidates.into_iter().map(|(_, stem)| stem).collect())
+}
+
+#[derive(Deserialize)]
+struct SessionSummary {
+    #[serde(default)]
+    title: Option<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    messages: Vec<SessionMessageSummary>,
+    #[serde(default)]
+    working_dir: Option<String>,
+    #[serde(default)]
+    short_name: Option<String>,
+    #[serde(default)]
+    is_canary: bool,
+    #[serde(default)]
+    is_debug: bool,
+    #[serde(default)]
+    status: SessionStatus,
+}
+
+#[derive(Deserialize)]
+struct SessionMessageSummary {
+    role: Role,
+    #[serde(default)]
+    token_usage: Option<SessionTokenUsageSummary>,
+}
+
+#[derive(Deserialize)]
+struct SessionTokenUsageSummary {
+    input_tokens: u64,
+    output_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u64>,
+}
+
+impl SessionTokenUsageSummary {
+    fn total_tokens(&self) -> u64 {
+        self.input_tokens
+            + self.output_tokens
+            + self.cache_read_input_tokens.unwrap_or(0)
+            + self.cache_creation_input_tokens.unwrap_or(0)
+    }
+}
+
+fn load_session_summary(path: &Path) -> Result<SessionSummary> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    Ok(serde_json::from_reader(reader)?)
+}
+
+fn build_messages_preview(session: &Session) -> Vec<PreviewMessage> {
+    session::render_messages(session)
+        .into_iter()
+        .rev()
+        .take(20)
+        .rev()
+        .map(|msg| PreviewMessage {
+            role: msg.role,
+            content: msg.content,
+            tool_calls: msg.tool_calls,
+            tool_data: msg.tool_data,
+            timestamp: None,
+        })
+        .collect()
+}
+
+fn crashed_sessions_from_visible_sessions(sessions: &[SessionInfo]) -> Option<CrashedSessionsInfo> {
+    let mut crashed: Vec<&SessionInfo> = sessions
+        .iter()
+        .filter(|s| matches!(s.status, SessionStatus::Crashed { .. }))
+        .collect();
+    if crashed.is_empty() {
+        return None;
+    }
+
+    crashed.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
+    let most_recent = crashed[0].last_message_time;
+    let crash_window = chrono::Duration::seconds(60);
+    crashed.retain(|s| {
+        let delta = most_recent.signed_duration_since(s.last_message_time);
+        delta >= chrono::Duration::zero() && delta <= crash_window
+    });
+    if crashed.is_empty() {
+        return None;
+    }
+
+    Some(CrashedSessionsInfo {
+        session_ids: crashed.iter().map(|s| s.id.clone()).collect(),
+        display_names: crashed.iter().map(|s| s.short_name.clone()).collect(),
+        most_recent_crash: most_recent,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub enum PickerResult {
     Selected(String),
@@ -136,94 +299,73 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
         return Ok(Vec::new());
     }
 
+    let scan_limit = session_scan_limit();
+    let candidates = collect_recent_session_stems(&sessions_dir, scan_limit)?;
     let mut sessions: Vec<SessionInfo> = Vec::new();
 
-    for entry in std::fs::read_dir(&sessions_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().map(|e| e == "json").unwrap_or(false) {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if let Ok(mut session) = Session::load(stem) {
-                    let updated = session.detect_crash();
-                    if updated {
-                        let _ = session.save();
-                    }
-                    let short_name = session.display_name().to_string();
-                    let icon = session_icon(&short_name);
+    for stem in candidates {
+        let path = sessions_dir.join(format!("{stem}.json"));
+        if let Ok(session) = load_session_summary(&path) {
+            let short_name = session
+                .short_name
+                .clone()
+                .or_else(|| extract_session_name(&stem).map(|s| s.to_string()))
+                .unwrap_or_else(|| stem.clone());
+            let icon = session_icon(&short_name);
 
-                    // Count messages and estimate tokens
-                    let mut user_message_count = 0;
-                    let mut assistant_message_count = 0;
-                    let mut total_chars = 0;
+            // Count messages and estimate tokens
+            let mut user_message_count = 0;
+            let mut assistant_message_count = 0;
+            let mut estimated_tokens: usize = 0;
 
-                    for msg in &session.messages {
-                        match msg.role {
-                            Role::User => user_message_count += 1,
-                            Role::Assistant => assistant_message_count += 1,
-                        }
-                        for block in &msg.content {
-                            if let ContentBlock::Text { text, .. } = block {
-                                total_chars += text.len();
-                            }
-                        }
-                    }
-
-                    // Rough token estimate: ~4 chars per token
-                    let estimated_tokens = total_chars / 4;
-
-                    // Extract preview messages (last 20 rendered entries)
-                    let messages_preview: Vec<PreviewMessage> = session::render_messages(&session)
-                        .into_iter()
-                        .rev()
-                        .take(20)
-                        .rev()
-                        .map(|msg| PreviewMessage {
-                            role: msg.role,
-                            content: msg.content,
-                            tool_calls: msg.tool_calls,
-                            tool_data: msg.tool_data,
-                            timestamp: None,
-                        })
-                        .collect();
-
-                    let status = session.status.clone();
-
-                    // Skip sessions with no messages
-                    if session.messages.is_empty() {
-                        continue;
-                    }
-
-                    let title = session.title.unwrap_or_else(|| "Untitled".to_string());
-                    let search_index = build_search_index(
-                        stem,
-                        &short_name,
-                        &title,
-                        session.working_dir.as_deref(),
-                        &messages_preview,
-                    );
-
-                    sessions.push(SessionInfo {
-                        id: stem.to_string(),
-                        short_name,
-                        icon: icon.to_string(),
-                        title,
-                        message_count: session.messages.len(),
-                        user_message_count,
-                        assistant_message_count,
-                        created_at: session.created_at,
-                        last_message_time: session.updated_at,
-                        working_dir: session.working_dir,
-                        is_canary: session.is_canary,
-                        is_debug: session.is_debug,
-                        status,
-                        estimated_tokens,
-                        messages_preview,
-                        search_index,
-                        server_name: None,
-                        server_icon: None,
-                    });
+            for msg in &session.messages {
+                match msg.role {
+                    Role::User => user_message_count += 1,
+                    Role::Assistant => assistant_message_count += 1,
+                }
+                if let Some(usage) = &msg.token_usage {
+                    estimated_tokens =
+                        estimated_tokens.saturating_add(usage.total_tokens() as usize);
                 }
             }
+
+            let status = session.status.clone();
+
+            // Skip sessions with no messages
+            if session.messages.is_empty() {
+                continue;
+            }
+
+            let title = session.title.unwrap_or_else(|| "Untitled".to_string());
+            let messages_preview: Vec<PreviewMessage> = Vec::new();
+            let search_index = build_search_index(
+                &stem,
+                &short_name,
+                &title,
+                session.working_dir.as_deref(),
+                &messages_preview,
+            );
+
+            sessions.push(SessionInfo {
+                id: stem.to_string(),
+                short_name,
+                icon: icon.to_string(),
+                title,
+                message_count: session.messages.len(),
+                user_message_count,
+                assistant_message_count,
+                created_at: session.created_at,
+                last_message_time: session.updated_at,
+                working_dir: session.working_dir,
+                is_canary: session.is_canary,
+                is_debug: session.is_debug,
+                status,
+                estimated_tokens,
+                messages_preview,
+                search_index,
+                server_name: None,
+                server_icon: None,
+            });
         }
     }
 
@@ -309,22 +451,13 @@ pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
 /// Safely truncate a string at a character boundary
 fn safe_truncate(s: &str, max_chars: usize) -> &str {
     if s.chars().count() <= max_chars {
-        s
-    } else {
-        let mut end = 0;
-        for (i, (idx, _)) in s.char_indices().enumerate() {
-            if i >= max_chars {
-                break;
-            }
-            end = idx;
-        }
-        // Include the last character
-        if let Some((idx, c)) = s.char_indices().nth(max_chars) {
-            &s[..idx]
-        } else {
-            s
-        }
+        return s;
     }
+
+    s.char_indices()
+        .nth(max_chars)
+        .map(|(idx, _)| &s[..idx])
+        .unwrap_or(s)
 }
 
 /// Format duration since a time in a human-readable way
@@ -438,7 +571,7 @@ impl SessionPicker {
             list_state.select(Some(0));
         }
 
-        let crashed_sessions = session::detect_crashed_sessions().ok().flatten();
+        let crashed_sessions = crashed_sessions_from_visible_sessions(&visible);
         let crashed_session_ids: HashSet<String> = crashed_sessions
             .as_ref()
             .map(|info| info.session_ids.iter().cloned().collect())
@@ -536,7 +669,7 @@ impl SessionPicker {
             list_state.select(Some(idx));
         }
 
-        let crashed_sessions = session::detect_crashed_sessions().ok().flatten();
+        let crashed_sessions = crashed_sessions_from_visible_sessions(&all_sessions);
         let crashed_session_ids: HashSet<String> = crashed_sessions
             .as_ref()
             .map(|info| info.session_ids.iter().cloned().collect())
@@ -573,6 +706,56 @@ impl SessionPicker {
                 .and_then(|opt| opt.as_ref())
                 .and_then(|session_idx| self.sessions.get(*session_idx))
         })
+    }
+
+    fn selected_session_index(&self) -> Option<usize> {
+        self.list_state.selected().and_then(|i| {
+            self.item_to_session
+                .get(i)
+                .and_then(|opt| opt.as_ref().copied())
+        })
+    }
+
+    fn ensure_selected_preview_loaded(&mut self) {
+        let Some(session_idx) = self.selected_session_index() else {
+            return;
+        };
+        let needs_preview = self
+            .sessions
+            .get(session_idx)
+            .map(|s| s.messages_preview.is_empty())
+            .unwrap_or(false);
+        if !needs_preview {
+            return;
+        }
+
+        let session_id = self.sessions[session_idx].id.clone();
+        let Ok(session) = Session::load(&session_id) else {
+            return;
+        };
+        let preview = build_messages_preview(&session);
+
+        if let Some(s) = self.sessions.get_mut(session_idx) {
+            s.messages_preview = preview.clone();
+        }
+        for s in &mut self.all_sessions {
+            if s.id == session_id {
+                s.messages_preview = preview.clone();
+                break;
+            }
+        }
+        for s in &mut self.all_orphan_sessions {
+            if s.id == session_id {
+                s.messages_preview = preview.clone();
+                break;
+            }
+        }
+        for group in &mut self.all_server_groups {
+            if let Some(found) = group.sessions.iter_mut().find(|s| s.id == session_id) {
+                found.messages_preview = preview;
+                return;
+            }
+        }
     }
 
     /// Find next selectable item (skip headers)
@@ -1086,6 +1269,8 @@ impl SessionPicker {
         } else {
             Color::Rgb(50, 50, 50)
         };
+        self.ensure_selected_preview_loaded();
+
         let Some(session) = self.selected_session().cloned() else {
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -1567,7 +1752,7 @@ impl SessionPicker {
                 };
                 anyhow::anyhow!("failed to initialize session picker terminal: {}", msg)
             })?;
-        // Initialize mermaid image picker (queries terminal for graphics protocol support)
+        // Initialize mermaid image picker (fast default, optional probe via env)
         super::mermaid::init_picker();
         let keyboard_enhanced = super::enable_keyboard_enhancement();
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
