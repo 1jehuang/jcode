@@ -125,11 +125,16 @@ codegen-units = 16
 incremental = false
 
 [profile.dev]
-debug = 1
+debug = 0
 incremental = true
 
 [profile.dev.package."*"]
-opt-level = 1
+opt-level = 0
+
+[profile.test]
+debug = 0
+incremental = true
+codegen-units = 256
 
 [dev-dependencies]
 async-stream = "0.3"

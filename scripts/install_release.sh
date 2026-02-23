@@ -11,10 +11,33 @@
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-# Build with LTO for stable release
-echo "Building with LTO (this takes a few minutes)..."
-cargo build --profile release-lto --manifest-path "$repo_root/Cargo.toml"
-bin="$repo_root/target/release-lto/jcode"
+
+profile="${JCODE_RELEASE_PROFILE:-release-lto}"
+if [[ "${1:-}" == "--fast" ]]; then
+  profile="release"
+  shift
+fi
+
+if [[ "$#" -gt 0 ]]; then
+  echo "Usage: $0 [--fast]" >&2
+  exit 1
+fi
+
+case "$profile" in
+  release-lto)
+    echo "Building with LTO (this takes a few minutes)..."
+    ;;
+  release)
+    echo "Building fast release profile (no LTO)..."
+    ;;
+  *)
+    echo "Unsupported profile: $profile (expected: release or release-lto)" >&2
+    exit 1
+    ;;
+esac
+
+cargo build --profile "$profile" --manifest-path "$repo_root/Cargo.toml"
+bin="$repo_root/target/$profile/jcode"
 
 if [[ ! -x "$bin" ]]; then
   echo "Release binary not found: $bin" >&2
