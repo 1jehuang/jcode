@@ -65,6 +65,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use provider::Provider;
 use std::io::{self, IsTerminal, Write};
+use std::net::ToSocketAddrs;
 use std::panic;
 use std::process::Command as ProcessCommand;
 use std::sync::{Arc, Mutex};
@@ -1981,6 +1982,22 @@ async fn debug_start_server(arg: &str, socket_path: Option<String>) -> Result<()
     Ok(())
 }
 
+fn resolve_connect_host(bind_addr: &str) -> String {
+    // If binding to all interfaces, show a concrete hostname hint for remote clients.
+    if bind_addr == "0.0.0.0" || bind_addr == "::" {
+        return std::env::var("JCODE_GATEWAY_HOST")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                std::env::var("HOSTNAME")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
+            .unwrap_or_else(|| "<your-mac-hostname>".to_string());
+    }
+    bind_addr.to_string()
+}
+
 fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
     let mut registry = gateway::DeviceRegistry::load();
 
@@ -2042,12 +2059,34 @@ fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
     eprintln!("  \x1b[1;36m│\x1b[0m   \x1b[2mExpires in 5 minutes\x1b[0m   \x1b[1;36m│\x1b[0m");
     eprintln!("  \x1b[1;36m│\x1b[0m                         \x1b[1;36m│\x1b[0m");
     eprintln!("  \x1b[1;36m└─────────────────────────┘\x1b[0m");
+    let connect_host = resolve_connect_host(&gw_config.bind_addr);
+    let resolved_hint = format!("{}:{}", connect_host, gw_config.port);
+    let bind_hint = format!("{}:{}", gw_config.bind_addr, gw_config.port);
+
     eprintln!();
     eprintln!("  Enter this code in the jcode iOS app to pair.");
-    eprintln!(
-        "  Gateway: \x1b[36m{}:{}\x1b[0m",
-        gw_config.bind_addr, gw_config.port
-    );
+    eprintln!("  Connect host: \x1b[36m{}\x1b[0m", resolved_hint);
+    if connect_host != gw_config.bind_addr {
+        eprintln!("  (Gateway bind address: \x1b[2m{}\x1b[0m)", bind_hint);
+    }
+
+    if connect_host == "<your-mac-hostname>" {
+        eprintln!(
+            "  Tip: set JCODE_GATEWAY_HOST to your reachable Tailscale hostname (e.g. yashmacbook.tailnet.ts.net)."
+        );
+    }
+
+    if (gw_config.bind_addr.as_str(), gw_config.port)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut it| it.next())
+        .is_none()
+    {
+        eprintln!(
+            "  \x1b[33mWarning:\x1b[0m gateway bind address appears invalid: {}",
+            bind_hint
+        );
+    }
     eprintln!();
 
     Ok(())
