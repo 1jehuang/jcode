@@ -258,6 +258,10 @@ impl TuiState for BenchState {
         None
     }
 
+    fn server_display_icon(&self) -> Option<String> {
+        None
+    }
+
     fn server_sessions(&self) -> Vec<String> {
         Vec::new()
     }

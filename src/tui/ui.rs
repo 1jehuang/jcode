@@ -52,6 +52,10 @@ const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 const STARTUP_ASCII_STATUS_FPS: f32 = 12.0;
 const STARTUP_ASCII_STATUS_SPINNER: &[&str] = &["|", "/", "-", "\\"];
 
+// Keep the picker spacious on tall terminals without crowding the chat pane.
+const MODEL_PICKER_MAX_HEIGHT: u16 = 16;
+const MODEL_PICKER_MIN_MESSAGES_HEIGHT: u16 = 3;
+
 const LUMINANCE: &[u8] = b".,-~:;=!*#$@";
 
 fn render_donut(elapsed: f32, width: usize, height: usize) -> Vec<String> {
@@ -119,15 +123,13 @@ fn render_startup_animation(
     height: usize,
     variant: usize,
 ) -> Vec<String> {
-    match variant % 7 {
+    match variant % 6 {
         0 => render_donut(elapsed, width, height),
         1 => render_globe(elapsed, width, height),
         2 => render_cube(elapsed, width, height),
         3 => render_mobius(elapsed, width, height),
         4 => render_octahedron(elapsed, width, height),
-        5 => render_lorenz(elapsed, width, height),
-        6 => render_dna_helix(elapsed, width, height),
-        _ => render_donut(elapsed, width, height),
+        _ => render_lorenz(elapsed, width, height),
     }
 }
 
@@ -769,7 +771,7 @@ fn header_spans(icon: &str, session: &str, model: &str, elapsed: f32) -> Vec<Spa
 }
 
 /// Capitalize first letter of a string
-fn capitalize(s: &str) -> String {
+pub(crate) fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
         None => String::new(),
@@ -2588,7 +2590,7 @@ fn startup_animation_variant() -> usize {
         let mut hasher = DefaultHasher::new();
         std::time::SystemTime::now().hash(&mut hasher);
         std::process::id().hash(&mut hasher);
-        (std::hash::Hasher::finish(&hasher) % 7) as usize
+        (std::hash::Hasher::finish(&hasher) % 6) as usize
     })
 }
 
@@ -2726,13 +2728,19 @@ fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>>
         lines.push(Line::from("")); // Empty line if no badges (only in centered mode)
     }
 
-    // Line 2: "<ServerName|JCode> <icon> <SessionName>" (chroma)
+    // Line 2: "<ServerName> <SessionName> <icons>" (chroma)
     if !session_name.is_empty() {
         let title_prefix = server_name
             .as_deref()
             .map(capitalize)
             .unwrap_or_else(|| "JCode".to_string());
-        let full_name = format!("{} {} {}", title_prefix, icon, capitalize(&session_name));
+        let server_icon = app.server_display_icon().unwrap_or_default();
+        let icons = if server_icon.is_empty() {
+            icon.to_string()
+        } else {
+            format!("{}{}", server_icon, icon)
+        };
+        let full_name = format!("{} {} {}", title_prefix, capitalize(&session_name), icons);
         lines.push(
             Line::from(Span::styled(
                 full_name,

@@ -101,6 +101,8 @@ pub trait TuiState {
     fn session_display_name(&self) -> Option<String>;
     /// Server display name (modifier like "running" or "blazing") - only set in remote mode
     fn server_display_name(&self) -> Option<String>;
+    /// Server icon (e.g., "🔥", "🌫️") - only set in remote mode
+    fn server_display_icon(&self) -> Option<String>;
     /// List of all session IDs on the server (remote mode only)
     fn server_sessions(&self) -> Vec<String>;
     /// Number of connected clients (remote mode only)
