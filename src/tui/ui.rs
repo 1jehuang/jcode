@@ -5168,10 +5168,9 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let mut z_buf = vec![0.0f32; sw * sh];
 
     let variant = idle_animation_variant();
-    match variant {
+    match variant % 2 {
         0 => sample_donut(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
-        1 => sample_knot(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
-        _ => sample_dna(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
+        _ => sample_knot(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
     }
 
     let time_hue = elapsed * 40.0;
@@ -5295,7 +5294,7 @@ fn idle_animation_variant() -> usize {
         let mut hasher = DefaultHasher::new();
         std::time::SystemTime::now().hash(&mut hasher);
         std::process::id().hash(&mut hasher);
-        (std::hash::Hasher::finish(&hasher) % 3) as usize
+        (std::hash::Hasher::finish(&hasher) % 2) as usize
     })
 }
 
