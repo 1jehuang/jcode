@@ -5168,9 +5168,10 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let mut z_buf = vec![0.0f32; sw * sh];
 
     let variant = idle_animation_variant();
-    match variant % 2 {
+    match variant % 3 {
         0 => sample_donut(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
-        _ => sample_knot(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
+        1 => sample_knot(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
+        _ => sample_gyroscope(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
     }
 
     let time_hue = elapsed * 40.0;
@@ -5294,7 +5295,7 @@ fn idle_animation_variant() -> usize {
         let mut hasher = DefaultHasher::new();
         std::time::SystemTime::now().hash(&mut hasher);
         std::process::id().hash(&mut hasher);
-        (std::hash::Hasher::finish(&hasher) % 2) as usize
+        (std::hash::Hasher::finish(&hasher) % 3) as usize
     })
 }
 
@@ -5444,6 +5445,99 @@ fn sample_dna(
             }
         }
         t += rung_step;
+    }
+}
+
+fn sample_gyroscope(
+    elapsed: f32,
+    sw: usize,
+    sh: usize,
+    hit: &mut [bool],
+    lum_map: &mut [f32],
+    z_buf: &mut [f32],
+) {
+    let rot_x = elapsed * 0.45 + (elapsed * 0.7).sin() * 0.25;
+    let rot_y = elapsed * 0.70;
+    let rot_z = elapsed * 0.28 + (elapsed * 0.5).cos() * 0.18;
+    let cam_dist = 8.5f32;
+    let aspect = 0.5;
+    let scale_base = (sw as f32).min(sh as f32 / aspect) * 0.30;
+
+    // Axis index: 0=x-axis ring, 1=y-axis ring, 2=z-axis ring.
+    let rings = [(0u8, 2.0f32, 0.17f32), (1, 1.45, 0.15), (2, 0.95, 0.13)];
+
+    for (ring_idx, &(axis, major_r, tube_r)) in rings.iter().enumerate() {
+        let phase = elapsed * (0.35 + ring_idx as f32 * 0.15);
+        let mut u: f32 = 0.0;
+        while u < std::f32::consts::TAU {
+            let uu = u + phase;
+            let cu = uu.cos();
+            let su = uu.sin();
+
+            let mut v: f32 = 0.0;
+            while v < std::f32::consts::TAU {
+                let cv = v.cos();
+                let sv = v.sin();
+                let ring_r = major_r + tube_r * cv;
+
+                let (x, y, z, nx, ny, nz) = match axis {
+                    0 => {
+                        let x = tube_r * sv;
+                        let y = ring_r * cu;
+                        let z = ring_r * su;
+                        let nx = sv;
+                        let ny = cv * cu;
+                        let nz = cv * su;
+                        (x, y, z, nx, ny, nz)
+                    }
+                    1 => {
+                        let x = ring_r * cu;
+                        let y = tube_r * sv;
+                        let z = ring_r * su;
+                        let nx = cv * cu;
+                        let ny = sv;
+                        let nz = cv * su;
+                        (x, y, z, nx, ny, nz)
+                    }
+                    _ => {
+                        let x = ring_r * cu;
+                        let y = ring_r * su;
+                        let z = tube_r * sv;
+                        let nx = cv * cu;
+                        let ny = cv * su;
+                        let nz = sv;
+                        (x, y, z, nx, ny, nz)
+                    }
+                };
+
+                let (rx, ry, rz) = rotate_xyz(x, y, z, rot_x, rot_y, rot_z);
+                let d = cam_dist + rz;
+                if d < 0.1 {
+                    v += 0.24;
+                    continue;
+                }
+
+                let proj = cam_dist / d;
+                let xp = (sw as f32 / 2.0 + rx * proj * scale_base) as isize;
+                let yp = (sh as f32 / 2.0 - ry * proj * scale_base * aspect) as isize;
+                let depth = 1.0 / d;
+
+                if xp >= 0 && (xp as usize) < sw && yp >= 0 && (yp as usize) < sh {
+                    let idx = yp as usize * sw + xp as usize;
+                    if depth > z_buf[idx] {
+                        z_buf[idx] = depth;
+                        let (rnx, rny, rnz) = rotate_xyz(nx, ny, nz, rot_x, rot_y, rot_z);
+                        let lum = (rnx * 0.45 + rny * 0.35 + rnz * 0.20 + 0.20).clamp(-1.0, 1.0);
+                        lum_map[idx] = lum;
+                        hit[idx] = true;
+                    }
+                }
+
+                v += 0.24;
+            }
+
+            u += 0.035;
+        }
     }
 }
 
