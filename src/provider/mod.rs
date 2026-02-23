@@ -206,7 +206,6 @@ pub const ALL_CLAUDE_MODELS: &[&str] = &[
 ];
 
 pub const ALL_OPENAI_MODELS: &[&str] = &[
-    "codex-mini-latest",
     "gpt-5.3-codex",
     "gpt-5.3-codex-spark",
     "gpt-5.2-chat-latest",

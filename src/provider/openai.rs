@@ -50,7 +50,6 @@ static REWRITTEN_ORPHAN_TOOL_OUTPUTS: AtomicU64 = AtomicU64::new(0);
 
 /// Available OpenAI/Codex models
 const AVAILABLE_MODELS: &[&str] = &[
-    "codex-mini-latest",
     "gpt-5.3-codex",
     "gpt-5.3-codex-spark",
     "gpt-5.2-chat-latest",
