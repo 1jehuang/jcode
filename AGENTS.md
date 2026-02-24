@@ -4,10 +4,12 @@
 
 - **Commit as you go** - Make small, focused commits after completing each feature or fix
 - **Push when done** - Push all commits to remote when finishing a task or session
-- **Rebuild when done** - Run `cargo build --release` (the `jcode` symlink picks it up automatically)
-- **Promote to stable release** - Run `scripts/install_release.sh` to update the stable/release binary
-- **Test before committing** - Run `cargo test` to verify changes
+- **Use fast iteration by default** - Prefer `cargo check`, targeted tests, and dev builds while iterating
+- **Rebuild when done** - Run `cargo build --release` when you need to manually verify release behavior
+- **Promote to stable release only for release/signoff** - Run `scripts/install_release.sh` to update the stable/release binary (this uses `release-lto` and is slow)
+- **Test before committing** - Run `cargo test` (or a focused subset for narrow changes during iteration, then full suite before shipping)
 - **Bump version for releases** - Update version in `Cargo.toml` when making releases
+- **Remote builds available** - Use `scripts/remote_build.sh` to offload heavy cargo work to another machine
 
 ## Versioning
 
@@ -34,15 +36,20 @@ The build also includes git hash and `-dev` suffix for uncommitted changes (e.g.
 
 ## Build, Test, and Development Commands
 - `cargo install --path .`: install the local CLI.
+- `cargo check`: fastest compile feedback loop (no binary output).
+- `cargo build`: fast dev build for iteration.
 - `cargo build --release`: rebuild latest (jcode on PATH picks it up automatically).
-- `scripts/install_release.sh`: promote current build to stable/release.
+- `scripts/install_release.sh`: promote current build to stable/release (`release-lto`, slow; use for release/signoff).
 - `jcode`: launch the TUI.
 - `jcode serve` / `jcode connect`: start the daemon and attach a client.
 - `cargo test`: run unit + integration tests.
+- `cargo test <test_name>`: run targeted tests for faster iteration.
 - `cargo test --test e2e`: run only end-to-end tests.
 - `cargo run --bin test_api`: Claude Code CLI smoke test.
 - `cargo run --bin jcode-harness -- --include-network`: exercise tool harness with optional network calls.
 - `scripts/agent_trace.sh`: end-to-end agent trace (set `JCODE_PROVIDER=openai|claude`).
+- `scripts/remote_build.sh --release`: build on remote machine and sync binary back.
+- `scripts/remote_build.sh test`: run tests on remote machine.
 
 ## Logs
 - Logs are written to `~/.jcode/logs/` (daily files like `jcode-YYYY-MM-DD.log`).

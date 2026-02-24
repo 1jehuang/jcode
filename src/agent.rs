@@ -85,6 +85,8 @@ pub struct Agent {
     provider_session_id: Option<String>,
     /// Last upstream provider (OpenRouter) observed for this session
     last_upstream_provider: Option<String>,
+    /// Last observed transport/connection type for this session
+    last_connection_type: Option<String>,
     /// Pending swarm alerts to inject into the next turn
     pending_alerts: Vec<String>,
     /// Soft interrupt queue: messages to inject at next safe point without cancelling
@@ -190,6 +192,7 @@ impl Agent {
             allowed_tools: None,
             provider_session_id: None,
             last_upstream_provider: None,
+            last_connection_type: None,
             pending_alerts: Vec::new(),
             soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             background_tool_signal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -223,6 +226,7 @@ impl Agent {
             allowed_tools,
             provider_session_id: None,
             last_upstream_provider: None,
+            last_connection_type: None,
             pending_alerts: Vec::new(),
             soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             background_tool_signal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -563,6 +567,7 @@ impl Agent {
             "model": self.provider.model(),
             "provider_session_id": self.provider_session_id,
             "last_upstream_provider": self.last_upstream_provider,
+            "last_connection_type": self.last_connection_type,
             "active_skill": self.active_skill,
             "allowed_tools": self.allowed_tools,
             "session": {
@@ -757,6 +762,7 @@ impl Agent {
             || reason.contains("max_tokens")
             || reason.contains("length")
             || reason.contains("trunc")
+            || reason.contains("commentary")
     }
 
     fn continuation_prompt_for_stop_reason(stop_reason: &str) -> String {
@@ -1986,6 +1992,12 @@ impl Agent {
                             );
                         }
                     }
+                    StreamEvent::ConnectionType { connection } => {
+                        if trace {
+                            eprintln!("[trace] connection_type={}", connection);
+                        }
+                        self.last_connection_type = Some(connection);
+                    }
                     StreamEvent::MessageEnd {
                         stop_reason: reason,
                     } => {
@@ -2675,6 +2687,10 @@ impl Agent {
                             );
                         }
                     }
+                    StreamEvent::ConnectionType { connection } => {
+                        self.last_connection_type = Some(connection.clone());
+                        let _ = event_tx.send(ServerEvent::ConnectionType { connection });
+                    }
                     StreamEvent::MessageEnd {
                         stop_reason: reason,
                     } => {
@@ -3329,6 +3345,10 @@ impl Agent {
                                 usage_cache_creation,
                             );
                         }
+                    }
+                    StreamEvent::ConnectionType { connection } => {
+                        self.last_connection_type = Some(connection.clone());
+                        let _ = event_tx.send(ServerEvent::ConnectionType { connection });
                     }
                     StreamEvent::MessageEnd {
                         stop_reason: reason,
