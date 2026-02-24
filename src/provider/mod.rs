@@ -242,6 +242,13 @@ struct RuntimeModelUnavailability {
     observed_at: SystemTime,
 }
 
+#[derive(Debug, Clone)]
+struct RuntimeProviderUnavailability {
+    reason: String,
+    recorded_at: Instant,
+    observed_at: SystemTime,
+}
+
 /// Dynamic cache of models actually available for this account (populated from Codex API).
 /// When populated, only models in this set should be offered/accepted for the OpenAI provider.
 static ACCOUNT_AVAILABLE_MODELS: std::sync::LazyLock<RwLock<Option<HashSet<String>>>> =
@@ -253,11 +260,15 @@ static ACCOUNT_AVAILABLE_MODELS_OBSERVED_AT: std::sync::LazyLock<RwLock<Option<S
 static ACCOUNT_RUNTIME_UNAVAILABLE_MODELS: std::sync::LazyLock<
     RwLock<HashMap<String, RuntimeModelUnavailability>>,
 > = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+static ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS: std::sync::LazyLock<
+    RwLock<HashMap<String, RuntimeProviderUnavailability>>,
+> = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 static ACCOUNT_MODEL_REFRESH_LAST_ATTEMPT: std::sync::LazyLock<RwLock<Option<Instant>>> =
     std::sync::LazyLock::new(|| RwLock::new(None));
 static ACCOUNT_MODEL_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 const ACCOUNT_MODEL_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const RUNTIME_UNAVAILABLE_TTL: Duration = Duration::from_secs(10 * 60);
+const PROVIDER_RUNTIME_UNAVAILABLE_TTL: Duration = Duration::from_secs(5 * 60);
 const ACCOUNT_MODEL_REFRESH_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,6 +327,10 @@ pub fn format_account_model_availability_detail(
 
 fn normalize_model_id(model: &str) -> String {
     model.trim().to_ascii_lowercase()
+}
+
+fn normalize_provider_id(provider: &str) -> String {
+    provider.trim().to_ascii_lowercase()
 }
 
 /// Look up a cached context limit for a model.
@@ -538,6 +553,65 @@ pub fn clear_model_unavailable_for_account(model: &str) {
     }
 }
 
+fn runtime_provider_unavailability(provider: &str) -> Option<RuntimeProviderUnavailability> {
+    let key = normalize_provider_id(provider);
+    if key.is_empty() {
+        return None;
+    }
+
+    let mut unavailable = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write().ok()?;
+    if let Some(entry) = unavailable.get(&key) {
+        if entry.recorded_at.elapsed() <= PROVIDER_RUNTIME_UNAVAILABLE_TTL {
+            return Some(entry.clone());
+        }
+        unavailable.remove(&key);
+    }
+    None
+}
+
+pub fn record_provider_unavailable_for_account(provider: &str, reason: &str) {
+    let key = normalize_provider_id(provider);
+    if key.is_empty() {
+        return;
+    }
+
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
+        unavailable.insert(
+            key,
+            RuntimeProviderUnavailability {
+                reason: reason.trim().to_string(),
+                recorded_at: Instant::now(),
+                observed_at: SystemTime::now(),
+            },
+        );
+    }
+}
+
+pub fn clear_provider_unavailable_for_account(provider: &str) {
+    let key = normalize_provider_id(provider);
+    if key.is_empty() {
+        return;
+    }
+
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
+        unavailable.remove(&key);
+    }
+}
+
+pub fn provider_unavailability_detail_for_account(provider: &str) -> Option<String> {
+    let entry = runtime_provider_unavailability(provider)?;
+
+    let mut detail = entry.reason;
+    if let Ok(elapsed) = SystemTime::now().duration_since(entry.observed_at) {
+        detail.push_str(&format!(
+            " (runtime-error, {} ago)",
+            format_elapsed_duration_short(elapsed)
+        ));
+    }
+
+    Some(detail)
+}
+
 pub fn model_unavailability_detail_for_account(model: &str) -> Option<String> {
     let availability = model_availability_for_account(model);
     format_account_model_availability_detail(&availability)
@@ -705,7 +779,9 @@ pub async fn fetch_openai_model_catalog(access_token: &str) -> Result<OpenAIMode
 /// Fetch context window sizes from the Codex backend API.
 /// Returns a map of model slug -> context_window tokens.
 pub async fn fetch_openai_context_limits(access_token: &str) -> Result<HashMap<String, usize>> {
-    Ok(fetch_openai_model_catalog(access_token).await?.context_limits)
+    Ok(fetch_openai_model_catalog(access_token)
+        .await?
+        .context_limits)
 }
 
 /// Return the context window size in tokens for a given model, if known.
@@ -782,6 +858,8 @@ pub struct MultiProvider {
     /// Direct Anthropic API provider (no Python dependency)
     anthropic: Option<anthropic::AnthropicProvider>,
     openai: Option<openai::OpenAIProvider>,
+    /// GitHub Copilot CLI provider (fallback when OAuth quotas are exhausted)
+    copilot: Option<copilot::CopilotCliProvider>,
     /// OpenRouter API provider (200+ models from various providers)
     openrouter: Option<openrouter::OpenRouterProvider>,
     active: RwLock<ActiveProvider>,
@@ -792,14 +870,283 @@ pub struct MultiProvider {
     use_claude_cli: bool,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ActiveProvider {
     Claude,
     OpenAI,
+    Copilot,
     OpenRouter,
 }
 
 impl MultiProvider {
+    fn provider_label(provider: ActiveProvider) -> &'static str {
+        match provider {
+            ActiveProvider::Claude => "Anthropic",
+            ActiveProvider::OpenAI => "OpenAI",
+            ActiveProvider::Copilot => "GitHub Copilot",
+            ActiveProvider::OpenRouter => "OpenRouter",
+        }
+    }
+
+    fn provider_key(provider: ActiveProvider) -> &'static str {
+        match provider {
+            ActiveProvider::Claude => "claude",
+            ActiveProvider::OpenAI => "openai",
+            ActiveProvider::Copilot => "copilot",
+            ActiveProvider::OpenRouter => "openrouter",
+        }
+    }
+
+    fn set_active_provider(&self, provider: ActiveProvider) {
+        *self.active.write().unwrap() = provider;
+    }
+
+    fn provider_is_configured(&self, provider: ActiveProvider) -> bool {
+        match provider {
+            ActiveProvider::Claude => self.anthropic.is_some() || self.claude.is_some(),
+            ActiveProvider::OpenAI => self.openai.is_some(),
+            ActiveProvider::Copilot => self.copilot.is_some(),
+            ActiveProvider::OpenRouter => self.openrouter.is_some(),
+        }
+    }
+
+    fn provider_precheck_unavailable_reason(&self, provider: ActiveProvider) -> Option<String> {
+        match provider {
+            ActiveProvider::Claude if self.is_claude_usage_exhausted() => {
+                Some("OAuth usage exhausted".to_string())
+            }
+            _ => None,
+        }
+    }
+
+    fn fallback_sequence(active: ActiveProvider) -> Vec<ActiveProvider> {
+        match active {
+            // OAuth-first fallback, then Copilot CLI. Keep OpenRouter out of automatic
+            // exhaustion fallback to avoid silently switching to direct API billing.
+            ActiveProvider::Claude => {
+                vec![
+                    ActiveProvider::Claude,
+                    ActiveProvider::OpenAI,
+                    ActiveProvider::Copilot,
+                ]
+            }
+            ActiveProvider::OpenAI => {
+                vec![
+                    ActiveProvider::OpenAI,
+                    ActiveProvider::Claude,
+                    ActiveProvider::Copilot,
+                ]
+            }
+            ActiveProvider::Copilot => {
+                vec![
+                    ActiveProvider::Copilot,
+                    ActiveProvider::Claude,
+                    ActiveProvider::OpenAI,
+                ]
+            }
+            ActiveProvider::OpenRouter => vec![ActiveProvider::OpenRouter],
+        }
+    }
+
+    fn summarize_error(err: &anyhow::Error) -> String {
+        err.to_string()
+            .lines()
+            .next()
+            .unwrap_or("unknown error")
+            .trim()
+            .to_string()
+    }
+
+    fn should_failover_on_error(err: &anyhow::Error) -> bool {
+        let lower = err.to_string().to_ascii_lowercase();
+
+        let quota_or_limit = [
+            "quota",
+            "insufficient_quota",
+            "rate limit",
+            "rate_limit",
+            "too many requests",
+            " 429",
+            "(429",
+            "billing",
+            "credit",
+            "payment required",
+            "usage exhausted",
+            "token limit",
+            "limit reached",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+
+        let auth_or_availability = [
+            "credentials not available",
+            "token expired",
+            "re-authenticate",
+            "unauthorized",
+            "forbidden",
+            "not available for your account",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+
+        quota_or_limit || auth_or_availability
+    }
+
+    fn no_provider_available_error(notes: &[String]) -> anyhow::Error {
+        let mut msg = "No tokens/providers left: no usable provider right now. Anthropic/OpenAI usage may be exhausted and GitHub Copilot is not authenticated or currently unavailable.".to_string();
+        if !notes.is_empty() {
+            msg.push_str(" Details: ");
+            msg.push_str(&notes.join(" | "));
+        }
+        msg.push_str(" Use `/usage` to check limits and `/login <provider>` to re-authenticate.");
+        anyhow::anyhow!(msg)
+    }
+
+    async fn complete_on_provider(
+        &self,
+        provider: ActiveProvider,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        match provider {
+            ActiveProvider::Claude => {
+                // Prefer direct Anthropic API if available.
+                if let Some(ref anthropic) = self.anthropic {
+                    anthropic
+                        .complete(messages, tools, system, resume_session_id)
+                        .await
+                } else if let Some(ref claude) = self.claude {
+                    claude
+                        .complete(messages, tools, system, resume_session_id)
+                        .await
+                } else {
+                    Err(anyhow::anyhow!(
+                        "Claude credentials not available. Run `claude` to log in."
+                    ))
+                }
+            }
+            ActiveProvider::OpenAI => {
+                if let Some(ref openai) = self.openai {
+                    openai
+                        .complete(messages, tools, system, resume_session_id)
+                        .await
+                } else {
+                    Err(anyhow::anyhow!("OpenAI credentials not available. Run `jcode login --provider openai` to log in."))
+                }
+            }
+            ActiveProvider::Copilot => {
+                if let Some(ref copilot) = self.copilot {
+                    copilot
+                        .complete(messages, tools, system, resume_session_id)
+                        .await
+                } else {
+                    Err(anyhow::anyhow!(
+                        "GitHub Copilot fallback is not available. Run `jcode login --provider copilot`."
+                    ))
+                }
+            }
+            ActiveProvider::OpenRouter => {
+                if let Some(ref openrouter) = self.openrouter {
+                    openrouter
+                        .complete(messages, tools, system, resume_session_id)
+                        .await
+                } else {
+                    Err(anyhow::anyhow!("OpenRouter credentials not available. Set OPENROUTER_API_KEY environment variable."))
+                }
+            }
+        }
+    }
+
+    async fn complete_split_on_provider(
+        &self,
+        provider: ActiveProvider,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system_static: &str,
+        system_dynamic: &str,
+        resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        match provider {
+            ActiveProvider::Claude => {
+                // Prefer direct Anthropic API for best caching support.
+                if let Some(ref anthropic) = self.anthropic {
+                    anthropic
+                        .complete_split(
+                            messages,
+                            tools,
+                            system_static,
+                            system_dynamic,
+                            resume_session_id,
+                        )
+                        .await
+                } else if let Some(ref claude) = self.claude {
+                    claude
+                        .complete_split(
+                            messages,
+                            tools,
+                            system_static,
+                            system_dynamic,
+                            resume_session_id,
+                        )
+                        .await
+                } else {
+                    Err(anyhow::anyhow!(
+                        "Claude credentials not available. Run `claude` to log in."
+                    ))
+                }
+            }
+            ActiveProvider::OpenAI => {
+                if let Some(ref openai) = self.openai {
+                    openai
+                        .complete_split(
+                            messages,
+                            tools,
+                            system_static,
+                            system_dynamic,
+                            resume_session_id,
+                        )
+                        .await
+                } else {
+                    Err(anyhow::anyhow!("OpenAI credentials not available. Run `jcode login --provider openai` to log in."))
+                }
+            }
+            ActiveProvider::Copilot => {
+                if let Some(ref copilot) = self.copilot {
+                    copilot
+                        .complete_split(
+                            messages,
+                            tools,
+                            system_static,
+                            system_dynamic,
+                            resume_session_id,
+                        )
+                        .await
+                } else {
+                    Err(anyhow::anyhow!(
+                        "GitHub Copilot fallback is not available. Run `jcode login --provider copilot`."
+                    ))
+                }
+            }
+            ActiveProvider::OpenRouter => {
+                if let Some(ref openrouter) = self.openrouter {
+                    openrouter
+                        .complete_split(
+                            messages,
+                            tools,
+                            system_static,
+                            system_dynamic,
+                            resume_session_id,
+                        )
+                        .await
+                } else {
+                    Err(anyhow::anyhow!("OpenRouter credentials not available. Set OPENROUTER_API_KEY environment variable."))
+                }
+            }
+        }
+    }
+
     fn spawn_openai_catalog_refresh_if_needed(&self) {
         if !self.has_openai_creds {
             return;
@@ -821,6 +1168,7 @@ impl MultiProvider {
     pub fn new() -> Self {
         let has_claude_creds = auth::claude::load_credentials().is_ok();
         let has_openai_creds = auth::codex::load_credentials().is_ok();
+        let has_copilot_cli = auth::AuthStatus::check().copilot == auth::AuthState::Available;
         let has_openrouter_creds = openrouter::OpenRouterProvider::has_credentials();
 
         // Check if we should use Claude CLI instead of direct API.
@@ -859,6 +1207,12 @@ impl MultiProvider {
             None
         };
 
+        let copilot = if has_copilot_cli {
+            Some(copilot::CopilotCliProvider::new())
+        } else {
+            None
+        };
+
         // OpenRouter provider (access 200+ models via OPENROUTER_API_KEY)
         let openrouter = if has_openrouter_creds {
             match openrouter::OpenRouterProvider::new() {
@@ -872,11 +1226,13 @@ impl MultiProvider {
             None
         };
 
-        // Default to Claude if available, otherwise OpenAI, then OpenRouter
+        // Default to OAuth/CLI providers first. Keep direct API (OpenRouter) lowest.
         let active = if claude.is_some() || anthropic.is_some() {
             ActiveProvider::Claude
         } else if openai.is_some() {
             ActiveProvider::OpenAI
+        } else if copilot.is_some() {
+            ActiveProvider::Copilot
         } else if openrouter.is_some() {
             ActiveProvider::OpenRouter
         } else {
@@ -888,6 +1244,7 @@ impl MultiProvider {
             claude,
             anthropic,
             openai,
+            copilot,
             openrouter,
             active: RwLock::new(active),
             has_claude_creds,
@@ -935,23 +1292,6 @@ impl MultiProvider {
         // (give a small buffer for rounding/display issues)
         usage.five_hour >= 0.99 && usage.seven_day >= 0.99
     }
-
-    /// Auto-fallback to OpenRouter with kimi-k2.5 if Claude is exhausted
-    fn try_fallback_to_openrouter(&self) -> Option<&openrouter::OpenRouterProvider> {
-        if self.is_claude_usage_exhausted() {
-            if let Some(ref openrouter) = self.openrouter {
-                // Switch to OpenRouter and set kimi-k2.5 as the model
-                *self.active.write().unwrap() = ActiveProvider::OpenRouter;
-                // Try to set the model to kimi-k2.5
-                let _ = openrouter.set_model("moonshotai/kimi-k2-5");
-                crate::logging::info(
-                    "Auto-switched to OpenRouter (kimi-k2.5) - Claude OAuth usage exhausted",
-                );
-                return Some(openrouter);
-            }
-        }
-        None
-    }
 }
 
 #[async_trait]
@@ -965,49 +1305,58 @@ impl Provider for MultiProvider {
     ) -> Result<EventStream> {
         self.spawn_openai_catalog_refresh_if_needed();
 
-        match self.active_provider() {
-            ActiveProvider::Claude => {
-                // Check if Claude usage is exhausted and fallback is available
-                if let Some(openrouter) = self.try_fallback_to_openrouter() {
-                    return openrouter
-                        .complete(messages, tools, system, resume_session_id)
-                        .await;
-                }
+        let active = self.active_provider();
+        let sequence = Self::fallback_sequence(active);
+        let mut notes: Vec<String> = Vec::new();
 
-                // Prefer direct Anthropic API if available
-                if let Some(ref anthropic) = self.anthropic {
-                    anthropic
-                        .complete(messages, tools, system, resume_session_id)
-                        .await
-                } else if let Some(ref claude) = self.claude {
-                    claude
-                        .complete(messages, tools, system, resume_session_id)
-                        .await
-                } else {
-                    Err(anyhow::anyhow!(
-                        "Claude credentials not available. Run `claude` to log in."
-                    ))
-                }
+        for candidate in sequence {
+            let label = Self::provider_label(candidate);
+            let key = Self::provider_key(candidate);
+
+            if !self.provider_is_configured(candidate) {
+                notes.push(format!("{}: not configured", label));
+                continue;
             }
-            ActiveProvider::OpenAI => {
-                if let Some(ref openai) = self.openai {
-                    openai
-                        .complete(messages, tools, system, resume_session_id)
-                        .await
-                } else {
-                    Err(anyhow::anyhow!("OpenAI credentials not available. Run `jcode login --provider openai` to log in."))
-                }
+
+            if let Some(detail) = provider_unavailability_detail_for_account(key) {
+                notes.push(format!("{}: {}", label, detail));
+                continue;
             }
-            ActiveProvider::OpenRouter => {
-                if let Some(ref openrouter) = self.openrouter {
-                    openrouter
-                        .complete(messages, tools, system, resume_session_id)
-                        .await
-                } else {
-                    Err(anyhow::anyhow!("OpenRouter credentials not available. Set OPENROUTER_API_KEY environment variable."))
+
+            if let Some(reason) = self.provider_precheck_unavailable_reason(candidate) {
+                notes.push(format!("{}: {}", label, reason));
+                record_provider_unavailable_for_account(key, &reason);
+                continue;
+            }
+
+            match self
+                .complete_on_provider(candidate, messages, tools, system, resume_session_id)
+                .await
+            {
+                Ok(stream) => {
+                    clear_provider_unavailable_for_account(key);
+                    if candidate != active {
+                        self.set_active_provider(candidate);
+                        crate::logging::info(&format!(
+                            "Auto-fallback: switched active provider from {:?} to {:?}",
+                            active, candidate
+                        ));
+                    }
+                    return Ok(stream);
+                }
+                Err(err) => {
+                    let summary = Self::summarize_error(&err);
+                    notes.push(format!("{}: {}", label, summary));
+                    if Self::should_failover_on_error(&err) {
+                        record_provider_unavailable_for_account(key, &summary);
+                    } else {
+                        return Err(err);
+                    }
                 }
             }
         }
+
+        Err(Self::no_provider_available_error(&notes))
     }
 
     /// Split system prompt completion - delegates to underlying provider for better caching
@@ -1021,88 +1370,72 @@ impl Provider for MultiProvider {
     ) -> Result<EventStream> {
         self.spawn_openai_catalog_refresh_if_needed();
 
-        match self.active_provider() {
-            ActiveProvider::Claude => {
-                // Check if Claude usage is exhausted and fallback is available
-                if let Some(openrouter) = self.try_fallback_to_openrouter() {
-                    return openrouter
-                        .complete_split(
-                            messages,
-                            tools,
-                            system_static,
-                            system_dynamic,
-                            resume_session_id,
-                        )
-                        .await;
-                }
+        let active = self.active_provider();
+        let sequence = Self::fallback_sequence(active);
+        let mut notes: Vec<String> = Vec::new();
 
-                // Prefer direct Anthropic API for best caching support
-                if let Some(ref anthropic) = self.anthropic {
-                    anthropic
-                        .complete_split(
-                            messages,
-                            tools,
-                            system_static,
-                            system_dynamic,
-                            resume_session_id,
-                        )
-                        .await
-                } else if let Some(ref claude) = self.claude {
-                    // Claude CLI doesn't support split, fall back to combined
-                    claude
-                        .complete_split(
-                            messages,
-                            tools,
-                            system_static,
-                            system_dynamic,
-                            resume_session_id,
-                        )
-                        .await
-                } else {
-                    Err(anyhow::anyhow!(
-                        "Claude credentials not available. Run `claude` to log in."
-                    ))
-                }
+        for candidate in sequence {
+            let label = Self::provider_label(candidate);
+            let key = Self::provider_key(candidate);
+
+            if !self.provider_is_configured(candidate) {
+                notes.push(format!("{}: not configured", label));
+                continue;
             }
-            ActiveProvider::OpenAI => {
-                if let Some(ref openai) = self.openai {
-                    // OpenAI doesn't support split caching, use default combined
-                    openai
-                        .complete_split(
-                            messages,
-                            tools,
-                            system_static,
-                            system_dynamic,
-                            resume_session_id,
-                        )
-                        .await
-                } else {
-                    Err(anyhow::anyhow!("OpenAI credentials not available. Run `jcode login --provider openai` to log in."))
-                }
+
+            if let Some(detail) = provider_unavailability_detail_for_account(key) {
+                notes.push(format!("{}: {}", label, detail));
+                continue;
             }
-            ActiveProvider::OpenRouter => {
-                if let Some(ref openrouter) = self.openrouter {
-                    // OpenRouter doesn't support split caching, use default combined
-                    openrouter
-                        .complete_split(
-                            messages,
-                            tools,
-                            system_static,
-                            system_dynamic,
-                            resume_session_id,
-                        )
-                        .await
-                } else {
-                    Err(anyhow::anyhow!("OpenRouter credentials not available. Set OPENROUTER_API_KEY environment variable."))
+
+            if let Some(reason) = self.provider_precheck_unavailable_reason(candidate) {
+                notes.push(format!("{}: {}", label, reason));
+                record_provider_unavailable_for_account(key, &reason);
+                continue;
+            }
+
+            match self
+                .complete_split_on_provider(
+                    candidate,
+                    messages,
+                    tools,
+                    system_static,
+                    system_dynamic,
+                    resume_session_id,
+                )
+                .await
+            {
+                Ok(stream) => {
+                    clear_provider_unavailable_for_account(key);
+                    if candidate != active {
+                        self.set_active_provider(candidate);
+                        crate::logging::info(&format!(
+                            "Auto-fallback: switched active provider from {:?} to {:?}",
+                            active, candidate
+                        ));
+                    }
+                    return Ok(stream);
+                }
+                Err(err) => {
+                    let summary = Self::summarize_error(&err);
+                    notes.push(format!("{}: {}", label, summary));
+                    if Self::should_failover_on_error(&err) {
+                        record_provider_unavailable_for_account(key, &summary);
+                    } else {
+                        return Err(err);
+                    }
                 }
             }
         }
+
+        Err(Self::no_provider_available_error(&notes))
     }
 
     fn name(&self) -> &str {
         match self.active_provider() {
             ActiveProvider::Claude => "Claude",
             ActiveProvider::OpenAI => "OpenAI",
+            ActiveProvider::Copilot => "Copilot",
             ActiveProvider::OpenRouter => "OpenRouter",
         }
     }
@@ -1124,6 +1457,11 @@ impl Provider for MultiProvider {
                 .as_ref()
                 .map(|o| o.model())
                 .unwrap_or_else(|| "gpt-5.3-codex-spark".to_string()),
+            ActiveProvider::Copilot => self
+                .copilot
+                .as_ref()
+                .map(|o| o.model())
+                .unwrap_or_else(|| "claude-sonnet-4".to_string()),
             ActiveProvider::OpenRouter => self
                 .openrouter
                 .as_ref()
@@ -1195,6 +1533,13 @@ impl Provider for MultiProvider {
                 ActiveProvider::OpenAI => {
                     if let Some(ref openai) = self.openai {
                         openai.set_model(model)
+                    } else {
+                        Err(anyhow::anyhow!("Unknown model: {}", model))
+                    }
+                }
+                ActiveProvider::Copilot => {
+                    if let Some(ref copilot) = self.copilot {
+                        copilot.set_model(model)
                     } else {
                         Err(anyhow::anyhow!("Unknown model: {}", model))
                     }
@@ -1311,13 +1656,11 @@ impl Provider for MultiProvider {
             } else {
                 match availability.state {
                     AccountModelAvailabilityState::Available => (true, String::new()),
-                    AccountModelAvailabilityState::Unavailable => {
-                        (
-                            false,
-                            format_account_model_availability_detail(&availability)
-                                .unwrap_or_else(|| "not available".to_string()),
-                        )
-                    }
+                    AccountModelAvailabilityState::Unavailable => (
+                        false,
+                        format_account_model_availability_detail(&availability)
+                            .unwrap_or_else(|| "not available".to_string()),
+                    ),
                     AccountModelAvailabilityState::Unknown => {
                         let detail = format_account_model_availability_detail(&availability)
                             .unwrap_or_else(|| "availability unknown".to_string());
@@ -1471,6 +1814,11 @@ impl Provider for MultiProvider {
                 .as_ref()
                 .map(|o| o.handles_tools_internally())
                 .unwrap_or(false),
+            ActiveProvider::Copilot => self
+                .copilot
+                .as_ref()
+                .map(|o| o.handles_tools_internally())
+                .unwrap_or(false),
             ActiveProvider::OpenRouter => false, // jcode executes tools
         }
     }
@@ -1479,6 +1827,7 @@ impl Provider for MultiProvider {
         match self.active_provider() {
             ActiveProvider::Claude => None,
             ActiveProvider::OpenAI => self.openai.as_ref().and_then(|o| o.reasoning_effort()),
+            ActiveProvider::Copilot => None,
             ActiveProvider::OpenRouter => None,
         }
     }
@@ -1503,6 +1852,7 @@ impl Provider for MultiProvider {
                 .as_ref()
                 .map(|o| o.available_efforts())
                 .unwrap_or_default(),
+            ActiveProvider::Copilot => vec![],
             _ => vec![],
         }
     }
@@ -1522,6 +1872,11 @@ impl Provider for MultiProvider {
             }
             ActiveProvider::OpenAI => self
                 .openai
+                .as_ref()
+                .map(|o| o.supports_compaction())
+                .unwrap_or(false),
+            ActiveProvider::Copilot => self
+                .copilot
                 .as_ref()
                 .map(|o| o.supports_compaction())
                 .unwrap_or(false),
@@ -1549,6 +1904,11 @@ impl Provider for MultiProvider {
                 .as_ref()
                 .map(|o| o.context_window())
                 .unwrap_or(DEFAULT_CONTEXT_LIMIT),
+            ActiveProvider::Copilot => self
+                .copilot
+                .as_ref()
+                .map(|o| o.context_window())
+                .unwrap_or(DEFAULT_CONTEXT_LIMIT),
             ActiveProvider::OpenRouter => self
                 .openrouter
                 .as_ref()
@@ -1567,6 +1927,11 @@ impl Provider for MultiProvider {
             ActiveProvider::OpenAI => {
                 if provider.openai.is_some() {
                     *provider.active.write().unwrap() = ActiveProvider::OpenAI;
+                }
+            }
+            ActiveProvider::Copilot => {
+                if provider.copilot.is_some() {
+                    *provider.active.write().unwrap() = ActiveProvider::Copilot;
                 }
             }
             ActiveProvider::OpenRouter => {
@@ -1590,6 +1955,7 @@ impl Provider for MultiProvider {
                 }
             }
             ActiveProvider::OpenAI => None,
+            ActiveProvider::Copilot => None,
             ActiveProvider::OpenRouter => None,
         }
     }
@@ -1667,5 +2033,37 @@ mod tests {
                 .collect(),
         );
         assert_eq!(context_limit_for_model("test-model-xyz"), Some(64_000));
+    }
+
+    #[test]
+    fn test_fallback_sequence_prefers_oauth_then_copilot() {
+        assert_eq!(
+            MultiProvider::fallback_sequence(ActiveProvider::Claude),
+            vec![
+                ActiveProvider::Claude,
+                ActiveProvider::OpenAI,
+                ActiveProvider::Copilot,
+            ]
+        );
+        assert_eq!(
+            MultiProvider::fallback_sequence(ActiveProvider::OpenAI),
+            vec![
+                ActiveProvider::OpenAI,
+                ActiveProvider::Claude,
+                ActiveProvider::Copilot,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_no_provider_error_mentions_tokens_and_details() {
+        let err = MultiProvider::no_provider_available_error(&[
+            "OpenAI: rate limited".to_string(),
+            "GitHub Copilot: not configured".to_string(),
+        ]);
+        let text = err.to_string();
+        assert!(text.contains("No tokens/providers left"));
+        assert!(text.contains("OpenAI: rate limited"));
+        assert!(text.contains("GitHub Copilot: not configured"));
     }
 }

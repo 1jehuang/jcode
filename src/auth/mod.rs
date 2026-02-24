@@ -147,11 +147,12 @@ impl AuthStatus {
             AuthState::NotConfigured
         };
 
-        status.antigravity = if command_available_from_env("JCODE_ANTIGRAVITY_CLI_PATH", "antigravity") {
-            AuthState::Available
-        } else {
-            AuthState::NotConfigured
-        };
+        status.antigravity =
+            if command_available_from_env("JCODE_ANTIGRAVITY_CLI_PATH", "antigravity") {
+                AuthState::Available
+            } else {
+                AuthState::NotConfigured
+            };
 
         status
     }
@@ -208,7 +209,11 @@ fn explicit_command_exists(path: &std::path::Path) -> bool {
     {
         let pathext =
             std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-        for ext in pathext.split(';').map(str::trim).filter(|ext| !ext.is_empty()) {
+        for ext in pathext
+            .split(';')
+            .map(str::trim)
+            .filter(|ext| !ext.is_empty())
+        {
             let candidate = path.with_extension(ext.trim_start_matches('.'));
             if candidate.exists() {
                 return true;
@@ -234,7 +239,8 @@ fn command_candidates(command: &str) -> Vec<std::ffi::OsString> {
 
     #[cfg(windows)]
     {
-        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+        let pathext =
+            std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
         let exts: Vec<&str> = pathext
             .split(';')
             .map(str::trim)

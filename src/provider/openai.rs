@@ -32,6 +32,7 @@ const RESPONSES_PATH: &str = "responses";
 const DEFAULT_MODEL: &str = "gpt-5.3-codex-spark";
 const ORIGINATOR: &str = "codex_cli_rs";
 const CHATGPT_INSTRUCTIONS: &str = include_str!("../prompts/openai_chatgpt.md");
+const SELFDEV_SECTION_HEADER: &str = "# Self-Development Mode";
 
 /// Maximum number of retries for transient errors
 const MAX_RETRIES: u32 = 3;
@@ -254,6 +255,18 @@ impl OpenAIProvider {
         !credentials.refresh_token.is_empty() || credentials.id_token.is_some()
     }
 
+    fn chatgpt_instructions_with_selfdev(system: &str) -> String {
+        if let Some(selfdev_section) = extract_selfdev_section(system) {
+            format!(
+                "{}\n\n{}",
+                CHATGPT_INSTRUCTIONS.trim_end(),
+                selfdev_section
+            )
+        } else {
+            CHATGPT_INSTRUCTIONS.to_string()
+        }
+    }
+
     fn should_prefer_websocket(model: &str) -> bool {
         let normalized = model.trim().to_ascii_lowercase();
         if normalized.is_empty() {
@@ -397,6 +410,21 @@ impl OpenAIProvider {
             .send()
             .await
             .context("Failed to send request to OpenAI API")
+    }
+}
+
+fn extract_selfdev_section(system: &str) -> Option<&str> {
+    let start = system.find(SELFDEV_SECTION_HEADER)?;
+    let end = if let Some(rel_end) = system[start + 1..].find("\n# ") {
+        start + 1 + rel_end
+    } else {
+        system.len()
+    };
+    let section = system[start..end].trim();
+    if section.is_empty() {
+        None
+    } else {
+        Some(section)
     }
 }
 
@@ -1426,7 +1454,7 @@ impl Provider for OpenAIProvider {
             let credentials = self.credentials.read().await;
             let is_chatgpt = Self::is_chatgpt_mode(&credentials);
             let instructions = if is_chatgpt {
-                CHATGPT_INSTRUCTIONS.to_string()
+                Self::chatgpt_instructions_with_selfdev(system)
             } else {
                 system.to_string()
             };
@@ -1852,8 +1880,7 @@ async fn stream_response(
                 if let StreamEvent::Error { message, .. } = &event {
                     if let Some(model_name) = request.get("model").and_then(|m| m.as_str()) {
                         maybe_record_runtime_model_unavailable_from_stream_error(
-                            model_name,
-                            message,
+                            model_name, message,
                         );
                     }
                     if is_retryable_error(&message.to_lowercase()) {
@@ -2078,8 +2105,7 @@ async fn stream_response_websocket(
                         if let StreamEvent::Error { message, .. } = &event {
                             if let Some(model_name) = request_model.as_deref() {
                                 maybe_record_runtime_model_unavailable_from_stream_error(
-                                    model_name,
-                                    message,
+                                    model_name, message,
                                 );
                             }
                             if is_retryable_error(&message.to_lowercase()) {
@@ -2100,8 +2126,7 @@ async fn stream_response_websocket(
                         if let StreamEvent::Error { message, .. } = &event {
                             if let Some(model_name) = request_model.as_deref() {
                                 maybe_record_runtime_model_unavailable_from_stream_error(
-                                    model_name,
-                                    message,
+                                    model_name, message,
                                 );
                             }
                             if is_retryable_error(&message.to_lowercase()) {
@@ -2207,7 +2232,10 @@ fn classify_unavailable_model_error(status: StatusCode, body: &str) -> Option<St
         let reason = if trimmed.is_empty() {
             format!("model denied by OpenAI API (status {})", status)
         } else {
-            format!("model denied by OpenAI API (status {}): {}", status, trimmed)
+            format!(
+                "model denied by OpenAI API (status {}): {}",
+                status, trimmed
+            )
         };
         return Some(reason);
     }
@@ -3079,5 +3107,31 @@ mod tests {
         }
 
         assert!(saw_rewritten_message);
+    }
+
+    #[test]
+    fn test_extract_selfdev_section_missing_returns_none() {
+        let system = "# Environment\nDate: 2026-01-01\n\n# Available Skills\n- test";
+        assert!(extract_selfdev_section(system).is_none());
+    }
+
+    #[test]
+    fn test_extract_selfdev_section_stops_at_next_top_level_header() {
+        let system = "# Environment\nDate: 2026-01-01\n\n# Self-Development Mode\nUse selfdev tool\n## selfdev Tool\nreload\n\n# Available Skills\n- test";
+        let section = extract_selfdev_section(system).expect("expected self-dev section");
+        assert!(section.starts_with("# Self-Development Mode"));
+        assert!(section.contains("Use selfdev tool"));
+        assert!(section.contains("## selfdev Tool"));
+        assert!(!section.contains("# Available Skills"));
+    }
+
+    #[test]
+    fn test_chatgpt_instructions_with_selfdev_appends_selfdev_block() {
+        let system = "# Environment\nDate: 2026-01-01\n\n# Self-Development Mode\nUse selfdev tool\n\n# Available Skills\n- test";
+
+        let instructions = OpenAIProvider::chatgpt_instructions_with_selfdev(system);
+        assert!(instructions.contains("You are in the Jcode harness"));
+        assert!(instructions.contains("# Self-Development Mode"));
+        assert!(instructions.contains("Use selfdev tool"));
     }
 }

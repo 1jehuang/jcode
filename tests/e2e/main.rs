@@ -241,7 +241,11 @@ async fn test_clear_preserves_debug_for_resumed_debug_session() -> Result<()> {
                 saw_resume_history = true;
                 break;
             }
-            ServerEvent::Error { id, message } if id == resume_id => {
+            ServerEvent::Error {
+                id,
+                message,
+                ..
+            } if id == resume_id => {
                 anyhow::bail!("resume_session failed: {}", message);
             }
             _ => {}
