@@ -527,11 +527,11 @@ graph TB
 
 <div align="center">
 
-## OpenClaw — Ambient Mode
+## OpenClaw Implementation — Ambient Mode
 
 </div>
 
-OpenClaw is jcode's always-on autonomous agent. When you're not actively coding, it runs in the background — gardening your memory graph, doing proactive work, and staying reachable via Telegram.
+Ambient mode is Jcode's always-on autonomous agent. When you're not actively coding, it runs in the background — gardening your memory graph, doing proactive work, and staying reachable via Telegram. (IOS app planned)
 
 Think of it like a brain consolidating memories during sleep: it merges duplicates, resolves contradictions, verifies stale facts against your codebase, and extracts missed context from crashed sessions.
 
