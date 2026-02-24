@@ -13,11 +13,12 @@ use reqwest::header::HeaderValue;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::task::{Context as TaskContext, Poll};
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::connect_async;
@@ -39,14 +40,21 @@ const MAX_RETRIES: u32 = 3;
 const RETRY_BASE_DELAY_MS: u64 = 1000;
 const WEBSOCKET_UPGRADE_REQUIRED_ERROR: StatusCode = StatusCode::UPGRADE_REQUIRED;
 const WEBSOCKET_FALLBACK_NOTICE: &str = "falling back from websockets to https transport";
-const WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS: u64 = 45;
-const WEBSOCKET_IDLE_TIMEOUT_SECS: u64 = 30;
-const WEBSOCKET_COMPLETION_TIMEOUT_SECS: u64 = 90;
+const WEBSOCKET_CONNECT_TIMEOUT_SECS: u64 = 8;
+const WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS: u64 = 8;
+const WEBSOCKET_IDLE_TIMEOUT_SECS: u64 = 8;
+const WEBSOCKET_COMPLETION_TIMEOUT_SECS: u64 = 300;
+const WEBSOCKET_MODEL_COOLDOWN_BASE_SECS: u64 = 600;
+const WEBSOCKET_MODEL_COOLDOWN_MAX_SECS: u64 = 3600;
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 16_384;
 static FALLBACK_TOOL_CALL_COUNTER: AtomicU64 = AtomicU64::new(1);
 static RECOVERED_TEXT_WRAPPED_TOOL_CALLS: AtomicU64 = AtomicU64::new(0);
 static NORMALIZED_NULL_TOOL_ARGUMENTS: AtomicU64 = AtomicU64::new(0);
 static REWRITTEN_ORPHAN_TOOL_OUTPUTS: AtomicU64 = AtomicU64::new(0);
+static WEBSOCKET_COOLDOWNS: LazyLock<Arc<RwLock<HashMap<String, Instant>>>> =
+    LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
+static WEBSOCKET_FAILURE_STREAKS: LazyLock<Arc<RwLock<HashMap<String, u32>>>> =
+    LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
 
 /// Available OpenAI/Codex models
 const AVAILABLE_MODELS: &[&str] = &[
@@ -141,7 +149,8 @@ pub struct OpenAIProvider {
     max_output_tokens: Option<u32>,
     reasoning_effort: Arc<RwLock<Option<String>>>,
     transport_mode: OpenAITransportMode,
-    websocket_disabled: Arc<AtomicBool>,
+    websocket_cooldowns: Arc<RwLock<HashMap<String, Instant>>>,
+    websocket_failure_streaks: Arc<RwLock<HashMap<String, u32>>>,
 }
 
 impl OpenAIProvider {
@@ -195,7 +204,8 @@ impl OpenAIProvider {
             max_output_tokens,
             reasoning_effort: Arc::new(RwLock::new(reasoning_effort)),
             transport_mode,
-            websocket_disabled: Arc::new(AtomicBool::new(false)),
+            websocket_cooldowns: Arc::clone(&WEBSOCKET_COOLDOWNS),
+            websocket_failure_streaks: Arc::clone(&WEBSOCKET_FAILURE_STREAKS),
         }
     }
 
@@ -245,7 +255,12 @@ impl OpenAIProvider {
     }
 
     fn should_prefer_websocket(model: &str) -> bool {
-        model.contains("codex") || model.starts_with("gpt-5")
+        let normalized = model.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return false;
+        }
+
+        normalized.contains("codex") || normalized.starts_with("gpt-5")
     }
 
     fn normalize_reasoning_effort(raw: &str) -> Option<String> {
@@ -1058,6 +1073,20 @@ fn parse_openai_response_event(
                 }
             }
         }
+        "response.incomplete" => {
+            let stop_reason = event
+                .response
+                .as_ref()
+                .and_then(extract_stop_reason_from_response)
+                .or_else(|| Some("incomplete".to_string()));
+            if let Some(response) = event.response {
+                if let Some(usage_event) = extract_usage_from_response(&response) {
+                    pending.push_back(usage_event);
+                }
+            }
+            pending.push_back(StreamEvent::MessageEnd { stop_reason });
+            return pending.pop_front();
+        }
         "response.completed" => {
             let stop_reason = event
                 .response
@@ -1089,9 +1118,27 @@ fn parse_openai_response_event(
     None
 }
 
+fn extract_last_assistant_message_phase(response: &Value) -> Option<String> {
+    let output = response.get("output")?.as_array()?;
+    output.iter().rev().find_map(|item| {
+        if item.get("type").and_then(|v| v.as_str()) != Some("message") {
+            return None;
+        }
+        if item.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+            return None;
+        }
+        item.get("phase")
+            .and_then(|v| v.as_str())
+            .map(|phase| phase.to_string())
+    })
+}
+
 fn extract_stop_reason_from_response(response: &Value) -> Option<String> {
     let status = response.get("status").and_then(|v| v.as_str());
     if status == Some("completed") {
+        if extract_last_assistant_message_phase(response).as_deref() == Some("commentary") {
+            return Some("commentary".to_string());
+        }
         return None;
     }
 
@@ -1398,43 +1445,69 @@ impl Provider for OpenAIProvider {
         // Clone what we need for the async task
         let credentials = Arc::clone(&self.credentials);
         let transport_mode = self.transport_mode;
-        let websocket_disabled = Arc::clone(&self.websocket_disabled);
+        let websocket_cooldowns = Arc::clone(&self.websocket_cooldowns);
+        let websocket_failure_streaks = Arc::clone(&self.websocket_failure_streaks);
         let model_for_transport = model_id.clone();
         let client = self.client.clone();
 
         // Spawn task to handle streaming with retry logic
         tokio::spawn(async move {
             let mut last_error = None;
+            let mut force_https_for_request = false;
+            let mut skip_backoff_once = false;
 
             for attempt in 0..MAX_RETRIES {
-                if attempt > 0 {
+                if attempt > 0 && !skip_backoff_once {
                     // Exponential backoff: 1s, 2s, 4s
                     let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
-                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
                     crate::logging::info(&format!(
                         "Retrying OpenAI API request (attempt {}/{})",
                         attempt + 1,
                         MAX_RETRIES
                     ));
                 }
+                skip_backoff_once = false;
 
-                let transport = if websocket_disabled.load(Ordering::Acquire) {
+                let transport = if force_https_for_request {
                     OpenAITransport::HTTPS
                 } else {
                     match transport_mode {
                         OpenAITransportMode::HTTPS => OpenAITransport::HTTPS,
                         OpenAITransportMode::WebSocket => OpenAITransport::WebSocket,
                         OpenAITransportMode::Auto => {
-                            if Self::should_prefer_websocket(&model_for_transport) {
-                                OpenAITransport::WebSocket
-                            } else {
+                            if !Self::should_prefer_websocket(&model_for_transport) {
                                 OpenAITransport::HTTPS
+                            } else if let Some(remaining) = websocket_cooldown_remaining(
+                                &websocket_cooldowns,
+                                &model_for_transport,
+                            )
+                            .await
+                            {
+                                crate::logging::info(&format!(
+                                    "OpenAI websocket cooldown active for model='{}' ({}s remaining); using HTTPS",
+                                    model_for_transport,
+                                    remaining.as_secs()
+                                ));
+                                OpenAITransport::HTTPS
+                            } else {
+                                OpenAITransport::WebSocket
                             }
                         }
                     }
                 };
 
                 let transport_label = transport.as_str();
+                if tx
+                    .send(Ok(StreamEvent::ConnectionType {
+                        connection: transport_label.to_string(),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                let attempt_started = Instant::now();
                 crate::logging::info(&format!(
                     "OpenAI stream attempt {}/{} using transport '{}'; model='{}'; mode='{}'",
                     attempt + 1,
@@ -1459,21 +1532,49 @@ impl Provider for OpenAIProvider {
                 };
 
                 match result {
-                    Ok(()) => return, // Success
+                    Ok(()) => {
+                        if use_websocket {
+                            record_websocket_success(
+                                &websocket_cooldowns,
+                                &websocket_failure_streaks,
+                                &model_for_transport,
+                            )
+                            .await;
+                        }
+                        return;
+                    } // Success
                     Err(OpenAIStreamFailure::FallbackToHttps(error)) => {
-                        crate::logging::info(
-                            "WebSocket fallback detected. Retrying using HTTPS transport for this session.",
-                        );
-                        websocket_disabled.store(true, Ordering::SeqCst);
+                        let elapsed_ms = attempt_started.elapsed().as_millis();
+                        crate::logging::warn(&format!(
+                            "WebSocket fallback after {}ms: {}",
+                            elapsed_ms, error
+                        ));
+                        force_https_for_request = true;
+                        skip_backoff_once = true;
+                        if matches!(transport_mode, OpenAITransportMode::Auto) {
+                            let (streak, cooldown) = record_websocket_fallback(
+                                &websocket_cooldowns,
+                                &websocket_failure_streaks,
+                                &model_for_transport,
+                            )
+                            .await;
+                            crate::logging::warn(&format!(
+                                "OpenAI websocket backoff for model='{}': streak={} cooldown={}s",
+                                model_for_transport,
+                                streak,
+                                cooldown.as_secs()
+                            ));
+                        }
                         last_error = Some(error);
                         continue;
                     }
                     Err(OpenAIStreamFailure::Other(error)) => {
+                        let elapsed_ms = attempt_started.elapsed().as_millis();
                         let error_str = error.to_string().to_lowercase();
                         if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
                             crate::logging::info(&format!(
-                                "Transient error, will retry: {}",
-                                error
+                                "Transient error after {}ms, will retry: {}",
+                                elapsed_ms, error
                             ));
                             last_error = Some(error);
                             continue;
@@ -1586,7 +1687,8 @@ impl Provider for OpenAIProvider {
             max_output_tokens: self.max_output_tokens,
             reasoning_effort: Arc::new(RwLock::new(self.reasoning_effort())),
             transport_mode: self.transport_mode,
-            websocket_disabled: Arc::clone(&self.websocket_disabled),
+            websocket_cooldowns: Arc::clone(&self.websocket_cooldowns),
+            websocket_failure_streaks: Arc::clone(&self.websocket_failure_streaks),
         })
     }
 }
@@ -1759,8 +1861,6 @@ async fn stream_response_websocket(
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<(), OpenAIStreamFailure> {
-    use std::time::{Duration, Instant};
-
     let access_token = openai_access_token(&credentials).await?;
     let creds = credentials.read().await;
     let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
@@ -1801,7 +1901,19 @@ async fn stream_response_websocket(
     }
     drop(creds);
 
-    let (mut ws_stream, _response) = match connect_async(ws_request).await {
+    let connect_result = tokio::time::timeout(
+        Duration::from_secs(WEBSOCKET_CONNECT_TIMEOUT_SECS),
+        connect_async(ws_request),
+    )
+    .await
+    .map_err(|_| {
+        OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+            "WebSocket connect timed out after {}s",
+            WEBSOCKET_CONNECT_TIMEOUT_SECS
+        ))
+    })?;
+
+    let (mut ws_stream, _response) = match connect_result {
         Ok((stream, response)) => (stream, response),
         Err(err) if is_ws_upgrade_required(&err) => {
             return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
@@ -1809,7 +1921,7 @@ async fn stream_response_websocket(
             )));
         }
         Err(err) => {
-            return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+            return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
                 "Failed to connect websocket stream: {}",
                 err
             )));
@@ -1844,9 +1956,9 @@ async fn stream_response_websocket(
     use futures::StreamExt;
     let mut saw_text_delta = false;
     let mut saw_response_completed = false;
-    let mut saw_any_message = false;
+    let mut saw_api_activity = false;
     let ws_started_at = Instant::now();
-    let mut last_non_keepalive_message_at = Instant::now();
+    let mut last_api_activity_at = Instant::now();
     let mut pending: VecDeque<StreamEvent> = VecDeque::new();
 
     loop {
@@ -1859,17 +1971,25 @@ async fn stream_response_websocket(
             )));
         }
 
-        if saw_any_message
-            && last_non_keepalive_message_at.elapsed()
-                >= Duration::from_secs(WEBSOCKET_IDLE_TIMEOUT_SECS)
+        if !saw_api_activity
+            && ws_started_at.elapsed() >= Duration::from_secs(WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS)
         {
             return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
-                "WebSocket stream stalled without non-keepalive events for {}s",
+                "WebSocket stream did not emit API activity within {}s",
+                WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS
+            )));
+        }
+
+        if saw_api_activity
+            && last_api_activity_at.elapsed() >= Duration::from_secs(WEBSOCKET_IDLE_TIMEOUT_SECS)
+        {
+            return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                "WebSocket stream stalled without API activity for {}s",
                 WEBSOCKET_IDLE_TIMEOUT_SECS
             )));
         }
 
-        let timeout_secs = if saw_any_message {
+        let timeout_secs = if saw_api_activity {
             WEBSOCKET_IDLE_TIMEOUT_SECS
         } else {
             WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS
@@ -1878,8 +1998,8 @@ async fn stream_response_websocket(
             .await
             .map_err(|_| {
                 OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
-                    "WebSocket stream timed out waiting for {} event ({}s)",
-                    if saw_any_message { "next" } else { "first" },
+                    "WebSocket stream timed out waiting for {} websocket activity ({}s)",
+                    if saw_api_activity { "next" } else { "first" },
                     timeout_secs
                 ))
             })?;
@@ -1892,7 +2012,6 @@ async fn stream_response_websocket(
                 "WebSocket stream ended before response.completed"
             )));
         };
-        saw_any_message = true;
 
         match result {
             Ok(message) => match message {
@@ -1905,11 +2024,13 @@ async fn stream_response_websocket(
                         )));
                     }
 
-                    let mut saw_progress_event = false;
+                    let mut made_api_activity = is_websocket_activity_payload(&text);
                     if let Some(event) =
                         parse_openai_response_event(&text, &mut saw_text_delta, &mut pending)
                     {
-                        saw_progress_event = true;
+                        if is_stream_activity_event(&event) {
+                            made_api_activity = true;
+                        }
                         if matches!(event, StreamEvent::MessageEnd { .. }) {
                             saw_response_completed = true;
                         }
@@ -1926,7 +2047,9 @@ async fn stream_response_websocket(
                         }
                     }
                     while let Some(event) = pending.pop_front() {
-                        saw_progress_event = true;
+                        if is_stream_activity_event(&event) {
+                            made_api_activity = true;
+                        }
                         if let StreamEvent::Error { message, .. } = &event {
                             if is_retryable_error(&message.to_lowercase()) {
                                 return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
@@ -1942,8 +2065,9 @@ async fn stream_response_websocket(
                             return Ok(());
                         }
                     }
-                    if saw_progress_event {
-                        last_non_keepalive_message_at = Instant::now();
+                    if made_api_activity {
+                        saw_api_activity = true;
+                        last_api_activity_at = Instant::now();
                     }
                 }
                 WsMessage::Ping(payload) => {
@@ -2072,10 +2196,153 @@ fn is_websocket_fallback_notice(data: &str) -> bool {
     data.to_lowercase().contains(WEBSOCKET_FALLBACK_NOTICE)
 }
 
+fn is_stream_activity_event(_event: &StreamEvent) -> bool {
+    true
+}
+
+fn is_websocket_activity_payload(data: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+        return false;
+    };
+    value
+        .get("type")
+        .and_then(|kind| kind.as_str())
+        .map(|kind| !kind.is_empty())
+        .unwrap_or(false)
+}
+
+fn normalize_transport_model(model: &str) -> Option<String> {
+    let normalized = model.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+async fn websocket_cooldown_remaining(
+    websocket_cooldowns: &Arc<RwLock<HashMap<String, Instant>>>,
+    model: &str,
+) -> Option<Duration> {
+    let key = normalize_transport_model(model)?;
+    let now = Instant::now();
+
+    {
+        let guard = websocket_cooldowns.read().await;
+        if let Some(until) = guard.get(&key) {
+            if *until > now {
+                return Some(*until - now);
+            }
+        }
+    }
+
+    let mut guard = websocket_cooldowns.write().await;
+    if let Some(until) = guard.get(&key) {
+        if *until > now {
+            return Some(*until - now);
+        }
+        guard.remove(&key);
+    }
+    None
+}
+
+#[cfg(test)]
+async fn set_websocket_cooldown(
+    websocket_cooldowns: &Arc<RwLock<HashMap<String, Instant>>>,
+    model: &str,
+) {
+    let Some(key) = normalize_transport_model(model) else {
+        return;
+    };
+
+    let cooldown = Duration::from_secs(WEBSOCKET_MODEL_COOLDOWN_BASE_SECS);
+    let until = Instant::now() + cooldown;
+    let mut guard = websocket_cooldowns.write().await;
+    guard.insert(key, until);
+}
+
+async fn set_websocket_cooldown_for(
+    websocket_cooldowns: &Arc<RwLock<HashMap<String, Instant>>>,
+    model: &str,
+    cooldown: Duration,
+) {
+    let Some(key) = normalize_transport_model(model) else {
+        return;
+    };
+
+    let until = Instant::now() + cooldown;
+    let mut guard = websocket_cooldowns.write().await;
+    guard.insert(key, until);
+}
+
+async fn clear_websocket_cooldown(
+    websocket_cooldowns: &Arc<RwLock<HashMap<String, Instant>>>,
+    model: &str,
+) {
+    let Some(key) = normalize_transport_model(model) else {
+        return;
+    };
+
+    let mut guard = websocket_cooldowns.write().await;
+    guard.remove(&key);
+}
+
+fn websocket_cooldown_for_streak(streak: u32) -> Duration {
+    let base = WEBSOCKET_MODEL_COOLDOWN_BASE_SECS as u128;
+    let max = WEBSOCKET_MODEL_COOLDOWN_MAX_SECS as u128;
+    let shift = streak.saturating_sub(1).min(16);
+    let scaled = base.saturating_mul(1u128 << shift);
+    Duration::from_secs(scaled.min(max) as u64)
+}
+
+async fn record_websocket_fallback(
+    websocket_cooldowns: &Arc<RwLock<HashMap<String, Instant>>>,
+    websocket_failure_streaks: &Arc<RwLock<HashMap<String, u32>>>,
+    model: &str,
+) -> (u32, Duration) {
+    let Some(key) = normalize_transport_model(model) else {
+        return (0, Duration::from_secs(WEBSOCKET_MODEL_COOLDOWN_BASE_SECS));
+    };
+
+    let streak = {
+        let mut guard = websocket_failure_streaks.write().await;
+        let entry = guard.entry(key).or_insert(0);
+        *entry = entry.saturating_add(1);
+        *entry
+    };
+
+    let cooldown = websocket_cooldown_for_streak(streak);
+    set_websocket_cooldown_for(websocket_cooldowns, model, cooldown).await;
+    (streak, cooldown)
+}
+
+async fn record_websocket_success(
+    websocket_cooldowns: &Arc<RwLock<HashMap<String, Instant>>>,
+    websocket_failure_streaks: &Arc<RwLock<HashMap<String, u32>>>,
+    model: &str,
+) {
+    clear_websocket_cooldown(websocket_cooldowns, model).await;
+    let Some(key) = normalize_transport_model(model) else {
+        return;
+    };
+    let streak = {
+        let mut guard = websocket_failure_streaks.write().await;
+        guard.remove(&key).unwrap_or(0)
+    };
+    if streak > 0 {
+        crate::logging::info(&format!(
+            "OpenAI websocket health reset for model='{}' after successful stream (previous streak={})",
+            model, streak
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::auth::codex::CodexCredentials;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
     const BRIGHT_PEARL_WRAPPED_TOOL_CALL_FIXTURE: &str =
         include_str!("../../tests/fixtures/openai/bright_pearl_wrapped_tool_call.txt");
 
@@ -2320,6 +2587,115 @@ mod tests {
     }
 
     #[test]
+    fn test_should_prefer_websocket_for_gpt5_family_models() {
+        assert!(OpenAIProvider::should_prefer_websocket(
+            "gpt-5.3-codex-spark"
+        ));
+        assert!(OpenAIProvider::should_prefer_websocket(
+            "GPT-5.3-CODEX-SPARK"
+        ));
+        assert!(OpenAIProvider::should_prefer_websocket("gpt-5.3-codex"));
+        assert!(OpenAIProvider::should_prefer_websocket("gpt-5"));
+        assert!(!OpenAIProvider::should_prefer_websocket(""));
+    }
+
+    #[tokio::test]
+    async fn test_websocket_cooldown_helpers_set_clear_and_expire() {
+        let cooldowns = Arc::new(RwLock::new(HashMap::new()));
+        let model = "gpt-5.3-codex";
+
+        assert!(websocket_cooldown_remaining(&cooldowns, model)
+            .await
+            .is_none());
+
+        set_websocket_cooldown(&cooldowns, model).await;
+        let remaining = websocket_cooldown_remaining(&cooldowns, model).await;
+        assert!(remaining.is_some());
+
+        clear_websocket_cooldown(&cooldowns, model).await;
+        assert!(websocket_cooldown_remaining(&cooldowns, model)
+            .await
+            .is_none());
+
+        {
+            let mut guard = cooldowns.write().await;
+            guard.insert(model.to_string(), Instant::now() - Duration::from_secs(1));
+        }
+        assert!(websocket_cooldown_remaining(&cooldowns, model)
+            .await
+            .is_none());
+        assert!(!cooldowns.read().await.contains_key(model));
+    }
+
+    #[test]
+    fn test_websocket_cooldown_for_streak_scales_and_caps() {
+        assert_eq!(
+            websocket_cooldown_for_streak(1),
+            Duration::from_secs(WEBSOCKET_MODEL_COOLDOWN_BASE_SECS)
+        );
+        assert_eq!(
+            websocket_cooldown_for_streak(2),
+            Duration::from_secs(WEBSOCKET_MODEL_COOLDOWN_BASE_SECS * 2)
+        );
+        assert_eq!(
+            websocket_cooldown_for_streak(3),
+            Duration::from_secs(WEBSOCKET_MODEL_COOLDOWN_BASE_SECS * 4)
+        );
+        assert_eq!(
+            websocket_cooldown_for_streak(32),
+            Duration::from_secs(WEBSOCKET_MODEL_COOLDOWN_MAX_SECS)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_record_websocket_fallback_tracks_streak_and_cooldown() {
+        let cooldowns = Arc::new(RwLock::new(HashMap::new()));
+        let streaks = Arc::new(RwLock::new(HashMap::new()));
+        let model = "gpt-5.3-codex-spark";
+
+        let (streak1, cooldown1) = record_websocket_fallback(&cooldowns, &streaks, model).await;
+        assert_eq!(streak1, 1);
+        assert_eq!(
+            cooldown1,
+            Duration::from_secs(WEBSOCKET_MODEL_COOLDOWN_BASE_SECS)
+        );
+        let remaining1 = websocket_cooldown_remaining(&cooldowns, model)
+            .await
+            .expect("cooldown should be set");
+        assert!(remaining1 <= cooldown1);
+
+        let (streak2, cooldown2) = record_websocket_fallback(&cooldowns, &streaks, model).await;
+        assert_eq!(streak2, 2);
+        assert_eq!(
+            cooldown2,
+            Duration::from_secs(WEBSOCKET_MODEL_COOLDOWN_BASE_SECS * 2)
+        );
+        let remaining2 = websocket_cooldown_remaining(&cooldowns, model)
+            .await
+            .expect("cooldown should be set");
+        assert!(remaining2 <= cooldown2);
+
+        record_websocket_success(&cooldowns, &streaks, model).await;
+        assert!(websocket_cooldown_remaining(&cooldowns, model)
+            .await
+            .is_none());
+        let normalized = normalize_transport_model(model).expect("normalized model");
+        assert!(!streaks.read().await.contains_key(&normalized));
+    }
+
+    #[test]
+    fn test_websocket_activity_payload_detection() {
+        assert!(is_websocket_activity_payload(
+            r#"{"type":"response.created","response":{"id":"resp_1"}}"#
+        ));
+        assert!(is_websocket_activity_payload(
+            r#"{"type":"response.reasoning.delta","delta":"thinking"}"#
+        ));
+        assert!(!is_websocket_activity_payload("not json"));
+        assert!(!is_websocket_activity_payload(r#"{"foo":"bar"}"#));
+    }
+
+    #[test]
     fn test_parse_openai_response_completed_captures_incomplete_stop_reason() {
         let data = r#"{"type":"response.completed","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}"#;
         let mut saw_text_delta = false;
@@ -2346,6 +2722,38 @@ mod tests {
         match event {
             StreamEvent::MessageEnd { stop_reason } => {
                 assert!(stop_reason.is_none());
+            }
+            other => panic!("expected MessageEnd, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_openai_response_completed_commentary_phase_sets_stop_reason() {
+        let data = r#"{"type":"response.completed","response":{"status":"completed","output":[{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Still working"}]}]}}"#;
+        let mut saw_text_delta = false;
+        let mut pending = VecDeque::new();
+
+        let event = parse_openai_response_event(data, &mut saw_text_delta, &mut pending)
+            .expect("expected message end");
+        match event {
+            StreamEvent::MessageEnd { stop_reason } => {
+                assert_eq!(stop_reason.as_deref(), Some("commentary"));
+            }
+            other => panic!("expected MessageEnd, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_openai_response_incomplete_emits_message_end_with_reason() {
+        let data = r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"content_filter"}}}"#;
+        let mut saw_text_delta = false;
+        let mut pending = VecDeque::new();
+
+        let event = parse_openai_response_event(data, &mut saw_text_delta, &mut pending)
+            .expect("expected message end");
+        match event {
+            StreamEvent::MessageEnd { stop_reason } => {
+                assert_eq!(stop_reason.as_deref(), Some("content_filter"));
             }
             other => panic!("expected MessageEnd, got {:?}", other),
         }
