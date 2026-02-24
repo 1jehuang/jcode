@@ -322,7 +322,6 @@ Use this tool to manage builds and get debug socket info:
 ```json
 {"name": "selfdev", "input": {"action": "reload"}}      // Restart with current binary
 {"name": "selfdev", "input": {"action": "status"}}      // Show build versions, debug socket path
-{"name": "selfdev", "input": {"action": "rollback"}}    // Switch back to stable build
 {"name": "selfdev", "input": {"action": "socket-info"}} // Debug socket connection info
 {"name": "selfdev", "input": {"action": "socket-help"}} // Debug socket command reference
 ```
@@ -367,7 +366,6 @@ Use this tool to manage builds and get debug socket info:
 ```json
 {{"name": "selfdev", "input": {{"action": "reload"}}}}      // Restart with current binary
 {{"name": "selfdev", "input": {{"action": "status"}}}}      // Show build versions, debug socket path
-{{"name": "selfdev", "input": {{"action": "rollback"}}}}    // Switch back to stable build
 {{"name": "selfdev", "input": {{"action": "socket-info"}}}} // Debug socket connection info
 {{"name": "selfdev", "input": {{"action": "socket-help"}}}} // Debug socket command reference
 ```

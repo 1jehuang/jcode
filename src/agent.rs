@@ -3791,7 +3791,7 @@ impl Agent {
                     ));
                     tool_handle.abort();
 
-                    // For selfdev reload/rollback, the interruption is intentional -
+                    // For selfdev reload, the interruption is intentional -
                     // the tool triggered the reload and blocked waiting for shutdown.
                     // Use a non-error message so the conversation history is clean.
                     let is_selfdev_reload = tc.name == "selfdev";

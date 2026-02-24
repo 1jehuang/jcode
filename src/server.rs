@@ -963,7 +963,7 @@ impl Server {
             ));
         }
 
-        // Spawn selfdev signal monitor (checks for reload/rollback signals)
+        // Spawn selfdev signal monitor (checks for reload signal)
         // Only run on selfdev servers to avoid non-selfdev servers picking up
         // rebuild-signal and exec'ing, which would kill all their client connections
         if is_selfdev_env() {
@@ -8949,9 +8949,8 @@ async fn do_server_reload_with_progress(
     }
 
     // Step 2: Check for binary
-    let (exe, exe_label) = server_update_candidate().ok_or_else(|| {
-        anyhow::anyhow!("No reloadable binary found (canary/rollback/launcher/stable)")
-    })?;
+    let (exe, exe_label) =
+        server_update_candidate().ok_or_else(|| anyhow::anyhow!("No reloadable binary found"))?;
     if !exe.exists() {
         send_progress("verify", "❌ No reloadable binary found", Some(false), None);
         send_progress(
@@ -9125,32 +9124,6 @@ async fn monitor_selfdev_signals(
             }
         }
 
-        // Check for rollback signal (switch to stable)
-        let rollback_path = jcode_dir.join("rollback-signal");
-        if rollback_path.exists() {
-            if let Ok(_hash) = std::fs::read_to_string(&rollback_path) {
-                let _ = std::fs::remove_file(&rollback_path);
-                crate::logging::info("Server: rollback signal received");
-
-                // Gracefully stop all active generations before exec'ing
-                graceful_shutdown_sessions(&sessions, &swarm_members).await;
-
-                // Get stable binary path
-                if let Ok(binary) = crate::build::stable_binary_path() {
-                    if binary.exists() {
-                        let err = crate::platform::replace_process(
-                            ProcessCommand::new(&binary).arg("serve"),
-                        );
-
-                        crate::logging::error(&format!(
-                            "Failed to exec into stable {:?}: {}",
-                            binary, err
-                        ));
-                    }
-                }
-                std::process::exit(43);
-            }
-        }
     }
 }
 

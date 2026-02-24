@@ -1344,19 +1344,13 @@ impl App {
             // restored after a server restart were idle and shouldn't be prompted.
             let reload_ctx = ReloadContext::load_for_session(session_id).ok().flatten();
             if let Some(ctx) = reload_ctx {
-                let action = if ctx.is_rollback {
-                    "Rollback"
-                } else {
-                    "Reload"
-                };
                 let task_info = ctx
                     .task_context
                     .map(|t| format!("\nTask context: {}", t))
                     .unwrap_or_default();
 
                 let continuation_msg = format!(
-                    "[SYSTEM: {} succeeded. Build {} → {}.{}\nSession restored with {} turns.\nIMPORTANT: The reload is done. You MUST immediately continue your work. Do NOT ask the user what to do next. Do NOT summarize what happened. Just pick up exactly where you left off and keep going.]",
-                    action,
+                    "[SYSTEM: Reload succeeded. Build {} → {}.{}\nSession restored with {} turns.\nIMPORTANT: The reload is done. You MUST immediately continue your work. Do NOT ask the user what to do next. Do NOT summarize what happened. Just pick up exactly where you left off and keep going.]",
                     ctx.version_before,
                     ctx.version_after,
                     task_info,
@@ -1378,11 +1372,6 @@ impl App {
 
             // Check if this was a reload that failed - inject failure message if so
             if let Ok(Some(ctx)) = ReloadContext::load_for_session(session_id) {
-                let action = if ctx.is_rollback {
-                    "Rollback"
-                } else {
-                    "Reload"
-                };
                 let task_info = ctx
                     .task_context
                     .map(|t| format!(" You were working on: {}", t))
@@ -1391,9 +1380,8 @@ impl App {
                 self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: format!(
-                        "⚠ {} failed. Session could not be restored. Previous version: {}, Target version: {}.{}\n\
+                        "⚠ Reload failed. Session could not be restored. Previous version: {}, Target version: {}.{}\n\
                          Starting fresh session. You may need to re-examine your changes.",
-                        action,
                         ctx.version_before,
                         ctx.version_after,
                         task_info
@@ -1619,12 +1607,22 @@ impl App {
                 self.set_diagram_focus(true);
                 true
             }
-            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
-                let idx = (c as u32 - '1' as u32) as usize;
-                self.jump_diagram(idx);
-                true
-            }
             _ => false,
+        }
+    }
+
+    fn ctrl_prompt_rank(code: &KeyCode, modifiers: KeyModifiers) -> Option<usize> {
+        if !modifiers.contains(KeyModifiers::CONTROL)
+            || modifiers.contains(KeyModifiers::ALT)
+            || modifiers.contains(KeyModifiers::SHIFT)
+        {
+            return None;
+        }
+        match code {
+            KeyCode::Char(c) if c.is_ascii_digit() && *c != '0' => {
+                Some((*c as u8 - b'0') as usize)
+            }
+            _ => None,
         }
     }
 
@@ -3693,7 +3691,7 @@ impl App {
         Ok(format!("injected {:?} with {:?}", key_code, modifiers))
     }
 
-    /// Check for selfdev signal files (rebuild-signal, rollback-signal)
+    /// Check for selfdev signal files (rebuild-signal)
     /// These are written by the selfdev tool to trigger restarts
     fn check_selfdev_signals(&mut self) {
         // Only check in canary sessions
@@ -3716,20 +3714,6 @@ impl App {
                 self.session.provider_session_id = self.provider_session_id.clone();
                 let _ = self.session.save();
                 self.requested_exit_code = Some(42);
-                self.should_quit = true;
-            }
-        }
-
-        // Check for rollback signal
-        let rollback_path = jcode_dir.join("rollback-signal");
-        if rollback_path.exists() {
-            if let Ok(_hash) = std::fs::read_to_string(&rollback_path) {
-                // Remove signal file
-                let _ = std::fs::remove_file(&rollback_path);
-                // Save session and trigger exit with code 43 (rollback requested)
-                self.session.provider_session_id = self.provider_session_id.clone();
-                let _ = self.session.save();
-                self.requested_exit_code = Some(43);
                 self.should_quit = true;
             }
         }
@@ -3777,7 +3761,7 @@ impl App {
                         self.poll_compaction_completion();
                         // Check for debug commands
                         self.check_debug_command();
-                        // Check for selfdev signals (rebuild/rollback)
+                        // Check for selfdev signals (rebuild)
                         self.check_selfdev_signals();
                         // Check for new stable version (auto-migration)
                         self.check_stable_version();
@@ -4163,19 +4147,13 @@ impl App {
                 });
 
                 if let Some(ctx) = reload_ctx {
-                    let action = if ctx.is_rollback {
-                        "Rollback"
-                    } else {
-                        "Reload"
-                    };
                     let task_info = ctx
                         .task_context
                         .map(|t| format!("\nTask context: {}", t))
                         .unwrap_or_default();
 
                     let continuation_msg = format!(
-                        "[SYSTEM: {} succeeded. Build {} → {}.{}\nIMPORTANT: The reload is done. You MUST immediately continue your work. Do NOT ask the user what to do next. Do NOT summarize what happened. Just pick up exactly where you left off and keep going.]",
-                        action,
+                        "[SYSTEM: Reload succeeded. Build {} → {}.{}\nIMPORTANT: The reload is done. You MUST immediately continue your work. Do NOT ask the user what to do next. Do NOT summarize what happened. Just pick up exactly where you left off and keep going.]",
                         ctx.version_before,
                         ctx.version_after,
                         task_info
@@ -5453,6 +5431,11 @@ impl App {
             return Ok(());
         }
 
+        if let Some(rank) = Self::ctrl_prompt_rank(&code, modifiers) {
+            self.scroll_to_recent_prompt_rank(rank);
+            return Ok(());
+        }
+
         // Handle scroll bookmark toggle (default: Ctrl+G)
         if self.scroll_keys.is_bookmark(code.clone(), modifiers) {
             self.toggle_scroll_bookmark();
@@ -6137,6 +6120,11 @@ impl App {
             } else {
                 self.scroll_to_next_prompt();
             }
+            return Ok(());
+        }
+
+        if let Some(rank) = Self::ctrl_prompt_rank(&code, modifiers) {
+            self.scroll_to_recent_prompt_rank(rank);
             return Ok(());
         }
 
@@ -8954,7 +8942,12 @@ impl App {
             }
             Err(e) => {
                 self.push_display_message(DisplayMessage::error(format!(
-                    "Cursor login failed: {}\n\nInstall Cursor Agent and run `{} login`.",
+                    "Cursor login failed: {}\n\nInstall Cursor Agent:\n\
+                     - macOS/Linux/WSL: `curl https://cursor.com/install -fsS | bash`\n\
+                     - Windows (PowerShell): `irm 'https://cursor.com/install?win32=true' | iex`\n\n\
+                     Then log in with one of:\n\
+                     - `{} login`\n\
+                     - `agent login`",
                     e, binary
                 )));
                 self.set_status_notice("Login: cursor failed");
@@ -12376,6 +12369,41 @@ impl App {
         self.follow_chat_bottom();
     }
 
+    /// Scroll to Nth most-recent user prompt (1 = most recent prior prompt).
+    fn scroll_to_recent_prompt_rank(&mut self, rank: usize) {
+        let rank = rank.max(1);
+        let positions = self.message_line_positions(100);
+        let user_positions: Vec<usize> = positions
+            .iter()
+            .filter_map(|(is_user, pos)| if *is_user { Some(*pos) } else { None })
+            .collect();
+
+        if user_positions.is_empty() {
+            return;
+        }
+
+        // If we're at bottom/following, rank 1 is the newest user prompt.
+        // If we're already scrolled, rank 1 means the nearest prompt at/above current view.
+        let current = if self.auto_scroll_paused {
+            self.scroll_offset
+        } else {
+            0
+        };
+
+        let start_idx = if current == 0 {
+            0
+        } else {
+            user_positions
+                .iter()
+                .position(|&pos| pos >= current)
+                .unwrap_or(user_positions.len().saturating_sub(1))
+        };
+
+        let target_idx = (start_idx + rank - 1).min(user_positions.len().saturating_sub(1));
+        self.scroll_offset = user_positions[target_idx];
+        self.auto_scroll_paused = true;
+    }
+
     /// Toggle scroll bookmark: stash current position and jump to bottom,
     /// or restore stashed position if already at bottom.
     fn toggle_scroll_bookmark(&mut self) {
@@ -15194,6 +15222,45 @@ mod tests {
         assert!(app.scroll_offset <= after_up);
     }
 
+    #[test]
+    fn test_prompt_jump_ctrl_digits_by_recency() {
+        let mut app = create_test_app();
+        app.display_messages = vec![
+            DisplayMessage::user("first".to_string()),
+            DisplayMessage::assistant("a".to_string()),
+            DisplayMessage::user("second".to_string()),
+            DisplayMessage::assistant("b".to_string()),
+            DisplayMessage::user("third".to_string()),
+            DisplayMessage::assistant("c".to_string()),
+            DisplayMessage::user("fourth".to_string()),
+        ];
+        app.bump_display_messages_version();
+        app.follow_chat_bottom();
+
+        app.handle_key(KeyCode::Char('1'), KeyModifiers::CONTROL)
+            .unwrap();
+        let first_jump = app.scroll_offset;
+        assert!(app.auto_scroll_paused);
+        assert!(first_jump > 0);
+
+        app.follow_chat_bottom();
+        app.handle_key(KeyCode::Char('2'), KeyModifiers::CONTROL)
+            .unwrap();
+        let second_jump = app.scroll_offset;
+        assert!(second_jump > first_jump);
+
+        app.follow_chat_bottom();
+        app.handle_key(KeyCode::Char('3'), KeyModifiers::CONTROL)
+            .unwrap();
+        let third_jump = app.scroll_offset;
+        assert!(third_jump > second_jump);
+
+        app.follow_chat_bottom();
+        app.handle_key(KeyCode::Char('9'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert_eq!(app.scroll_offset, third_jump);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn test_prompt_jump_ctrl_esc_fallback_on_macos() {
@@ -15223,6 +15290,29 @@ mod tests {
         app.handle_key(KeyCode::Char('5'), KeyModifiers::CONTROL)
             .unwrap();
         assert!(app.scroll_offset <= after_up);
+    }
+
+    #[test]
+    fn test_scroll_cmd_j_k_fallback_in_app() {
+        let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
+
+        // Seed max scroll estimates before key handling.
+        render_and_snap(&app, &mut terminal);
+
+        app.handle_key(KeyCode::Char('k'), KeyModifiers::SUPER)
+            .unwrap();
+        if cfg!(target_os = "macos") {
+            assert!(app.auto_scroll_paused);
+            assert!(app.scroll_offset > 0);
+            let after_up = app.scroll_offset;
+
+            app.handle_key(KeyCode::Char('j'), KeyModifiers::SUPER)
+                .unwrap();
+            assert!(app.scroll_offset <= after_up);
+        } else {
+            assert!(!app.auto_scroll_paused);
+            assert_eq!(app.scroll_offset, 0);
+        }
     }
 
     #[test]
@@ -15302,6 +15392,40 @@ mod tests {
         ))
         .unwrap();
         assert!(app.scroll_offset <= after_up);
+    }
+
+    #[test]
+    fn test_remote_scroll_cmd_j_k_fallback() {
+        let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        // Seed max scroll estimates before key handling.
+        render_and_snap(&app, &mut terminal);
+
+        rt.block_on(app.handle_remote_key(
+            KeyCode::Char('k'),
+            KeyModifiers::SUPER,
+            &mut remote,
+        ))
+        .unwrap();
+        if cfg!(target_os = "macos") {
+            assert!(app.auto_scroll_paused);
+            assert!(app.scroll_offset > 0);
+            let after_up = app.scroll_offset;
+
+            rt.block_on(app.handle_remote_key(
+                KeyCode::Char('j'),
+                KeyModifiers::SUPER,
+                &mut remote,
+            ))
+            .unwrap();
+            assert!(app.scroll_offset <= after_up);
+        } else {
+            assert!(!app.auto_scroll_paused);
+            assert_eq!(app.scroll_offset, 0);
+        }
     }
 
     #[test]

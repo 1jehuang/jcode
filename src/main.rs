@@ -344,7 +344,7 @@ enum Command {
     /// Update jcode to the latest version
     Update,
 
-    /// Self-development mode: run as canary with auto-rollback on crash
+    /// Self-development mode: run as canary with crash recovery wrapper
     SelfDev {
         /// Build and test a new canary version before launching
         #[arg(long)]
@@ -2313,7 +2313,12 @@ fn login_cursor_flow() -> Result<()> {
         std::env::var("JCODE_CURSOR_CLI_PATH").unwrap_or_else(|_| "cursor-agent".to_string());
     run_external_login_command(&binary, &["login"]).with_context(|| {
         format!(
-            "Cursor login failed. Install Cursor Agent and run `{} login`.",
+            "Cursor login failed.\n\nInstall Cursor Agent:\n\
+             - macOS/Linux/WSL: `curl https://cursor.com/install -fsS | bash`\n\
+             - Windows (PowerShell): `irm 'https://cursor.com/install?win32=true' | iex`\n\n\
+             Then log in with one of:\n\
+             - `{} login`\n\
+             - `agent login`",
             binary
         )
     })?;
@@ -3006,9 +3011,6 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
     let repo_dir =
         get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
-    // Track if this is a fresh start (not resuming) before we move resume_session
-    let is_fresh_start = resume_session.is_none();
-
     // Get or create session and mark as canary
     let session_id = if let Some(id) = resume_session {
         // Load existing session and ensure it's marked as canary
@@ -3059,31 +3061,6 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
     let hash = build::current_git_hash(&repo_dir)?;
     let binary_path = target_binary.clone();
 
-    // On fresh start (not resume), set current build as rollback safety net —
-    // but only if no self-dev server is already running (to avoid clobbering
-    // manifest state that other sessions depend on).
-    if is_fresh_start {
-        let selfdev_socket = std::path::Path::new(SELFDEV_SOCKET);
-        let server_already_running = selfdev_socket.exists()
-            && crate::transport::Stream::connect(SELFDEV_SOCKET)
-                .await
-                .is_ok();
-
-        if !server_already_running {
-            eprintln!("Setting {} as rollback safety net...", hash);
-
-            build::install_version(&repo_dir, &hash)?;
-            build::update_rollback_symlink(&hash)?;
-
-            let mut manifest = build::BuildManifest::load()?;
-            manifest.stable = Some(hash.clone());
-            manifest.canary = None;
-            manifest.canary_session = None;
-            manifest.canary_status = None;
-            manifest.save()?;
-        }
-    }
-
     // Launch wrapper process
     eprintln!("Starting self-dev session with {}...", hash);
 
@@ -3105,9 +3082,7 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
 
 // Exit codes for canary wrapper communication
 // Note: Rust panic exits with 101, so we avoid that for our signals
-const EXIT_DONE: i32 = 0; // Clean exit, stop wrapper
 const EXIT_RELOAD_REQUESTED: i32 = 42; // Agent wants to reload to new canary build
-const EXIT_ROLLBACK_REQUESTED: i32 = 43; // Agent wants to rollback to stable
 
 /// Path for self-dev shared server socket
 const SELFDEV_SOCKET: &str = "/tmp/jcode-selfdev.sock";
@@ -3271,28 +3246,16 @@ async fn run_canary_wrapper(
         hot_rebuild(rebuild_session_id)?;
     }
 
-    // Check if reload/rollback was requested - exec into new binary
+    // Check if reload was requested - exec into new binary
     if let Some(code) = run_result.exit_code {
-        if code == EXIT_RELOAD_REQUESTED || code == EXIT_ROLLBACK_REQUESTED {
-            let action = if code == EXIT_RELOAD_REQUESTED {
-                "reload"
-            } else {
-                "rollback"
-            };
-            eprintln!(
-                "\n🔄 Client {} requested, restarting with new binary...",
-                action
-            );
+        if code == EXIT_RELOAD_REQUESTED {
+            eprintln!("\n🔄 Client reload requested, restarting with new binary...");
 
             // Small delay for filesystem sync
             std::thread::sleep(std::time::Duration::from_millis(200));
 
-            // Get the appropriate binary (canary for reload, rollback for rollback)
-            let binary_path = if code == EXIT_RELOAD_REQUESTED {
-                build::canary_binary_path().ok()
-            } else {
-                build::rollback_binary_path().ok()
-            };
+            // Get canary binary path for reload
+            let binary_path = build::canary_binary_path().ok();
 
             let binary = binary_path
                 .filter(|p| p.exists())

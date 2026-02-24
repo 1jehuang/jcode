@@ -30,8 +30,6 @@ pub struct ReloadContext {
     pub session_id: String,
     /// Timestamp
     pub timestamp: String,
-    /// Whether this was a rollback
-    pub is_rollback: bool,
 }
 
 impl ReloadContext {
@@ -104,7 +102,7 @@ impl Tool for SelfDevTool {
     fn description(&self) -> &str {
         "Self-development tool for working on jcode itself. Only available in self-dev mode. \
          Actions: 'reload' (restart with built binary), \
-         'status' (show build versions), 'rollback' (switch to stable), \
+         'status' (show build versions), \
          'socket-info' (debug socket connection info), 'socket-help' (debug socket commands)."
     }
 
@@ -117,19 +115,17 @@ impl Tool for SelfDevTool {
                     "enum": [
                         "reload",
                         "status",
-                        "rollback",
                         "socket-info",
                         "socket-help"
                     ],
                     "description": "Action to perform: 'reload' restarts with built binary, \
                                    'status' shows build versions and crash history, \
-                                   'rollback' switches back to stable build, \
                                    'socket-info' returns debug socket paths and connection info, \
                                    'socket-help' shows available debug socket commands"
                 },
                 "context": {
                     "type": "string",
-                    "description": "Optional context for reload/rollback - describe what you're working on. \
+                    "description": "Optional context for reload - describe what you're working on. \
                                    This will be included in the continuation message after restart."
                 }
             },
@@ -146,11 +142,10 @@ impl Tool for SelfDevTool {
         let result = match action.as_str() {
             "reload" => self.do_reload(params.context, &ctx.session_id).await,
             "status" => self.do_status().await,
-            "rollback" => self.do_rollback(params.context, &ctx.session_id).await,
             "socket-info" => self.do_socket_info().await,
             "socket-help" => self.do_socket_help().await,
             _ => Ok(ToolOutput::new(format!(
-                "Unknown action: {}. Use 'reload', 'status', 'rollback', 'socket-info', or 'socket-help'.",
+                "Unknown action: {}. Use 'reload', 'status', 'socket-info', or 'socket-help'.",
                 action
             ))),
         };
@@ -198,7 +193,6 @@ impl SelfDevTool {
             version_after: hash.clone(),
             session_id: session_id.to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
-            is_rollback: false,
         };
         crate::logging::info(&format!(
             "Saving reload context to {:?}",
@@ -334,37 +328,6 @@ impl SelfDevTool {
         Ok(ToolOutput::new(status))
     }
 
-    async fn do_rollback(&self, context: Option<String>, session_id: &str) -> Result<ToolOutput> {
-        let manifest = build::BuildManifest::load()?;
-
-        let stable_hash = manifest
-            .stable
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No stable build to rollback to"))?;
-
-        let version_before = env!("JCODE_VERSION").to_string();
-
-        // Save reload context for continuation after restart
-        let reload_ctx = ReloadContext {
-            task_context: context,
-            version_before,
-            version_after: stable_hash.clone(),
-            session_id: session_id.to_string(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            is_rollback: true,
-        };
-        reload_ctx.save()?;
-
-        // Write signal file with stable hash to trigger rollback
-        let signal_path = crate::storage::jcode_dir()?.join("rollback-signal");
-        std::fs::write(&signal_path, &stable_hash)?;
-
-        // Block until the server picks up the signal and triggers graceful shutdown.
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-        }
-    }
-
     async fn do_socket_info(&self) -> Result<ToolOutput> {
         let debug_socket = server::debug_socket_path();
         let main_socket = server::socket_path();
@@ -461,7 +424,6 @@ mod tests {
             version_after: "abc1234".to_string(),
             session_id: "test-session-123".to_string(),
             timestamp: "2025-01-20T00:00:00Z".to_string(),
-            is_rollback: false,
         };
 
         // Serialize and deserialize
@@ -475,25 +437,6 @@ mod tests {
         assert_eq!(loaded.version_before, "v0.1.100");
         assert_eq!(loaded.version_after, "abc1234");
         assert_eq!(loaded.session_id, "test-session-123");
-        assert!(!loaded.is_rollback);
-    }
-
-    #[test]
-    fn test_reload_context_rollback() {
-        let ctx = ReloadContext {
-            task_context: None,
-            version_before: "canary-xyz".to_string(),
-            version_after: "stable-abc".to_string(),
-            session_id: "session-456".to_string(),
-            timestamp: "2025-01-20T00:00:00Z".to_string(),
-            is_rollback: true,
-        };
-
-        let json = serde_json::to_string(&ctx).unwrap();
-        let loaded: ReloadContext = serde_json::from_str(&json).unwrap();
-
-        assert!(loaded.is_rollback);
-        assert!(loaded.task_context.is_none());
     }
 
     #[test]

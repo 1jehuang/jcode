@@ -109,7 +109,7 @@ pub fn update_launcher_symlink_to_stable() -> Result<PathBuf> {
 /// Resolve which client binary should be considered for update checks/reload.
 ///
 /// Order matters and should match `/reload` behavior:
-/// - Self-dev sessions prefer canary, then rollback
+/// - Self-dev sessions prefer canary
 /// - Then launcher path
 /// - Then stable channel path
 /// - Finally currently running executable
@@ -118,11 +118,6 @@ pub fn client_update_candidate(is_selfdev_session: bool) -> Option<(PathBuf, &'s
         if let Ok(canary) = canary_binary_path() {
             if canary.exists() {
                 return Some((canary, "canary"));
-            }
-        }
-        if let Ok(rollback) = rollback_binary_path() {
-            if rollback.exists() {
-                return Some((rollback, "rollback"));
             }
         }
     }
@@ -582,17 +577,6 @@ pub fn install_version(repo_dir: &std::path::Path, hash: &str) -> Result<PathBuf
 pub fn update_canary_symlink(hash: &str) -> Result<()> {
     let _ = update_channel_symlink("canary", hash)?;
     Ok(())
-}
-
-/// Update rollback symlink (safety net for self-dev, separate from stable/release)
-pub fn update_rollback_symlink(hash: &str) -> Result<()> {
-    let _ = update_channel_symlink("rollback", hash)?;
-    Ok(())
-}
-
-/// Get path to rollback binary
-pub fn rollback_binary_path() -> Result<PathBuf> {
-    Ok(builds_dir()?.join("rollback").join(binary_name()))
 }
 
 /// Get path to build log file

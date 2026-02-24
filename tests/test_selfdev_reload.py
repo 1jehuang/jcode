@@ -183,7 +183,7 @@ def test_reload_context():
             print(f"   Fields: {list(ctx.keys())}")
 
             # Verify expected fields
-            expected = ['task_context', 'version_before', 'version_after', 'session_id', 'timestamp', 'is_rollback']
+            expected = ['task_context', 'version_before', 'version_after', 'session_id', 'timestamp']
             missing = [f for f in expected if f not in ctx]
             if missing:
                 print(f"   Warning: Missing fields: {missing}")
