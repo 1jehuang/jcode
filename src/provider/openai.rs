@@ -1498,15 +1498,6 @@ impl Provider for OpenAIProvider {
                 };
 
                 let transport_label = transport.as_str();
-                if tx
-                    .send(Ok(StreamEvent::ConnectionType {
-                        connection: transport_label.to_string(),
-                    }))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
                 let attempt_started = Instant::now();
                 crate::logging::info(&format!(
                     "OpenAI stream attempt {}/{} using transport '{}'; model='{}'; mode='{}'",
