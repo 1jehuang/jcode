@@ -67,6 +67,10 @@ pub struct KeybindingsConfig {
     pub scroll_prompt_down: String,
     /// Scroll bookmark toggle key (default: "ctrl+g")
     pub scroll_bookmark: String,
+    /// Scroll up fallback key (default: "cmd+k")
+    pub scroll_up_fallback: String,
+    /// Scroll down fallback key (default: "cmd+j")
+    pub scroll_down_fallback: String,
 }
 
 impl Default for KeybindingsConfig {
@@ -83,6 +87,8 @@ impl Default for KeybindingsConfig {
             scroll_prompt_up: "ctrl+[".to_string(),
             scroll_prompt_down: "ctrl+]".to_string(),
             scroll_bookmark: "ctrl+g".to_string(),
+            scroll_up_fallback: "cmd+k".to_string(),
+            scroll_down_fallback: "cmd+j".to_string(),
         }
     }
 }
@@ -473,6 +479,12 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_SCROLL_BOOKMARK_KEY") {
             self.keybindings.scroll_bookmark = v;
         }
+        if let Ok(v) = std::env::var("JCODE_SCROLL_UP_FALLBACK_KEY") {
+            self.keybindings.scroll_up_fallback = v;
+        }
+        if let Ok(v) = std::env::var("JCODE_SCROLL_DOWN_FALLBACK_KEY") {
+            self.keybindings.scroll_down_fallback = v;
+        }
 
         // Display
         if let Ok(v) = std::env::var("JCODE_DIFF_MODE") {
@@ -722,6 +734,10 @@ scroll_prompt_down = "ctrl+]"
 # Scroll bookmark toggle (stash position, jump to bottom, press again to return)
 scroll_bookmark = "ctrl+g"
 
+# Optional fallback scroll bindings (useful on macOS terminals that forward Command)
+scroll_up_fallback = "cmd+k"
+scroll_down_fallback = "cmd+j"
+
 [display]
 # Diff display mode: "off", "inline" (default), or "pinned" (dedicated pane)
 diff_mode = "inline"
@@ -851,6 +867,8 @@ desktop_notifications = true
 **Keybindings:**
 - Scroll up: `{}`
 - Scroll down: `{}`
+- Scroll up fallback: `{}`
+- Scroll down fallback: `{}`
 - Page up: `{}`
 - Page down: `{}`
 - Model next: `{}`
@@ -909,6 +927,8 @@ desktop_notifications = true
             path,
             self.keybindings.scroll_up,
             self.keybindings.scroll_down,
+            self.keybindings.scroll_up_fallback,
+            self.keybindings.scroll_down_fallback,
             self.keybindings.scroll_page_up,
             self.keybindings.scroll_page_down,
             self.keybindings.model_switch_next,

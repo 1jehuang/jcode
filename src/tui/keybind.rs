@@ -176,6 +176,8 @@ fn normalize_key(code: KeyCode, modifiers: KeyModifiers) -> (KeyCode, KeyModifie
 pub struct ScrollKeys {
     pub up: KeyBinding,
     pub down: KeyBinding,
+    pub up_fallback: Option<KeyBinding>,
+    pub down_fallback: Option<KeyBinding>,
     pub page_up: KeyBinding,
     pub page_down: KeyBinding,
     pub prompt_up: KeyBinding,
@@ -183,6 +185,8 @@ pub struct ScrollKeys {
     pub bookmark: KeyBinding,
     pub up_label: String,
     pub down_label: String,
+    pub up_fallback_label: Option<String>,
+    pub down_fallback_label: Option<String>,
     pub page_up_label: String,
     pub page_down_label: String,
     pub prompt_up_label: String,
@@ -191,12 +195,30 @@ pub struct ScrollKeys {
 }
 
 impl ScrollKeys {
+    fn matches_scroll_up(&self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        self.up.matches(code.clone(), modifiers)
+            || self
+                .up_fallback
+                .as_ref()
+                .map(|k| k.matches(code, modifiers))
+                .unwrap_or(false)
+    }
+
+    fn matches_scroll_down(&self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        self.down.matches(code.clone(), modifiers)
+            || self
+                .down_fallback
+                .as_ref()
+                .map(|k| k.matches(code, modifiers))
+                .unwrap_or(false)
+    }
+
     /// Check if a key matches scroll up (returns scroll amount, negative = up)
     pub fn scroll_amount(&self, code: KeyCode, modifiers: KeyModifiers) -> Option<i32> {
-        if self.up.matches(code.clone(), modifiers) {
+        if self.matches_scroll_up(code.clone(), modifiers) {
             return Some(-3); // Scroll up 3 lines
         }
-        if self.down.matches(code.clone(), modifiers) {
+        if self.matches_scroll_down(code.clone(), modifiers) {
             return Some(3); // Scroll down 3 lines
         }
         if self.page_up.matches(code.clone(), modifiers) {
@@ -213,8 +235,11 @@ impl ScrollKeys {
             }
         }
 
-        // macOS fallback: allow Command+J/K for scrolling when terminal forwards SUPER/META.
+        // macOS compatibility fallback: keep historical Cmd+J/K behavior if not explicitly
+        // configured, to preserve usability in terminals forwarding SUPER/META.
         let mac_command = cfg!(target_os = "macos")
+            && self.up_fallback.is_none()
+            && self.down_fallback.is_none()
             && (modifiers.contains(KeyModifiers::SUPER) || modifiers.contains(KeyModifiers::META));
         if mac_command {
             match code {
@@ -290,6 +315,24 @@ pub fn load_scroll_keys() -> ScrollKeys {
 
     let (up, up_label) = parse_or_default(&cfg.keybindings.scroll_up, default_up, "Ctrl+K");
     let (down, down_label) = parse_or_default(&cfg.keybindings.scroll_down, default_down, "Ctrl+J");
+    let default_up_fallback = KeyBinding {
+        code: KeyCode::Char('k'),
+        modifiers: KeyModifiers::SUPER,
+    };
+    let default_down_fallback = KeyBinding {
+        code: KeyCode::Char('j'),
+        modifiers: KeyModifiers::SUPER,
+    };
+    let (up_fallback, up_fallback_label) = parse_optional(
+        &cfg.keybindings.scroll_up_fallback,
+        default_up_fallback,
+        "Cmd+K",
+    );
+    let (down_fallback, down_fallback_label) = parse_optional(
+        &cfg.keybindings.scroll_down_fallback,
+        default_down_fallback,
+        "Cmd+J",
+    );
     let (page_up, page_up_label) =
         parse_or_default(&cfg.keybindings.scroll_page_up, default_page_up, "Alt+U");
     let (page_down, page_down_label) = parse_or_default(
@@ -313,6 +356,8 @@ pub fn load_scroll_keys() -> ScrollKeys {
     ScrollKeys {
         up,
         down,
+        up_fallback,
+        down_fallback,
         page_up,
         page_down,
         prompt_up,
@@ -320,6 +365,8 @@ pub fn load_scroll_keys() -> ScrollKeys {
         bookmark,
         up_label,
         down_label,
+        up_fallback_label,
+        down_fallback_label,
         page_up_label,
         page_down_label,
         prompt_up_label,
@@ -445,6 +492,14 @@ mod tests {
                 code: KeyCode::Char('j'),
                 modifiers: KeyModifiers::ALT,
             },
+            up_fallback: Some(KeyBinding {
+                code: KeyCode::Char('K'),
+                modifiers: KeyModifiers::SHIFT,
+            }),
+            down_fallback: Some(KeyBinding {
+                code: KeyCode::Char('J'),
+                modifiers: KeyModifiers::SHIFT,
+            }),
             page_up: KeyBinding {
                 code: KeyCode::Char('u'),
                 modifiers: KeyModifiers::ALT,
@@ -467,6 +522,8 @@ mod tests {
             },
             up_label: "Alt+K".to_string(),
             down_label: "Alt+J".to_string(),
+            up_fallback_label: Some("Shift+K".to_string()),
+            down_fallback_label: Some("Shift+J".to_string()),
             page_up_label: "Alt+U".to_string(),
             page_down_label: "Alt+D".to_string(),
             prompt_up_label: "Alt+[".to_string(),
@@ -490,8 +547,24 @@ mod tests {
     }
 
     #[test]
-    fn test_scroll_amount_cmd_fallback_macos_only() {
+    fn test_scroll_amount_configured_fallback_keys() {
         let keys = test_scroll_keys();
+
+        assert_eq!(
+            keys.scroll_amount(KeyCode::Char('K'), KeyModifiers::SHIFT),
+            Some(-3)
+        );
+        assert_eq!(
+            keys.scroll_amount(KeyCode::Char('J'), KeyModifiers::SHIFT),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn test_scroll_amount_cmd_fallback_macos_only() {
+        let mut keys = test_scroll_keys();
+        keys.up_fallback = None;
+        keys.down_fallback = None;
 
         let up = keys.scroll_amount(KeyCode::Char('k'), KeyModifiers::SUPER);
         let down = keys.scroll_amount(KeyCode::Char('j'), KeyModifiers::SUPER);
