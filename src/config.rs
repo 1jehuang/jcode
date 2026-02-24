@@ -61,9 +61,9 @@ pub struct KeybindingsConfig {
     pub effort_increase: String,
     /// Effort decrease key (default: "alt+left")
     pub effort_decrease: String,
-    /// Scroll to previous prompt key (default: "alt+[")
+    /// Scroll to previous prompt key (default: "ctrl+[")
     pub scroll_prompt_up: String,
-    /// Scroll to next prompt key (default: "alt+]")
+    /// Scroll to next prompt key (default: "ctrl+]")
     pub scroll_prompt_down: String,
     /// Scroll bookmark toggle key (default: "ctrl+g")
     pub scroll_bookmark: String,
@@ -80,8 +80,8 @@ impl Default for KeybindingsConfig {
             model_switch_prev: "ctrl+shift+tab".to_string(),
             effort_increase: "alt+right".to_string(),
             effort_decrease: "alt+left".to_string(),
-            scroll_prompt_up: "alt+[".to_string(),
-            scroll_prompt_down: "alt+]".to_string(),
+            scroll_prompt_up: "ctrl+[".to_string(),
+            scroll_prompt_down: "ctrl+]".to_string(),
             scroll_bookmark: "ctrl+g".to_string(),
         }
     }
@@ -715,8 +715,9 @@ effort_increase = "alt+right"
 effort_decrease = "alt+left"
 
 # Jump between user prompts
-scroll_prompt_up = "alt+["
-scroll_prompt_down = "alt+]"
+# Note: some legacy terminals report Ctrl+] as Ctrl+5. jcode handles that fallback.
+scroll_prompt_up = "ctrl+["
+scroll_prompt_down = "ctrl+]"
 
 # Scroll bookmark toggle (stash position, jump to bottom, press again to return)
 scroll_bookmark = "ctrl+g"

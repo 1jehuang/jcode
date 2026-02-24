@@ -3,6 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use similar::{ChangeTag, TextDiff};
 use std::path::Path;
 
 pub struct ApplyPatchTool;
@@ -79,12 +80,25 @@ impl Tool for ApplyPatchTool {
                         tokio::fs::create_dir_all(parent).await?;
                     }
                     tokio::fs::write(&resolved, contents).await?;
-                    results.push(format!("✓ {}: created", path));
+                    let diff = generate_diff_summary("", contents);
+                    if diff.is_empty() {
+                        results.push(format!("✓ {}: created", path));
+                    } else {
+                        results.push(format!("✓ {}: created\n{}", path, diff));
+                    }
                 }
                 PatchHunk::DeleteFile { path } => {
                     let resolved = ctx.resolve_path(Path::new(path));
-                    if std::fs::remove_file(&resolved).is_ok() {
-                        results.push(format!("✓ {}: deleted", path));
+                    let old_contents = tokio::fs::read_to_string(&resolved)
+                        .await
+                        .unwrap_or_default();
+                    if tokio::fs::remove_file(&resolved).await.is_ok() {
+                        let diff = generate_diff_summary(&old_contents, "");
+                        if diff.is_empty() {
+                            results.push(format!("✓ {}: deleted", path));
+                        } else {
+                            results.push(format!("✓ {}: deleted\n{}", path, diff));
+                        }
                     } else {
                         results.push(format!("✗ {}: failed to delete", path));
                     }
@@ -96,7 +110,8 @@ impl Tool for ApplyPatchTool {
                 } => {
                     let resolved = ctx.resolve_path(Path::new(path));
                     match apply_update_chunks(&resolved, chunks).await {
-                        Ok(new_contents) => {
+                        Ok((old_contents, new_contents)) => {
+                            let diff = generate_diff_summary(&old_contents, &new_contents);
                             if let Some(dest) = move_to {
                                 let dest_resolved = ctx.resolve_path(Path::new(dest));
                                 if let Some(parent) = dest_resolved.parent() {
@@ -104,19 +119,38 @@ impl Tool for ApplyPatchTool {
                                 }
                                 tokio::fs::write(&dest_resolved, &new_contents).await?;
                                 let _ = tokio::fs::remove_file(&resolved).await;
-                                results.push(format!(
-                                    "✓ {}: modified ({} hunks), moved to {}",
-                                    path,
-                                    chunks.len(),
-                                    dest
-                                ));
+                                if diff.is_empty() {
+                                    results.push(format!(
+                                        "✓ {}: modified ({} hunks), moved to {}",
+                                        path,
+                                        chunks.len(),
+                                        dest
+                                    ));
+                                } else {
+                                    results.push(format!(
+                                        "✓ {}: modified ({} hunks), moved to {}\n{}",
+                                        path,
+                                        chunks.len(),
+                                        dest,
+                                        diff
+                                    ));
+                                }
                             } else {
                                 tokio::fs::write(&resolved, &new_contents).await?;
-                                results.push(format!(
-                                    "✓ {}: modified ({} hunks)",
-                                    path,
-                                    chunks.len()
-                                ));
+                                if diff.is_empty() {
+                                    results.push(format!(
+                                        "✓ {}: modified ({} hunks)",
+                                        path,
+                                        chunks.len()
+                                    ));
+                                } else {
+                                    results.push(format!(
+                                        "✓ {}: modified ({} hunks)\n{}",
+                                        path,
+                                        chunks.len(),
+                                        diff
+                                    ));
+                                }
                             }
                         }
                         Err(e) => {
@@ -135,7 +169,7 @@ impl Tool for ApplyPatchTool {
     }
 }
 
-async fn apply_update_chunks(path: &Path, chunks: &[UpdateFileChunk]) -> Result<String> {
+async fn apply_update_chunks(path: &Path, chunks: &[UpdateFileChunk]) -> Result<(String, String)> {
     let original_contents = tokio::fs::read_to_string(path).await?;
     let mut original_lines: Vec<String> = original_contents.split('\n').map(String::from).collect();
 
@@ -149,7 +183,55 @@ async fn apply_update_chunks(path: &Path, chunks: &[UpdateFileChunk]) -> Result<
     if !new_lines.last().is_some_and(String::is_empty) {
         new_lines.push(String::new());
     }
-    Ok(new_lines.join("\n"))
+    Ok((original_contents, new_lines.join("\n")))
+}
+
+/// Generate a compact diff with line numbers (max 30 lines).
+fn generate_diff_summary(old: &str, new: &str) -> String {
+    let diff = TextDiff::from_lines(old, new);
+    let mut output = String::new();
+    let mut line_count = 0;
+    const MAX_LINES: usize = 30;
+
+    let mut old_line = 1usize;
+    let mut new_line = 1usize;
+
+    for change in diff.iter_all_changes() {
+        if line_count >= MAX_LINES {
+            output.push_str("... (diff truncated)\n");
+            break;
+        }
+
+        let content = change.value().trim_end_matches('\n');
+        let (prefix, line_num) = match change.tag() {
+            ChangeTag::Delete => {
+                let num = old_line;
+                old_line += 1;
+                if content.trim().is_empty() {
+                    continue;
+                }
+                ("-", num)
+            }
+            ChangeTag::Insert => {
+                let num = new_line;
+                new_line += 1;
+                if content.trim().is_empty() {
+                    continue;
+                }
+                ("+", num)
+            }
+            ChangeTag::Equal => {
+                old_line += 1;
+                new_line += 1;
+                continue;
+            }
+        };
+
+        output.push_str(&format!("{}{} {}\n", line_num, prefix, content));
+        line_count += 1;
+    }
+
+    output.trim_end().to_string()
 }
 
 fn compute_replacements(
@@ -580,8 +662,9 @@ mod tests {
             new_lines: vec!["foo".to_string(), "baz".to_string()],
             is_end_of_file: false,
         }];
-        let result = apply_update_chunks(f.path(), &chunks).await.unwrap();
-        assert_eq!(result, "foo\nbaz\n");
+        let (old_result, new_result) = apply_update_chunks(f.path(), &chunks).await.unwrap();
+        assert_eq!(old_result, "foo\nbar\n");
+        assert_eq!(new_result, "foo\nbaz\n");
     }
 
     #[tokio::test]
@@ -601,8 +684,9 @@ mod tests {
                 is_end_of_file: false,
             },
         ];
-        let result = apply_update_chunks(f.path(), &chunks).await.unwrap();
-        assert_eq!(result, "foo\nBAR\nbaz\nQUX\n");
+        let (old_result, new_result) = apply_update_chunks(f.path(), &chunks).await.unwrap();
+        assert_eq!(old_result, "foo\nbar\nbaz\nqux\n");
+        assert_eq!(new_result, "foo\nBAR\nbaz\nQUX\n");
     }
 
     #[tokio::test]
@@ -616,9 +700,9 @@ mod tests {
             new_lines: vec!["        return 42".to_string()],
             is_end_of_file: false,
         }];
-        let result = apply_update_chunks(f.path(), &chunks).await.unwrap();
+        let (_old_result, new_result) = apply_update_chunks(f.path(), &chunks).await.unwrap();
         assert_eq!(
-            result,
+            new_result,
             "class Foo:\n    def bar(self):\n        pass\n    def baz(self):\n        return 42\n"
         );
     }
@@ -632,8 +716,19 @@ mod tests {
             new_lines: vec!["quux".to_string()],
             is_end_of_file: false,
         }];
-        let result = apply_update_chunks(f.path(), &chunks).await.unwrap();
-        assert_eq!(result, "foo\nbar\nbaz\nquux\n");
+        let (_old_result, new_result) = apply_update_chunks(f.path(), &chunks).await.unwrap();
+        assert_eq!(new_result, "foo\nbar\nbaz\nquux\n");
+    }
+
+    #[test]
+    fn test_generate_diff_summary_compact_format() {
+        let old = "line one\nline two\nline three\n";
+        let new = "line one\nchanged two\nline three\n";
+        let diff = generate_diff_summary(old, new);
+
+        assert!(diff.contains("2- line two"));
+        assert!(diff.contains("2+ changed two"));
+        assert!(!diff.contains("line one"));
     }
 
     #[test]
