@@ -8876,13 +8876,8 @@ fn do_server_reload() -> Result<()> {
 
     // Pull latest changes
     crate::logging::info("Pulling latest changes...");
-    let pull = ProcessCommand::new("git")
-        .args(["pull", "-q"])
-        .current_dir(&repo_dir)
-        .status()?;
-
-    if !pull.success() {
-        crate::logging::info("Warning: git pull failed, continuing with current code");
+    if let Err(e) = crate::update::run_git_pull_ff_only(&repo_dir, true) {
+        crate::logging::info(&format!("Warning: {}. Continuing with current code.", e));
     }
 
     // Build release

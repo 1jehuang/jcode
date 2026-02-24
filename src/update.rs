@@ -141,6 +141,56 @@ pub fn should_auto_update() -> bool {
     true
 }
 
+fn summarize_git_pull_failure(stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let text = stderr.trim();
+    if text.is_empty() {
+        return "git pull failed".to_string();
+    }
+
+    if text.contains("Need to specify how to reconcile divergent branches")
+        || text.contains("Not possible to fast-forward")
+        || text.contains("refusing to merge unrelated histories")
+    {
+        return "git pull requires manual reconciliation (local and upstream have diverged)"
+            .to_string();
+    }
+
+    if text.contains("There is no tracking information for the current branch") {
+        return "git pull failed: current branch has no upstream tracking branch".to_string();
+    }
+
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("hint:"))
+        .unwrap_or("git pull failed");
+    let line = line.strip_prefix("fatal: ").unwrap_or(line);
+    if line.eq_ignore_ascii_case("git pull failed") {
+        "git pull failed".to_string()
+    } else {
+        format!("git pull failed: {}", line)
+    }
+}
+
+pub fn run_git_pull_ff_only(repo_dir: &Path, quiet: bool) -> Result<()> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("pull").arg("--ff-only");
+    if quiet {
+        cmd.arg("-q");
+    }
+    let output = cmd
+        .current_dir(repo_dir)
+        .output()
+        .context("Failed to run git pull")?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("{}", summarize_git_pull_failure(&output.stderr));
+    }
+}
+
 fn is_inside_git_repo(path: &std::path::Path) -> bool {
     let mut dir = if path.is_dir() {
         Some(path)
@@ -359,9 +409,9 @@ fn build_from_source() -> Result<PathBuf> {
             .context("Failed to run git pull")?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             // If pull fails (e.g. diverged), reset to origin/main
-            crate::logging::warn(&format!("git pull failed: {}, trying reset", stderr.trim()));
+            let summary = summarize_git_pull_failure(&output.stderr);
+            crate::logging::warn(&format!("{}, trying reset", summary));
             let output = std::process::Command::new("git")
                 .args(["fetch", "origin", "main"])
                 .current_dir(&repo_dir)
@@ -648,5 +698,32 @@ mod tests {
     #[test]
     fn test_should_auto_update_dev_build() {
         assert!(!should_auto_update());
+    }
+
+    #[test]
+    fn test_summarize_git_pull_failure_diverged() {
+        let stderr = b"hint: You have divergent branches and need to specify how to reconcile them.\nfatal: Need to specify how to reconcile divergent branches.\n";
+        assert_eq!(
+            summarize_git_pull_failure(stderr),
+            "git pull requires manual reconciliation (local and upstream have diverged)"
+        );
+    }
+
+    #[test]
+    fn test_summarize_git_pull_failure_no_tracking_branch() {
+        let stderr = b"There is no tracking information for the current branch.\n";
+        assert_eq!(
+            summarize_git_pull_failure(stderr),
+            "git pull failed: current branch has no upstream tracking branch"
+        );
+    }
+
+    #[test]
+    fn test_summarize_git_pull_failure_uses_first_non_hint_line() {
+        let stderr = b"hint: test hint\nfatal: repository not found\n";
+        assert_eq!(
+            summarize_git_pull_failure(stderr),
+            "git pull failed: repository not found"
+        );
     }
 }

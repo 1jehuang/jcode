@@ -1273,13 +1273,8 @@ fn hot_rebuild(session_id: &str) -> Result<()> {
 
     // Pull latest changes (quiet)
     eprintln!("Pulling latest changes...");
-    let pull = ProcessCommand::new("git")
-        .args(["pull", "-q"])
-        .current_dir(&repo_dir)
-        .status()?;
-
-    if !pull.success() {
-        eprintln!("Warning: git pull failed, continuing with current version");
+    if let Err(e) = update::run_git_pull_ff_only(&repo_dir, true) {
+        eprintln!("Warning: {}. Continuing with current version.", e);
     }
 
     // Rebuild (show progress)
@@ -2808,15 +2803,8 @@ fn run_auto_update() -> Result<()> {
     let repo_dir =
         get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
-    // Git pull (quiet)
-    let pull = ProcessCommand::new("git")
-        .args(["pull", "-q"])
-        .current_dir(&repo_dir)
-        .status()?;
-
-    if !pull.success() {
-        anyhow::bail!("git pull failed");
-    }
+    // Git pull (fast-forward only; capture stderr to avoid noisy terminal hints)
+    update::run_git_pull_ff_only(&repo_dir, true)?;
 
     // Cargo build --release (show output for progress)
     eprintln!("Building new version...");
@@ -2888,15 +2876,8 @@ fn run_update() -> Result<()> {
 
     eprintln!("Updating jcode from {}...", repo_dir.display());
 
-    eprintln!("Pulling latest changes...");
-    let pull = ProcessCommand::new("git")
-        .args(["pull"])
-        .current_dir(&repo_dir)
-        .status()?;
-
-    if !pull.success() {
-        anyhow::bail!("git pull failed");
-    }
+    eprintln!("Pulling latest changes (fast-forward only)...");
+    update::run_git_pull_ff_only(&repo_dir, true)?;
 
     eprintln!("Building...");
     let build = ProcessCommand::new("cargo")
