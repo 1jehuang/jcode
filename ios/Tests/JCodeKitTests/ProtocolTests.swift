@@ -77,45 +77,49 @@ do {
     if case .textDelta(let text) = e1 { assertEqual(text, "hello") }
     else { check(false, "Expected textDelta") }
 
-    let e2 = try decodeEvent(#"{"type":"tool_start","id":"tool_1","name":"shell_exec"}"#)
-    if case .toolStart(let id, let name) = e2 {
+    let e2 = try decodeEvent(#"{"type":"text_replace","text":"clean text"}"#)
+    if case .textReplace(let text) = e2 { assertEqual(text, "clean text") }
+    else { check(false, "Expected textReplace") }
+
+    let e3 = try decodeEvent(#"{"type":"tool_start","id":"tool_1","name":"shell_exec"}"#)
+    if case .toolStart(let id, let name) = e3 {
         assertEqual(id, "tool_1"); assertEqual(name, "shell_exec")
     } else { check(false, "Expected toolStart") }
 
-    let e3 = try decodeEvent(#"{"type":"tool_done","id":"t1","name":"bash","output":"ok","error":null}"#)
-    if case .toolDone(let id, let name, let output, let error) = e3 {
+    let e4 = try decodeEvent(#"{"type":"tool_done","id":"t1","name":"bash","output":"ok","error":null}"#)
+    if case .toolDone(let id, let name, let output, let error) = e4 {
         assertEqual(id, "t1"); assertEqual(name, "bash"); assertEqual(output, "ok"); assertNil(error)
     } else { check(false, "Expected toolDone") }
 
-    let e4 = try decodeEvent(#"{"type":"tokens","input":1000,"output":200,"cache_read_input":500}"#)
-    if case .tokenUsage(let input, let output, let cacheRead, let cacheWrite) = e4 {
+    let e5 = try decodeEvent(#"{"type":"tokens","input":1000,"output":200,"cache_read_input":500}"#)
+    if case .tokenUsage(let input, let output, let cacheRead, let cacheWrite) = e5 {
         assertEqual(input, 1000); assertEqual(output, 200); assertEqual(cacheRead, 500); assertNil(cacheWrite)
     } else { check(false, "Expected tokenUsage") }
 
-    let e5 = try decodeEvent(#"{"type":"done","id":7}"#)
-    if case .done(let id) = e5 { assertEqual(id, 7) }
+    let e6 = try decodeEvent(#"{"type":"done","id":7}"#)
+    if case .done(let id) = e6 { assertEqual(id, 7) }
     else { check(false, "Expected done") }
 
-    let e6 = try decodeEvent(#"{"type":"error","id":3,"message":"something broke"}"#)
-    if case .error(let id, let message) = e6 {
+    let e7 = try decodeEvent(#"{"type":"error","id":3,"message":"something broke"}"#)
+    if case .error(let id, let message) = e7 {
         assertEqual(id, 3); assertEqual(message, "something broke")
     } else { check(false, "Expected error") }
 
-    let e7 = try decodeEvent(#"{"type":"session","session_id":"fox_abc123"}"#)
-    if case .sessionId(let sid) = e7 { assertEqual(sid, "fox_abc123") }
+    let e8 = try decodeEvent(#"{"type":"session","session_id":"fox_abc123"}"#)
+    if case .sessionId(let sid) = e8 { assertEqual(sid, "fox_abc123") }
     else { check(false, "Expected sessionId") }
 
-    let e8 = try decodeEvent(#"{"type":"pong","id":99}"#)
-    if case .pong(let id) = e8 { assertEqual(id, 99) }
+    let e9 = try decodeEvent(#"{"type":"pong","id":99}"#)
+    if case .pong(let id) = e9 { assertEqual(id, 99) }
     else { check(false, "Expected pong") }
 
-    let e9 = try decodeEvent(#"{"type":"model_changed","id":2,"model":"gpt-4o","provider_name":"openai"}"#)
-    if case .modelChanged(let id, let model, let provider, let error) = e9 {
+    let e10 = try decodeEvent(#"{"type":"model_changed","id":2,"model":"gpt-4o","provider_name":"openai"}"#)
+    if case .modelChanged(let id, let model, let provider, let error) = e10 {
         assertEqual(id, 2); assertEqual(model, "gpt-4o"); assertEqual(provider, "openai"); assertNil(error)
     } else { check(false, "Expected modelChanged") }
 
-    let e10 = try decodeEvent(#"{"type":"future_event","data":"stuff"}"#)
-    if case .unknown(let type, _) = e10 { assertEqual(type, "future_event") }
+    let e11 = try decodeEvent(#"{"type":"future_event","data":"stuff"}"#)
+    if case .unknown(let type, _) = e11 { assertEqual(type, "future_event") }
     else { check(false, "Expected unknown") }
 }
 

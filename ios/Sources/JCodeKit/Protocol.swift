@@ -113,6 +113,7 @@ public enum Request: Encodable, Sendable {
 public enum ServerEvent: Decodable, Sendable {
     case ack(id: UInt64)
     case textDelta(text: String)
+    case textReplace(text: String)
     case toolStart(id: String, name: String)
     case toolInput(delta: String)
     case toolExec(id: String, name: String)
@@ -154,6 +155,10 @@ public enum ServerEvent: Decodable, Sendable {
         case "text_delta":
             let text = try container.decode(String.self, forKey: .key("text"))
             self = .textDelta(text: text)
+
+        case "text_replace":
+            let text = try container.decode(String.self, forKey: .key("text"))
+            self = .textReplace(text: text)
 
         case "tool_start":
             let id = try container.decode(String.self, forKey: .key("id"))

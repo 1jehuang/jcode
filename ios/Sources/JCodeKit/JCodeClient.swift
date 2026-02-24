@@ -70,6 +70,7 @@ public protocol JCodeClientDelegate: AnyObject {
     func clientDidConnect(serverInfo: ServerInfo)
     func clientDidDisconnect(error: String?)
     func clientDidReceiveText(_ text: String)
+    func clientDidReplaceText(_ text: String)
     func clientDidStartTool(_ tool: ToolCallInfo)
     func clientDidReceiveToolInput(_ delta: String)
     func clientDidExecuteTool(id: String, name: String)
@@ -83,6 +84,7 @@ public protocol JCodeClientDelegate: AnyObject {
 
 @MainActor
 public extension JCodeClientDelegate {
+    func clientDidReplaceText(_ text: String) {}
     func clientDidReceiveToolInput(_ delta: String) {}
     func clientDidUpdateTokens(_ update: TokenUpdate) {}
     func clientDidChangeModel(model: String, provider: String?) {}
@@ -135,10 +137,15 @@ public actor JCodeClient {
 
     public func switchSession(_ sessionId: String) async throws {
         try await connection.resumeSession(sessionId)
+        let _ = try await connection.requestHistory()
     }
 
     public func changeModel(_ model: String) async throws {
         try await connection.setModel(model)
+    }
+
+    public func refreshHistory() async throws {
+        let _ = try await connection.requestHistory()
     }
 
     public func getServerInfo() -> ServerInfo {
@@ -194,6 +201,9 @@ public actor JCodeClient {
         case .textDelta(let text):
             await callDelegate { $0.clientDidReceiveText(text) }
 
+        case .textReplace(let text):
+            await callDelegate { $0.clientDidReplaceText(text) }
+
         case .toolStart(let id, let name):
             let info = ToolCallInfo(id: id, name: name)
             await callDelegate { $0.clientDidStartTool(info) }
@@ -230,7 +240,7 @@ public actor JCodeClient {
         case .ack, .pong, .state, .reloading, .reloadProgress,
              .notification, .swarmStatus, .mcpStatus,
              .softInterruptInjected, .memoryInjected,
-             .splitResponse, .compactResult, .unknown:
+             .splitResponse, .compactResult, .stdinRequest, .unknown:
             break
         }
     }

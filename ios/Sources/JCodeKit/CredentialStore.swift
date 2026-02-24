@@ -1,6 +1,6 @@
 import Foundation
 
-public struct ServerCredential: Codable, Sendable {
+public struct ServerCredential: Codable, Sendable, Hashable {
     public let host: String
     public let port: UInt16
     public let authToken: String
@@ -39,14 +39,23 @@ public actor CredentialStore {
         credentials.first { $0.host == host }
     }
 
+    public func find(host: String, port: UInt16) -> ServerCredential? {
+        credentials.first { $0.host == host && $0.port == port }
+    }
+
     public func save(_ credential: ServerCredential) throws {
-        credentials.removeAll { $0.host == credential.host }
+        credentials.removeAll { $0.host == credential.host && $0.port == credential.port }
         credentials.append(credential)
         try persist()
     }
 
     public func remove(host: String) throws {
         credentials.removeAll { $0.host == host }
+        try persist()
+    }
+
+    public func remove(host: String, port: UInt16) throws {
+        credentials.removeAll { $0.host == host && $0.port == port }
         try persist()
     }
 

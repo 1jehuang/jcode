@@ -113,11 +113,14 @@ public actor JCodeConnection {
     // MARK: - Private
 
     private func send(_ request: Request) async throws {
+        guard let webSocket else {
+            throw ConnectionError.notConnected
+        }
         let data = try JSONEncoder().encode(request)
         guard let text = String(data: data, encoding: .utf8) else {
             throw ConnectionError.encodingFailed
         }
-        try await webSocket?.send(.string(text))
+        try await webSocket.send(.string(text))
     }
 
     private func startReceiving() {

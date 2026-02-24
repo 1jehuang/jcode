@@ -1,7 +1,7 @@
 # jcode iOS Client
 
-> **Status:** Design
-> **Updated:** 2025-02-21
+> **Status:** Phase 1 implemented (app shell + SDK), awaiting on-device validation
+> **Updated:** 2026-02-23
 
 A native iOS application that connects to a jcode server running on the user's laptop or desktop. The phone is a rich, touch-optimized client; all heavy lifting (LLM calls, tool execution, file I/O, git, MCP) stays on the server.
 
@@ -709,6 +709,66 @@ jcode pair
    - `xed .` (open current project in Xcode)
 
 Because jcode executes tools on `yashmacbook`, this gives you "use Xcode through iPhone" behavior: the phone is the control surface, Mac runs Xcode/build commands.
+
+### Current in-repo iOS implementation (Phase 1)
+
+The repo now includes both:
+
+- `JCodeKit` (`ios/Sources/JCodeKit`) - transport/protocol SDK
+- `JCodeMobile` (`ios/Sources/JCodeMobile`) - SwiftUI app shell for pairing + chat
+
+Implemented app flow:
+
+1. Enter host/port and run health check (`GET /health`).
+2. Pair using 6-digit code (`POST /pair`).
+3. Save credentials locally and select among paired servers.
+4. Connect over WebSocket to `/ws` with auth token.
+5. Chat with streaming deltas and `text_replace` handling.
+6. View and switch sessions from server-provided session list.
+
+Notes:
+
+- Credentials are currently persisted by `CredentialStore` in app support JSON.
+- APNs push, ambient dashboard, and lock-screen tool approvals remain Phase 2/3 items.
+
+### Build/run on a Mac (Xcode)
+
+If `xcodegen` is installed on your Mac:
+
+1. Install XcodeGen if needed:
+
+```bash
+brew install xcodegen
+```
+
+2. Generate the Xcode project:
+
+```bash
+cd ios
+xcodegen generate
+```
+
+3. Open `ios/JCodeMobile.xcodeproj` in Xcode.
+
+If you don't want to install XcodeGen, manually create an iOS app target in Xcode and add `../ios` as a local Swift Package dependency (product: `JCodeKit`).
+
+4. Select the `JCodeMobile` scheme and an iPhone simulator or your device.
+5. Build and run.
+
+`project.yml` already wires the app target (`JCodeMobile`) to the local `JCodeKit` package product.
+
+
+### End-to-end checklist for your goal (iPhone -> yashmacbook -> Xcode commands)
+
+1. On Mac: enable and restart jcode gateway.
+2. On Mac: run `jcode pair` and copy the code.
+3. On iPhone app: pair to `yashmacbook` (or its Tailscale DNS name).
+4. Connect and send command requests like:
+   - `xcodebuild -list`
+   - `xcodebuild -scheme <Scheme> -destination 'platform=iOS Simulator,name=iPhone 15' build`
+   - `xed .`
+
+Success condition: commands execute on `yashmacbook` and stream results back to iPhone chat.
 
 ---
 
