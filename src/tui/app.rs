@@ -4949,6 +4949,7 @@ impl App {
                     title: None,
                     tool_data: None,
                 });
+                self.rate_limit_pending_message = None;
                 self.is_processing = false;
                 self.status = ProcessingStatus::Idle;
                 self.interleave_message = None;
@@ -5029,6 +5030,8 @@ impl App {
                 let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
 
                 if session_changed {
+                    self.rate_limit_pending_message = None;
+                    self.rate_limit_reset = None;
                     self.clear_display_messages();
                     self.clear_streaming_render_state();
                     self.streaming_tool_calls.clear();
@@ -14869,6 +14872,74 @@ mod tests {
     }
 
     #[test]
+    fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "retry me".to_string(),
+            is_system: false,
+        });
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = Some(9);
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 9,
+                message: "rate limited".to_string(),
+                retry_after_secs: Some(3),
+            },
+            &mut remote,
+        );
+
+        assert!(!app.is_processing);
+        assert!(matches!(app.status, ProcessingStatus::Idle));
+        assert!(app.current_message_id.is_none());
+        assert!(app.rate_limit_reset.is_some());
+        assert!(app.rate_limit_pending_message.is_some());
+
+        let last = app
+            .display_messages()
+            .last()
+            .expect("missing rate-limit status message");
+        assert_eq!(last.role, "system");
+        assert!(last.content.contains("Will auto-retry in 3 seconds"));
+    }
+
+    #[test]
+    fn test_remote_error_without_retry_clears_pending() {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "retry me".to_string(),
+            is_system: false,
+        });
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 10,
+                message: "provider failed hard".to_string(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+
+        assert!(app.rate_limit_pending_message.is_none());
+        let last = app
+            .display_messages()
+            .last()
+            .expect("missing error message");
+        assert_eq!(last.role, "error");
+        assert_eq!(last.content, "provider failed hard");
+    }
+
+    #[test]
     fn test_info_widget_data_includes_connection_type() {
         let mut app = create_test_app();
         app.connection_type = Some("https".to_string());
@@ -15125,6 +15196,56 @@ mod tests {
 
         assert_eq!(app.scroll_offset, 0);
         app.handle_key(KeyCode::Esc, KeyModifiers::CONTROL).unwrap();
+        assert!(app.auto_scroll_paused);
+        assert!(app.scroll_offset > 0);
+    }
+
+    #[test]
+    fn test_remote_prompt_jump_ctrl_brackets() {
+        let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        // Seed max scroll estimates before key handling.
+        render_and_snap(&app, &mut terminal);
+
+        assert_eq!(app.scroll_offset, 0);
+        assert!(!app.auto_scroll_paused);
+
+        rt.block_on(app.handle_remote_key(
+            KeyCode::Char('['),
+            KeyModifiers::CONTROL,
+            &mut remote,
+        ))
+        .unwrap();
+        assert!(app.auto_scroll_paused);
+        assert!(app.scroll_offset > 0);
+
+        let after_up = app.scroll_offset;
+        rt.block_on(app.handle_remote_key(
+            KeyCode::Char(']'),
+            KeyModifiers::CONTROL,
+            &mut remote,
+        ))
+        .unwrap();
+        assert!(app.scroll_offset <= after_up);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_remote_prompt_jump_ctrl_esc_fallback_on_macos() {
+        let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        // Seed max scroll estimates before key handling.
+        render_and_snap(&app, &mut terminal);
+
+        assert_eq!(app.scroll_offset, 0);
+        rt.block_on(app.handle_remote_key(KeyCode::Esc, KeyModifiers::CONTROL, &mut remote))
+            .unwrap();
         assert!(app.auto_scroll_paused);
         assert!(app.scroll_offset > 0);
     }
