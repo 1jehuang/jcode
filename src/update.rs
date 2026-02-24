@@ -1,3 +1,4 @@
+use crate::build;
 use crate::storage;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -280,22 +281,27 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
                 // Install the built binary
                 let install_dir = stable_install_dir()?;
                 fs::create_dir_all(&install_dir)?;
-                let current_stable = install_dir.join("jcode");
+                let current_stable = install_dir.join(build::binary_name());
 
                 let mut metadata = UpdateMetadata::load().unwrap_or_default();
                 if current_stable.exists() {
                     if let Ok(resolved) = fs::read_link(&current_stable) {
                         metadata.previous_binary = Some(resolved.to_string_lossy().to_string());
                     } else {
-                        let backup =
-                            install_dir.join(format!("jcode-backup-{}", std::process::id()));
+                        let backup = install_dir.join(build::versioned_binary_name(&format!(
+                            "backup-{}",
+                            std::process::id()
+                        )));
                         let _ = fs::copy(&current_stable, &backup);
                         metadata.previous_binary = Some(backup.to_string_lossy().to_string());
                     }
                 }
 
                 // Copy built binary to install location
-                let dest = install_dir.join(format!("jcode-main-{}", latest_sha));
+                let dest = install_dir.join(build::versioned_binary_name(&format!(
+                    "main-{}",
+                    latest_sha
+                )));
                 fs::copy(&path, &dest).context("Failed to copy built binary")?;
                 crate::platform::set_permissions_executable(&dest)?;
 
@@ -453,7 +459,7 @@ fn build_from_source() -> Result<PathBuf> {
         );
     }
 
-    let binary = repo_dir.join("target").join("release").join("jcode");
+    let binary = build::release_binary_path(&repo_dir);
     if !binary.exists() {
         anyhow::bail!("Built binary not found at {}", binary.display());
     }
@@ -540,15 +546,18 @@ pub fn download_and_install_blocking(release: &GitHubRelease) -> Result<PathBuf>
     fs::create_dir_all(&install_dir)?;
 
     let version = release.tag_name.trim_start_matches('v');
-    let versioned_path = install_dir.join(format!("jcode-{}", version));
+    let versioned_path = install_dir.join(build::versioned_binary_name(&version));
 
-    let current_stable = install_dir.join("jcode");
+    let current_stable = install_dir.join(build::binary_name());
     let mut metadata = UpdateMetadata::load().unwrap_or_default();
     if current_stable.exists() {
         if let Ok(resolved) = fs::read_link(&current_stable) {
             metadata.previous_binary = Some(resolved.to_string_lossy().to_string());
         } else {
-            let backup = install_dir.join(format!("jcode-backup-{}", std::process::id()));
+            let backup = install_dir.join(build::versioned_binary_name(&format!(
+                "backup-{}",
+                std::process::id()
+            )));
             let _ = fs::copy(&current_stable, &backup);
             metadata.previous_binary = Some(backup.to_string_lossy().to_string());
         }
@@ -641,7 +650,7 @@ pub fn rollback() -> Result<Option<PathBuf>> {
         let previous_path = PathBuf::from(previous);
         if previous_path.exists() {
             let install_dir = stable_install_dir()?;
-            let current_stable = install_dir.join("jcode");
+            let current_stable = install_dir.join(build::binary_name());
             let temp_symlink = install_dir.join(format!(".jcode-symlink-{}", std::process::id()));
             crate::platform::atomic_symlink_swap(&previous_path, &current_stable, &temp_symlink)?;
 

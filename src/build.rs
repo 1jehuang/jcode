@@ -16,7 +16,7 @@ pub fn get_repo_dir() -> Option<PathBuf> {
 
     // Fallback: check relative to executable
     if let Ok(exe) = std::env::current_exe() {
-        // Assume structure: repo/target/release/jcode
+        // Assume structure: repo/target/release/<binary> (platform-specific executable name)
         if let Some(repo) = exe
             .parent()
             .and_then(|p| p.parent())
@@ -31,10 +31,34 @@ pub fn get_repo_dir() -> Option<PathBuf> {
     None
 }
 
+pub fn binary_stem() -> &'static str {
+    "jcode"
+}
+
+pub fn binary_name() -> &'static str {
+    if cfg!(windows) {
+        "jcode.exe"
+    } else {
+        binary_stem()
+    }
+}
+
+pub fn release_binary_path(repo_dir: &std::path::Path) -> PathBuf {
+    repo_dir.join("target").join("release").join(binary_name())
+}
+
+pub fn versioned_binary_name(suffix: &str) -> String {
+    if cfg!(windows) {
+        format!("{}-{}.exe", binary_stem(), suffix)
+    } else {
+        format!("{}-{}", binary_stem(), suffix)
+    }
+}
+
 /// Find the best development binary in the repo.
 /// Checks target/release (the default build output).
 pub fn find_dev_binary(repo_dir: &std::path::Path) -> Option<PathBuf> {
-    let release = repo_dir.join("target/release/jcode");
+    let release = release_binary_path(repo_dir);
     if release.exists() {
         Some(release)
     } else {
@@ -272,17 +296,20 @@ pub fn manifest_path() -> Result<PathBuf> {
 
 /// Get path to a specific version's binary
 pub fn version_binary_path(hash: &str) -> Result<PathBuf> {
-    Ok(builds_dir()?.join("versions").join(hash).join("jcode"))
+    Ok(builds_dir()?
+        .join("versions")
+        .join(hash)
+        .join(binary_name()))
 }
 
 /// Get path to stable symlink
 pub fn stable_binary_path() -> Result<PathBuf> {
-    Ok(builds_dir()?.join("stable").join("jcode"))
+    Ok(builds_dir()?.join("stable").join(binary_name()))
 }
 
 /// Get path to canary binary
 pub fn canary_binary_path() -> Result<PathBuf> {
-    Ok(builds_dir()?.join("canary").join("jcode"))
+    Ok(builds_dir()?.join("canary").join(binary_name()))
 }
 
 /// Get path to migration context file
@@ -373,7 +400,7 @@ pub fn current_build_info(repo_dir: &std::path::Path) -> Result<BuildInfo> {
 
 /// Install release binary into ~/.local/bin with versioned filename and symlink
 pub fn install_local_release(repo_dir: &std::path::Path) -> Result<PathBuf> {
-    let source = repo_dir.join("target/release/jcode");
+    let source = release_binary_path(repo_dir);
     if !source.exists() {
         anyhow::bail!("Binary not found at {:?}", source);
     }
@@ -392,7 +419,7 @@ pub fn install_local_release(repo_dir: &std::path::Path) -> Result<PathBuf> {
     let dest_dir = home.join(".local").join("bin");
     storage::ensure_dir(&dest_dir)?;
 
-    let versioned = dest_dir.join(format!("jcode-{}", version));
+    let versioned = dest_dir.join(versioned_binary_name(&version));
 
     // Remove existing file first to avoid ETXTBSY
     if versioned.exists() {
@@ -402,7 +429,7 @@ pub fn install_local_release(repo_dir: &std::path::Path) -> Result<PathBuf> {
 
     crate::platform::set_permissions_executable(&versioned)?;
 
-    let link_path = dest_dir.join("jcode");
+    let link_path = dest_dir.join(binary_name());
     let _ = std::fs::remove_file(&link_path);
     crate::platform::symlink_or_copy(&versioned, &link_path)?;
 
@@ -452,7 +479,7 @@ pub fn read_stable_version() -> Result<Option<String>> {
 
 /// Copy binary to versioned location
 pub fn install_version(repo_dir: &std::path::Path, hash: &str) -> Result<PathBuf> {
-    let source = repo_dir.join("target/release/jcode");
+    let source = release_binary_path(repo_dir);
     if !source.exists() {
         anyhow::bail!("Binary not found at {:?}", source);
     }
@@ -460,7 +487,7 @@ pub fn install_version(repo_dir: &std::path::Path, hash: &str) -> Result<PathBuf
     let dest_dir = builds_dir()?.join("versions").join(hash);
     storage::ensure_dir(&dest_dir)?;
 
-    let dest = dest_dir.join("jcode");
+    let dest = dest_dir.join(binary_name());
 
     // Remove existing file first to avoid "Text file busy" error (ETXTBSY)
     // when the binary is currently being executed. Unlinking is allowed
@@ -481,8 +508,11 @@ pub fn update_canary_symlink(hash: &str) -> Result<()> {
     let canary_dir = builds_dir()?.join("canary");
     storage::ensure_dir(&canary_dir)?;
 
-    let link_path = canary_dir.join("jcode");
-    let target = builds_dir()?.join("versions").join(hash).join("jcode");
+    let link_path = canary_dir.join(binary_name());
+    let target = builds_dir()?
+        .join("versions")
+        .join(hash)
+        .join(binary_name());
 
     // Remove existing symlink/file
     let _ = std::fs::remove_file(&link_path);
@@ -497,8 +527,11 @@ pub fn update_rollback_symlink(hash: &str) -> Result<()> {
     let rollback_dir = builds_dir()?.join("rollback");
     storage::ensure_dir(&rollback_dir)?;
 
-    let link_path = rollback_dir.join("jcode");
-    let target = builds_dir()?.join("versions").join(hash).join("jcode");
+    let link_path = rollback_dir.join(binary_name());
+    let target = builds_dir()?
+        .join("versions")
+        .join(hash)
+        .join(binary_name());
 
     let _ = std::fs::remove_file(&link_path);
 
@@ -509,7 +542,7 @@ pub fn update_rollback_symlink(hash: &str) -> Result<()> {
 
 /// Get path to rollback binary
 pub fn rollback_binary_path() -> Result<PathBuf> {
-    Ok(builds_dir()?.join("rollback").join("jcode"))
+    Ok(builds_dir()?.join("rollback").join(binary_name()))
 }
 
 /// Get path to build log file

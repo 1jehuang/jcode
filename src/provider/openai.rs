@@ -335,19 +335,44 @@ impl OpenAIProvider {
 
     async fn model_id(&self) -> String {
         let current = self.model.read().await.clone();
-        if let Some(false) = crate::provider::is_model_available_for_account(&current) {
-            if let Some(fallback) = crate::provider::get_best_available_openai_model() {
-                if fallback != current {
+        let availability = crate::provider::model_availability_for_account(&current);
+
+        match availability.state {
+            crate::provider::AccountModelAvailabilityState::Unavailable => {
+                if let Some(detail) = availability.reason {
                     crate::logging::info(&format!(
-                        "Model '{}' not available for account; falling back to '{}'",
-                        current, fallback
+                        "Model '{}' currently unavailable ({}); selecting fallback",
+                        current, detail
                     ));
-                    let mut w = self.model.write().await;
-                    *w = fallback.clone();
-                    return fallback;
+                }
+                if let Some(fallback) = crate::provider::get_best_available_openai_model() {
+                    if fallback != current {
+                        crate::logging::info(&format!(
+                            "Model '{}' not available for account; falling back to '{}'",
+                            current, fallback
+                        ));
+                        let mut w = self.model.write().await;
+                        *w = fallback.clone();
+                        return fallback;
+                    }
                 }
             }
+            crate::provider::AccountModelAvailabilityState::Unknown => {
+                if crate::provider::should_refresh_openai_model_catalog()
+                    && crate::provider::begin_openai_model_catalog_refresh()
+                {
+                    let creds = self.credentials.read().await;
+                    let token = creds.access_token.clone();
+                    drop(creds);
+                    crate::provider::refresh_openai_model_catalog_in_background(
+                        token,
+                        "openai-request-setup",
+                    );
+                }
+            }
+            crate::provider::AccountModelAvailabilityState::Available => {}
         }
+
         current
     }
 
@@ -1611,16 +1636,20 @@ impl Provider for OpenAIProvider {
                 DEFAULT_MODEL
             );
         }
-        if let Some(false) = crate::provider::is_model_available_for_account(model) {
+        let availability = crate::provider::model_availability_for_account(model);
+        if availability.state == crate::provider::AccountModelAvailabilityState::Unavailable {
+            let detail = crate::provider::format_account_model_availability_detail(&availability)
+                .unwrap_or_else(|| "not available for your account".to_string());
             anyhow::bail!(
-                "The '{}' model is not available for your account. \
-                 Your account may not have access to this model. \
+                "The '{}' model is not available for your account right now ({}). \
                  Use /model to see available models.",
-                model
+                model,
+                detail
             );
         }
         if let Ok(mut current) = self.model.try_write() {
             *current = model.to_string();
+            crate::provider::clear_model_unavailable_for_account(model);
             Ok(())
         } else {
             Err(anyhow::anyhow!(
@@ -1778,6 +1807,16 @@ async fn stream_response(
 
         let body = response.text().await.unwrap_or_default();
 
+        if let Some(reason) = classify_unavailable_model_error(status, &body) {
+            if let Some(model_name) = request.get("model").and_then(|m| m.as_str()) {
+                crate::provider::record_model_unavailable_for_account(model_name, &reason);
+                crate::logging::warn(&format!(
+                    "Recorded OpenAI model '{}' as unavailable: {}",
+                    model_name, reason
+                ));
+            }
+        }
+
         // Check if we need to refresh token
         if should_refresh_token(status, &body) {
             // Token refresh needed - this is a retryable error
@@ -1811,6 +1850,12 @@ async fn stream_response(
                     saw_message_end = true;
                 }
                 if let StreamEvent::Error { message, .. } = &event {
+                    if let Some(model_name) = request.get("model").and_then(|m| m.as_str()) {
+                        maybe_record_runtime_model_unavailable_from_stream_error(
+                            model_name,
+                            message,
+                        );
+                    }
                     if is_retryable_error(&message.to_lowercase()) {
                         return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
                             "Stream error: {}",
@@ -1852,6 +1897,11 @@ async fn stream_response_websocket(
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<(), OpenAIStreamFailure> {
+    let request_model = request
+        .get("model")
+        .and_then(|m| m.as_str())
+        .map(|m| m.to_string());
+
     let access_token = openai_access_token(&credentials).await?;
     let creds = credentials.read().await;
     let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
@@ -2026,6 +2076,12 @@ async fn stream_response_websocket(
                             saw_response_completed = true;
                         }
                         if let StreamEvent::Error { message, .. } = &event {
+                            if let Some(model_name) = request_model.as_deref() {
+                                maybe_record_runtime_model_unavailable_from_stream_error(
+                                    model_name,
+                                    message,
+                                );
+                            }
                             if is_retryable_error(&message.to_lowercase()) {
                                 return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
                                     "Stream error: {}",
@@ -2042,6 +2098,12 @@ async fn stream_response_websocket(
                             made_api_activity = true;
                         }
                         if let StreamEvent::Error { message, .. } = &event {
+                            if let Some(model_name) = request_model.as_deref() {
+                                maybe_record_runtime_model_unavailable_from_stream_error(
+                                    model_name,
+                                    message,
+                                );
+                            }
                             if is_retryable_error(&message.to_lowercase()) {
                                 return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
                                     "Stream error: {}",
@@ -2101,6 +2163,56 @@ fn should_refresh_token(status: StatusCode, body: &str) -> bool {
             || lower.contains("unauthorized");
     }
     false
+}
+
+fn maybe_record_runtime_model_unavailable_from_stream_error(model: &str, message: &str) {
+    let reason = classify_unavailable_model_error(StatusCode::BAD_REQUEST, message)
+        .or_else(|| classify_unavailable_model_error(StatusCode::FORBIDDEN, message));
+
+    if let Some(reason) = reason {
+        crate::provider::record_model_unavailable_for_account(model, &reason);
+        crate::logging::warn(&format!(
+            "Recorded OpenAI model '{}' as unavailable from stream error: {}",
+            model, reason
+        ));
+    }
+}
+
+fn classify_unavailable_model_error(status: StatusCode, body: &str) -> Option<String> {
+    let lower = body.to_ascii_lowercase();
+
+    let mentions_model = lower.contains("model")
+        || lower.contains("slug")
+        || lower.contains("engine")
+        || lower.contains("deployment");
+    let unavailable = lower.contains("not available")
+        || lower.contains("unavailable")
+        || lower.contains("does not have access")
+        || lower.contains("not enabled")
+        || lower.contains("not found")
+        || lower.contains("unknown model")
+        || lower.contains("unsupported model")
+        || lower.contains("invalid model");
+
+    if !mentions_model || !unavailable {
+        return None;
+    }
+
+    if status == StatusCode::NOT_FOUND
+        || status == StatusCode::FORBIDDEN
+        || status == StatusCode::BAD_REQUEST
+        || status == StatusCode::UNPROCESSABLE_ENTITY
+    {
+        let trimmed = body.trim();
+        let reason = if trimmed.is_empty() {
+            format!("model denied by OpenAI API (status {})", status)
+        } else {
+            format!("model denied by OpenAI API (status {}): {}", status, trimmed)
+        };
+        return Some(reason);
+    }
+
+    None
 }
 
 fn extract_error_with_retry(

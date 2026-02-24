@@ -671,6 +671,15 @@ impl Provider for ClaudeProvider {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
         tokio::spawn(async move {
+            if tx
+                .send(Ok(StreamEvent::ConnectionType {
+                    connection: "cli subprocess".to_string(),
+                }))
+                .await
+                .is_err()
+            {
+                return;
+            }
             let mut last_error: Option<anyhow::Error> = None;
 
             for attempt in 0..MAX_RETRIES {

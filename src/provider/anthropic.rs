@@ -130,12 +130,17 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
+    fn is_usage_exhausted() -> bool {
+        let usage = crate::usage::get_sync();
+        usage.five_hour >= 0.99 && usage.seven_day >= 0.99
+    }
+
     pub fn new() -> Self {
         let model = std::env::var("JCODE_ANTHROPIC_MODEL").unwrap_or_else(|_| {
-            if crate::auth::claude::is_max_subscription() {
-                DEFAULT_MODEL.to_string()
-            } else {
+            if Self::is_usage_exhausted() {
                 "claude-sonnet-4-6".to_string()
+            } else {
+                DEFAULT_MODEL.to_string()
             }
         });
 
@@ -528,6 +533,15 @@ impl Provider for AnthropicProvider {
         // Spawn task to handle streaming with retry logic.
         // This includes forced OAuth refresh on auth failures.
         tokio::spawn(async move {
+            if tx
+                .send(Ok(StreamEvent::ConnectionType {
+                    connection: "https/sse".to_string(),
+                }))
+                .await
+                .is_err()
+            {
+                return;
+            }
             run_stream_with_retries(client, token, is_oauth, request, tx, credentials, model).await;
         });
 
@@ -611,6 +625,15 @@ impl Provider for AnthropicProvider {
 
         // Spawn task to handle streaming with retry logic
         tokio::spawn(async move {
+            if tx
+                .send(Ok(StreamEvent::ConnectionType {
+                    connection: "https/sse".to_string(),
+                }))
+                .await
+                .is_err()
+            {
+                return;
+            }
             run_stream_with_retries(client, token, is_oauth, request, tx, credentials, model).await;
         });
 

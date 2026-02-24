@@ -55,6 +55,7 @@ pub struct ClientApp {
     streaming_cache_read_tokens: Option<u64>,
     streaming_cache_creation_tokens: Option<u64>,
     upstream_provider: Option<String>,
+    connection_type: Option<String>,
     total_input_tokens: u64,
     total_output_tokens: u64,
     total_cost: f32,
@@ -256,6 +257,7 @@ impl ClientApp {
             streaming_cache_read_tokens: None,
             streaming_cache_creation_tokens: None,
             upstream_provider: None,
+            connection_type: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             total_cost: 0.0,
@@ -749,6 +751,9 @@ impl ClientApp {
                     self.streaming_cache_creation_tokens = cache_creation_input;
                 }
             }
+            ServerEvent::ConnectionType { connection } => {
+                self.connection_type = Some(connection);
+            }
             ServerEvent::UpstreamProvider { provider } => {
                 self.upstream_provider = Some(provider);
             }
@@ -861,6 +866,7 @@ impl ClientApp {
                     self.streaming_cache_read_tokens = None;
                     self.streaming_cache_creation_tokens = None;
                     self.upstream_provider = None;
+                    self.connection_type = None;
                     self.processing_started = None;
                     self.streaming_tps_start = None;
                     self.streaming_tps_elapsed = Duration::ZERO;
@@ -1091,6 +1097,7 @@ impl ClientApp {
 
                         self.is_processing = true;
                         self.upstream_provider = None;
+                        self.connection_type = None;
                         self.processing_started = Some(Instant::now());
                         self.streaming_tps_start = None;
                         self.streaming_tps_elapsed = Duration::ZERO;
@@ -1503,6 +1510,7 @@ impl TuiState for ClientApp {
             background_info,
             session_name: self.session_display_name(),
             upstream_provider: None, // Client mode doesn't have upstream provider info
+            connection_type: self.connection_type.clone(),
             ..Default::default()
         }
     }
@@ -1604,5 +1612,15 @@ mod tests {
             reload_msg.content,
             "🔄 Server reload initiated...\n[init] 🔄 Starting hot-reload...\n[verify] ✓ Binary verified\n```\nsize=68.4MB\n```"
         );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_connection_type_event_updates_state() {
+        let mut app = ClientApp::new();
+        app.handle_server_event(crate::protocol::ServerEvent::ConnectionType {
+            connection: "https".to_string(),
+        });
+        assert_eq!(app.connection_type.as_deref(), Some("https"));
     }
 }

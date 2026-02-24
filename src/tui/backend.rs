@@ -231,6 +231,7 @@ pub struct RemoteConnection {
     current_tool_input: String,
     line_buffer: String,
     has_loaded_history: bool,
+    call_output_tokens_seen: u64,
 }
 
 impl RemoteConnection {
@@ -257,6 +258,7 @@ impl RemoteConnection {
             current_tool_input: String::new(),
             line_buffer: String::new(),
             has_loaded_history: false,
+            call_output_tokens_seen: 0,
         };
 
         // Subscribe to events
@@ -487,6 +489,7 @@ impl RemoteConnection {
             current_tool_input: String::new(),
             line_buffer: String::new(),
             has_loaded_history: false,
+            call_output_tokens_seen: 0,
         }
     }
 
@@ -559,6 +562,16 @@ impl RemoteConnection {
     /// Clear pending diff state
     pub fn clear_pending(&mut self) {
         self.pending_diffs.clear();
+    }
+
+    /// Per-API-call output token watermark (for TPS delta accumulation).
+    pub fn call_output_tokens_seen(&mut self) -> &mut u64 {
+        &mut self.call_output_tokens_seen
+    }
+
+    /// Reset per-call output token watermark.
+    pub fn reset_call_output_tokens_seen(&mut self) {
+        self.call_output_tokens_seen = 0;
     }
 }
 

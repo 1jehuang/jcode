@@ -1198,10 +1198,9 @@ fn hot_reload(session_id: &str) -> Result<()> {
         }
     }
 
-    // Pick binary: prefer target/release/jcode (both selfdev and normal use this),
-    // fall back to PATH or current exe.
+    // Pick binary: prefer the release build path in the repo, then PATH/current exe.
     let exe = if let Some(repo_dir) = get_repo_dir() {
-        let candidate = repo_dir.join("target/release/jcode");
+        let candidate = build::release_binary_path(&repo_dir);
         if candidate.exists() {
             candidate
         } else {
@@ -1321,7 +1320,7 @@ fn hot_rebuild(session_id: &str) -> Result<()> {
     }
 
     // Get the binary path - use the known location in the repo
-    let exe = repo_dir.join("target/release/jcode");
+    let exe = build::release_binary_path(&repo_dir);
     if !exe.exists() {
         anyhow::bail!("Binary not found at {:?}", exe);
     }
@@ -2454,7 +2453,10 @@ async fn run_client() -> Result<()> {
 }
 
 /// Run TUI client connected to server
-async fn run_tui_client(resume_session: Option<String>, startup_message: Option<String>) -> Result<()> {
+async fn run_tui_client(
+    resume_session: Option<String>,
+    startup_message: Option<String>,
+) -> Result<()> {
     let terminal = init_tui_terminal()?;
     // Initialize mermaid image picker (fast default, optional probe via env)
     crate::tui::mermaid::init_picker();
@@ -3029,7 +3031,7 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
 
     // Use best available binary: prefer release-fast (10s incremental) over release (5min)
     let target_binary =
-        build::find_dev_binary(&repo_dir).unwrap_or_else(|| repo_dir.join("target/release/jcode"));
+        build::find_dev_binary(&repo_dir).unwrap_or_else(|| build::release_binary_path(&repo_dir));
 
     // Only build if explicitly requested with --build flag
     if should_build {
@@ -3143,7 +3145,7 @@ async fn run_canary_wrapper(
         let _ = std::fs::remove_file(format!("{}.hash", socket_path));
         let _ = std::fs::remove_file(server::debug_socket_path());
 
-        // Select binary to use - prefer the initial binary (target/release/jcode)
+        // Select binary to use - prefer the initial binary (release build)
         // since it's guaranteed to be the most up-to-date when starting fresh
         let binary_path = if initial_binary_path.exists() {
             initial_binary_path.clone()

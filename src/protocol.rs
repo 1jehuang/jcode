@@ -367,6 +367,10 @@ pub enum ServerEvent {
         cache_creation_input: Option<u64>,
     },
 
+    /// Active transport/connection type for the current stream
+    #[serde(rename = "connection_type")]
+    ConnectionType { connection: String },
+
     /// Upstream provider info (e.g., which provider OpenRouter routed to)
     #[serde(rename = "upstream_provider")]
     UpstreamProvider { provider: String },
@@ -806,6 +810,19 @@ mod tests {
         let decoded: ServerEvent = serde_json::from_str(json.trim()).unwrap();
         match decoded {
             ServerEvent::TextDelta { text } => assert_eq!(text, "hello"),
+            _ => panic!("wrong event type"),
+        }
+    }
+
+    #[test]
+    fn test_connection_type_event_roundtrip() {
+        let event = ServerEvent::ConnectionType {
+            connection: "websocket".to_string(),
+        };
+        let json = encode_event(&event);
+        let decoded: ServerEvent = serde_json::from_str(json.trim()).unwrap();
+        match decoded {
+            ServerEvent::ConnectionType { connection } => assert_eq!(connection, "websocket"),
             _ => panic!("wrong event type"),
         }
     }

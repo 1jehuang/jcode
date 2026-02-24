@@ -165,12 +165,15 @@ impl SelfDevTool {
             .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository directory"))?;
 
         let target_binary = build::find_dev_binary(&repo_dir)
-            .unwrap_or_else(|| repo_dir.join("target/release/jcode"));
+            .unwrap_or_else(|| build::release_binary_path(&repo_dir));
         if !target_binary.exists() {
             return Ok(ToolOutput::new(
-                "No binary found at target/release/jcode.\n\
-                 Run 'cargo build --release' first, then try reload again."
-                    .to_string(),
+                format!(
+                    "No binary found at {}.\n\
+                     Run 'cargo build --release' first, then try reload again.",
+                    target_binary.display()
+                )
+                .to_string(),
             ));
         }
 

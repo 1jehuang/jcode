@@ -12,9 +12,11 @@ use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::Stream;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant, SystemTime};
 
 // Re-export native tool result types for use by agent
 pub use claude::{NativeToolResult, NativeToolResultSender};
@@ -233,10 +235,88 @@ pub const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
 static CONTEXT_LIMIT_CACHE: std::sync::LazyLock<RwLock<HashMap<String, usize>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
+#[derive(Debug, Clone)]
+struct RuntimeModelUnavailability {
+    reason: String,
+    recorded_at: Instant,
+    observed_at: SystemTime,
+}
+
 /// Dynamic cache of models actually available for this account (populated from Codex API).
 /// When populated, only models in this set should be offered/accepted for the OpenAI provider.
-static ACCOUNT_AVAILABLE_MODELS: std::sync::LazyLock<RwLock<Option<Vec<String>>>> =
+static ACCOUNT_AVAILABLE_MODELS: std::sync::LazyLock<RwLock<Option<HashSet<String>>>> =
     std::sync::LazyLock::new(|| RwLock::new(None));
+static ACCOUNT_AVAILABLE_MODELS_FETCHED_AT: std::sync::LazyLock<RwLock<Option<Instant>>> =
+    std::sync::LazyLock::new(|| RwLock::new(None));
+static ACCOUNT_AVAILABLE_MODELS_OBSERVED_AT: std::sync::LazyLock<RwLock<Option<SystemTime>>> =
+    std::sync::LazyLock::new(|| RwLock::new(None));
+static ACCOUNT_RUNTIME_UNAVAILABLE_MODELS: std::sync::LazyLock<
+    RwLock<HashMap<String, RuntimeModelUnavailability>>,
+> = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+static ACCOUNT_MODEL_REFRESH_LAST_ATTEMPT: std::sync::LazyLock<RwLock<Option<Instant>>> =
+    std::sync::LazyLock::new(|| RwLock::new(None));
+static ACCOUNT_MODEL_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+const ACCOUNT_MODEL_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+const RUNTIME_UNAVAILABLE_TTL: Duration = Duration::from_secs(10 * 60);
+const ACCOUNT_MODEL_REFRESH_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountModelAvailabilityState {
+    Available,
+    Unavailable,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+pub struct AccountModelAvailability {
+    pub state: AccountModelAvailabilityState,
+    pub reason: Option<String>,
+    pub source: &'static str,
+    pub observed_at: Option<SystemTime>,
+}
+
+fn format_elapsed_duration_short(elapsed: Duration) -> String {
+    if elapsed.as_secs() < 60 {
+        format!("{}s", elapsed.as_secs())
+    } else if elapsed.as_secs() < 3600 {
+        format!("{}m", elapsed.as_secs() / 60)
+    } else if elapsed.as_secs() < 86_400 {
+        format!("{}h", elapsed.as_secs() / 3600)
+    } else {
+        format!("{}d", elapsed.as_secs() / 86_400)
+    }
+}
+
+pub fn format_account_model_availability_detail(
+    availability: &AccountModelAvailability,
+) -> Option<String> {
+    let base = match availability.state {
+        AccountModelAvailabilityState::Available => return None,
+        AccountModelAvailabilityState::Unavailable | AccountModelAvailabilityState::Unknown => {
+            availability
+                .reason
+                .clone()
+                .unwrap_or_else(|| "availability unknown".to_string())
+        }
+    };
+
+    let mut meta_parts = vec![availability.source.to_string()];
+    if let Some(observed_at) = availability.observed_at {
+        if let Ok(elapsed) = SystemTime::now().duration_since(observed_at) {
+            meta_parts.push(format!("{} ago", format_elapsed_duration_short(elapsed)));
+        }
+    }
+
+    if meta_parts.is_empty() {
+        Some(base)
+    } else {
+        Some(format!("{} ({})", base, meta_parts.join(", ")))
+    }
+}
+
+fn normalize_model_id(model: &str) -> String {
+    model.trim().to_ascii_lowercase()
+}
 
 /// Look up a cached context limit for a model.
 fn get_cached_context_limit(model: &str) -> Option<usize> {
@@ -262,22 +342,256 @@ pub fn populate_context_limits(models: HashMap<String, usize>) {
 /// Populate the account-available model list (called once at startup from the Codex API).
 pub fn populate_account_models(slugs: Vec<String>) {
     if !slugs.is_empty() {
+        let mut normalized = HashSet::new();
+        for slug in slugs {
+            let slug = normalize_model_id(&slug);
+            if !slug.is_empty() {
+                normalized.insert(slug);
+            }
+        }
+        if normalized.is_empty() {
+            return;
+        }
+
         if let Ok(mut available) = ACCOUNT_AVAILABLE_MODELS.write() {
-            crate::logging::info(&format!("Account available models: {}", slugs.join(", ")));
-            *available = Some(slugs);
+            let mut sorted: Vec<String> = normalized.iter().cloned().collect();
+            sorted.sort();
+            crate::logging::info(&format!("Account available models: {}", sorted.join(", ")));
+            *available = Some(normalized.clone());
+        }
+        if let Ok(mut fetched_at) = ACCOUNT_AVAILABLE_MODELS_FETCHED_AT.write() {
+            *fetched_at = Some(Instant::now());
+        }
+        if let Ok(mut observed_at) = ACCOUNT_AVAILABLE_MODELS_OBSERVED_AT.write() {
+            *observed_at = Some(SystemTime::now());
+        }
+        if let Ok(mut last_attempt) = ACCOUNT_MODEL_REFRESH_LAST_ATTEMPT.write() {
+            *last_attempt = Some(Instant::now());
+        }
+        if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_MODELS.write() {
+            unavailable.retain(|model, _| !normalized.contains(model));
         }
     }
 }
 
-/// Check if a model is available for the current account.
-/// Returns None if the dynamic list hasn't been fetched yet (assume available).
-/// Returns Some(true) if the model is in the account's available list.
-/// Returns Some(false) if the model is NOT in the account's available list.
-pub fn is_model_available_for_account(model: &str) -> Option<bool> {
+pub fn note_openai_model_catalog_refresh_attempt() {
+    if let Ok(mut last_attempt) = ACCOUNT_MODEL_REFRESH_LAST_ATTEMPT.write() {
+        *last_attempt = Some(Instant::now());
+    }
+}
+
+fn openai_model_catalog_refresh_throttled() -> bool {
+    let Ok(last_attempt) = ACCOUNT_MODEL_REFRESH_LAST_ATTEMPT.read() else {
+        return false;
+    };
+
+    last_attempt
+        .as_ref()
+        .map(|at| at.elapsed() < ACCOUNT_MODEL_REFRESH_RETRY_INTERVAL)
+        .unwrap_or(false)
+}
+
+pub fn should_refresh_openai_model_catalog() -> bool {
+    if account_model_cache_is_fresh() {
+        return false;
+    }
+    if openai_model_catalog_refresh_throttled() {
+        return false;
+    }
+    !ACCOUNT_MODEL_REFRESH_IN_FLIGHT.load(Ordering::Relaxed)
+}
+
+pub fn begin_openai_model_catalog_refresh() -> bool {
+    if !should_refresh_openai_model_catalog() {
+        return false;
+    }
+    if ACCOUNT_MODEL_REFRESH_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return false;
+    }
+
+    note_openai_model_catalog_refresh_attempt();
+    true
+}
+
+pub fn finish_openai_model_catalog_refresh() {
+    ACCOUNT_MODEL_REFRESH_IN_FLIGHT.store(false, Ordering::SeqCst);
+}
+
+fn account_model_cache_is_fresh() -> bool {
+    let Ok(guard) = ACCOUNT_AVAILABLE_MODELS_FETCHED_AT.read() else {
+        return false;
+    };
+    guard
+        .as_ref()
+        .map(|fetched_at| fetched_at.elapsed() <= ACCOUNT_MODEL_CACHE_TTL)
+        .unwrap_or(false)
+}
+
+fn runtime_model_unavailability(model: &str) -> Option<RuntimeModelUnavailability> {
+    let key = normalize_model_id(model);
+    if key.is_empty() {
+        return None;
+    }
+
+    let mut unavailable = ACCOUNT_RUNTIME_UNAVAILABLE_MODELS.write().ok()?;
+    if let Some(entry) = unavailable.get(&key) {
+        if entry.recorded_at.elapsed() <= RUNTIME_UNAVAILABLE_TTL {
+            return Some(entry.clone());
+        }
+        unavailable.remove(&key);
+    }
+    None
+}
+
+fn account_snapshot_model_available(model: &str) -> Option<bool> {
+    if !account_model_cache_is_fresh() {
+        return None;
+    }
+    let key = normalize_model_id(model);
+    if key.is_empty() {
+        return None;
+    }
+
     let cache = ACCOUNT_AVAILABLE_MODELS.read().ok()?;
-    match cache.as_ref() {
-        Some(models) => Some(models.iter().any(|m| m == model)),
-        None => None,
+    let models = cache.as_ref()?;
+    Some(models.contains(&key))
+}
+
+fn account_models_observed_at() -> Option<SystemTime> {
+    ACCOUNT_AVAILABLE_MODELS_OBSERVED_AT
+        .read()
+        .ok()
+        .and_then(|v| *v)
+}
+
+pub fn refresh_openai_model_catalog_in_background(access_token: String, context: &'static str) {
+    if access_token.trim().is_empty() {
+        finish_openai_model_catalog_refresh();
+        return;
+    }
+
+    tokio::spawn(async move {
+        let refresh_result = fetch_openai_model_catalog(&access_token).await;
+        match refresh_result {
+            Ok(catalog)
+                if !catalog.available_models.is_empty() || !catalog.context_limits.is_empty() =>
+            {
+                crate::logging::info(&format!(
+                    "Refreshed OpenAI model catalog ({}): {} available, {} with context limits",
+                    context,
+                    catalog.available_models.len(),
+                    catalog.context_limits.len()
+                ));
+                if !catalog.context_limits.is_empty() {
+                    populate_context_limits(catalog.context_limits.clone());
+                }
+                if !catalog.available_models.is_empty() {
+                    populate_account_models(catalog.available_models.clone());
+                }
+            }
+            Ok(_) => {
+                crate::logging::info(&format!(
+                    "Codex models API refresh returned no model catalog data ({})",
+                    context
+                ));
+            }
+            Err(e) => {
+                crate::logging::info(&format!(
+                    "Failed to refresh OpenAI model catalog from Codex API ({}): {}",
+                    context, e
+                ));
+            }
+        }
+        finish_openai_model_catalog_refresh();
+    });
+}
+
+pub fn record_model_unavailable_for_account(model: &str, reason: &str) {
+    let key = normalize_model_id(model);
+    if key.is_empty() {
+        return;
+    }
+
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_MODELS.write() {
+        unavailable.insert(
+            key,
+            RuntimeModelUnavailability {
+                reason: reason.trim().to_string(),
+                recorded_at: Instant::now(),
+                observed_at: SystemTime::now(),
+            },
+        );
+    }
+}
+
+pub fn clear_model_unavailable_for_account(model: &str) {
+    let key = normalize_model_id(model);
+    if key.is_empty() {
+        return;
+    }
+
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_MODELS.write() {
+        unavailable.remove(&key);
+    }
+}
+
+pub fn model_unavailability_detail_for_account(model: &str) -> Option<String> {
+    let availability = model_availability_for_account(model);
+    format_account_model_availability_detail(&availability)
+}
+
+/// Check if a model is available for the current account.
+/// Returns None when availability is currently unknown (e.g. stale/missing snapshot).
+/// Returns Some(true) when available and Some(false) when unavailable.
+pub fn is_model_available_for_account(model: &str) -> Option<bool> {
+    match model_availability_for_account(model).state {
+        AccountModelAvailabilityState::Available => Some(true),
+        AccountModelAvailabilityState::Unavailable => Some(false),
+        AccountModelAvailabilityState::Unknown => None,
+    }
+}
+
+pub fn model_availability_for_account(model: &str) -> AccountModelAvailability {
+    if let Some(runtime) = runtime_model_unavailability(model) {
+        return AccountModelAvailability {
+            state: AccountModelAvailabilityState::Unavailable,
+            reason: Some(runtime.reason),
+            source: "runtime-error",
+            observed_at: Some(runtime.observed_at),
+        };
+    }
+
+    if !account_model_cache_is_fresh() {
+        return AccountModelAvailability {
+            state: AccountModelAvailabilityState::Unknown,
+            reason: Some("availability snapshot is stale".to_string()),
+            source: "account-snapshot",
+            observed_at: account_models_observed_at(),
+        };
+    }
+
+    match account_snapshot_model_available(model) {
+        Some(true) => AccountModelAvailability {
+            state: AccountModelAvailabilityState::Available,
+            reason: None,
+            source: "account-snapshot",
+            observed_at: account_models_observed_at(),
+        },
+        Some(false) => AccountModelAvailability {
+            state: AccountModelAvailabilityState::Unavailable,
+            reason: Some("not available for your account".to_string()),
+            source: "account-snapshot",
+            observed_at: account_models_observed_at(),
+        },
+        None => AccountModelAvailability {
+            state: AccountModelAvailabilityState::Unknown,
+            reason: Some("no availability snapshot yet".to_string()),
+            source: "account-snapshot",
+            observed_at: account_models_observed_at(),
+        },
     }
 }
 
@@ -294,19 +608,85 @@ const OPENAI_MODEL_PREFERENCE: &[&str] = &[
 /// Get the best available OpenAI model, falling back through the preference list.
 /// Returns None if the dynamic model list hasn't been fetched yet.
 pub fn get_best_available_openai_model() -> Option<String> {
+    if !account_model_cache_is_fresh() {
+        return None;
+    }
     let cache = ACCOUNT_AVAILABLE_MODELS.read().ok()?;
     let models = cache.as_ref()?;
+
     for preferred in OPENAI_MODEL_PREFERENCE {
-        if models.iter().any(|m| m == preferred) {
+        if models.contains(*preferred) && runtime_model_unavailability(preferred).is_none() {
             return Some(preferred.to_string());
         }
     }
-    models.first().cloned()
+
+    let mut sorted_models: Vec<String> = models.iter().cloned().collect();
+    sorted_models.sort();
+    sorted_models
+        .into_iter()
+        .find(|model| runtime_model_unavailability(model).is_none())
 }
 
-/// Fetch context window sizes from the Codex backend API.
-/// Returns a map of model slug -> context_window tokens.
-pub async fn fetch_openai_context_limits(access_token: &str) -> Result<HashMap<String, usize>> {
+#[derive(Debug, Clone, Default)]
+pub struct OpenAIModelCatalog {
+    pub available_models: Vec<String>,
+    pub context_limits: HashMap<String, usize>,
+}
+
+fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIModelCatalog {
+    let models = data
+        .get("models")
+        .and_then(|m| m.as_array())
+        .or_else(|| {
+            data.get("data")
+                .and_then(|d| d.get("models"))
+                .and_then(|m| m.as_array())
+        })
+        .or_else(|| data.get("data").and_then(|d| d.as_array()))
+        .or_else(|| data.as_array());
+
+    let mut available: HashSet<String> = HashSet::new();
+    let mut limits: HashMap<String, usize> = HashMap::new();
+
+    for model in models.into_iter().flatten() {
+        let Some(slug) = model
+            .get("slug")
+            .or_else(|| model.get("id"))
+            .or_else(|| model.get("model"))
+            .and_then(|s| s.as_str())
+        else {
+            continue;
+        };
+
+        let slug = normalize_model_id(slug);
+        if slug.is_empty() {
+            continue;
+        }
+
+        available.insert(slug.clone());
+
+        if let Some(ctx) = model
+            .get("context_window")
+            .or_else(|| model.get("context_length"))
+            .and_then(|c| c.as_u64())
+        {
+            limits.insert(slug, ctx as usize);
+        }
+    }
+
+    let mut available_models: Vec<String> = available.into_iter().collect();
+    available_models.sort();
+
+    OpenAIModelCatalog {
+        available_models,
+        context_limits: limits,
+    }
+}
+
+/// Fetch model availability and context windows from the Codex backend API.
+pub async fn fetch_openai_model_catalog(access_token: &str) -> Result<OpenAIModelCatalog> {
+    note_openai_model_catalog_refresh_attempt();
+
     let client = reqwest::Client::new();
     let resp = client
         .get("https://chatgpt.com/backend-api/codex/models?client_version=1.0.0")
@@ -319,20 +699,13 @@ pub async fn fetch_openai_context_limits(access_token: &str) -> Result<HashMap<S
     }
 
     let data: serde_json::Value = resp.json().await?;
-    let mut limits = HashMap::new();
+    Ok(parse_openai_model_catalog(&data))
+}
 
-    if let Some(models) = data.get("models").and_then(|m| m.as_array()) {
-        for model in models {
-            if let (Some(slug), Some(ctx)) = (
-                model.get("slug").and_then(|s| s.as_str()),
-                model.get("context_window").and_then(|c| c.as_u64()),
-            ) {
-                limits.insert(slug.to_string(), ctx as usize);
-            }
-        }
-    }
-
-    Ok(limits)
+/// Fetch context window sizes from the Codex backend API.
+/// Returns a map of model slug -> context_window tokens.
+pub async fn fetch_openai_context_limits(access_token: &str) -> Result<HashMap<String, usize>> {
+    Ok(fetch_openai_model_catalog(access_token).await?.context_limits)
 }
 
 /// Return the context window size in tokens for a given model, if known.
@@ -427,6 +800,23 @@ enum ActiveProvider {
 }
 
 impl MultiProvider {
+    fn spawn_openai_catalog_refresh_if_needed(&self) {
+        if !self.has_openai_creds {
+            return;
+        }
+        if !begin_openai_model_catalog_refresh() {
+            return;
+        }
+
+        let creds = auth::codex::load_credentials();
+        let token = creds
+            .as_ref()
+            .ok()
+            .map(|c| c.access_token.clone())
+            .unwrap_or_default();
+        refresh_openai_model_catalog_in_background(token, "multi-provider");
+    }
+
     /// Create a new MultiProvider, detecting available credentials
     pub fn new() -> Self {
         let has_claude_creds = auth::claude::load_credentials().is_ok();
@@ -506,38 +896,8 @@ impl MultiProvider {
             use_claude_cli,
         };
 
-        // Spawn background fetch for dynamic context limits from Codex API
-        if has_openai_creds {
-            if let Ok(creds) = auth::codex::load_credentials() {
-                let token = creds.access_token.clone();
-                if !token.is_empty() {
-                    tokio::spawn(async move {
-                        match fetch_openai_context_limits(&token).await {
-                            Ok(limits) if !limits.is_empty() => {
-                                crate::logging::info(&format!(
-                                    "Fetched context limits for {} OpenAI models from API",
-                                    limits.len()
-                                ));
-                                let slugs: Vec<String> = limits.keys().cloned().collect();
-                                populate_context_limits(limits);
-                                populate_account_models(slugs);
-                            }
-                            Ok(_) => {
-                                crate::logging::info(
-                                    "Codex models API returned no models with context_window",
-                                );
-                            }
-                            Err(e) => {
-                                crate::logging::info(&format!(
-                                    "Failed to fetch context limits from Codex API: {}",
-                                    e
-                                ));
-                            }
-                        }
-                    });
-                }
-            }
-        }
+        // Prime OpenAI model/account availability in the background.
+        result.spawn_openai_catalog_refresh_if_needed();
 
         result
     }
@@ -603,6 +963,8 @@ impl Provider for MultiProvider {
         system: &str,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        self.spawn_openai_catalog_refresh_if_needed();
+
         match self.active_provider() {
             ActiveProvider::Claude => {
                 // Check if Claude usage is exhausted and fallback is available
@@ -657,6 +1019,8 @@ impl Provider for MultiProvider {
         system_dynamic: &str,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        self.spawn_openai_catalog_refresh_if_needed();
+
         match self.active_provider() {
             ActiveProvider::Claude => {
                 // Check if Claude usage is exhausted and fallback is available
@@ -769,6 +1133,8 @@ impl Provider for MultiProvider {
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
+        self.spawn_openai_catalog_refresh_if_needed();
+
         // Detect which provider this model belongs to
         let target_provider = provider_for_model(model);
 
@@ -880,6 +1246,8 @@ impl Provider for MultiProvider {
     }
 
     fn model_routes(&self) -> Vec<ModelRoute> {
+        self.spawn_openai_catalog_refresh_if_needed();
+
         let mut routes = Vec::new();
         let has_oauth = self.has_claude_creds && !self.use_claude_cli;
         let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
@@ -937,12 +1305,25 @@ impl Provider for MultiProvider {
 
         // OpenAI models
         for model in ALL_OPENAI_MODELS {
+            let availability = model_availability_for_account(model);
             let (available, detail) = if !self.has_openai_creds {
                 (false, "no credentials".to_string())
-            } else if let Some(false) = is_model_available_for_account(model) {
-                (false, "not available for your plan".to_string())
             } else {
-                (true, String::new())
+                match availability.state {
+                    AccountModelAvailabilityState::Available => (true, String::new()),
+                    AccountModelAvailabilityState::Unavailable => {
+                        (
+                            false,
+                            format_account_model_availability_detail(&availability)
+                                .unwrap_or_else(|| "not available".to_string()),
+                        )
+                    }
+                    AccountModelAvailabilityState::Unknown => {
+                        let detail = format_account_model_availability_detail(&availability)
+                            .unwrap_or_else(|| "availability unknown".to_string());
+                        (true, detail)
+                    }
+                }
             };
             routes.push(ModelRoute {
                 model: model.to_string(),
@@ -1029,6 +1410,31 @@ impl Provider for MultiProvider {
                     routes.push(ModelRoute {
                         model: model.to_string(),
                         provider: "Anthropic".to_string(),
+                        api_method: "openrouter".to_string(),
+                        available: true,
+                        detail: String::new(),
+                    });
+                }
+            }
+
+            for model in ALL_OPENAI_MODELS {
+                let or_model = format!("openai/{}", model);
+                if let Some((endpoints, _)) =
+                    openrouter::load_endpoints_disk_cache_public(&or_model)
+                {
+                    for ep in &endpoints {
+                        routes.push(ModelRoute {
+                            model: model.to_string(),
+                            provider: ep.provider_name.clone(),
+                            api_method: "openrouter".to_string(),
+                            available: true,
+                            detail: ep.detail_string(),
+                        });
+                    }
+                } else {
+                    routes.push(ModelRoute {
+                        model: model.to_string(),
+                        provider: "OpenAI".to_string(),
                         api_method: "openrouter".to_string(),
                         available: true,
                         detail: String::new(),

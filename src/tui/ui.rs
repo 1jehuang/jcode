@@ -848,66 +848,90 @@ fn build_auth_status_line(auth: &crate::auth::AuthStatus, max_width: usize) -> L
         }
     }
 
-    // Build full-length labels
+    fn rendered_width(entries: &[&str]) -> usize {
+        if entries.is_empty() {
+            return 0;
+        }
+
+        entries.iter().map(|label| label.len() + 3).sum::<usize>() + (entries.len() - 1)
+    }
+
+    fn provider_label(name: &str, state: AuthState, method: Option<&str>) -> String {
+        match (state, method) {
+            (AuthState::NotConfigured, _) => name.to_string(),
+            (_, Some(method)) if !method.is_empty() => format!("{}({})", name, method),
+            _ => name.to_string(),
+        }
+    }
+
     let anthropic_label = if auth.anthropic.has_oauth && auth.anthropic.has_api_key {
-        "anthropic(oauth+key)"
+        provider_label("anthropic", auth.anthropic.state, Some("oauth+key"))
     } else if auth.anthropic.has_oauth {
-        "anthropic(oauth)"
+        provider_label("anthropic", auth.anthropic.state, Some("oauth"))
     } else if auth.anthropic.has_api_key {
-        "anthropic(key)"
+        provider_label("anthropic", auth.anthropic.state, Some("key"))
     } else {
-        "anthropic"
+        provider_label("anthropic", auth.anthropic.state, None)
     };
 
     let openai_label = if auth.openai_has_oauth && auth.openai_has_api_key {
-        "openai(oauth+key)"
+        provider_label("openai", auth.openai, Some("oauth+key"))
     } else if auth.openai_has_oauth {
-        "openai(oauth)"
+        provider_label("openai", auth.openai, Some("oauth"))
     } else if auth.openai_has_api_key {
-        "openai(key)"
+        provider_label("openai", auth.openai, Some("key"))
     } else {
-        "openai"
+        provider_label("openai", auth.openai, None)
     };
 
-    // Estimate full width: "● label ● openrouter ● label"
-    let full_width = 2 + anthropic_label.len() + 3 + "openrouter".len() + 3 + openai_label.len();
+    let full_specs: Vec<(String, AuthState)> = vec![
+        (anthropic_label, auth.anthropic.state),
+        ("openrouter".to_string(), auth.openrouter),
+        (openai_label, auth.openai),
+        (provider_label("cursor", auth.cursor, None), auth.cursor),
+        (provider_label("copilot", auth.copilot, None), auth.copilot),
+        (provider_label("antigravity", auth.antigravity, None), auth.antigravity),
+    ];
 
-    // Choose short labels if full doesn't fit
-    let (anth_lbl, or_lbl, oai_lbl) = if full_width <= max_width {
-        (anthropic_label, "openrouter", openai_label)
+    let compact_specs: Vec<(String, AuthState)> = vec![
+        (provider_label("an", auth.anthropic.state, None), auth.anthropic.state),
+        ("or".to_string(), auth.openrouter),
+        (provider_label("oa", auth.openai, None), auth.openai),
+        (provider_label("cu", auth.cursor, None), auth.cursor),
+        (provider_label("cp", auth.copilot, None), auth.copilot),
+        (provider_label("ag", auth.antigravity, None), auth.antigravity),
+    ];
+
+    let full: Vec<&str> = full_specs.iter().map(|(label, _)| label.as_str()).collect();
+    let compact: Vec<&str> = compact_specs.iter().map(|(label, _)| label.as_str()).collect();
+
+    let provider_specs: Vec<&(String, AuthState)> = if rendered_width(&full) <= max_width {
+        full_specs.iter().collect()
+    } else if rendered_width(&compact) <= max_width {
+        compact_specs.iter().collect()
     } else {
-        // Short form: drop auth method details
-        ("anthropic", "openrouter", "openai")
+        compact_specs.iter().take(4).collect()
     };
 
     let mut spans = Vec::new();
-    spans.push(Span::styled(
-        dot_char(auth.anthropic.state),
-        Style::default().fg(dot_color(auth.anthropic.state)),
-    ));
-    spans.push(Span::styled(
-        format!(" {} ", anth_lbl),
-        Style::default().fg(DIM_COLOR),
-    ));
-    spans.push(Span::styled(
-        dot_char(auth.openrouter),
-        Style::default().fg(dot_color(auth.openrouter)),
-    ));
-    spans.push(Span::styled(
-        format!(" {} ", or_lbl),
-        Style::default().fg(DIM_COLOR),
-    ));
-    spans.push(Span::styled(
-        dot_char(auth.openai),
-        Style::default().fg(dot_color(auth.openai)),
-    ));
-    spans.push(Span::styled(
-        format!(" {}", oai_lbl),
-        Style::default().fg(DIM_COLOR),
-    ));
+    for (i, (label, state)) in provider_specs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" ", Style::default().fg(DIM_COLOR)));
+        }
+
+        spans.push(Span::styled(
+            dot_char(*state),
+            Style::default().fg(dot_color(*state)),
+        ));
+        spans.push(Span::styled(
+            format!(" {} ", label),
+            Style::default().fg(DIM_COLOR),
+        ));
+    }
 
     Line::from(spans)
 }
+
 
 /// Render context window as vertical list with smart grouping
 /// Items < 5% are grouped by category (docs, msgs, etc.)

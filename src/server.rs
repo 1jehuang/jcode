@@ -438,7 +438,7 @@ fn server_update_candidate() -> Option<(PathBuf, &'static str)> {
     }
 
     if let Some(repo_dir) = crate::build::get_repo_dir() {
-        let exe = repo_dir.join("target/release/jcode");
+        let exe = build::release_binary_path(&repo_dir);
         if exe.exists() {
             return Some((exe, "release"));
         }
@@ -6005,8 +6005,16 @@ async fn execute_debug_command(
             .unwrap_or("")
             .trim()
             .to_lowercase();
+        let claude_usage = crate::usage::get_sync();
+        let claude_usage_exhausted = claude_usage.five_hour >= 0.99 && claude_usage.seven_day >= 0.99;
         let default_model = match provider.as_str() {
-            "claude" | "anthropic" => if crate::auth::claude::is_max_subscription() { "claude-opus-4-6" } else { "claude-sonnet-4-6" },
+            "claude" | "anthropic" => {
+                if claude_usage_exhausted {
+                    "claude-sonnet-4-6"
+                } else {
+                    "claude-opus-4-6"
+                }
+            }
             "openai" | "codex" => "gpt-5.3-codex-spark",
             "openrouter" => "anthropic/claude-sonnet-4",
             "cursor" => "gpt-5",
@@ -6053,11 +6061,12 @@ async fn execute_debug_command(
             .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository directory"))?;
 
         let target_binary = crate::build::find_dev_binary(&repo_dir)
-            .unwrap_or_else(|| repo_dir.join("target/release/jcode"));
+            .unwrap_or_else(|| build::release_binary_path(&repo_dir));
         if !target_binary.exists() {
-            return Err(anyhow::anyhow!(
-                "No binary found at target/release/jcode. Run 'cargo build --release' first."
-            ));
+            return Err(anyhow::anyhow!(format!(
+                "No binary found at {}. Run 'cargo build --release' first.",
+                target_binary.display()
+            )));
         }
 
         let hash = crate::build::current_git_hash(&repo_dir)?;
@@ -8823,7 +8832,7 @@ fn get_repo_dir() -> Option<PathBuf> {
 
     // Fallback: check relative to executable
     if let Ok(exe) = std::env::current_exe() {
-        // Assume structure: repo/target/release/jcode
+        // Assume structure: repo/target/release/<binary> (or platform-specific equivalent)
         if let Some(repo) = exe
             .parent()
             .and_then(|p| p.parent())
@@ -8875,7 +8884,7 @@ fn do_server_reload() -> Result<()> {
     crate::logging::info("✓ Build complete, restarting server...");
 
     // Find the new executable
-    let exe = repo_dir.join("target/release/jcode");
+    let exe = build::release_binary_path(&repo_dir);
     if !exe.exists() {
         anyhow::bail!("Built executable not found at {:?}", exe);
     }
@@ -8921,9 +8930,8 @@ async fn do_server_reload_with_progress(
     }
 
     // Step 2: Check for binary
-    let (exe, exe_label) = server_update_candidate().ok_or_else(|| {
-        anyhow::anyhow!("No reloadable binary found (canary/stable or target/release)")
-    })?;
+    let (exe, exe_label) = server_update_candidate()
+        .ok_or_else(|| anyhow::anyhow!("No reloadable binary found (canary/stable or release)"))?;
     if !exe.exists() {
         send_progress("verify", "❌ No reloadable binary found", Some(false), None);
         send_progress(

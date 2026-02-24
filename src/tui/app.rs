@@ -484,6 +484,8 @@ pub struct App {
     streaming_cache_creation_tokens: Option<u64>,
     // Upstream provider (e.g., which provider OpenRouter routed to)
     upstream_provider: Option<String>,
+    // Active stream connection type (websocket/https/etc.)
+    connection_type: Option<String>,
     // Total session token usage (accumulated across all turns)
     total_input_tokens: u64,
     total_output_tokens: u64,
@@ -504,7 +506,10 @@ pub struct App {
     streaming_tps_start: Option<Instant>,
     /// Accumulated streaming-only time across agentic loop iterations
     streaming_tps_elapsed: Duration,
-    /// Accumulated output tokens across all API calls in a turn
+    /// Accumulated output tokens across all API calls in a turn.
+    ///
+    /// Providers may emit repeated cumulative usage snapshots for a single API call,
+    /// so we accumulate per-call deltas to avoid double counting.
     streaming_total_output_tokens: u64,
     // Current status
     status: ProcessingStatus,
@@ -823,6 +828,7 @@ impl App {
             streaming_cache_read_tokens: None,
             streaming_cache_creation_tokens: None,
             upstream_provider: None,
+            connection_type: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             total_cost: 0.0,
@@ -4217,6 +4223,7 @@ impl App {
                                 self.streaming_tps_start = None;
                                 self.streaming_tps_elapsed = Duration::ZERO;
                                 self.streaming_total_output_tokens = 0;
+                                remote.reset_call_output_tokens_seen();
                             } else {
                                 crate::logging::error("Failed to send queued continuation message");
                             }
@@ -4294,6 +4301,7 @@ impl App {
                                                     self.streaming_tps_start = None;
                                                     self.streaming_tps_elapsed = Duration::ZERO;
                                                     self.streaming_total_output_tokens = 0;
+                                                    remote.reset_call_output_tokens_seen();
                                                 }
                                                 Err(e) => {
                                                     self.push_display_message(DisplayMessage::error(format!(
@@ -4313,6 +4321,7 @@ impl App {
                                             self.streaming_tps_start = None;
                                             self.streaming_tps_elapsed = Duration::ZERO;
                                             self.streaming_total_output_tokens = 0;
+                                            remote.reset_call_output_tokens_seen();
                                         }
                                     }
                                 }
@@ -4636,6 +4645,8 @@ impl App {
     ) -> bool {
         use crate::protocol::ServerEvent;
 
+        let call_output_tokens_seen = remote.call_output_tokens_seen();
+
         match event {
             ServerEvent::TextDelta { text } => {
                 if let Some(thought_line) = Self::extract_thought_line(&text) {
@@ -4756,7 +4767,7 @@ impl App {
                 cache_read_input,
                 cache_creation_input,
             } => {
-                self.streaming_total_output_tokens += output;
+                self.accumulate_streaming_output_tokens(output, call_output_tokens_seen);
                 self.streaming_input_tokens = input;
                 self.streaming_output_tokens = output;
                 if cache_read_input.is_some() {
@@ -4765,6 +4776,10 @@ impl App {
                 if cache_creation_input.is_some() {
                     self.streaming_cache_creation_tokens = cache_creation_input;
                 }
+                false
+            }
+            ServerEvent::ConnectionType { connection } => {
+                self.connection_type = Some(connection);
                 false
             }
             ServerEvent::UpstreamProvider { provider } => {
@@ -4975,6 +4990,7 @@ impl App {
                     self.swarm_plan_items.clear();
                     self.swarm_plan_version = None;
                     self.swarm_plan_swarm_id = None;
+                    self.connection_type = None;
                 }
                 // Store provider info for UI display
                 if let Some(name) = provider_name {
@@ -5112,6 +5128,7 @@ impl App {
                     if let Some(ref pname) = provider_name {
                         self.remote_provider_name = Some(pname.clone());
                     }
+                    self.connection_type = None;
                     self.push_display_message(DisplayMessage::system(format!(
                         "✓ Switched to model: {}",
                         model
@@ -5667,6 +5684,7 @@ impl App {
                             return Ok(());
                         }
                         self.upstream_provider = None;
+                        self.connection_type = None;
                         remote.set_model(model_name).await?;
                         return Ok(());
                     }
@@ -6513,6 +6531,22 @@ impl App {
         self.streaming_md_renderer.borrow_mut().reset();
         crate::tui::mermaid::clear_streaming_preview_diagram();
         content
+    }
+
+    fn accumulate_streaming_output_tokens(
+        &mut self,
+        output_tokens: u64,
+        call_output_tokens_seen: &mut u64,
+    ) {
+        let delta = if output_tokens >= *call_output_tokens_seen {
+            output_tokens - *call_output_tokens_seen
+        } else {
+            // Usage snapshots should be monotonic within one API call. If they are not,
+            // treat this as a reset and count the full value once.
+            output_tokens
+        };
+        self.streaming_total_output_tokens += delta;
+        *call_output_tokens_seen = output_tokens;
     }
 
     fn command_help(&self, topic: &str) -> Option<String> {
@@ -7372,6 +7406,7 @@ impl App {
                     self.provider_session_id = None;
                     self.session.provider_session_id = None;
                     self.upstream_provider = None;
+                    self.connection_type = None;
                     let active_model = self.provider.model();
                     self.update_context_limit_for_model(&active_model);
                     self.session.model = Some(active_model.clone());
@@ -7830,6 +7865,7 @@ impl App {
                 self.provider_session_id = None;
                 self.session.provider_session_id = None;
                 self.upstream_provider = None;
+                self.connection_type = None;
                 self.update_context_limit_for_model(next_model);
                 self.session.model = Some(self.provider.model());
                 let _ = self.session.save();
@@ -9110,16 +9146,32 @@ impl App {
                         });
                     }
                 } else if crate::provider::ALL_OPENAI_MODELS.contains(&model.as_str()) {
-                    let (available, detail) =
-                        if auth.openai == crate::auth::AuthState::NotConfigured {
-                            (false, "no credentials".to_string())
-                        } else if let Some(false) =
-                            crate::provider::is_model_available_for_account(model)
-                        {
-                            (false, "not available for your plan".to_string())
-                        } else {
-                            (true, String::new())
-                        };
+                    let availability = crate::provider::model_availability_for_account(model);
+                    let (available, detail) = if auth.openai == crate::auth::AuthState::NotConfigured {
+                        (false, "no credentials".to_string())
+                    } else {
+                        match availability.state {
+                            crate::provider::AccountModelAvailabilityState::Available => {
+                                (true, String::new())
+                            }
+                            crate::provider::AccountModelAvailabilityState::Unavailable => {
+                                (
+                                    false,
+                                    crate::provider::format_account_model_availability_detail(
+                                        &availability,
+                                    )
+                                    .unwrap_or_else(|| "not available".to_string()),
+                                )
+                            }
+                            crate::provider::AccountModelAvailabilityState::Unknown => {
+                                let detail = crate::provider::format_account_model_availability_detail(
+                                    &availability,
+                                )
+                                .unwrap_or_else(|| "availability unknown".to_string());
+                                (true, detail)
+                            }
+                        }
+                    };
                     routes.push(crate::provider::ModelRoute {
                         model: model.clone(),
                         provider: "OpenAI".to_string(),
@@ -9544,6 +9596,7 @@ impl App {
 
                     self.picker_state = None;
                     self.upstream_provider = None;
+                    self.connection_type = None;
                     if self.is_remote {
                         self.pending_model_switch = Some(spec);
                     } else {
@@ -10007,6 +10060,7 @@ impl App {
             let mut current_tool_input = String::new();
             let mut first_event = true;
             let mut saw_message_end = false;
+            let mut call_output_tokens_seen: u64 = 0;
             let store_reasoning_content = self.provider.name() == "openrouter";
             let mut reasoning_content = String::new();
             // Track tool results from provider (already executed by Claude Code CLI)
@@ -10100,7 +10154,10 @@ impl App {
                         }
                         if let Some(output) = output_tokens {
                             self.streaming_output_tokens = output;
-                            self.streaming_total_output_tokens += output;
+                            self.accumulate_streaming_output_tokens(
+                                output,
+                                &mut call_output_tokens_seen,
+                            );
                         }
                         if cache_read_input_tokens.is_some() {
                             self.streaming_cache_read_tokens = cache_read_input_tokens;
@@ -10116,6 +10173,9 @@ impl App {
                                 self.check_context_warning(context_tokens);
                             }
                         }
+                    }
+                    StreamEvent::ConnectionType { connection } => {
+                        self.connection_type = Some(connection);
                     }
                     StreamEvent::MessageEnd { .. } => {
                         if let Some(start) = self.streaming_tps_start.take() {
@@ -10593,6 +10653,7 @@ impl App {
             let mut current_tool_input = String::new();
             let mut first_event = true;
             let mut saw_message_end = false;
+            let mut call_output_tokens_seen: u64 = 0;
             let mut interleaved = false; // Track if we interleaved a message mid-stream
                                          // Track tool results from provider (already executed by Claude Code CLI)
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
@@ -10827,7 +10888,10 @@ impl App {
                                         }
                                         if let Some(output) = output_tokens {
                                             self.streaming_output_tokens = output;
-                                            self.streaming_total_output_tokens += output;
+                                            self.accumulate_streaming_output_tokens(
+                                                output,
+                                                &mut call_output_tokens_seen,
+                                            );
                                         }
                                         if cache_read_input_tokens.is_some() {
                                             self.streaming_cache_read_tokens = cache_read_input_tokens;
@@ -10851,6 +10915,9 @@ impl App {
                                             cache_creation_input_tokens: self
                                                 .streaming_cache_creation_tokens,
                                         });
+                                    }
+                                    StreamEvent::ConnectionType { connection } => {
+                                        self.connection_type = Some(connection);
                                     }
                                     StreamEvent::MessageEnd { .. } => {
                                         if let Some(start) = self.streaming_tps_start.take() {
@@ -12991,6 +13058,7 @@ impl super::TuiState for App {
             },
             auth_method,
             upstream_provider: self.upstream_provider.clone(),
+            connection_type: self.connection_type.clone(),
             diagrams,
             ambient_info: if crate::config::config().ambient.enabled {
                 let state = crate::ambient::AmbientState::load().unwrap_or_default();
@@ -14358,7 +14426,7 @@ mod tests {
         let Some(repo_dir) = crate::build::get_repo_dir() else {
             return;
         };
-        let exe = repo_dir.join("target/release/jcode");
+        let exe = crate::build::release_binary_path(&repo_dir);
 
         let mut created = false;
         if !exe.exists() {
@@ -14388,7 +14456,7 @@ mod tests {
         let Some(repo_dir) = crate::build::get_repo_dir() else {
             return;
         };
-        let exe = repo_dir.join("target/release/jcode");
+        let exe = crate::build::release_binary_path(&repo_dir);
 
         let mut created = false;
         if !exe.exists() {
@@ -14458,6 +14526,31 @@ mod tests {
             reload_msg.content,
             "🔄 Server reload initiated...\n[init] 🔄 Starting hot-reload...\n[verify] ✓ Binary verified\n```\nsize=68.4MB\n```"
         );
+    }
+
+    #[test]
+    fn test_handle_server_event_updates_connection_type() {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ConnectionType {
+                connection: "websocket".to_string(),
+            },
+            &mut remote,
+        );
+
+        assert_eq!(app.connection_type.as_deref(), Some("websocket"));
+    }
+
+    #[test]
+    fn test_info_widget_data_includes_connection_type() {
+        let mut app = create_test_app();
+        app.connection_type = Some("https".to_string());
+        let data = crate::tui::TuiState::info_widget_data(&app);
+        assert_eq!(data.connection_type.as_deref(), Some("https"));
     }
 
     #[test]

@@ -59,6 +59,15 @@ impl Provider for CursorCliProvider {
         let (tx, rx) = mpsc::channel::<Result<crate::message::StreamEvent>>(100);
 
         tokio::spawn(async move {
+            if tx
+                .send(Ok(crate::message::StreamEvent::ConnectionType {
+                    connection: "cli subprocess".to_string(),
+                }))
+                .await
+                .is_err()
+            {
+                return;
+            }
             let mut cmd = Command::new(&cli_path);
             cmd.arg("-p")
                 .arg("--print")

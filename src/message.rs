@@ -220,6 +220,8 @@ pub enum StreamEvent {
         cache_read_input_tokens: Option<u64>,
         cache_creation_input_tokens: Option<u64>,
     },
+    /// Active transport/connection type for this stream
+    ConnectionType { connection: String },
     /// Error occurred
     Error {
         message: String,

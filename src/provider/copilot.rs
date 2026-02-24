@@ -124,6 +124,15 @@ impl Provider for CopilotCliProvider {
         let (tx, rx) = mpsc::channel::<Result<crate::message::StreamEvent>>(100);
 
         tokio::spawn(async move {
+            if tx
+                .send(Ok(crate::message::StreamEvent::ConnectionType {
+                    connection: "cli subprocess".to_string(),
+                }))
+                .await
+                .is_err()
+            {
+                return;
+            }
             let mut cmd = invocation.command();
             cmd.arg("-p").arg(prompt).arg("--allow-all-tools");
             if !model.trim().is_empty() {

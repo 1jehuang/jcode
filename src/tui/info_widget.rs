@@ -686,6 +686,8 @@ pub struct InfoWidgetData {
     pub auth_method: AuthMethod,
     /// Upstream provider (e.g., which OpenRouter provider served the request: fireworks, etc.)
     pub upstream_provider: Option<String>,
+    /// Active connection type (websocket/https/etc.)
+    pub connection_type: Option<String>,
     /// Mermaid diagrams to display
     pub diagrams: Vec<DiagramInfo>,
     /// Ambient mode status
@@ -1279,6 +1281,22 @@ fn calculate_widget_height(
                 return 0;
             }
             let mut h = 1u16; // Model name
+            if data
+                .provider_name
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty())
+            {
+                h += 1; // Provider line
+            }
+            if data
+                .connection_type
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty())
+            {
+                h += 1; // Connection line
+            }
             if data.auth_method != AuthMethod::Unknown {
                 h += 1; // Auth method line
             }
@@ -2708,6 +2726,21 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
         lines.push(Line::from(provider_spans));
     }
 
+    if let Some(connection) = data
+        .connection_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        lines.push(Line::from(vec![
+            Span::styled("↔ ", Style::default().fg(Color::Rgb(140, 180, 255))),
+            Span::styled(
+                connection.to_lowercase(),
+                Style::default().fg(Color::Rgb(140, 180, 255)),
+            ),
+        ]));
+    }
+
     // Auth method line (with upstream provider if available)
     if data.auth_method != AuthMethod::Unknown {
         let (icon, label, color) = match data.auth_method {
@@ -3565,9 +3598,9 @@ fn render_tips_widget(inner: Rect) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        calculate_placements, render_memory_topology_lines, render_memory_widget, truncate_smart,
-        BackgroundInfo, GraphEdge, GraphNode, InfoWidgetData, Margins, MemoryInfo, SwarmInfo,
-        UsageInfo, UsageProvider, WidgetKind,
+        calculate_placements, render_memory_topology_lines, render_memory_widget,
+        render_model_widget, truncate_smart, BackgroundInfo, GraphEdge, GraphNode, InfoWidgetData,
+        Margins, MemoryInfo, SwarmInfo, UsageInfo, UsageProvider, WidgetKind,
     };
     use ratatui::layout::Rect;
 
@@ -3725,6 +3758,25 @@ mod tests {
             placements.iter().any(|p| p.kind == WidgetKind::Overview),
             "expected overview widget placement"
         );
+    }
+
+    #[test]
+    fn model_widget_renders_connection_type() {
+        let data = InfoWidgetData {
+            model: Some("gpt-5.3-codex".to_string()),
+            provider_name: Some("openai".to_string()),
+            connection_type: Some("websocket".to_string()),
+            ..Default::default()
+        };
+        let lines = render_model_widget(&data, Rect::new(0, 0, 40, 10));
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_lowercase();
+        assert!(text.contains("websocket"));
     }
 
     #[test]
