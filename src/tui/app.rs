@@ -1062,6 +1062,12 @@ impl App {
         );
     }
 
+    fn reconnect_target_session_id(&self) -> Option<String> {
+        self.remote_session_id
+            .clone()
+            .or_else(|| self.resume_session_id.clone())
+    }
+
     /// Check if there's a newer binary on disk than when we started
     /// Only returns true if the SAME binary file has been modified (e.g., via /reload)
     fn has_newer_binary(&self) -> bool {
@@ -3890,11 +3896,7 @@ impl App {
         let mut disconnect_start: Option<std::time::Instant> = None;
 
         'outer: loop {
-            let session_to_resume = if reconnect_attempts == 0 {
-                self.resume_session_id.take()
-            } else {
-                self.remote_session_id.clone()
-            };
+            let session_to_resume = self.reconnect_target_session_id();
 
             let mut remote = match RemoteConnection::connect_with_session(
                 session_to_resume.as_deref(),
@@ -3911,9 +3913,6 @@ impl App {
                     r
                 }
                 Err(e) => {
-                    if reconnect_attempts == 0 && session_to_resume.is_some() {
-                        self.resume_session_id = session_to_resume;
-                    }
                     if reconnect_attempts == 0 {
                         return Err(anyhow::anyhow!(
                             "Failed to connect to server. Is `jcode serve` running? Error: {}",
@@ -14728,6 +14727,47 @@ mod tests {
         assert!(
             !app.auto_scroll_paused,
             "typing in remote mode should follow newest content, not pin top"
+        );
+    }
+
+    #[test]
+    fn test_reconnect_target_prefers_remote_session_id() {
+        let mut app = create_test_app();
+        app.resume_session_id = Some("ses_resume_idle".to_string());
+        app.remote_session_id = Some("ses_remote_active".to_string());
+
+        assert_eq!(
+            app.reconnect_target_session_id().as_deref(),
+            Some("ses_remote_active")
+        );
+    }
+
+    #[test]
+    fn test_reconnect_target_uses_resume_when_remote_missing() {
+        let mut app = create_test_app();
+        app.resume_session_id = Some("ses_resume_only".to_string());
+        app.remote_session_id = None;
+
+        assert_eq!(
+            app.reconnect_target_session_id().as_deref(),
+            Some("ses_resume_only")
+        );
+    }
+
+    #[test]
+    fn test_reconnect_target_does_not_consume_resume_session_id() {
+        let mut app = create_test_app();
+        app.resume_session_id = Some("ses_resume_persistent".to_string());
+        app.remote_session_id = None;
+
+        let first = app.reconnect_target_session_id();
+        let second = app.reconnect_target_session_id();
+
+        assert_eq!(first.as_deref(), Some("ses_resume_persistent"));
+        assert_eq!(second.as_deref(), Some("ses_resume_persistent"));
+        assert_eq!(
+            app.resume_session_id.as_deref(),
+            Some("ses_resume_persistent")
         );
     }
 
