@@ -1673,6 +1673,10 @@ impl TuiState for ClientApp {
             .ok()
             .map(|p| p.display().to_string())
     }
+
+    fn now_millis(&self) -> u64 {
+        self.app_started.elapsed().as_millis() as u64
+    }
 }
 
 #[cfg(test)]

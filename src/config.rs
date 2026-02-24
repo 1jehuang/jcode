@@ -184,6 +184,8 @@ pub struct DisplayConfig {
     pub startup_animation: bool,
     /// Show idle animation before first prompt (default: true)
     pub idle_animation: bool,
+    /// Briefly animate user prompt line when it enters viewport (default: true)
+    pub prompt_entry_animation: bool,
 }
 
 impl Default for DisplayConfig {
@@ -200,6 +202,7 @@ impl Default for DisplayConfig {
             diagram_mode: DiagramDisplayMode::default(),
             startup_animation: false,
             idle_animation: true,
+            prompt_entry_animation: true,
         }
     }
 }
@@ -538,6 +541,11 @@ impl Config {
                 self.display.idle_animation = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_PROMPT_ENTRY_ANIMATION") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.prompt_entry_animation = parsed;
+            }
+        }
 
         // Features
         if let Ok(v) = std::env::var("JCODE_MEMORY_ENABLED") {
@@ -727,7 +735,7 @@ effort_increase = "alt+right"
 effort_decrease = "alt+left"
 
 # Jump between user prompts
-# Note: some legacy terminals report Ctrl+] as Ctrl+5. jcode handles that fallback.
+# Also supports Ctrl+1..9 for recency rank jumps (1 = most recent).
 scroll_prompt_up = "ctrl+["
 scroll_prompt_down = "ctrl+]"
 
@@ -762,6 +770,9 @@ startup_animation = false
 
 # Show idle animation before first prompt (default: true)
 idle_animation = true
+
+# Briefly animate a user prompt line when it enters the viewport (default: true)
+prompt_entry_animation = true
 
 [features]
 # Memory: retrieval + extraction sidecar features
@@ -887,6 +898,7 @@ desktop_notifications = true
 - Debug socket: {}
 - Startup animation: {}
 - Idle animation: {}
+- Prompt entry animation: {}
 
 **Features:**
 - Memory: {}
@@ -945,6 +957,7 @@ desktop_notifications = true
             self.display.debug_socket,
             self.display.startup_animation,
             self.display.idle_animation,
+            self.display.prompt_entry_animation,
             self.features.memory,
             self.features.swarm,
             self.features.update_channel,

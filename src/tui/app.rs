@@ -1619,9 +1619,7 @@ impl App {
             return None;
         }
         match code {
-            KeyCode::Char(c) if c.is_ascii_digit() && *c != '0' => {
-                Some((*c as u8 - b'0') as usize)
-            }
+            KeyCode::Char(c) if c.is_ascii_digit() && *c != '0' => Some((*c as u8 - b'0') as usize),
             _ => None,
         }
     }
@@ -4903,8 +4901,10 @@ impl App {
                     .or_else(|| parse_rate_limit_error(&message));
                 if let Some(reset_duration) = reset_duration {
                     self.rate_limit_reset = Some(Instant::now() + reset_duration);
-                    if let Some(is_system) =
-                        self.rate_limit_pending_message.as_ref().map(|pending| pending.is_system)
+                    if let Some(is_system) = self
+                        .rate_limit_pending_message
+                        .as_ref()
+                        .map(|pending| pending.is_system)
                     {
                         self.push_display_message(DisplayMessage::system(format!(
                             "⏳ Rate limit hit. Will auto-retry in {} seconds...",
@@ -5421,7 +5421,7 @@ impl App {
             return Ok(());
         }
 
-        // Handle prompt jump keys (default: Ctrl+[/])
+        // Handle prompt jump keys (default: Ctrl+[/], plus Ctrl+1..9 recency)
         if let Some(dir) = self.scroll_keys.prompt_jump(code.clone(), modifiers) {
             if dir < 0 {
                 self.scroll_to_prev_prompt();
@@ -5548,7 +5548,9 @@ impl App {
                             tool_data: None,
                         });
                         // Send expanded content to server
-                        let _ = self.begin_remote_send(remote, expanded, images, false).await;
+                        let _ = self
+                            .begin_remote_send(remote, expanded, images, false)
+                            .await;
                     }
                     SendAction::Queue => {
                         self.queued_messages.push(expanded);
@@ -5891,7 +5893,9 @@ impl App {
                                 tool_data: None,
                             });
                             // Send expanded content (with actual pasted text) to server
-                            let _ = self.begin_remote_send(remote, expanded, images, false).await;
+                            let _ = self
+                                .begin_remote_send(remote, expanded, images, false)
+                                .await;
                         }
                         SendAction::Queue => {
                             self.queued_messages.push(expanded);
@@ -6113,7 +6117,7 @@ impl App {
             return Ok(());
         }
 
-        // Handle prompt jump keys (default: Ctrl+[/])
+        // Handle prompt jump keys (default: Ctrl+[/], plus Ctrl+1..9 recency)
         if let Some(dir) = self.scroll_keys.prompt_jump(code.clone(), modifiers) {
             if dir < 0 {
                 self.scroll_to_prev_prompt();
@@ -6760,6 +6764,7 @@ impl App {
                      • `{}`/`{}` - Scroll up/down (see `/config`)\n\
                      • `{}`/`{}` - Page up/down (see `/config`)\n\
                      • `Ctrl+[` / `Ctrl+]` - Jump between user prompts\n\
+                     • `Ctrl+1..9` - Jump by recency (1 = most recent)\n\
                      • `Ctrl+Tab` / `Ctrl+T` - Toggle queue mode (wait vs immediate send)\n\
                      • `Ctrl+Up` - Retrieve pending message for editing\n\
                      • `Ctrl+U` - Clear input line\n\
@@ -13476,6 +13481,10 @@ impl super::TuiState for App {
     fn working_dir(&self) -> Option<String> {
         self.session.working_dir.clone()
     }
+
+    fn now_millis(&self) -> u64 {
+        self.app_started.elapsed().as_millis() as u64
+    }
 }
 
 fn effort_display_label(effort: &str) -> &str {
@@ -15281,7 +15290,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prompt_jump_ctrl_legacy_digit_fallback_in_app() {
+    fn test_prompt_jump_ctrl_digit_is_recency_rank_in_app() {
         let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
 
         // Seed max scroll estimates before key handling.
@@ -15292,10 +15301,10 @@ mod tests {
         let after_up = app.scroll_offset;
         assert!(after_up > 0);
 
-        // Legacy terminals can report Ctrl+] as Ctrl+5.
+        // Ctrl+5 now means "5th most-recent prompt" (clamped to oldest).
         app.handle_key(KeyCode::Char('5'), KeyModifiers::CONTROL)
             .unwrap();
-        assert!(app.scroll_offset <= after_up);
+        assert!(app.scroll_offset >= after_up);
     }
 
     #[test]
@@ -15329,22 +15338,14 @@ mod tests {
         assert_eq!(app.scroll_offset, 0);
         assert!(!app.auto_scroll_paused);
 
-        rt.block_on(app.handle_remote_key(
-            KeyCode::Char('['),
-            KeyModifiers::CONTROL,
-            &mut remote,
-        ))
-        .unwrap();
+        rt.block_on(app.handle_remote_key(KeyCode::Char('['), KeyModifiers::CONTROL, &mut remote))
+            .unwrap();
         assert!(app.auto_scroll_paused);
         assert!(app.scroll_offset > 0);
 
         let after_up = app.scroll_offset;
-        rt.block_on(app.handle_remote_key(
-            KeyCode::Char(']'),
-            KeyModifiers::CONTROL,
-            &mut remote,
-        ))
-        .unwrap();
+        rt.block_on(app.handle_remote_key(KeyCode::Char(']'), KeyModifiers::CONTROL, &mut remote))
+            .unwrap();
         assert!(app.scroll_offset <= after_up);
     }
 
@@ -15367,7 +15368,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_prompt_jump_ctrl_legacy_digit_fallback() {
+    fn test_remote_prompt_jump_ctrl_digit_is_recency_rank() {
         let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
@@ -15376,23 +15377,15 @@ mod tests {
         // Seed max scroll estimates before key handling.
         render_and_snap(&app, &mut terminal);
 
-        rt.block_on(app.handle_remote_key(
-            KeyCode::Char('['),
-            KeyModifiers::CONTROL,
-            &mut remote,
-        ))
-        .unwrap();
+        rt.block_on(app.handle_remote_key(KeyCode::Char('['), KeyModifiers::CONTROL, &mut remote))
+            .unwrap();
         let after_up = app.scroll_offset;
         assert!(after_up > 0);
 
-        // Legacy terminals can report Ctrl+] as Ctrl+5.
-        rt.block_on(app.handle_remote_key(
-            KeyCode::Char('5'),
-            KeyModifiers::CONTROL,
-            &mut remote,
-        ))
-        .unwrap();
-        assert!(app.scroll_offset <= after_up);
+        // Ctrl+5 now means "5th most-recent prompt" (clamped to oldest).
+        rt.block_on(app.handle_remote_key(KeyCode::Char('5'), KeyModifiers::CONTROL, &mut remote))
+            .unwrap();
+        assert!(app.scroll_offset >= after_up);
     }
 
     #[test]
@@ -15405,22 +15398,14 @@ mod tests {
         // Seed max scroll estimates before key handling.
         render_and_snap(&app, &mut terminal);
 
-        rt.block_on(app.handle_remote_key(
-            KeyCode::Char('k'),
-            KeyModifiers::SUPER,
-            &mut remote,
-        ))
-        .unwrap();
+        rt.block_on(app.handle_remote_key(KeyCode::Char('k'), KeyModifiers::SUPER, &mut remote))
+            .unwrap();
         assert!(app.auto_scroll_paused);
         assert!(app.scroll_offset > 0);
         let after_up = app.scroll_offset;
 
-        rt.block_on(app.handle_remote_key(
-            KeyCode::Char('j'),
-            KeyModifiers::SUPER,
-            &mut remote,
-        ))
-        .unwrap();
+        rt.block_on(app.handle_remote_key(KeyCode::Char('j'), KeyModifiers::SUPER, &mut remote))
+            .unwrap();
         assert!(app.scroll_offset <= after_up);
     }
 

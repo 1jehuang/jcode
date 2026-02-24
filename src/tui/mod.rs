@@ -160,6 +160,8 @@ pub trait TuiState {
     fn picker_state(&self) -> Option<&PickerState>;
     /// Working directory for this session
     fn working_dir(&self) -> Option<String>;
+    /// Monotonic clock for viewport animations
+    fn now_millis(&self) -> u64;
 }
 
 /// Unified model/provider picker with three columns
