@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use super::keybind::{ModelSwitchKeys, ScrollKeys};
+use super::keybind::{CenteredToggleKeys, ModelSwitchKeys, ScrollKeys};
 use super::markdown::IncrementalMarkdownRenderer;
 use super::stream_buffer::StreamBuffer;
 use crate::bus::{BackgroundTaskStatus, Bus, BusEvent, ToolEvent, ToolStatus};
@@ -673,6 +673,8 @@ pub struct App {
     effort_switch_keys: super::keybind::EffortSwitchKeys,
     // Keybindings for scrolling
     scroll_keys: ScrollKeys,
+    // Keybinding for centered-mode toggle
+    centered_toggle_keys: CenteredToggleKeys,
     // Scroll bookmark: stashed scroll position for quick teleport back
     scroll_bookmark: Option<usize>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
@@ -968,6 +970,7 @@ impl App {
             pending_model_switch: None,
             model_switch_keys: super::keybind::load_model_switch_keys(),
             effort_switch_keys: super::keybind::load_effort_switch_keys(),
+            centered_toggle_keys: super::keybind::load_centered_toggle_key(),
             scroll_keys: super::keybind::load_scroll_keys(),
             scroll_bookmark: None,
             status_notice: None,
@@ -5369,6 +5372,10 @@ impl App {
             self.cycle_effort(direction);
             return Ok(());
         }
+        if self.centered_toggle_keys.toggle.matches(code.clone(), modifiers) {
+            self.toggle_centered_mode();
+            return Ok(());
+        }
         self.normalize_diagram_state();
         let diagram_available = self.diagram_available();
         if self.handle_diagram_focus_key(code.clone(), modifiers, diagram_available) {
@@ -5433,6 +5440,12 @@ impl App {
 
         if let Some(rank) = Self::ctrl_prompt_rank(&code, modifiers) {
             self.scroll_to_recent_prompt_rank(rank);
+            return Ok(());
+        }
+
+        // Handle centered mode toggle (default: Alt+C)
+        if self.centered_toggle_keys.toggle.matches(code.clone(), modifiers) {
+            self.toggle_centered_mode();
             return Ok(());
         }
 
@@ -6054,6 +6067,10 @@ impl App {
             self.cycle_effort(direction);
             return Ok(());
         }
+        if self.centered_toggle_keys.toggle.matches(code.clone(), modifiers) {
+            self.toggle_centered_mode();
+            return Ok(());
+        }
         self.normalize_diagram_state();
         let diagram_available = self.diagram_available();
         if self.handle_diagram_focus_key(code.clone(), modifiers, diagram_available) {
@@ -6062,6 +6079,10 @@ impl App {
         // Handle Alt combos (readline word movement)
         if modifiers.contains(KeyModifiers::ALT) {
             match code {
+                c if self.centered_toggle_keys.toggle.matches(c, modifiers) => {
+                    self.toggle_centered_mode();
+                    return Ok(());
+                }
                 KeyCode::Char('b') => {
                     // Alt+B: back one word
                     self.cursor_pos = self.find_word_boundary_back();
@@ -6757,6 +6778,7 @@ impl App {
                      • `+` / `-` - Resize diagram pane (when focused)\n\
                      • `Alt+M` - Toggle diagram pane\n\
                      • `Alt+T` - Toggle diagram pane position (side/top)\n\
+                     • `{}` - Toggle centered/left-aligned layout\n\
                      • `Shift+Tab` - Cycle diff mode (Off → Inline → Pinned)\n\
                      • `Alt+V` - Paste image from clipboard\n\
                      • `Ctrl+R` - Recover from missing tool outputs\n\
@@ -6781,6 +6803,7 @@ impl App {
                     self.scroll_keys.down_label,
                     self.scroll_keys.page_up_label,
                     self.scroll_keys.page_down_label,
+                    self.centered_toggle_keys.toggle_label,
                     model_next,
                     model_prev
                 ),
@@ -12424,6 +12447,12 @@ impl App {
             self.set_status_notice("📌 Bookmark set — press again to return");
         }
         // If already at bottom with no bookmark, do nothing
+    }
+
+    fn toggle_centered_mode(&mut self) {
+        self.centered = !self.centered;
+        let mode = if self.centered { "Centered" } else { "Left-aligned" };
+        self.set_status_notice(format!("Layout: {}", mode));
     }
 
     // ==================== Debug Socket Methods ====================
