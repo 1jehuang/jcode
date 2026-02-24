@@ -35,6 +35,7 @@ use tokio::time::interval;
 #[derive(Debug, Clone)]
 struct PendingRemoteMessage {
     content: String,
+    images: Vec<(String, String)>,
     is_system: bool,
 }
 
@@ -808,7 +809,7 @@ impl App {
         is_system: bool,
     ) -> Result<u64> {
         let msg_id = remote
-            .send_message_with_images(content.clone(), images)
+            .send_message_with_images(content.clone(), images.clone())
             .await?;
         self.current_message_id = Some(msg_id);
         self.is_processing = true;
@@ -820,7 +821,11 @@ impl App {
         self.thought_line_inserted = false;
         self.thinking_prefix_emitted = false;
         self.thinking_buffer.clear();
-        self.rate_limit_pending_message = Some(PendingRemoteMessage { content, is_system });
+        self.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content,
+            images,
+            is_system,
+        });
         remote.reset_call_output_tokens_seen();
         Ok(msg_id)
     }
@@ -4231,7 +4236,7 @@ impl App {
                                             .begin_remote_send(
                                                 &mut remote,
                                                 pending.content,
-                                                vec![],
+                                                pending.images,
                                                 pending.is_system,
                                             )
                                             .await;
@@ -14880,6 +14885,7 @@ mod tests {
 
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
             content: "retry me".to_string(),
+            images: vec![],
             is_system: false,
         });
         app.is_processing = true;
@@ -14918,6 +14924,7 @@ mod tests {
 
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
             content: "retry me".to_string(),
+            images: vec![],
             is_system: false,
         });
 
