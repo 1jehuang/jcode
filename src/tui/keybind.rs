@@ -119,9 +119,7 @@ fn parse_keybinding(raw: &str) -> Option<KeyBinding> {
         match part {
             "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
             "alt" | "option" | "meta" => modifiers |= KeyModifiers::ALT,
-            "cmd" | "command" | "super" | "win" | "windows" => {
-                modifiers |= KeyModifiers::SUPER
-            }
+            "cmd" | "command" | "super" | "win" | "windows" => modifiers |= KeyModifiers::SUPER,
             "hyper" => modifiers |= KeyModifiers::HYPER,
             "shift" => modifiers |= KeyModifiers::SHIFT,
             _ => {
@@ -262,12 +260,11 @@ impl ScrollKeys {
 
         // Fallback prompt-jump bindings:
         // - Ctrl+[ / Ctrl+] in terminals with keyboard enhancement
-        // - Ctrl+5 in legacy terminals where Ctrl+] is reported as Ctrl+5
         //   (Ctrl+[ is indistinguishable from Esc without keyboard enhancement)
         if modifiers.contains(KeyModifiers::CONTROL) {
             match code {
                 KeyCode::Char('[') => return Some(-1),
-                KeyCode::Char(']') | KeyCode::Char('5') => return Some(1),
+                KeyCode::Char(']') => return Some(1),
                 _ => {}
             }
         }
@@ -592,11 +589,11 @@ mod tests {
     }
 
     #[test]
-    fn test_prompt_jump_ctrl_legacy_digit_fallback() {
+    fn test_prompt_jump_ctrl_digit_reserved_for_rank_jump() {
         let keys = test_scroll_keys();
         assert_eq!(
             keys.prompt_jump(KeyCode::Char('5'), KeyModifiers::CONTROL),
-            Some(1)
+            None
         );
         assert_eq!(
             keys.prompt_jump(KeyCode::Char('4'), KeyModifiers::CONTROL),
