@@ -15256,9 +15256,15 @@ mod tests {
         assert!(third_jump > second_jump);
 
         app.follow_chat_bottom();
+        app.handle_key(KeyCode::Char('4'), KeyModifiers::CONTROL)
+            .unwrap();
+        let fourth_jump = app.scroll_offset;
+        assert!(fourth_jump > third_jump);
+
+        app.follow_chat_bottom();
         app.handle_key(KeyCode::Char('9'), KeyModifiers::CONTROL)
             .unwrap();
-        assert_eq!(app.scroll_offset, third_jump);
+        assert_eq!(app.scroll_offset, fourth_jump);
     }
 
     #[cfg(target_os = "macos")]
@@ -15301,18 +15307,13 @@ mod tests {
 
         app.handle_key(KeyCode::Char('k'), KeyModifiers::SUPER)
             .unwrap();
-        if cfg!(target_os = "macos") {
-            assert!(app.auto_scroll_paused);
-            assert!(app.scroll_offset > 0);
-            let after_up = app.scroll_offset;
+        assert!(app.auto_scroll_paused);
+        assert!(app.scroll_offset > 0);
+        let after_up = app.scroll_offset;
 
-            app.handle_key(KeyCode::Char('j'), KeyModifiers::SUPER)
-                .unwrap();
-            assert!(app.scroll_offset <= after_up);
-        } else {
-            assert!(!app.auto_scroll_paused);
-            assert_eq!(app.scroll_offset, 0);
-        }
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::SUPER)
+            .unwrap();
+        assert!(app.scroll_offset <= after_up);
     }
 
     #[test]
@@ -15410,22 +15411,17 @@ mod tests {
             &mut remote,
         ))
         .unwrap();
-        if cfg!(target_os = "macos") {
-            assert!(app.auto_scroll_paused);
-            assert!(app.scroll_offset > 0);
-            let after_up = app.scroll_offset;
+        assert!(app.auto_scroll_paused);
+        assert!(app.scroll_offset > 0);
+        let after_up = app.scroll_offset;
 
-            rt.block_on(app.handle_remote_key(
-                KeyCode::Char('j'),
-                KeyModifiers::SUPER,
-                &mut remote,
-            ))
-            .unwrap();
-            assert!(app.scroll_offset <= after_up);
-        } else {
-            assert!(!app.auto_scroll_paused);
-            assert_eq!(app.scroll_offset, 0);
-        }
+        rt.block_on(app.handle_remote_key(
+            KeyCode::Char('j'),
+            KeyModifiers::SUPER,
+            &mut remote,
+        ))
+        .unwrap();
+        assert!(app.scroll_offset <= after_up);
     }
 
     #[test]
