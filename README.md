@@ -464,16 +464,14 @@ graph TB
     Stable --> C["Session C<br>canary"]
 
     C --> Reload["selfdev reload<br><i>Hot-restart with new binary</i>"]
-    Reload -->|"crash"| Rollback["Auto-Rollback<br>to stable"]
-    Reload -->|"success"| Promote["selfdev promote<br><i>Mark as new stable</i>"]
+    Reload -->|"restart"| Continue["Session resumes<br>with continuation context"]
 
     style Stable fill:#10b981,color:#fff
     style C fill:#f97316,color:#fff
-    style Rollback fill:#ef4444,color:#fff
-    style Promote fill:#10b981,color:#fff
+    style Continue fill:#10b981,color:#fff
 ```
 
-jcode can develop itself - edit code, build, hot-reload, and test in-place. If the canary crashes, it auto-rolls back to the last stable binary and wakes with crash context.
+jcode can develop itself - edit code, build, hot-reload, and test in-place. After reload, the session resumes with continuation context so work can continue immediately.
 
 </details>
 
