@@ -118,8 +118,12 @@ do {
         assertEqual(id, 2); assertEqual(model, "gpt-4o"); assertEqual(provider, "openai"); assertNil(error)
     } else { check(false, "Expected modelChanged") }
 
-    let e11 = try decodeEvent(#"{"type":"future_event","data":"stuff"}"#)
-    if case .unknown(let type, _) = e11 { assertEqual(type, "future_event") }
+    let e11 = try decodeEvent(#"{"type":"interrupted"}"#)
+    if case .interrupted = e11 { check(true) }
+    else { check(false, "Expected interrupted") }
+
+    let e12 = try decodeEvent(#"{"type":"future_event","data":"stuff"}"#)
+    if case .unknown(let type, _) = e12 { assertEqual(type, "future_event") }
     else { check(false, "Expected unknown") }
 }
 

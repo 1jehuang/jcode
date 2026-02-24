@@ -63,6 +63,8 @@ pub struct ClientApp {
     streaming_tps_start: Option<Instant>,
     streaming_tps_elapsed: Duration,
     streaming_total_output_tokens: u64,
+    // Per-API-call watermark used to convert cumulative output snapshots into deltas.
+    call_output_tokens_seen: u64,
     last_activity: Option<Instant>,
 
     // Client-specific state
@@ -265,6 +267,7 @@ impl ClientApp {
             streaming_tps_start: None,
             streaming_tps_elapsed: Duration::ZERO,
             streaming_total_output_tokens: 0,
+            call_output_tokens_seen: 0,
             last_activity: None,
 
             // Client-specific state
@@ -741,7 +744,14 @@ impl ClientApp {
                 cache_read_input,
                 cache_creation_input,
             } => {
-                self.streaming_total_output_tokens += output;
+                let delta = if output >= self.call_output_tokens_seen {
+                    output - self.call_output_tokens_seen
+                } else {
+                    // Treat non-monotonic snapshots as a reset and count the full value once.
+                    output
+                };
+                self.streaming_total_output_tokens += delta;
+                self.call_output_tokens_seen = output;
                 self.streaming_input_tokens = input;
                 self.streaming_output_tokens = output;
                 if cache_read_input.is_some() {
@@ -756,6 +766,24 @@ impl ClientApp {
             }
             ServerEvent::UpstreamProvider { provider } => {
                 self.upstream_provider = Some(provider);
+            }
+            ServerEvent::Interrupted => {
+                self.streaming_text.clear();
+                self.streaming_md_renderer.borrow_mut().reset();
+                crate::tui::mermaid::clear_streaming_preview_diagram();
+                self.streaming_tool_calls.clear();
+                self.current_tool_id = None;
+                self.current_tool_name = None;
+                self.current_tool_input.clear();
+                self.pending_diffs.clear();
+                self.call_output_tokens_seen = 0;
+                self.streaming_tps_start = None;
+                self.streaming_tps_elapsed = Duration::ZERO;
+                self.streaming_total_output_tokens = 0;
+                self.processing_started = None;
+                self.is_processing = false;
+                self.status = ProcessingStatus::Idle;
+                self.push_display_message(DisplayMessage::system("Interrupted"));
             }
             ServerEvent::Done { .. } => {
                 self.log_cache_miss_if_unexpected();
@@ -787,6 +815,7 @@ impl ClientApp {
                 self.is_processing = false;
                 // Clear any leftover diff tracking state
                 self.pending_diffs.clear();
+                self.call_output_tokens_seen = 0;
             }
             ServerEvent::Error { message, .. } => {
                 self.push_display_message(DisplayMessage {
@@ -799,6 +828,7 @@ impl ClientApp {
                 });
                 self.is_processing = false;
                 self.pending_diffs.clear();
+                self.call_output_tokens_seen = 0;
             }
             ServerEvent::SessionId { session_id } => {
                 self.session_id = Some(session_id);
@@ -871,6 +901,7 @@ impl ClientApp {
                     self.streaming_tps_start = None;
                     self.streaming_tps_elapsed = Duration::ZERO;
                     self.streaming_total_output_tokens = 0;
+                    self.call_output_tokens_seen = 0;
                     self.last_activity = None;
                     self.is_processing = false;
                     self.status = ProcessingStatus::Idle;
@@ -1102,6 +1133,7 @@ impl ClientApp {
                         self.streaming_tps_start = None;
                         self.streaming_tps_elapsed = Duration::ZERO;
                         self.streaming_total_output_tokens = 0;
+                        self.call_output_tokens_seen = 0;
                     }
                 }
             }
@@ -1374,7 +1406,10 @@ impl TuiState for ClientApp {
             || ((provider_name == "unknown" || provider_name == "remote")
                 && has_anthropic_creds
                 && !has_openai_creds);
-        let is_openai_provider = provider_name.contains("openai");
+        let is_openai_provider = provider_name.contains("openai")
+            || ((provider_name == "unknown" || provider_name == "remote")
+                && has_openai_creds
+                && !has_anthropic_creds);
         let is_api_key_provider = provider_name.contains("openrouter");
 
         let output_tps = if self.is_processing {
@@ -1389,7 +1424,11 @@ impl TuiState for ClientApp {
             Some(super::info_widget::UsageInfo {
                 provider: super::info_widget::UsageProvider::Anthropic,
                 five_hour: usage.five_hour,
+                five_hour_resets_at: usage.five_hour_resets_at.clone(),
                 seven_day: usage.seven_day,
+                seven_day_resets_at: usage.seven_day_resets_at.clone(),
+                spark: None,
+                spark_resets_at: None,
                 total_cost: 0.0,
                 input_tokens: 0,
                 output_tokens: 0,
@@ -1398,16 +1437,71 @@ impl TuiState for ClientApp {
                 output_tps,
                 available: true,
             })
-        } else if is_api_key_provider
-            || is_openai_provider
-            || self.total_input_tokens > 0
-            || self.total_output_tokens > 0
+        } else if is_openai_provider {
+            let openai_usage = crate::usage::get_openai_usage_sync();
+            if openai_usage.has_limits() {
+                Some(super::info_widget::UsageInfo {
+                    provider: super::info_widget::UsageProvider::OpenAI,
+                    five_hour: openai_usage
+                        .five_hour
+                        .as_ref()
+                        .map(|w| w.usage_ratio)
+                        .unwrap_or(0.0),
+                    five_hour_resets_at: openai_usage
+                        .five_hour
+                        .as_ref()
+                        .and_then(|w| w.resets_at.clone()),
+                    seven_day: openai_usage
+                        .seven_day
+                        .as_ref()
+                        .map(|w| w.usage_ratio)
+                        .unwrap_or(0.0),
+                    seven_day_resets_at: openai_usage
+                        .seven_day
+                        .as_ref()
+                        .and_then(|w| w.resets_at.clone()),
+                    spark: openai_usage.spark.as_ref().map(|w| w.usage_ratio),
+                    spark_resets_at: openai_usage
+                        .spark
+                        .as_ref()
+                        .and_then(|w| w.resets_at.clone()),
+                    total_cost: 0.0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    output_tps,
+                    available: true,
+                })
+            } else {
+                Some(super::info_widget::UsageInfo {
+                    provider: super::info_widget::UsageProvider::CostBased,
+                    five_hour: 0.0,
+                    five_hour_resets_at: None,
+                    seven_day: 0.0,
+                    seven_day_resets_at: None,
+                    spark: None,
+                    spark_resets_at: None,
+                    total_cost: self.total_cost,
+                    input_tokens: self.total_input_tokens,
+                    output_tokens: self.total_output_tokens,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    output_tps,
+                    available: true,
+                })
+            }
+        } else if is_api_key_provider || self.total_input_tokens > 0 || self.total_output_tokens > 0
         {
-            // API-key providers, OpenAI, or if we have token counts
+            // API-key providers, or fallback if we have token counts
             Some(super::info_widget::UsageInfo {
                 provider: super::info_widget::UsageProvider::CostBased,
                 five_hour: 0.0,
+                five_hour_resets_at: None,
                 seven_day: 0.0,
+                seven_day_resets_at: None,
+                spark: None,
+                spark_resets_at: None,
                 total_cost: self.total_cost,
                 input_tokens: self.total_input_tokens,
                 output_tokens: self.total_output_tokens,
@@ -1622,5 +1716,70 @@ mod tests {
             connection: "https".to_string(),
         });
         assert_eq!(app.connection_type.as_deref(), Some("https"));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_token_usage_uses_per_call_deltas() {
+        let mut app = ClientApp::new();
+
+        app.handle_server_event(crate::protocol::ServerEvent::TokenUsage {
+            input: 100,
+            output: 10,
+            cache_read_input: None,
+            cache_creation_input: None,
+        });
+        app.handle_server_event(crate::protocol::ServerEvent::TokenUsage {
+            input: 100,
+            output: 30,
+            cache_read_input: None,
+            cache_creation_input: None,
+        });
+        app.handle_server_event(crate::protocol::ServerEvent::TokenUsage {
+            input: 100,
+            output: 30,
+            cache_read_input: None,
+            cache_creation_input: None,
+        });
+
+        assert_eq!(app.streaming_output_tokens, 30);
+        assert_eq!(app.streaming_total_output_tokens, 30);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_interrupted_event_clears_stream_state_and_pushes_system_message() {
+        let mut app = ClientApp::new();
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.streaming_text = "partial assistant output".to_string();
+        app.current_tool_id = Some("tool_1".to_string());
+        app.current_tool_name = Some("bash".to_string());
+        app.current_tool_input = "{\"command\":\"sleep 10\"}".to_string();
+        app.pending_diffs.insert(
+            "tool_1".to_string(),
+            PendingFileDiff {
+                file_path: "src/main.rs".to_string(),
+                original_content: "fn main() {}".to_string(),
+            },
+        );
+
+        app.handle_server_event(crate::protocol::ServerEvent::Interrupted);
+
+        assert!(!app.is_processing);
+        assert!(matches!(app.status, ProcessingStatus::Idle));
+        assert!(app.streaming_text.is_empty());
+        assert!(app.current_tool_id.is_none());
+        assert!(app.current_tool_name.is_none());
+        assert!(app.current_tool_input.is_empty());
+        assert!(app.pending_diffs.is_empty());
+        assert_eq!(app.call_output_tokens_seen, 0);
+
+        let last = app
+            .display_messages
+            .last()
+            .expect("missing interrupted message");
+        assert_eq!(last.role, "system");
+        assert_eq!(last.content, "Interrupted");
     }
 }

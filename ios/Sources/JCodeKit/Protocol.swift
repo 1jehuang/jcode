@@ -133,6 +133,7 @@ public enum ServerEvent: Decodable, Sendable {
     case swarmStatus(members: [SwarmMemberStatus])
     case mcpStatus(servers: [String])
     case softInterruptInjected(content: String, point: String, toolsSkipped: Int?)
+    case interrupted
     case memoryInjected(count: Int, prompt: String, promptChars: Int, computedAgeMs: UInt64)
     case splitResponse(id: UInt64, newSessionId: String, newSessionName: String)
     case compactResult(id: UInt64, message: String, success: Bool)
@@ -255,6 +256,9 @@ public enum ServerEvent: Decodable, Sendable {
             let point = try container.decode(String.self, forKey: .key("point"))
             let toolsSkipped = try container.decodeIfPresent(Int.self, forKey: .key("tools_skipped"))
             self = .softInterruptInjected(content: content, point: point, toolsSkipped: toolsSkipped)
+
+        case "interrupted":
+            self = .interrupted
 
         case "memory_injected":
             let count = try container.decode(Int.self, forKey: .key("count"))

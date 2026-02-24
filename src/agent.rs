@@ -26,6 +26,22 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{broadcast, mpsc};
 
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct StreamError {
+    pub message: String,
+    pub retry_after_secs: Option<u64>,
+}
+
+impl StreamError {
+    fn new(message: String, retry_after_secs: Option<u64>) -> Self {
+        Self {
+            message,
+            retry_after_secs,
+        }
+    }
+}
+
 const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
 static RECOVERED_TEXT_WRAPPED_TOOL_CALLS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -2066,7 +2082,10 @@ impl Agent {
                             let _ = sender.send(native_result).await;
                         }
                     }
-                    StreamEvent::Error { message, .. } => {
+                    StreamEvent::Error {
+                        message,
+                        retry_after_secs,
+                    } => {
                         if trace {
                             eprintln!("[trace] stream_error {}", message);
                         }
@@ -2084,7 +2103,7 @@ impl Agent {
                             retry_after_compaction = true;
                             break;
                         }
-                        return Err(anyhow::anyhow!("Stream error: {}", message));
+                        return Err(StreamError::new(message, retry_after_secs).into());
                     }
                 }
             }
@@ -2730,7 +2749,10 @@ impl Agent {
                         self.last_upstream_provider = Some(provider.clone());
                         let _ = event_tx.send(ServerEvent::UpstreamProvider { provider });
                     }
-                    StreamEvent::Error { message, .. } => {
+                    StreamEvent::Error {
+                        message,
+                        retry_after_secs,
+                    } => {
                         if self.try_auto_compact_after_context_limit(&message) {
                             context_limit_retries += 1;
                             if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
@@ -2745,7 +2767,7 @@ impl Agent {
                             retry_after_compaction = true;
                             break;
                         }
-                        return Err(anyhow::anyhow!("Stream error: {}", message));
+                        return Err(StreamError::new(message, retry_after_secs).into());
                     }
                 }
             }
@@ -3389,7 +3411,10 @@ impl Agent {
                         self.last_upstream_provider = Some(provider.clone());
                         let _ = event_tx.send(ServerEvent::UpstreamProvider { provider });
                     }
-                    StreamEvent::Error { message, .. } => {
+                    StreamEvent::Error {
+                        message,
+                        retry_after_secs,
+                    } => {
                         if self.try_auto_compact_after_context_limit(&message) {
                             context_limit_retries += 1;
                             if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
@@ -3404,7 +3429,7 @@ impl Agent {
                             retry_after_compaction = true;
                             break;
                         }
-                        return Err(anyhow::anyhow!("Stream error: {}", message));
+                        return Err(StreamError::new(message, retry_after_secs).into());
                     }
                 }
             }

@@ -416,6 +416,13 @@ pub enum ServerEvent {
         tools_skipped: Option<usize>,
     },
 
+    /// Current turn was interrupted by explicit user cancel.
+    ///
+    /// This is rendered as a system/status notice (not assistant content),
+    /// so it does not blend into streaming model output.
+    #[serde(rename = "interrupted")]
+    Interrupted,
+
     /// Relevant memory was injected into the conversation
     #[serde(rename = "memory_injected")]
     MemoryInjected {
@@ -438,7 +445,12 @@ pub enum ServerEvent {
 
     /// Error occurred
     #[serde(rename = "error")]
-    Error { id: u64, message: String },
+    Error {
+        id: u64,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_secs: Option<u64>,
+    },
 
     /// Pong response
     #[serde(rename = "pong")]
@@ -815,6 +827,16 @@ mod tests {
     }
 
     #[test]
+    fn test_interrupted_event_decodes_from_json() {
+        let json = r#"{"type":"interrupted"}"#;
+        let decoded: ServerEvent = serde_json::from_str(json).unwrap();
+        match decoded {
+            ServerEvent::Interrupted => {}
+            _ => panic!("wrong event type"),
+        }
+    }
+
+    #[test]
     fn test_connection_type_event_roundtrip() {
         let event = ServerEvent::ConnectionType {
             connection: "websocket".to_string(),
@@ -823,6 +845,59 @@ mod tests {
         let decoded: ServerEvent = serde_json::from_str(json.trim()).unwrap();
         match decoded {
             ServerEvent::ConnectionType { connection } => assert_eq!(connection, "websocket"),
+            _ => panic!("wrong event type"),
+        }
+    }
+
+    #[test]
+    fn test_interrupted_event_roundtrip() {
+        let event = ServerEvent::Interrupted;
+        let json = encode_event(&event);
+        assert!(json.contains("\"type\":\"interrupted\""));
+        let decoded: ServerEvent = serde_json::from_str(json.trim()).unwrap();
+        match decoded {
+            ServerEvent::Interrupted => {}
+            _ => panic!("wrong event type"),
+        }
+    }
+
+    #[test]
+    fn test_error_event_retry_after_roundtrip() {
+        let event = ServerEvent::Error {
+            id: 42,
+            message: "rate limited".to_string(),
+            retry_after_secs: Some(17),
+        };
+        let json = encode_event(&event);
+        let decoded: ServerEvent = serde_json::from_str(json.trim()).unwrap();
+        match decoded {
+            ServerEvent::Error {
+                id,
+                message,
+                retry_after_secs,
+            } => {
+                assert_eq!(id, 42);
+                assert_eq!(message, "rate limited");
+                assert_eq!(retry_after_secs, Some(17));
+            }
+            _ => panic!("wrong event type"),
+        }
+    }
+
+    #[test]
+    fn test_error_event_retry_after_back_compat_default() {
+        let json = r#"{"type":"error","id":7,"message":"oops"}"#;
+        let decoded: ServerEvent = serde_json::from_str(json).unwrap();
+        match decoded {
+            ServerEvent::Error {
+                id,
+                message,
+                retry_after_secs,
+            } => {
+                assert_eq!(id, 7);
+                assert_eq!(message, "oops");
+                assert_eq!(retry_after_secs, None);
+            }
             _ => panic!("wrong event type"),
         }
     }

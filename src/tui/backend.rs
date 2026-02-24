@@ -318,6 +318,10 @@ impl RemoteConnection {
         content: String,
         images: Vec<(String, String)>,
     ) -> Result<u64> {
+        // Output token usage snapshots are cumulative within a single API call.
+        // Reset per-call watermark before sending the next user request.
+        self.reset_call_output_tokens_seen();
+
         let id = self.next_request_id;
         let request = Request::Message {
             id,

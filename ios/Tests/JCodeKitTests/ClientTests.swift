@@ -125,6 +125,7 @@ func runClientTests() {
             #"{"type":"session","session_id":"fox_123"}"#,
             #"{"type":"text_delta","text":"I'll help "}"#,
             #"{"type":"text_delta","text":"you with that."}"#,
+            #"{"type":"interrupted"}"#,
             #"{"type":"tool_start","id":"t1","name":"file_read"}"#,
             #"{"type":"tool_input","delta":"{\"path\":\""}"#,
             #"{"type":"tool_input","delta":"src/main.rs\"}"}"#,
@@ -135,6 +136,7 @@ func runClientTests() {
         ]
 
         var textParts: [String] = []
+        var sawInterrupted = false
         var toolStarted = false
         var toolDone = false
         var turnDone = false
@@ -144,6 +146,7 @@ func runClientTests() {
             switch event {
             case .sessionId(let sid): assertEqual2(sid, "fox_123")
             case .textDelta(let text): textParts.append(text)
+            case .interrupted: sawInterrupted = true
             case .toolStart(_, let name): toolStarted = true; assertEqual2(name, "file_read")
             case .toolDone(_, _, let output, _): toolDone = true; assertEqual2(output, "fn main() {}")
             case .done: turnDone = true
@@ -152,6 +155,7 @@ func runClientTests() {
         }
 
         assertEqual2(textParts.joined(), "I'll help you with that.")
+        check2(sawInterrupted, "interrupt event should decode")
         check2(toolStarted, "tool should have started")
         check2(toolDone, "tool should have finished")
         check2(turnDone, "turn should be done")

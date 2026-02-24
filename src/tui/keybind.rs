@@ -119,6 +119,10 @@ fn parse_keybinding(raw: &str) -> Option<KeyBinding> {
         match part {
             "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
             "alt" | "option" | "meta" => modifiers |= KeyModifiers::ALT,
+            "cmd" | "command" | "super" | "win" | "windows" => {
+                modifiers |= KeyModifiers::SUPER
+            }
+            "hyper" => modifiers |= KeyModifiers::HYPER,
             "shift" => modifiers |= KeyModifiers::SHIFT,
             _ => {
                 key_part = Some(part);
@@ -208,6 +212,17 @@ impl ScrollKeys {
                 _ => {}
             }
         }
+
+        // macOS fallback: allow Command+J/K for scrolling when terminal forwards SUPER/META.
+        let mac_command = cfg!(target_os = "macos")
+            && (modifiers.contains(KeyModifiers::SUPER) || modifiers.contains(KeyModifiers::META));
+        if mac_command {
+            match code {
+                KeyCode::Char('k') | KeyCode::Char('K') => return Some(-3),
+                KeyCode::Char('j') | KeyCode::Char('J') => return Some(3),
+                _ => {}
+            }
+        }
         None
     }
 
@@ -218,6 +233,18 @@ impl ScrollKeys {
         }
         if self.prompt_down.matches(code, modifiers) {
             return Some(1);
+        }
+
+        // Fallback prompt-jump bindings:
+        // - Ctrl+[ / Ctrl+] in terminals with keyboard enhancement
+        // - Ctrl+5 in legacy terminals where Ctrl+] is reported as Ctrl+5
+        //   (Ctrl+[ is indistinguishable from Esc without keyboard enhancement)
+        if modifiers.contains(KeyModifiers::CONTROL) {
+            match code {
+                KeyCode::Char('[') => return Some(-1),
+                KeyCode::Char(']') | KeyCode::Char('5') => return Some(1),
+                _ => {}
+            }
         }
         None
     }
@@ -250,11 +277,11 @@ pub fn load_scroll_keys() -> ScrollKeys {
     };
     let default_prompt_up = KeyBinding {
         code: KeyCode::Char('['),
-        modifiers: KeyModifiers::ALT,
+        modifiers: KeyModifiers::CONTROL,
     };
     let default_prompt_down = KeyBinding {
         code: KeyCode::Char(']'),
-        modifiers: KeyModifiers::ALT,
+        modifiers: KeyModifiers::CONTROL,
     };
     let default_bookmark = KeyBinding {
         code: KeyCode::Char('g'),
@@ -273,12 +300,12 @@ pub fn load_scroll_keys() -> ScrollKeys {
     let (prompt_up, prompt_up_label) = parse_or_default(
         &cfg.keybindings.scroll_prompt_up,
         default_prompt_up,
-        "Alt+[",
+        "Ctrl+[",
     );
     let (prompt_down, prompt_down_label) = parse_or_default(
         &cfg.keybindings.scroll_prompt_down,
         default_prompt_down,
-        "Alt+]",
+        "Ctrl+]",
     );
     let (bookmark, bookmark_label) =
         parse_or_default(&cfg.keybindings.scroll_bookmark, default_bookmark, "Ctrl+G");
@@ -360,6 +387,22 @@ fn format_binding(binding: &KeyBinding) -> String {
     if binding.modifiers.contains(KeyModifiers::ALT) {
         parts.push("Alt".to_string());
     }
+    if binding.modifiers.contains(KeyModifiers::SUPER) {
+        let label = if cfg!(target_os = "macos") {
+            "Cmd"
+        } else if cfg!(windows) {
+            "Win"
+        } else {
+            "Super"
+        };
+        parts.push(label.to_string());
+    }
+    if binding.modifiers.contains(KeyModifiers::META) {
+        parts.push("Meta".to_string());
+    }
+    if binding.modifiers.contains(KeyModifiers::HYPER) {
+        parts.push("Hyper".to_string());
+    }
     if binding.modifiers.contains(KeyModifiers::SHIFT) {
         parts.push("Shift".to_string());
     }
@@ -392,9 +435,8 @@ fn format_binding(binding: &KeyBinding) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_scroll_amount_ctrl_fallback() {
-        let keys = ScrollKeys {
+    fn test_scroll_keys() -> ScrollKeys {
+        ScrollKeys {
             up: KeyBinding {
                 code: KeyCode::Char('k'),
                 modifiers: KeyModifiers::ALT,
@@ -430,7 +472,12 @@ mod tests {
             prompt_up_label: "Alt+[".to_string(),
             prompt_down_label: "Alt+]".to_string(),
             bookmark_label: "Ctrl+G".to_string(),
-        };
+        }
+    }
+
+    #[test]
+    fn test_scroll_amount_ctrl_fallback() {
+        let keys = test_scroll_keys();
 
         assert_eq!(
             keys.scroll_amount(KeyCode::Char('k'), KeyModifiers::CONTROL),
@@ -440,5 +487,58 @@ mod tests {
             keys.scroll_amount(KeyCode::Char('j'), KeyModifiers::CONTROL),
             Some(3)
         );
+    }
+
+    #[test]
+    fn test_scroll_amount_cmd_fallback_macos_only() {
+        let keys = test_scroll_keys();
+
+        let up = keys.scroll_amount(KeyCode::Char('k'), KeyModifiers::SUPER);
+        let down = keys.scroll_amount(KeyCode::Char('j'), KeyModifiers::SUPER);
+
+        if cfg!(target_os = "macos") {
+            assert_eq!(up, Some(-3));
+            assert_eq!(down, Some(3));
+        } else {
+            assert_eq!(up, None);
+            assert_eq!(down, None);
+        }
+    }
+
+    #[test]
+    fn test_prompt_jump_ctrl_bracket_fallback() {
+        let keys = test_scroll_keys();
+        assert_eq!(
+            keys.prompt_jump(KeyCode::Char('['), KeyModifiers::CONTROL),
+            Some(-1)
+        );
+        assert_eq!(
+            keys.prompt_jump(KeyCode::Char(']'), KeyModifiers::CONTROL),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_prompt_jump_ctrl_legacy_digit_fallback() {
+        let keys = test_scroll_keys();
+        assert_eq!(
+            keys.prompt_jump(KeyCode::Char('5'), KeyModifiers::CONTROL),
+            Some(1)
+        );
+        assert_eq!(
+            keys.prompt_jump(KeyCode::Char('4'), KeyModifiers::CONTROL),
+            None
+        );
+    }
+
+    #[test]
+    fn test_parse_keybinding_command_and_meta_modifiers() {
+        let cmd = parse_keybinding("cmd+j").expect("cmd+j should parse");
+        assert_eq!(cmd.code, KeyCode::Char('j'));
+        assert!(cmd.modifiers.contains(KeyModifiers::SUPER));
+
+        let meta = parse_keybinding("meta+k").expect("meta+k should parse");
+        assert_eq!(meta.code, KeyCode::Char('k'));
+        assert!(meta.modifiers.contains(KeyModifiers::ALT));
     }
 }

@@ -517,6 +517,21 @@ final class AppModel: ObservableObject {
         replaceAssistantText(text)
     }
 
+    fileprivate func onInterrupted(_ interrupt: InterruptInfo) {
+        if let id = lastAssistantMessageId,
+           let idx = messages.firstIndex(where: { $0.id == id }),
+           messages[idx].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           messages[idx].toolCalls.isEmpty {
+            messages.remove(at: idx)
+        }
+
+        messages.append(ChatEntry(role: .system, text: interrupt.message))
+
+        inFlightTools.removeAll()
+        lastToolId = nil
+        lastAssistantMessageId = nil
+    }
+
     fileprivate func onToolStart(_ tool: ToolCallInfo) {
         attachTool(tool)
     }
@@ -641,5 +656,10 @@ private final class ClientDelegate: JCodeClientDelegate {
     func clientDidReceiveHistory(messages: [HistoryMessage]) {
         guard guardCurrent() else { return }
         model.onHistory(messages)
+    }
+
+    func clientDidInterrupt(_ interrupt: InterruptInfo) {
+        guard guardCurrent() else { return }
+        model.onInterrupted(interrupt)
     }
 }

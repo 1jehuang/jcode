@@ -65,6 +65,14 @@ public struct TokenUpdate: Sendable {
     public let cacheWrite: UInt64?
 }
 
+public struct InterruptInfo: Sendable {
+    public let message: String
+
+    public init(message: String = "Interrupted") {
+        self.message = message
+    }
+}
+
 @MainActor
 public protocol JCodeClientDelegate: AnyObject {
     func clientDidConnect(serverInfo: ServerInfo)
@@ -80,6 +88,7 @@ public protocol JCodeClientDelegate: AnyObject {
     func clientDidUpdateTokens(_ update: TokenUpdate)
     func clientDidChangeModel(model: String, provider: String?)
     func clientDidReceiveHistory(messages: [HistoryMessage])
+    func clientDidInterrupt(_ interrupt: InterruptInfo)
 }
 
 @MainActor
@@ -89,6 +98,7 @@ public extension JCodeClientDelegate {
     func clientDidUpdateTokens(_ update: TokenUpdate) {}
     func clientDidChangeModel(model: String, provider: String?) {}
     func clientDidReceiveHistory(messages: [HistoryMessage]) {}
+    func clientDidInterrupt(_ interrupt: InterruptInfo) {}
 }
 
 public actor JCodeClient {
@@ -236,6 +246,9 @@ public actor JCodeClient {
 
         case .upstreamProvider:
             break
+
+        case .interrupted:
+            await callDelegate { $0.clientDidInterrupt(InterruptInfo()) }
 
         case .ack, .pong, .state, .reloading, .reloadProgress,
              .notification, .swarmStatus, .mcpStatus,

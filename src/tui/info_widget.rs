@@ -440,8 +440,16 @@ pub struct UsageInfo {
     pub provider: UsageProvider,
     /// Five-hour window utilization (0.0-1.0) - for OAuth providers
     pub five_hour: f32,
+    /// Five-hour reset timestamp (RFC3339), if known
+    pub five_hour_resets_at: Option<String>,
     /// Seven-day window utilization (0.0-1.0) - for OAuth providers
     pub seven_day: f32,
+    /// Seven-day reset timestamp (RFC3339), if known
+    pub seven_day_resets_at: Option<String>,
+    /// Codex Spark window utilization (0.0-1.0), if available
+    pub spark: Option<f32>,
+    /// Codex Spark reset timestamp (RFC3339), if known
+    pub spark_resets_at: Option<String>,
     /// Total cost in USD - for API-key providers (OpenRouter, direct API key)
     pub total_cost: f32,
     /// Input tokens used - for cost calculation
@@ -1265,13 +1273,12 @@ fn calculate_widget_height(
             h
         }
         WidgetKind::UsageLimits => {
-            if data
-                .usage_info
-                .as_ref()
-                .map(|u| u.available)
-                .unwrap_or(false)
-            {
-                2 // Two bars
+            if let Some(info) = data.usage_info.as_ref() {
+                if info.available {
+                    2 + if info.spark.is_some() { 1 } else { 0 }
+                } else {
+                    0
+                }
             } else {
                 0
             }
@@ -1317,7 +1324,10 @@ fn calculate_widget_height(
                             }
                         }
                         _ => {
-                            h += 2; // Subscription bars
+                            h += 2; // Base subscription bars
+                            if info.spark.is_some() {
+                                h += 1; // Optional Spark bar
+                            }
                         }
                     }
                 }
@@ -2583,6 +2593,15 @@ fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
             let five_hr_left = 100u8.saturating_sub(five_hr_used);
             let seven_day_left = 100u8.saturating_sub(seven_day_used);
 
+            let five_hr_reset = info
+                .five_hour_resets_at
+                .as_deref()
+                .map(crate::usage::format_reset_time);
+            let seven_day_reset = info
+                .seven_day_resets_at
+                .as_deref()
+                .map(crate::usage::format_reset_time);
+
             let mut lines = Vec::new();
             let label = info.provider.label();
             if !label.is_empty() {
@@ -2597,16 +2616,31 @@ fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
                 "5-hour",
                 five_hr_used,
                 five_hr_left,
-                None,
+                five_hr_reset.as_deref(),
                 inner.width,
             ));
             lines.push(render_labeled_bar(
                 "Weekly",
                 seven_day_used,
                 seven_day_left,
-                None,
+                seven_day_reset.as_deref(),
                 inner.width,
             ));
+            if let Some(spark_usage) = info.spark {
+                let spark_used = (spark_usage * 100.0).round().clamp(0.0, 100.0) as u8;
+                let spark_left = 100u8.saturating_sub(spark_used);
+                let spark_reset = info
+                    .spark_resets_at
+                    .as_deref()
+                    .map(crate::usage::format_reset_time);
+                lines.push(render_labeled_bar(
+                    "Spark",
+                    spark_used,
+                    spark_left,
+                    spark_reset.as_deref(),
+                    inner.width,
+                ));
+            }
             lines
         }
     }
@@ -2822,6 +2856,7 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
                     }
                 }
                 _ => {
+                    // Keep provider-specific quota bars visible in compact cards.
                     // Subscription usage bars with provider label
                     let label = info.provider.label();
                     if !label.is_empty() {
@@ -2836,21 +2871,45 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
                     let seven_day_used = (info.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
                     let five_hr_left = 100u8.saturating_sub(five_hr_used);
                     let seven_day_left = 100u8.saturating_sub(seven_day_used);
+                    let five_hr_reset = info
+                        .five_hour_resets_at
+                        .as_deref()
+                        .map(crate::usage::format_reset_time);
+                    let seven_day_reset = info
+                        .seven_day_resets_at
+                        .as_deref()
+                        .map(crate::usage::format_reset_time);
 
                     lines.push(render_labeled_bar(
                         "5hr",
                         five_hr_used,
                         five_hr_left,
-                        None,
+                        five_hr_reset.as_deref(),
                         inner.width,
                     ));
                     lines.push(render_labeled_bar(
                         "7d",
                         seven_day_used,
                         seven_day_left,
-                        None,
+                        seven_day_reset.as_deref(),
                         inner.width,
                     ));
+
+                    if let Some(spark_usage) = info.spark {
+                        let spark_used = (spark_usage * 100.0).round().clamp(0.0, 100.0) as u8;
+                        let spark_left = 100u8.saturating_sub(spark_used);
+                        let spark_reset = info
+                            .spark_resets_at
+                            .as_deref()
+                            .map(crate::usage::format_reset_time);
+                        lines.push(render_labeled_bar(
+                            "sprk",
+                            spark_used,
+                            spark_left,
+                            spark_reset.as_deref(),
+                            inner.width,
+                        ));
+                    }
 
                     if let Some(tps) = info.output_tps {
                         lines.push(Line::from(vec![
@@ -3107,7 +3166,8 @@ fn compact_usage_height(data: &InfoWidgetData) -> u16 {
                 _ => {
                     let label = info.provider.label();
                     let label_line = if label.is_empty() { 0 } else { 1 };
-                    return 2 + label_line;
+                    let spark_line = if info.spark.is_some() { 1 } else { 0 };
+                    return 2 + label_line + spark_line;
                 }
             }
         }
@@ -3503,8 +3563,8 @@ struct Tip {
 
 fn all_tips() -> Vec<Tip> {
     [
-        "Ctrl+J / Ctrl+K to scroll chat up and down",
-        "Alt+[ / Alt+] to jump between user prompts",
+        "Ctrl+J / Ctrl+K to scroll chat up and down (Cmd+J / Cmd+K on macOS terminals that forward Command)",
+        "Ctrl+[ / Ctrl+] to jump between user prompts",
         "Ctrl+G to bookmark your scroll position — press again to teleport back",
         "```mermaid code blocks render as diagrams",
         "Swarms form automatically when multiple sessions share a repo — they coordinate plans, share context, and track file conflicts",
@@ -4644,6 +4704,14 @@ fn render_usage_compact(info: &UsageInfo, width: u16) -> Vec<Line<'static>> {
     let seven_day_used = (info.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
     let five_hr_left = 100u8.saturating_sub(five_hr_used);
     let seven_day_left = 100u8.saturating_sub(seven_day_used);
+    let five_hr_reset = info
+        .five_hour_resets_at
+        .as_deref()
+        .map(crate::usage::format_reset_time);
+    let seven_day_reset = info
+        .seven_day_resets_at
+        .as_deref()
+        .map(crate::usage::format_reset_time);
 
     let mut lines = Vec::new();
     let label = info.provider.label();
@@ -4659,16 +4727,31 @@ fn render_usage_compact(info: &UsageInfo, width: u16) -> Vec<Line<'static>> {
         "5-hour",
         five_hr_used,
         five_hr_left,
-        None,
+        five_hr_reset.as_deref(),
         width,
     ));
     lines.push(render_labeled_bar(
         "Weekly",
         seven_day_used,
         seven_day_left,
-        None,
+        seven_day_reset.as_deref(),
         width,
     ));
+    if let Some(spark_usage) = info.spark {
+        let spark_used = (spark_usage * 100.0).round().clamp(0.0, 100.0) as u8;
+        let spark_left = 100u8.saturating_sub(spark_used);
+        let spark_reset = info
+            .spark_resets_at
+            .as_deref()
+            .map(crate::usage::format_reset_time);
+        lines.push(render_labeled_bar(
+            "Spark",
+            spark_used,
+            spark_left,
+            spark_reset.as_deref(),
+            width,
+        ));
+    }
     lines
 }
 
