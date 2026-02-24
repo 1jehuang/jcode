@@ -2,10 +2,6 @@
 
 # jcode
 
-### Possibly the greatest coding agent ever built.
-
-**90,000+ lines of Rust. Zero compromise.**
-
 [![CI](https://github.com/1jehuang/jcode/actions/workflows/ci.yml/badge.svg)](https://github.com/1jehuang/jcode/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/Built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
