@@ -15208,6 +15208,24 @@ mod tests {
     }
 
     #[test]
+    fn test_prompt_jump_ctrl_legacy_digit_fallback_in_app() {
+        let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
+
+        // Seed max scroll estimates before key handling.
+        render_and_snap(&app, &mut terminal);
+
+        app.handle_key(KeyCode::Char('['), KeyModifiers::CONTROL)
+            .unwrap();
+        let after_up = app.scroll_offset;
+        assert!(after_up > 0);
+
+        // Legacy terminals can report Ctrl+] as Ctrl+5.
+        app.handle_key(KeyCode::Char('5'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(app.scroll_offset <= after_up);
+    }
+
+    #[test]
     fn test_remote_prompt_jump_ctrl_brackets() {
         let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -15255,6 +15273,35 @@ mod tests {
             .unwrap();
         assert!(app.auto_scroll_paused);
         assert!(app.scroll_offset > 0);
+    }
+
+    #[test]
+    fn test_remote_prompt_jump_ctrl_legacy_digit_fallback() {
+        let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        // Seed max scroll estimates before key handling.
+        render_and_snap(&app, &mut terminal);
+
+        rt.block_on(app.handle_remote_key(
+            KeyCode::Char('['),
+            KeyModifiers::CONTROL,
+            &mut remote,
+        ))
+        .unwrap();
+        let after_up = app.scroll_offset;
+        assert!(after_up > 0);
+
+        // Legacy terminals can report Ctrl+] as Ctrl+5.
+        rt.block_on(app.handle_remote_key(
+            KeyCode::Char('5'),
+            KeyModifiers::CONTROL,
+            &mut remote,
+        ))
+        .unwrap();
+        assert!(app.scroll_offset <= after_up);
     }
 
     #[test]
