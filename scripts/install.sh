@@ -32,7 +32,8 @@ esac
 VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
 [ -n "$VERSION" ] || err "Failed to determine latest version"
 
-URL="https://github.com/$REPO/releases/download/$VERSION/$ARTIFACT.tar.gz"
+URL_TGZ="https://github.com/$REPO/releases/download/$VERSION/$ARTIFACT.tar.gz"
+URL_BIN="https://github.com/$REPO/releases/download/$VERSION/$ARTIFACT"
 
 builds_dir="$HOME/.jcode/builds"
 stable_dir="$builds_dir/stable"
@@ -58,15 +59,42 @@ info "  launcher: $launcher_path"
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
-curl -fsSL "$URL" -o "$tmpdir/jcode.tar.gz"
-tar xzf "$tmpdir/jcode.tar.gz" -C "$tmpdir"
+download_mode=""
+if curl -fsSL "$URL_TGZ" -o "$tmpdir/jcode.download" 2>/dev/null; then
+  download_mode="tar"
+elif curl -fsSL "$URL_BIN" -o "$tmpdir/jcode.download" 2>/dev/null; then
+  download_mode="bin"
+fi
 
 mkdir -p "$INSTALL_DIR" "$stable_dir" "$version_dir"
 
 version="${VERSION#v}"
 dest_version_dir="$version_dir/$version"
 mkdir -p "$dest_version_dir"
-mv "$tmpdir/$ARTIFACT" "$dest_version_dir/jcode"
+
+if [ "$download_mode" = "tar" ]; then
+  tar xzf "$tmpdir/jcode.download" -C "$tmpdir"
+  src_bin="$tmpdir/$ARTIFACT"
+  [ -f "$src_bin" ] || err "Downloaded archive did not contain expected binary: $ARTIFACT"
+  mv "$src_bin" "$dest_version_dir/jcode"
+elif [ "$download_mode" = "bin" ]; then
+  mv "$tmpdir/jcode.download" "$dest_version_dir/jcode"
+else
+  info "No prebuilt asset found for $ARTIFACT in $VERSION; building from source..."
+  command -v git >/dev/null 2>&1 || err "git is required to build from source"
+  command -v cargo >/dev/null 2>&1 || err "cargo is required to build from source"
+
+  src_dir="$tmpdir/jcode-src"
+  git clone --depth 1 --branch "$VERSION" "https://github.com/$REPO.git" "$src_dir" \
+    || err "Failed to clone $REPO at $VERSION"
+  cargo build --release --manifest-path "$src_dir/Cargo.toml" \
+    || err "cargo build failed while building $REPO from source"
+
+  src_bin="$src_dir/target/release/jcode"
+  [ -f "$src_bin" ] || err "Built binary not found at $src_bin"
+  cp "$src_bin" "$dest_version_dir/jcode"
+fi
+
 chmod +x "$dest_version_dir/jcode"
 
 ln -sfn "$dest_version_dir/jcode" "$stable_dir/jcode"
