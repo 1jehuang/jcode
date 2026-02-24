@@ -1345,6 +1345,13 @@ fn rainbow_prompt_color(distance: usize) -> Color {
     Color::Rgb(blend(r, GRAY.0), blend(g, GRAY.1), blend(b, GRAY.2))
 }
 
+fn prompt_entry_color(base: Color, t: f32) -> Color {
+    let peak = Color::Rgb(255, 230, 120);
+    // Quick pulse in/out over the animation window.
+    let phase = if t < 0.5 { t * 2.0 } else { (1.0 - t) * 2.0 };
+    blend_color(base, peak, phase.clamp(0.0, 1.0) * 0.7)
+}
+
 /// Generate an animated color that pulses between two colors
 fn animated_tool_color(elapsed: f32) -> Color {
     // Cycle period of ~1.5 seconds
@@ -1571,8 +1578,111 @@ struct ImageRegion {
 struct PreparedMessages {
     wrapped_lines: Vec<Line<'static>>,
     wrapped_user_indices: Vec<usize>,
+    /// Wrapped line indices where a user prompt line starts
+    wrapped_user_prompt_starts: Vec<usize>,
     /// Pre-scanned image regions (computed once, not every frame)
     image_regions: Vec<ImageRegion>,
+}
+
+#[derive(Clone, Copy)]
+struct PromptViewportAnimation {
+    line_idx: usize,
+    start_ms: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct PromptViewportState {
+    initialized: bool,
+    last_visible_start: usize,
+    last_visible_end: usize,
+    active: Option<PromptViewportAnimation>,
+}
+
+const PROMPT_ENTRY_ANIMATION_MS: u64 = 450;
+
+static PROMPT_VIEWPORT_STATE: OnceLock<Mutex<PromptViewportState>> = OnceLock::new();
+
+fn prompt_viewport_state() -> &'static Mutex<PromptViewportState> {
+    PROMPT_VIEWPORT_STATE.get_or_init(|| Mutex::new(PromptViewportState::default()))
+}
+
+fn active_prompt_entry_animation(now_ms: u64) -> Option<PromptViewportAnimation> {
+    let mut state = match prompt_viewport_state().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    if let Some(anim) = state.active {
+        if now_ms.saturating_sub(anim.start_ms) <= PROMPT_ENTRY_ANIMATION_MS {
+            return Some(anim);
+        }
+        state.active = None;
+    }
+    None
+}
+
+fn record_prompt_viewport(visible_start: usize, visible_end: usize) {
+    let mut state = match prompt_viewport_state().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    state.initialized = true;
+    state.last_visible_start = visible_start;
+    state.last_visible_end = visible_end;
+    state.active = None;
+}
+
+fn update_prompt_entry_animation(
+    user_prompt_lines: &[usize],
+    visible_start: usize,
+    visible_end: usize,
+    now_ms: u64,
+) {
+    let mut state = match prompt_viewport_state().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    if !state.initialized {
+        state.initialized = true;
+        state.last_visible_start = visible_start;
+        state.last_visible_end = visible_end;
+        return;
+    }
+
+    let prev_visible_start = state.last_visible_start;
+    let prev_visible_end = state.last_visible_end;
+    let viewport_changed = prev_visible_start != visible_start || prev_visible_end != visible_end;
+
+    if let Some(anim) = state.active {
+        let still_fresh = now_ms.saturating_sub(anim.start_ms) <= PROMPT_ENTRY_ANIMATION_MS;
+        let still_visible = anim.line_idx >= visible_start && anim.line_idx < visible_end;
+        if still_fresh && still_visible {
+            state.last_visible_start = visible_start;
+            state.last_visible_end = visible_end;
+            return;
+        }
+        if !still_fresh || !still_visible {
+            state.active = None;
+        }
+    }
+
+    if viewport_changed && state.active.is_none() {
+        let newly_visible = user_prompt_lines.iter().copied().find(|line| {
+            *line >= visible_start
+                && *line < visible_end
+                && (*line < prev_visible_start || *line >= prev_visible_end)
+        });
+        if let Some(line_idx) = newly_visible {
+            state.active = Some(PromptViewportAnimation {
+                line_idx,
+                start_ms: now_ms,
+            });
+        }
+    }
+
+    state.last_visible_start = visible_start;
+    state.last_visible_end = visible_end;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2335,6 +2445,7 @@ fn prepare_messages(app: &dyn TuiState, width: u16, height: u16) -> PreparedMess
         PreparedMessages {
             wrapped_lines: Vec::new(),
             wrapped_user_indices: Vec::new(),
+            wrapped_user_prompt_starts: Vec::new(),
             image_regions: Vec::new(),
         }
     };
@@ -2348,12 +2459,14 @@ fn prepare_messages(app: &dyn TuiState, width: u16, height: u16) -> PreparedMess
         PreparedMessages {
             wrapped_lines: Vec::new(),
             wrapped_user_indices: Vec::new(),
+            wrapped_user_prompt_starts: Vec::new(),
             image_regions: Vec::new(),
         }
     };
 
     let mut wrapped_lines: Vec<Line<'static>>;
     let mut wrapped_user_indices;
+    let mut wrapped_user_prompt_starts;
     let mut image_regions;
 
     if startup_active {
@@ -2397,6 +2510,7 @@ fn prepare_messages(app: &dyn TuiState, width: u16, height: u16) -> PreparedMess
         }
         wrapped_lines.extend(content_lines);
         wrapped_user_indices = Vec::new();
+        wrapped_user_prompt_starts = Vec::new();
         image_regions = Vec::new();
     } else {
         let is_initial_empty = app.display_messages().is_empty()
@@ -2430,6 +2544,11 @@ fn prepare_messages(app: &dyn TuiState, width: u16, height: u16) -> PreparedMess
             *idx += header_len + startup_len;
         }
 
+        wrapped_user_prompt_starts = body_prepared.wrapped_user_prompt_starts;
+        for idx in &mut wrapped_user_prompt_starts {
+            *idx += header_len + startup_len;
+        }
+
         image_regions = Vec::new();
         for mut region in body_prepared.image_regions {
             region.abs_line_idx += header_len + startup_len;
@@ -2444,6 +2563,7 @@ fn prepare_messages(app: &dyn TuiState, width: u16, height: u16) -> PreparedMess
     PreparedMessages {
         wrapped_lines,
         wrapped_user_indices,
+        wrapped_user_prompt_starts,
         image_regions,
     }
 }
@@ -3111,6 +3231,7 @@ fn prepare_streaming_cached(
         return PreparedMessages {
             wrapped_lines: Vec::new(),
             wrapped_user_indices: Vec::new(),
+            wrapped_user_prompt_starts: Vec::new(),
             image_regions: Vec::new(),
         };
     }
@@ -3584,6 +3705,7 @@ fn wrap_lines(
     let full_width = width as usize;
     let user_width = width.saturating_sub(2) as usize; // Leave margin for right bar
     let mut wrapped_user_indices: Vec<usize> = Vec::new();
+    let mut wrapped_user_prompt_starts: Vec<usize> = Vec::new();
     let mut user_line_mask = vec![false; lines.len()];
     for &idx in user_line_indices {
         if idx < user_line_mask.len() {
@@ -3601,6 +3723,7 @@ fn wrap_lines(
         let count = new_lines.len();
 
         if is_user_line {
+            wrapped_user_prompt_starts.push(wrapped_idx);
             // All wrapped lines from a user message get the right bar
             for i in 0..count {
                 wrapped_user_indices.push(wrapped_idx + i);
@@ -3637,6 +3760,7 @@ fn wrap_lines(
     PreparedMessages {
         wrapped_lines,
         wrapped_user_indices,
+        wrapped_user_prompt_starts,
         image_regions,
     }
 }
@@ -3986,7 +4110,7 @@ fn draw_pinned_diagram(
         ));
     }
     if total > 1 {
-        title_parts.push(Span::styled(" Ctrl+1-9", Style::default().fg(DIM_COLOR)));
+        title_parts.push(Span::styled(" Ctrl+←/→", Style::default().fg(DIM_COLOR)));
     }
     title_parts.push(Span::styled(
         " Ctrl+H/L focus",
@@ -4087,6 +4211,7 @@ fn draw_messages(
 ) -> info_widget::Margins {
     let wrapped_lines = &prepared.wrapped_lines;
     let wrapped_user_indices = &prepared.wrapped_user_indices;
+    let wrapped_user_prompt_starts = &prepared.wrapped_user_prompt_starts;
 
     // Calculate scroll position
     let total_lines = wrapped_lines.len();
@@ -4116,6 +4241,20 @@ fn draw_messages(
     );
 
     let visible_end = (scroll + visible_height).min(wrapped_lines.len());
+
+    let now_ms = app.now_millis();
+    if crate::config::config().display.prompt_entry_animation {
+        update_prompt_entry_animation(wrapped_user_prompt_starts, scroll, visible_end, now_ms);
+    } else {
+        record_prompt_viewport(scroll, visible_end);
+    }
+
+    let active_prompt_anim = if crate::config::config().display.prompt_entry_animation {
+        active_prompt_entry_animation(now_ms)
+    } else {
+        None
+    };
+
     let mut visible_lines = if scroll < visible_end {
         wrapped_lines[scroll..visible_end].to_vec()
     } else {
@@ -4131,6 +4270,26 @@ fn draw_messages(
     frame.render_widget(Clear, area);
 
     // Render text first
+    if let Some(anim) = active_prompt_anim {
+        if anim.line_idx >= scroll && anim.line_idx < visible_end {
+            let rel_idx = anim.line_idx - scroll;
+            if let Some(line) = visible_lines.get_mut(rel_idx) {
+                let t = (now_ms.saturating_sub(anim.start_ms) as f32
+                    / PROMPT_ENTRY_ANIMATION_MS as f32)
+                    .clamp(0.0, 1.0);
+                for span in &mut line.spans {
+                    if !span.content.is_empty() {
+                        let base = match span.style.fg {
+                            Some(c) => c,
+                            None => USER_TEXT,
+                        };
+                        span.style = span.style.fg(prompt_entry_color(base, t));
+                    }
+                }
+            }
+        }
+    }
+
     let paragraph = Paragraph::new(visible_lines);
     frame.render_widget(paragraph, area);
 
@@ -7583,9 +7742,45 @@ fn draw_pinned_content(
 mod tests {
     use super::*;
 
+    fn reset_prompt_viewport_state_for_test() {
+        let mut state = match prompt_viewport_state().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *state = PromptViewportState::default();
+    }
+
     #[test]
     fn test_calculate_input_lines_empty() {
         assert_eq!(calculate_input_lines("", 80), 1);
+    }
+
+    #[test]
+    fn test_prompt_entry_animation_detects_newly_visible_prompt_line() {
+        reset_prompt_viewport_state_for_test();
+
+        // First frame initializes viewport history and should not animate.
+        update_prompt_entry_animation(&[5, 20], 0, 10, 1000);
+        assert!(active_prompt_entry_animation(1000).is_none());
+
+        // Scrolling down brings line 20 into view and should trigger animation.
+        update_prompt_entry_animation(&[5, 20], 15, 25, 1100);
+        let anim = active_prompt_entry_animation(1100).expect("expected active prompt animation");
+        assert_eq!(anim.line_idx, 20);
+    }
+
+    #[test]
+    fn test_prompt_entry_animation_expires_after_window() {
+        reset_prompt_viewport_state_for_test();
+
+        update_prompt_entry_animation(&[5, 20], 0, 10, 2000);
+        update_prompt_entry_animation(&[5, 20], 15, 25, 2100);
+
+        assert!(active_prompt_entry_animation(2100).is_some());
+        assert!(
+            active_prompt_entry_animation(2100 + PROMPT_ENTRY_ANIMATION_MS + 1).is_none(),
+            "animation should expire after configured duration"
+        );
     }
 
     #[test]
