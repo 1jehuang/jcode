@@ -662,13 +662,12 @@ fn semver() -> &'static str {
 
 /// True when this process is running from the stable release binary path.
 /// Only matches the explicit ~/.jcode/builds/stable/jcode path, NOT
-/// ~/.local/bin/jcode (which is the latest build from source).
+/// ~/.local/bin/jcode launcher path (which points to stable).
 fn is_running_stable_release() -> bool {
     static IS_STABLE: OnceLock<bool> = OnceLock::new();
     *IS_STABLE.get_or_init(|| {
         // Use the raw symlink target (read_link), not canonicalize, to
-        // distinguish ~/.local/bin/jcode -> target/release/jcode (latest)
-        // from ~/.jcode/builds/stable/jcode -> builds/versions/XXX/jcode (release).
+        // check whether we're on the stable channel link.
         let current_exe = match std::env::current_exe().ok() {
             Some(path) => path,
             None => return false,
@@ -676,8 +675,8 @@ fn is_running_stable_release() -> bool {
 
         // Check if we were launched via the stable symlink
         if let Ok(stable_path) = crate::build::stable_binary_path() {
-            // Compare the symlink target (not canonical) to avoid
-            // conflating target/release/jcode with the stable binary
+            // Compare the symlink target (not canonical) to distinguish
+            // launcher/stable links from direct binary execution.
             let stable_target =
                 std::fs::read_link(&stable_path).unwrap_or_else(|_| stable_path.clone());
             let current_target =
@@ -890,20 +889,32 @@ fn build_auth_status_line(auth: &crate::auth::AuthStatus, max_width: usize) -> L
         (openai_label, auth.openai),
         (provider_label("cursor", auth.cursor, None), auth.cursor),
         (provider_label("copilot", auth.copilot, None), auth.copilot),
-        (provider_label("antigravity", auth.antigravity, None), auth.antigravity),
+        (
+            provider_label("antigravity", auth.antigravity, None),
+            auth.antigravity,
+        ),
     ];
 
     let compact_specs: Vec<(String, AuthState)> = vec![
-        (provider_label("an", auth.anthropic.state, None), auth.anthropic.state),
+        (
+            provider_label("an", auth.anthropic.state, None),
+            auth.anthropic.state,
+        ),
         ("or".to_string(), auth.openrouter),
         (provider_label("oa", auth.openai, None), auth.openai),
         (provider_label("cu", auth.cursor, None), auth.cursor),
         (provider_label("cp", auth.copilot, None), auth.copilot),
-        (provider_label("ag", auth.antigravity, None), auth.antigravity),
+        (
+            provider_label("ag", auth.antigravity, None),
+            auth.antigravity,
+        ),
     ];
 
     let full: Vec<&str> = full_specs.iter().map(|(label, _)| label.as_str()).collect();
-    let compact: Vec<&str> = compact_specs.iter().map(|(label, _)| label.as_str()).collect();
+    let compact: Vec<&str> = compact_specs
+        .iter()
+        .map(|(label, _)| label.as_str())
+        .collect();
 
     let provider_specs: Vec<&(String, AuthState)> = if rendered_width(&full) <= max_width {
         full_specs.iter().collect()
@@ -931,7 +942,6 @@ fn build_auth_status_line(auth: &crate::auth::AuthStatus, max_width: usize) -> L
 
     Line::from(spans)
 }
-
 
 /// Render context window as vertical list with smart grouping
 /// Items < 5% are grouped by category (docs, msgs, etc.)
@@ -3349,7 +3359,10 @@ pub(crate) fn render_tool_message(
     };
 
     // For edit tools, count line changes
-    let is_edit_tool = matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit");
+    let is_edit_tool = matches!(
+        tc.name.as_str(),
+        "edit" | "Edit" | "write" | "multiedit" | "patch" | "Patch" | "apply_patch" | "ApplyPatch"
+    );
     let (additions, deletions) = if is_edit_tool {
         diff_change_counts_for_tool(tc, &msg.content)
     } else {
@@ -3386,10 +3399,7 @@ pub(crate) fn render_tool_message(
             for (i, call) in calls.iter().enumerate() {
                 let raw_name = call.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
                 let display_name = resolve_display_tool_name(raw_name);
-                let params = call
-                    .get("parameters")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                let params = batch_subcall_params(call);
 
                 let sub_tc = ToolCall {
                     id: String::new(),
@@ -3421,10 +3431,25 @@ pub(crate) fn render_tool_message(
     // Show diff output for editing tools with syntax highlighting
     if diff_mode.is_inline() && is_edit_tool {
         // Extract file extension for syntax highlighting
-        let file_ext = tc
+        let file_path_for_ext = tc
             .input
             .get("file_path")
             .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                tc.input
+                    .get("patch_text")
+                    .and_then(|v| v.as_str())
+                    .and_then(|patch_text| match tc.name.as_str() {
+                        "apply_patch" | "ApplyPatch" => {
+                            extract_apply_patch_primary_file(patch_text)
+                        }
+                        "patch" | "Patch" => extract_unified_patch_primary_file(patch_text),
+                        _ => None,
+                    })
+            });
+        let file_ext = file_path_for_ext
+            .as_deref()
             .and_then(|p| std::path::Path::new(p).extension())
             .and_then(|e| e.to_str());
 
@@ -4945,9 +4970,13 @@ fn build_idle_usage_line(app: &dyn TuiState) -> Line<'static> {
             // Show subscription usage bars inline with provider label
             let five_hr = (usage.five_hour * 100.0).round() as u8;
             let seven_day = (usage.seven_day * 100.0).round() as u8;
+            let spark = usage
+                .spark
+                .map(|v| (v * 100.0).round().clamp(0.0, 100.0) as u8);
 
             let five_hr_color = usage_color(five_hr);
             let seven_day_color = usage_color(seven_day);
+            let spark_color = spark.map(usage_color);
 
             let mut spans = Vec::new();
             let label = usage.provider.label();
@@ -4966,6 +4995,13 @@ fn build_idle_usage_line(app: &dyn TuiState) -> Line<'static> {
                     Style::default().fg(seven_day_color),
                 ),
             ]);
+            if let Some(spark_pct) = spark {
+                spans.push(Span::styled(" · sprk:", Style::default().fg(DIM_COLOR)));
+                spans.push(Span::styled(
+                    format!("{}%", spark_pct),
+                    Style::default().fg(spark_color.unwrap_or(Color::Rgb(140, 140, 150))),
+                ));
+            }
             Line::from(spans)
         }
     }
@@ -6238,6 +6274,10 @@ fn diff_change_counts_for_tool(tool: &ToolCall, content: &str) -> (usize, usize)
             diff_counts_from_input_pair(&tool.input, "old_string", "new_string").unwrap_or((0, 0))
         }
         "multiedit" => diff_counts_from_multiedit(&tool.input).unwrap_or((0, 0)),
+        "patch" | "Patch" => diff_counts_from_unified_patch_input(&tool.input).unwrap_or((0, 0)),
+        "apply_patch" | "ApplyPatch" => {
+            diff_counts_from_apply_patch_input(&tool.input).unwrap_or((0, 0))
+        }
         _ => (additions, deletions),
     }
 }
@@ -6272,6 +6312,53 @@ fn diff_counts_from_multiedit(input: &serde_json::Value) -> Option<(usize, usize
         let (add, del) = diff_counts_from_strings(old, new);
         additions += add;
         deletions += del;
+    }
+
+    Some((additions, deletions))
+}
+
+fn diff_counts_from_unified_patch_input(input: &serde_json::Value) -> Option<(usize, usize)> {
+    let patch_text = input.get("patch_text")?.as_str()?;
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+
+    for line in patch_text.lines() {
+        if line.starts_with("+++")
+            || line.starts_with("---")
+            || line.starts_with("@@")
+            || line.starts_with("diff --git")
+            || line.starts_with("index ")
+            || line.starts_with("\\ No newline")
+        {
+            continue;
+        }
+        if line.starts_with('+') {
+            additions += 1;
+        } else if line.starts_with('-') {
+            deletions += 1;
+        }
+    }
+
+    Some((additions, deletions))
+}
+
+fn diff_counts_from_apply_patch_input(input: &serde_json::Value) -> Option<(usize, usize)> {
+    let patch_text = input.get("patch_text")?.as_str()?;
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+
+    for line in patch_text.lines() {
+        let trimmed = line.trim_start();
+
+        if trimmed.starts_with("*** ") || trimmed.starts_with("@@") {
+            continue;
+        }
+
+        if trimmed.starts_with('+') {
+            additions += 1;
+        } else if trimmed.starts_with('-') {
+            deletions += 1;
+        }
     }
 
     Some((additions, deletions))
@@ -6335,6 +6422,22 @@ fn generate_diff_lines_from_tool_input(tool: &ToolCall) -> Vec<ParsedDiffLine> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             generate_diff_lines_from_strings("", content)
+        }
+        "patch" | "Patch" => {
+            let patch_text = tool
+                .input
+                .get("patch_text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            collect_diff_lines(patch_text)
+        }
+        "apply_patch" | "ApplyPatch" => {
+            let patch_text = tool
+                .input
+                .get("patch_text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            collect_diff_lines(patch_text)
         }
         _ => Vec::new(),
     }
@@ -6598,6 +6701,135 @@ fn parse_batch_sub_results(content: &str) -> Vec<bool> {
     results
 }
 
+/// Normalize a batch sub-call object to the effective parameters payload.
+/// Supports both canonical shape ({"tool": "...", "parameters": {...}})
+/// and recovered flat shape ({"tool": "...", "file_path": "...", ...}).
+fn batch_subcall_params(call: &serde_json::Value) -> serde_json::Value {
+    if let Some(params) = call.get("parameters") {
+        return params.clone();
+    }
+
+    if let Some(obj) = call.as_object() {
+        let mut flat = serde_json::Map::new();
+        for (k, v) in obj {
+            if k != "tool" {
+                flat.insert(k.clone(), v.clone());
+            }
+        }
+        return serde_json::Value::Object(flat);
+    }
+
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+fn summarize_unified_patch_input(patch_text: &str) -> String {
+    let lines = patch_text.lines().count();
+    let mut files: Vec<String> = Vec::new();
+
+    for line in patch_text.lines() {
+        let Some(rest) = line
+            .strip_prefix("--- ")
+            .or_else(|| line.strip_prefix("+++ "))
+        else {
+            continue;
+        };
+
+        let without_tab_suffix = rest.split('\t').next().unwrap_or(rest);
+        let path_token = without_tab_suffix.split_whitespace().next().unwrap_or("");
+        let path = path_token
+            .strip_prefix("a/")
+            .or(path_token.strip_prefix("b/"))
+            .unwrap_or(path_token);
+
+        if path.is_empty() || path == "/dev/null" {
+            continue;
+        }
+        if !files.iter().any(|f| f == path) {
+            files.push(path.to_string());
+        }
+    }
+
+    if files.len() == 1 {
+        format!("{} ({} lines)", files[0], lines)
+    } else if !files.is_empty() {
+        format!("{} files ({} lines)", files.len(), lines)
+    } else {
+        format!("({} lines)", lines)
+    }
+}
+
+fn summarize_apply_patch_input(patch_text: &str) -> String {
+    let lines = patch_text.lines().count();
+    let mut files: Vec<String> = Vec::new();
+
+    for line in patch_text.lines() {
+        let trimmed = line.trim();
+        let path = trimmed
+            .strip_prefix("*** Add File: ")
+            .or_else(|| trimmed.strip_prefix("*** Update File: "))
+            .or_else(|| trimmed.strip_prefix("*** Delete File: "))
+            .map(str::trim)
+            .unwrap_or("");
+
+        if path.is_empty() {
+            continue;
+        }
+        if !files.iter().any(|f| f == path) {
+            files.push(path.to_string());
+        }
+    }
+
+    if files.len() == 1 {
+        format!("{} ({} lines)", files[0], lines)
+    } else if !files.is_empty() {
+        format!("{} files ({} lines)", files.len(), lines)
+    } else {
+        format!("({} lines)", lines)
+    }
+}
+
+fn extract_apply_patch_primary_file(patch_text: &str) -> Option<String> {
+    for line in patch_text.lines() {
+        let trimmed = line.trim();
+        let path = trimmed
+            .strip_prefix("*** Add File: ")
+            .or_else(|| trimmed.strip_prefix("*** Update File: "))
+            .or_else(|| trimmed.strip_prefix("*** Delete File: "))
+            .map(str::trim)
+            .unwrap_or("");
+
+        if !path.is_empty() {
+            return Some(path.to_string());
+        }
+    }
+
+    None
+}
+
+fn extract_unified_patch_primary_file(patch_text: &str) -> Option<String> {
+    for line in patch_text.lines() {
+        let Some(rest) = line
+            .strip_prefix("+++ ")
+            .or_else(|| line.strip_prefix("--- "))
+        else {
+            continue;
+        };
+
+        let without_tab_suffix = rest.split('\t').next().unwrap_or(rest);
+        let path_token = without_tab_suffix.split_whitespace().next().unwrap_or("");
+        let path = path_token
+            .strip_prefix("a/")
+            .or(path_token.strip_prefix("b/"))
+            .unwrap_or(path_token);
+
+        if !path.is_empty() && path != "/dev/null" {
+            return Some(path.to_string());
+        }
+    }
+
+    None
+}
+
 /// Extract a brief summary from a tool call input (file path, command, etc.)
 fn get_tool_summary(tool: &ToolCall) -> String {
     let truncate = |s: &str, max_chars: usize| match s.char_indices().nth(max_chars) {
@@ -6684,39 +6916,17 @@ fn get_tool_summary(tool: &ToolCall) -> String {
                 .unwrap_or("agent");
             format!("{} ({})", desc, agent_type)
         }
-        "patch" | "apply_patch" => tool
+        "patch" | "Patch" => tool
             .input
             .get("patch_text")
             .and_then(|v| v.as_str())
-            .map(|p| {
-                let lines = p.lines().count();
-                let first_file = p
-                    .lines()
-                    .find(|l| {
-                        l.starts_with("--- ") || l.starts_with("+++ ") || l.starts_with("*** ")
-                    })
-                    .and_then(|l| {
-                        let rest = l
-                            .trim_start_matches("--- ")
-                            .trim_start_matches("+++ ")
-                            .trim_start_matches("*** ");
-                        let path = rest.split_whitespace().next().unwrap_or("");
-                        let path = path
-                            .strip_prefix("a/")
-                            .or(path.strip_prefix("b/"))
-                            .unwrap_or(path);
-                        if path.is_empty() || path == "/dev/null" {
-                            None
-                        } else {
-                            Some(path.to_string())
-                        }
-                    });
-                if let Some(file) = first_file {
-                    format!("{} ({} lines)", file, lines)
-                } else {
-                    format!("({} lines)", lines)
-                }
-            })
+            .map(summarize_unified_patch_input)
+            .unwrap_or_default(),
+        "apply_patch" | "ApplyPatch" => tool
+            .input
+            .get("patch_text")
+            .and_then(|v| v.as_str())
+            .map(summarize_apply_patch_input)
             .unwrap_or_default(),
         "webfetch" => tool
             .input
@@ -7013,7 +7223,17 @@ fn collect_pinned_content(
             continue;
         }
 
-        if !matches!(tc.name.as_str(), "edit" | "Edit" | "write" | "multiedit") {
+        if !matches!(
+            tc.name.as_str(),
+            "edit"
+                | "Edit"
+                | "write"
+                | "multiedit"
+                | "patch"
+                | "Patch"
+                | "apply_patch"
+                | "ApplyPatch"
+        ) {
             continue;
         }
 
@@ -7021,8 +7241,20 @@ fn collect_pinned_content(
             .input
             .get("file_path")
             .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
+            .map(str::to_string)
+            .or_else(|| {
+                tc.input
+                    .get("patch_text")
+                    .and_then(|v| v.as_str())
+                    .and_then(|patch_text| match tc.name.as_str() {
+                        "apply_patch" | "ApplyPatch" => {
+                            extract_apply_patch_primary_file(patch_text)
+                        }
+                        "patch" | "Patch" => extract_unified_patch_primary_file(patch_text),
+                        _ => None,
+                    })
+            })
+            .unwrap_or_else(|| "unknown".to_string());
 
         let change_lines = {
             let from_content = collect_diff_lines(&msg.content);
@@ -7511,5 +7743,161 @@ mod tests {
         };
         let width = estimate_pinned_diagram_pane_width_with_font(&diagram, 10, 24, Some((8, 16)));
         assert_eq!(width, 24);
+    }
+
+    #[test]
+    fn test_summarize_apply_patch_input_ignores_begin_marker() {
+        let patch = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n";
+        let summary = summarize_apply_patch_input(patch);
+        assert_eq!(summary, "src/lib.rs (6 lines)");
+    }
+
+    #[test]
+    fn test_summarize_apply_patch_input_multiple_files() {
+        let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-a\n+b\n*** Update File: b.txt\n@@\n-c\n+d\n*** End Patch\n";
+        let summary = summarize_apply_patch_input(patch);
+        assert_eq!(summary, "2 files (10 lines)");
+    }
+
+    #[test]
+    fn test_extract_apply_patch_primary_file() {
+        let patch = "*** Begin Patch\n*** Add File: new/file.rs\n+fn main() {}\n*** End Patch\n";
+        let file = extract_apply_patch_primary_file(patch);
+        assert_eq!(file.as_deref(), Some("new/file.rs"));
+    }
+
+    #[test]
+    fn test_batch_subcall_params_supports_flat_and_nested_shapes() {
+        let flat = serde_json::json!({
+            "tool": "read",
+            "file_path": "src/session.rs",
+            "offset": 0,
+            "limit": 420
+        });
+        let nested = serde_json::json!({
+            "tool": "read",
+            "parameters": {
+                "file_path": "src/main.rs",
+                "offset": 2320,
+                "limit": 220
+            }
+        });
+
+        let flat_params = batch_subcall_params(&flat);
+        let nested_params = batch_subcall_params(&nested);
+
+        assert_eq!(flat_params["file_path"], "src/session.rs");
+        assert_eq!(flat_params["offset"], 0);
+        assert_eq!(flat_params["limit"], 420);
+
+        assert_eq!(nested_params["file_path"], "src/main.rs");
+        assert_eq!(nested_params["offset"], 2320);
+        assert_eq!(nested_params["limit"], 220);
+    }
+
+    #[test]
+    fn test_render_tool_message_batch_flat_subcall_params_include_read_details() {
+        let msg = DisplayMessage {
+            role: "tool".to_string(),
+            content:
+                "--- [1] read ---\nok\n\n--- [2] read ---\nok\n\nCompleted: 2 succeeded, 0 failed"
+                    .to_string(),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: Some(ToolCall {
+                id: "call_batch_1".to_string(),
+                name: "batch".to_string(),
+                input: serde_json::json!({
+                    "tool_calls": [
+                        {"tool": "read", "file_path": "src/session.rs", "offset": 0, "limit": 420},
+                        {"tool": "read", "file_path": "src/main.rs", "offset": 2320, "limit": 220}
+                    ]
+                }),
+                intent: None,
+            }),
+        };
+
+        let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+        let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("read src/session.rs:0-420")),
+            "missing first read summary in {:?}",
+            rendered
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("read src/main.rs:2320-2540")),
+            "missing second read summary in {:?}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_render_tool_message_batch_nested_subcall_params_still_render() {
+        let msg = DisplayMessage {
+            role: "tool".to_string(),
+            content: "--- [1] grep ---\nok\n\nCompleted: 1 succeeded, 0 failed".to_string(),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: Some(ToolCall {
+                id: "call_batch_2".to_string(),
+                name: "batch".to_string(),
+                input: serde_json::json!({
+                    "tool_calls": [
+                        {"tool": "grep", "parameters": {"pattern": "TODO", "path": "src"}}
+                    ]
+                }),
+                intent: None,
+            }),
+        };
+
+        let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+        let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("grep 'TODO' in src")),
+            "missing grep summary in {:?}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_render_tool_message_batch_flat_grep_subcall_uses_pattern_and_path() {
+        let msg = DisplayMessage {
+            role: "tool".to_string(),
+            content: "--- [1] grep ---\nok\n\nCompleted: 1 succeeded, 0 failed".to_string(),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: Some(ToolCall {
+                id: "call_batch_3".to_string(),
+                name: "batch".to_string(),
+                input: serde_json::json!({
+                    "tool_calls": [
+                        {"tool": "grep", "pattern": "TODO", "path": "src"}
+                    ]
+                }),
+                intent: None,
+            }),
+        };
+
+        let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+        let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("grep 'TODO' in src")),
+            "missing flat grep summary in {:?}",
+            rendered
+        );
     }
 }

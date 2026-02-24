@@ -3,7 +3,7 @@ use crate::storage;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 const GITHUB_REPO: &str = "1jehuang/jcode";
@@ -279,54 +279,16 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
                     path.display()
                 ));
                 // Install the built binary
-                let install_dir = stable_install_dir()?;
-                fs::create_dir_all(&install_dir)?;
-                let current_stable = install_dir.join(build::binary_name());
+                let current_stable = build::stable_binary_path()?;
 
                 let mut metadata = UpdateMetadata::load().unwrap_or_default();
-                if current_stable.exists() {
-                    if let Ok(resolved) = fs::read_link(&current_stable) {
-                        metadata.previous_binary = Some(resolved.to_string_lossy().to_string());
-                    } else {
-                        let backup = install_dir.join(build::versioned_binary_name(&format!(
-                            "backup-{}",
-                            std::process::id()
-                        )));
-                        let _ = fs::copy(&current_stable, &backup);
-                        metadata.previous_binary = Some(backup.to_string_lossy().to_string());
-                    }
-                }
+                maybe_record_previous_binary(&current_stable, &mut metadata);
 
-                // Copy built binary to install location
-                let dest = install_dir.join(build::versioned_binary_name(&format!(
-                    "main-{}",
-                    latest_sha
-                )));
-                fs::copy(&path, &dest).context("Failed to copy built binary")?;
-                crate::platform::set_permissions_executable(&dest)?;
-
-                // Atomic symlink swap
-                let temp_symlink =
-                    install_dir.join(format!(".jcode-symlink-{}", std::process::id()));
-                crate::platform::atomic_symlink_swap(&dest, &current_stable, &temp_symlink)?;
-
-                // Also update the user's binary if it's a symlink or in ~/.local/bin
-                if let Ok(exe) = std::env::current_exe() {
-                    if let Ok(resolved) = fs::canonicalize(&exe) {
-                        // If running from ~/.local/bin, update that too
-                        if resolved != dest {
-                            let _ = fs::copy(&dest, &exe);
-                            #[cfg(target_os = "macos")]
-                            {
-                                // Re-sign on macOS
-                                let _ = std::process::Command::new("codesign")
-                                    .args(["--force", "--sign", "-"])
-                                    .arg(&exe)
-                                    .output();
-                            }
-                        }
-                    }
-                }
+                let channel_version = format!("main-{}", latest_sha);
+                build::install_binary_at_version(&path, &channel_version)
+                    .context("Failed to install built binary")?;
+                build::update_stable_symlink(&channel_version)?;
+                build::update_launcher_symlink_to_stable()?;
 
                 metadata.installed_version = Some(format!("main-{}", latest_sha));
                 metadata.installed_from = Some("source".to_string());
@@ -542,35 +504,15 @@ pub fn download_and_install_blocking(release: &GitHubRelease) -> Result<PathBuf>
 
     crate::platform::set_permissions_executable(&temp_path)?;
 
-    let install_dir = stable_install_dir()?;
-    fs::create_dir_all(&install_dir)?;
-
     let version = release.tag_name.trim_start_matches('v');
-    let versioned_path = install_dir.join(build::versioned_binary_name(&version));
-
-    let current_stable = install_dir.join(build::binary_name());
+    let current_stable = build::stable_binary_path()?;
     let mut metadata = UpdateMetadata::load().unwrap_or_default();
-    if current_stable.exists() {
-        if let Ok(resolved) = fs::read_link(&current_stable) {
-            metadata.previous_binary = Some(resolved.to_string_lossy().to_string());
-        } else {
-            let backup = install_dir.join(build::versioned_binary_name(&format!(
-                "backup-{}",
-                std::process::id()
-            )));
-            let _ = fs::copy(&current_stable, &backup);
-            metadata.previous_binary = Some(backup.to_string_lossy().to_string());
-        }
-    }
+    maybe_record_previous_binary(&current_stable, &mut metadata);
 
-    fs::rename(&temp_path, &versioned_path).or_else(|_| {
-        fs::copy(&temp_path, &versioned_path)?;
-        fs::remove_file(&temp_path)?;
-        Ok::<_, std::io::Error>(())
-    })?;
-
-    let temp_symlink = install_dir.join(format!(".jcode-symlink-{}", std::process::id()));
-    crate::platform::atomic_symlink_swap(&versioned_path, &current_stable, &temp_symlink)?;
+    let versioned_path = build::install_binary_at_version(&temp_path, version)?;
+    let _ = fs::remove_file(&temp_path);
+    build::update_stable_symlink(version)?;
+    build::update_launcher_symlink_to_stable()?;
 
     metadata.installed_version = Some(release.tag_name.clone());
     metadata.installed_from = Some(asset.browser_download_url.clone());
@@ -580,8 +522,19 @@ pub fn download_and_install_blocking(release: &GitHubRelease) -> Result<PathBuf>
     Ok(versioned_path)
 }
 
-fn stable_install_dir() -> Result<PathBuf> {
-    Ok(storage::jcode_dir()?.join("builds").join("stable"))
+fn maybe_record_previous_binary(current_channel_link: &Path, metadata: &mut UpdateMetadata) {
+    if !current_channel_link.exists() {
+        return;
+    }
+
+    if let Ok(resolved) = fs::read_link(current_channel_link) {
+        metadata.previous_binary = Some(resolved.to_string_lossy().to_string());
+        return;
+    }
+
+    if let Ok(canonical) = fs::canonicalize(current_channel_link) {
+        metadata.previous_binary = Some(canonical.to_string_lossy().to_string());
+    }
 }
 
 pub enum UpdateCheckResult {
@@ -649,10 +602,16 @@ pub fn rollback() -> Result<Option<PathBuf>> {
     if let Some(ref previous) = metadata.previous_binary {
         let previous_path = PathBuf::from(previous);
         if previous_path.exists() {
-            let install_dir = stable_install_dir()?;
-            let current_stable = install_dir.join(build::binary_name());
-            let temp_symlink = install_dir.join(format!(".jcode-symlink-{}", std::process::id()));
+            let current_stable = build::stable_binary_path()?;
+            if let Some(parent) = current_stable.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let temp_symlink = current_stable
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(format!(".jcode-symlink-{}", std::process::id()));
             crate::platform::atomic_symlink_swap(&previous_path, &current_stable, &temp_symlink)?;
+            let _ = build::update_launcher_symlink_to_stable();
 
             return Ok(Some(previous_path));
         }

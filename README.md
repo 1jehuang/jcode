@@ -110,11 +110,7 @@ cargo build --release
 Then symlink to your PATH:
 
 ```bash
-# Linux
-ln -sf $(pwd)/target/release/jcode ~/.local/bin/jcode
-
-# macOS
-ln -sf $(pwd)/target/release/jcode /usr/local/bin/jcode
+scripts/install_release.sh
 ```
 
 ### Prerequisites

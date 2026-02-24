@@ -34,9 +34,14 @@ VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep
 
 URL="https://github.com/$REPO/releases/download/$VERSION/$ARTIFACT.tar.gz"
 
+builds_dir="$HOME/.jcode/builds"
+stable_dir="$builds_dir/stable"
+version_dir="$builds_dir/versions"
+launcher_path="$INSTALL_DIR/jcode"
+
 EXISTING=""
-if [ -x "$INSTALL_DIR/jcode" ]; then
-  EXISTING=$("$INSTALL_DIR/jcode" --version 2>/dev/null | head -1 || echo "unknown")
+if [ -x "$launcher_path" ]; then
+  EXISTING=$("$launcher_path" --version 2>/dev/null | head -1 || echo "unknown")
 fi
 
 if [ -n "$EXISTING" ]; then
@@ -48,7 +53,7 @@ if [ -n "$EXISTING" ]; then
 else
   info "Installing jcode $VERSION"
 fi
-info "  $INSTALL_DIR/jcode ($ARTIFACT)"
+info "  launcher: $launcher_path"
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
@@ -56,12 +61,20 @@ trap 'rm -rf "$tmpdir"' EXIT
 curl -fsSL "$URL" -o "$tmpdir/jcode.tar.gz"
 tar xzf "$tmpdir/jcode.tar.gz" -C "$tmpdir"
 
-mkdir -p "$INSTALL_DIR"
-mv "$tmpdir/$ARTIFACT" "$INSTALL_DIR/jcode"
-chmod +x "$INSTALL_DIR/jcode"
+mkdir -p "$INSTALL_DIR" "$stable_dir" "$version_dir"
+
+version="${VERSION#v}"
+dest_version_dir="$version_dir/$version"
+mkdir -p "$dest_version_dir"
+mv "$tmpdir/$ARTIFACT" "$dest_version_dir/jcode"
+chmod +x "$dest_version_dir/jcode"
+
+ln -sfn "$dest_version_dir/jcode" "$stable_dir/jcode"
+printf '%s\n' "$version" > "$builds_dir/stable-version"
+ln -sfn "$stable_dir/jcode" "$launcher_path"
 
 if [ "$(uname -s)" = "Darwin" ]; then
-  xattr -d com.apple.quarantine "$INSTALL_DIR/jcode" 2>/dev/null || true
+  xattr -d com.apple.quarantine "$dest_version_dir/jcode" 2>/dev/null || true
 fi
 
 PATH_LINE="export PATH=\"$INSTALL_DIR:\$PATH\""

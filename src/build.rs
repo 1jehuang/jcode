@@ -2,7 +2,7 @@ use crate::storage;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Get the jcode repository directory
@@ -47,14 +47,6 @@ pub fn release_binary_path(repo_dir: &std::path::Path) -> PathBuf {
     repo_dir.join("target").join("release").join(binary_name())
 }
 
-pub fn versioned_binary_name(suffix: &str) -> String {
-    if cfg!(windows) {
-        format!("{}-{}.exe", binary_stem(), suffix)
-    } else {
-        format!("{}-{}", binary_stem(), suffix)
-    }
-}
-
 /// Find the best development binary in the repo.
 /// Checks target/release (the default build output).
 pub fn find_dev_binary(repo_dir: &std::path::Path) -> Option<PathBuf> {
@@ -66,19 +58,88 @@ pub fn find_dev_binary(repo_dir: &std::path::Path) -> Option<PathBuf> {
     }
 }
 
-/// Find the jcode binary on PATH (returns first match)
-pub fn jcode_path_in_path() -> Option<PathBuf> {
-    let exe_name = if cfg!(windows) { "jcode.exe" } else { "jcode" };
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(exe_name);
-        if let Ok(metadata) = std::fs::metadata(&candidate) {
-            if metadata.is_file() {
-                return Some(candidate);
+fn home_dir() -> Result<PathBuf> {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("USERPROFILE").map(PathBuf::from))
+        .map_err(|_| anyhow::anyhow!("HOME/USERPROFILE not set"))
+}
+
+/// Directory for the single launcher path users execute from PATH.
+///
+/// Defaults to `~/.local/bin`, overridable with `JCODE_INSTALL_DIR`.
+pub fn launcher_dir() -> Result<PathBuf> {
+    if let Ok(custom) = std::env::var("JCODE_INSTALL_DIR") {
+        let trimmed = custom.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+
+    Ok(home_dir()?.join(".local").join("bin"))
+}
+
+/// Path to the launcher binary (`~/.local/bin/jcode` by default).
+pub fn launcher_binary_path() -> Result<PathBuf> {
+    Ok(launcher_dir()?.join(binary_name()))
+}
+
+/// Update launcher path to point at the stable channel binary.
+pub fn update_launcher_symlink_to_stable() -> Result<PathBuf> {
+    let launcher = launcher_binary_path()?;
+    let stable = stable_binary_path()?;
+
+    if let Some(parent) = launcher.parent() {
+        storage::ensure_dir(parent)?;
+    }
+
+    let temp = launcher
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            ".{}-launcher-{}",
+            binary_stem(),
+            std::process::id()
+        ));
+
+    crate::platform::atomic_symlink_swap(&stable, &launcher, &temp)?;
+    Ok(launcher)
+}
+
+/// Resolve which client binary should be considered for update checks/reload.
+///
+/// Order matters and should match `/reload` behavior:
+/// - Self-dev sessions prefer canary, then rollback
+/// - Then launcher path
+/// - Then stable channel path
+/// - Finally currently running executable
+pub fn client_update_candidate(is_selfdev_session: bool) -> Option<(PathBuf, &'static str)> {
+    if is_selfdev_session {
+        if let Ok(canary) = canary_binary_path() {
+            if canary.exists() {
+                return Some((canary, "canary"));
+            }
+        }
+        if let Ok(rollback) = rollback_binary_path() {
+            if rollback.exists() {
+                return Some((rollback, "rollback"));
             }
         }
     }
-    None
+
+    if let Ok(launcher) = launcher_binary_path() {
+        if launcher.exists() {
+            return Some((launcher, "launcher"));
+        }
+    }
+
+    if let Ok(stable) = stable_binary_path() {
+        if stable.exists() {
+            return Some((stable, "stable"));
+        }
+    }
+
+    std::env::current_exe().ok().map(|exe| (exe, "current"))
 }
 
 /// Check if a directory is the jcode repository
@@ -398,7 +459,57 @@ pub fn current_build_info(repo_dir: &std::path::Path) -> Result<BuildInfo> {
     })
 }
 
-/// Install release binary into ~/.local/bin with versioned filename and symlink
+/// Install a binary at a specific immutable version path.
+pub fn install_binary_at_version(source: &std::path::Path, version: &str) -> Result<PathBuf> {
+    if !source.exists() {
+        anyhow::bail!("Binary not found at {:?}", source);
+    }
+
+    let dest_dir = builds_dir()?.join("versions").join(version);
+    storage::ensure_dir(&dest_dir)?;
+
+    let dest = dest_dir.join(binary_name());
+
+    // Remove existing file first to avoid ETXTBSY when replacing a running binary.
+    if dest.exists() {
+        std::fs::remove_file(&dest)?;
+    }
+
+    std::fs::copy(source, &dest)?;
+    crate::platform::set_permissions_executable(&dest)?;
+
+    Ok(dest)
+}
+
+fn update_channel_symlink(channel: &str, version: &str) -> Result<PathBuf> {
+    let channel_dir = builds_dir()?.join(channel);
+    storage::ensure_dir(&channel_dir)?;
+
+    let link_path = channel_dir.join(binary_name());
+    let target = version_binary_path(version)?;
+    if !target.exists() {
+        anyhow::bail!("Version binary not found at {:?}", target);
+    }
+
+    let temp = channel_dir.join(format!(
+        ".{}-{}-{}",
+        binary_stem(),
+        channel,
+        std::process::id()
+    ));
+    crate::platform::atomic_symlink_swap(&target, &link_path, &temp)?;
+
+    Ok(link_path)
+}
+
+/// Update stable symlink to point to a version and publish stable-version marker.
+pub fn update_stable_symlink(version: &str) -> Result<PathBuf> {
+    let stable_link = update_channel_symlink("stable", version)?;
+    std::fs::write(stable_version_file()?, version)?;
+    Ok(stable_link)
+}
+
+/// Install release binary into immutable versions and point stable+launcher to it.
 pub fn install_local_release(repo_dir: &std::path::Path) -> Result<PathBuf> {
     let source = release_binary_path(repo_dir);
     if !source.exists() {
@@ -413,25 +524,9 @@ pub fn install_local_release(repo_dir: &std::path::Path) -> Result<PathBuf> {
         hash
     };
 
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .map_err(|_| anyhow::anyhow!("HOME not set"))?;
-    let dest_dir = home.join(".local").join("bin");
-    storage::ensure_dir(&dest_dir)?;
-
-    let versioned = dest_dir.join(versioned_binary_name(&version));
-
-    // Remove existing file first to avoid ETXTBSY
-    if versioned.exists() {
-        std::fs::remove_file(&versioned)?;
-    }
-    std::fs::copy(&source, &versioned)?;
-
-    crate::platform::set_permissions_executable(&versioned)?;
-
-    let link_path = dest_dir.join(binary_name());
-    let _ = std::fs::remove_file(&link_path);
-    crate::platform::symlink_or_copy(&versioned, &link_path)?;
+    let versioned = install_binary_at_version(&source, &version)?;
+    update_stable_symlink(&version)?;
+    update_launcher_symlink_to_stable()?;
 
     Ok(versioned)
 }
@@ -480,63 +575,18 @@ pub fn read_stable_version() -> Result<Option<String>> {
 /// Copy binary to versioned location
 pub fn install_version(repo_dir: &std::path::Path, hash: &str) -> Result<PathBuf> {
     let source = release_binary_path(repo_dir);
-    if !source.exists() {
-        anyhow::bail!("Binary not found at {:?}", source);
-    }
-
-    let dest_dir = builds_dir()?.join("versions").join(hash);
-    storage::ensure_dir(&dest_dir)?;
-
-    let dest = dest_dir.join(binary_name());
-
-    // Remove existing file first to avoid "Text file busy" error (ETXTBSY)
-    // when the binary is currently being executed. Unlinking is allowed
-    // on running executables, but writing to them is not.
-    if dest.exists() {
-        std::fs::remove_file(&dest)?;
-    }
-
-    std::fs::copy(&source, &dest)?;
-
-    crate::platform::set_permissions_executable(&dest)?;
-
-    Ok(dest)
+    install_binary_at_version(&source, hash)
 }
 
 /// Update canary symlink to point to a version
 pub fn update_canary_symlink(hash: &str) -> Result<()> {
-    let canary_dir = builds_dir()?.join("canary");
-    storage::ensure_dir(&canary_dir)?;
-
-    let link_path = canary_dir.join(binary_name());
-    let target = builds_dir()?
-        .join("versions")
-        .join(hash)
-        .join(binary_name());
-
-    // Remove existing symlink/file
-    let _ = std::fs::remove_file(&link_path);
-
-    crate::platform::symlink_or_copy(&target, &link_path)?;
-
+    let _ = update_channel_symlink("canary", hash)?;
     Ok(())
 }
 
 /// Update rollback symlink (safety net for self-dev, separate from stable/release)
 pub fn update_rollback_symlink(hash: &str) -> Result<()> {
-    let rollback_dir = builds_dir()?.join("rollback");
-    storage::ensure_dir(&rollback_dir)?;
-
-    let link_path = rollback_dir.join(binary_name());
-    let target = builds_dir()?
-        .join("versions")
-        .join(hash)
-        .join(binary_name());
-
-    let _ = std::fs::remove_file(&link_path);
-
-    crate::platform::symlink_or_copy(&target, &link_path)?;
-
+    let _ = update_channel_symlink("rollback", hash)?;
     Ok(())
 }
 

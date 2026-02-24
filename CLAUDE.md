@@ -61,8 +61,10 @@ Logs are written to `~/.jcode/logs/` (daily files like `jcode-YYYY-MM-DD.log`).
 
 ## Install Notes
 
-- `~/.local/bin/jcode` is a symlink to `target/release/jcode` — always the latest build from source.
-- `~/.jcode/builds/stable/jcode` is the stable/release binary, updated by `scripts/install_release.sh`.
+- `~/.local/bin/jcode` is the launcher symlink used from PATH.
+- `~/.jcode/builds/stable/jcode` is the stable channel symlink.
+- `~/.jcode/builds/canary/jcode` and `~/.jcode/builds/rollback/jcode` are self-dev channels.
+- `~/.jcode/builds/versions/<version>/jcode` stores immutable binaries.
 - Ensure `~/.local/bin` is **before** `~/.cargo/bin` in `PATH`.
 
 ## Authentication

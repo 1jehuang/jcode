@@ -32,7 +32,33 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::time::interval;
 
+#[derive(Debug, Clone)]
+struct PendingRemoteMessage {
+    content: String,
+    is_system: bool,
+}
+
 const MEMORY_INJECTION_SUPPRESSION_SECS: u64 = 90;
+
+#[cfg(target_os = "macos")]
+fn ctrl_bracket_fallback_to_esc(code: &mut KeyCode, modifiers: &mut KeyModifiers) {
+    if !modifiers.contains(KeyModifiers::CONTROL) {
+        return;
+    }
+    match code {
+        KeyCode::Esc => {
+            *code = KeyCode::Char('[');
+        }
+        KeyCode::Char('5') => {
+            // Legacy tty mapping for Ctrl+]
+            *code = KeyCode::Char(']');
+        }
+        _ => {}
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ctrl_bracket_fallback_to_esc(_code: &mut KeyCode, _modifiers: &mut KeyModifiers) {}
 
 /// Debug command file path
 fn debug_cmd_path() -> PathBuf {
@@ -666,8 +692,8 @@ pub struct App {
     client_binary_mtime: Option<std::time::SystemTime>,
     // Rate limit state: when rate limit resets (if rate limited)
     rate_limit_reset: Option<Instant>,
-    // Message that was being sent when rate limit hit (to auto-retry)
-    rate_limit_pending_message: Option<String>,
+    // Message being sent when rate limit hit (to auto-retry in remote mode)
+    rate_limit_pending_message: Option<PendingRemoteMessage>,
     // Last turn-level stream error (used by /fix to choose recovery actions)
     last_stream_error: Option<String>,
     // Store reload info to pass to agent after reconnection (remote mode)
@@ -774,6 +800,31 @@ impl Provider for NullProvider {
 }
 
 impl App {
+    async fn begin_remote_send(
+        &mut self,
+        remote: &mut super::backend::RemoteConnection,
+        content: String,
+        images: Vec<(String, String)>,
+        is_system: bool,
+    ) -> Result<u64> {
+        let msg_id = remote
+            .send_message_with_images(content.clone(), images)
+            .await?;
+        self.current_message_id = Some(msg_id);
+        self.is_processing = true;
+        self.status = ProcessingStatus::Sending;
+        self.processing_started = Some(Instant::now());
+        self.streaming_tps_start = None;
+        self.streaming_tps_elapsed = Duration::ZERO;
+        self.streaming_total_output_tokens = 0;
+        self.thought_line_inserted = false;
+        self.thinking_prefix_emitted = false;
+        self.thinking_buffer.clear();
+        self.rate_limit_pending_message = Some(PendingRemoteMessage { content, is_system });
+        remote.reset_call_output_tokens_seen();
+        Ok(msg_id)
+    }
+
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
         let skills = SkillRegistry::load().unwrap_or_default();
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
@@ -1068,70 +1119,28 @@ impl App {
             .or_else(|| self.resume_session_id.clone())
     }
 
-    /// Check if there's a newer binary on disk than when we started
-    /// Only returns true if the SAME binary file has been modified (e.g., via /reload)
+    /// Check if the selected reload candidate is newer than startup.
+    /// Candidate selection matches `/reload` so the `cli↑` badge and reload target stay aligned.
     fn has_newer_binary(&self) -> bool {
         let Some(startup_mtime) = self.client_binary_mtime else {
             return false;
         };
 
-        // Get the currently running executable path
-        let Ok(current_exe) = std::env::current_exe() else {
-            return false;
-        };
-
-        // Check if the current executable has been modified since startup
-        // This handles the case where the binary is recompiled in place
-        if let Ok(metadata) = std::fs::metadata(&current_exe) {
-            if let Ok(current_mtime) = metadata.modified() {
-                if current_mtime > startup_mtime {
-                    return true;
-                }
-            }
-        }
-
-        // Also check the symlink target if we're running from a symlink
-        // This detects when install_release.sh updates the symlink to a newer binary
-        if let Ok(resolved) = std::fs::canonicalize(&current_exe) {
-            if resolved != current_exe {
-                // We're running from a symlink - check if the symlink now points elsewhere
-                // by comparing the canonical path to what it was at startup
-                if let Ok(link_target) = std::fs::read_link(&current_exe) {
-                    // The symlink itself might have changed to point to a different file
-                    // Check the target's mtime
-                    if let Ok(metadata) = std::fs::metadata(&link_target) {
-                        if let Ok(target_mtime) = metadata.modified() {
-                            if target_mtime > startup_mtime {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // In canary/self-dev sessions, also track canary binary freshness.
-        // This keeps client/server update checks aligned in self-dev flows.
-        let is_canary_session = if self.is_remote {
+        let is_selfdev_session = if self.is_remote {
             self.remote_is_canary.unwrap_or(false)
         } else {
             self.session.is_canary
         };
-        if is_canary_session {
-            if let Ok(canary) = crate::build::canary_binary_path() {
-                if canary.exists() {
-                    if let Ok(metadata) = std::fs::metadata(&canary) {
-                        if let Ok(canary_mtime) = metadata.modified() {
-                            if canary_mtime > startup_mtime {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
-        false
+        let Some((candidate, _label)) = crate::build::client_update_candidate(is_selfdev_session)
+        else {
+            return false;
+        };
+
+        std::fs::metadata(&candidate)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .is_some_and(|mtime| mtime > startup_mtime)
     }
 
     /// Initialize MCP servers (call after construction)
@@ -4209,21 +4218,38 @@ impl App {
                         }
                         // Check for debug commands (remote mode)
                         let _ = self.check_debug_command_remote(&mut remote).await;
+                        if let Some(reset_time) = self.rate_limit_reset {
+                            if Instant::now() >= reset_time {
+                                self.rate_limit_reset = None;
+                                if !self.is_processing {
+                                    if let Some(pending) = self.rate_limit_pending_message.clone() {
+                                        self.push_display_message(DisplayMessage::system(format!(
+                                            "✓ Rate limit reset. Retrying...{}",
+                                            if pending.is_system { " (system message)" } else { "" }
+                                        )));
+                                        let _ = self
+                                            .begin_remote_send(
+                                                &mut remote,
+                                                pending.content,
+                                                vec![],
+                                                pending.is_system,
+                                            )
+                                            .await;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         // Process queued messages (e.g. reload continuation)
                         if !self.is_processing && !self.queued_messages.is_empty() {
                             let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
                             crate::logging::info(&format!("Sending queued continuation message ({} chars)", combined.len()));
                             self.push_display_message(DisplayMessage::system(combined.clone()));
-                            if let Ok(msg_id) = remote.send_message(combined).await {
-                                self.current_message_id = Some(msg_id);
-                                self.is_processing = true;
-                                self.status = ProcessingStatus::Sending;
-                                self.processing_started = Some(Instant::now());
-                                self.streaming_tps_start = None;
-                                self.streaming_tps_elapsed = Duration::ZERO;
-                                self.streaming_total_output_tokens = 0;
-                                remote.reset_call_output_tokens_seen();
-                            } else {
+                            if self
+                                .begin_remote_send(&mut remote, combined, vec![], true)
+                                .await
+                                .is_err()
+                            {
                                 crate::logging::error("Failed to send queued continuation message");
                             }
                         }
@@ -4231,6 +4257,7 @@ impl App {
                     event = remote.next_event() => {
                         match event {
                             None => {
+                                self.rate_limit_pending_message = None;
                                 self.is_processing = false;
                                 disconnect_start = Some(std::time::Instant::now());
                                 self.push_display_message(DisplayMessage {
@@ -4291,17 +4318,16 @@ impl App {
                                                 title: None,
                                                 tool_data: None,
                                             });
-                                            match remote.send_message(interleave_msg).await {
-                                                Ok(msg_id) => {
-                                                    self.current_message_id = Some(msg_id);
-                                                    self.is_processing = true;
-                                                    self.status = ProcessingStatus::Sending;
-                                                    self.processing_started = Some(Instant::now());
-                                                    self.streaming_tps_start = None;
-                                                    self.streaming_tps_elapsed = Duration::ZERO;
-                                                    self.streaming_total_output_tokens = 0;
-                                                    remote.reset_call_output_tokens_seen();
-                                                }
+                                            match self
+                                                .begin_remote_send(
+                                                    &mut remote,
+                                                    interleave_msg,
+                                                    vec![],
+                                                    false,
+                                                )
+                                                .await
+                                            {
+                                                Ok(_) => {}
                                                 Err(e) => {
                                                     self.push_display_message(DisplayMessage::error(format!(
                                                         "Failed to send message: {}", e
@@ -4312,16 +4338,9 @@ impl App {
                                     } else if !self.queued_messages.is_empty() {
                                         let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
                                         self.push_display_message(DisplayMessage::system(combined.clone()));
-                                        if let Ok(msg_id) = remote.send_message(combined).await {
-                                            self.current_message_id = Some(msg_id);
-                                            self.is_processing = true;
-                                            self.status = ProcessingStatus::Sending;
-                                            self.processing_started = Some(Instant::now());
-                                            self.streaming_tps_start = None;
-                                            self.streaming_tps_elapsed = Duration::ZERO;
-                                            self.streaming_total_output_tokens = 0;
-                                            remote.reset_call_output_tokens_seen();
-                                        }
+                                        let _ = self
+                                            .begin_remote_send(&mut remote, combined, vec![], true)
+                                            .await;
                                     }
                                 }
                             }
@@ -4785,12 +4804,33 @@ impl App {
                 self.upstream_provider = Some(provider);
                 false
             }
+            ServerEvent::Interrupted => {
+                // Treat interruption as a system/status event, not assistant output.
+                self.rate_limit_pending_message = None;
+                self.interleave_message = None;
+                self.pending_soft_interrupts.clear();
+                self.clear_streaming_render_state();
+                self.stream_buffer.clear();
+                self.streaming_tool_calls.clear();
+                self.thought_line_inserted = false;
+                self.thinking_prefix_emitted = false;
+                self.thinking_buffer.clear();
+                self.push_display_message(DisplayMessage::system("Interrupted"));
+                self.is_processing = false;
+                self.status = ProcessingStatus::Idle;
+                self.processing_started = None;
+                self.current_message_id = None;
+                remote.clear_pending();
+                remote.reset_call_output_tokens_seen();
+                false
+            }
             ServerEvent::Done { id } => {
                 crate::logging::info(&format!(
                     "Client received Done id={}, current_message_id={:?}",
                     id, self.current_message_id
                 ));
                 if self.current_message_id == Some(id) {
+                    self.rate_limit_pending_message = None;
                     if let Some(chunk) = self.stream_buffer.flush() {
                         self.streaming_text.push_str(&chunk);
                     }
@@ -4811,6 +4851,7 @@ impl App {
                         self.push_turn_footer(duration);
                     }
                     crate::tui::mermaid::clear_streaming_preview_diagram();
+                    self.rate_limit_pending_message = None;
                     self.is_processing = false;
                     self.status = ProcessingStatus::Idle;
                     self.processing_started = None;
@@ -4822,6 +4863,7 @@ impl App {
                     self.thinking_prefix_emitted = false;
                     self.thinking_buffer.clear();
                     remote.clear_pending();
+                    remote.reset_call_output_tokens_seen();
                 } else if self.is_processing {
                     let is_stale = self.current_message_id.map_or(false, |mid| id < mid);
                     if is_stale {
@@ -4863,11 +4905,42 @@ impl App {
                         self.thinking_prefix_emitted = false;
                         self.thinking_buffer.clear();
                         remote.clear_pending();
+                        remote.reset_call_output_tokens_seen();
                     }
                 }
                 false
             }
-            ServerEvent::Error { message, .. } => {
+            ServerEvent::Error {
+                message,
+                retry_after_secs,
+                ..
+            } => {
+                let reset_duration = retry_after_secs
+                    .map(Duration::from_secs)
+                    .or_else(|| parse_rate_limit_error(&message));
+                if let Some(reset_duration) = reset_duration {
+                    self.rate_limit_reset = Some(Instant::now() + reset_duration);
+                    if let Some(is_system) =
+                        self.rate_limit_pending_message.as_ref().map(|pending| pending.is_system)
+                    {
+                        self.push_display_message(DisplayMessage::system(format!(
+                            "⏳ Rate limit hit. Will auto-retry in {} seconds...",
+                            reset_duration.as_secs()
+                        )));
+                        if is_system {
+                            self.set_status_notice("Rate limited; queued system retry");
+                        } else {
+                            self.set_status_notice("Rate limited; queued retry");
+                        }
+                        self.is_processing = false;
+                        self.status = ProcessingStatus::Idle;
+                        self.processing_started = None;
+                        self.current_message_id = None;
+                        remote.clear_pending();
+                        remote.reset_call_output_tokens_seen();
+                        return false;
+                    }
+                }
                 self.push_display_message(DisplayMessage {
                     role: "error".to_string(),
                     content: message,
@@ -4885,6 +4958,7 @@ impl App {
                 self.thinking_prefix_emitted = false;
                 self.thinking_buffer.clear();
                 remote.clear_pending();
+                remote.reset_call_output_tokens_seen();
                 false
             }
             ServerEvent::SessionId { session_id } => {
@@ -4990,6 +5064,7 @@ impl App {
                     self.swarm_plan_version = None;
                     self.swarm_plan_swarm_id = None;
                     self.connection_type = None;
+                    remote.reset_call_output_tokens_seen();
                 }
                 // Store provider info for UI display
                 if let Some(name) = provider_name {
@@ -5271,6 +5346,10 @@ impl App {
         modifiers: KeyModifiers,
         remote: &mut super::backend::RemoteConnection,
     ) -> Result<()> {
+        let mut code = code;
+        let mut modifiers = modifiers;
+        ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+
         // If picker is active and not in preview mode, handle picker keys first
         if let Some(ref picker) = self.picker_state {
             if !picker.preview {
@@ -5356,7 +5435,7 @@ impl App {
             return Ok(());
         }
 
-        // Handle prompt jump keys (default: Alt+[/])
+        // Handle prompt jump keys (default: Ctrl+[/])
         if let Some(dir) = self.scroll_keys.prompt_jump(code.clone(), modifiers) {
             if dir < 0 {
                 self.scroll_to_prev_prompt();
@@ -5478,17 +5557,7 @@ impl App {
                             tool_data: None,
                         });
                         // Send expanded content to server
-                        let msg_id = remote.send_message_with_images(expanded, images).await?;
-                        self.current_message_id = Some(msg_id);
-                        self.is_processing = true;
-                        self.status = ProcessingStatus::Sending;
-                        self.processing_started = Some(Instant::now());
-                        self.streaming_tps_start = None;
-                        self.streaming_tps_elapsed = Duration::ZERO;
-                        self.streaming_total_output_tokens = 0;
-                        self.thought_line_inserted = false;
-                        self.thinking_prefix_emitted = false;
-                        self.thinking_buffer.clear();
+                        let _ = self.begin_remote_send(remote, expanded, images, false).await;
                     }
                     SendAction::Queue => {
                         self.queued_messages.push(expanded);
@@ -5831,17 +5900,7 @@ impl App {
                                 tool_data: None,
                             });
                             // Send expanded content (with actual pasted text) to server
-                            let msg_id = remote.send_message_with_images(expanded, images).await?;
-                            self.current_message_id = Some(msg_id);
-                            self.is_processing = true;
-                            self.status = ProcessingStatus::Sending;
-                            self.processing_started = Some(Instant::now());
-                            self.streaming_tps_start = None;
-                            self.streaming_tps_elapsed = Duration::ZERO;
-                            self.streaming_total_output_tokens = 0;
-                            self.thought_line_inserted = false;
-                            self.thinking_prefix_emitted = false;
-                            self.thinking_buffer.clear();
+                            let _ = self.begin_remote_send(remote, expanded, images, false).await;
                         }
                         SendAction::Queue => {
                             self.queued_messages.push(expanded);
@@ -5963,6 +6022,10 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+        let mut code = code;
+        let mut modifiers = modifiers;
+        ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+
         // If picker is active and not in preview mode, handle picker keys first
         if let Some(ref picker) = self.picker_state {
             if !picker.preview {
@@ -6059,7 +6122,7 @@ impl App {
             return Ok(());
         }
 
-        // Handle prompt jump keys (default: Alt+[/])
+        // Handle prompt jump keys (default: Ctrl+[/])
         if let Some(dir) = self.scroll_keys.prompt_jump(code.clone(), modifiers) {
             if dir < 0 {
                 self.scroll_to_prev_prompt();
@@ -6588,7 +6651,7 @@ impl App {
                 "`/config`\nShow active configuration.\n\n`/config init`\nCreate default config file.\n\n`/config edit`\nOpen config in `$EDITOR`."
             }
             "auth" | "login" => {
-                "`/auth` / `/login`\nShow authentication status for all providers.\n\n`/login <provider>`\nStart login flow for a provider (claude, openai, openrouter)."
+                "`/auth` / `/login`\nShow authentication status for all providers.\n\n`/login <provider>`\nStart login flow for a provider (anthropic/claude, openai, openrouter, cursor, copilot, antigravity)."
             }
             "client-reload" if self.is_remote => {
                 "`/client-reload`\nForce client binary reload in remote mode."
@@ -6681,7 +6744,7 @@ impl App {
                      • `/rewind` - Show history with numbers, `/rewind N` to rewind\n\
                      • `/compact` - Manually compact context (summarize old messages)\n\
                      • `/fix` - Attempt session recovery (context/tool/session issues)\n\
-                     • `/auth` / `/login` - Show auth status, `/login <provider>` to authenticate\n\
+                     • `/auth` / `/login` - Show auth status, `/login <provider>` to authenticate (anthropic/openai/openrouter/cursor/copilot/antigravity)\n\
                      • `/debug-visual` - Enable visual debugging for TUI issues\n\
                      • `/<skill>` - Activate a skill\n\n\
                      **Available skills:** {}\n\n\
@@ -6700,6 +6763,7 @@ impl App {
                      • `PageUp/Down` or `Up/Down` - Scroll history\n\
                      • `{}`/`{}` - Scroll up/down (see `/config`)\n\
                      • `{}`/`{}` - Page up/down (see `/config`)\n\
+                     • `Ctrl+[` / `Ctrl+]` - Jump between user prompts\n\
                      • `Ctrl+Tab` / `Ctrl+T` - Toggle queue mode (wait vs immediate send)\n\
                      • `Ctrl+Up` - Retrieve pending message for editing\n\
                      • `Ctrl+U` - Clear input line\n\
@@ -7528,9 +7592,12 @@ impl App {
                 "claude" | "anthropic" => self.start_claude_login(),
                 "openai" => self.start_openai_login(),
                 "openrouter" => self.start_openrouter_login(),
+                "cursor" => self.start_cursor_login(),
+                "copilot" => self.start_copilot_login(),
+                "antigravity" => self.start_antigravity_login(),
                 other => {
                     self.push_display_message(DisplayMessage::error(format!(
-                        "Unknown provider '{}'. Use: claude, openai, or openrouter",
+                        "Unknown provider '{}'. Use: anthropic/claude, openai, openrouter, cursor, copilot, or antigravity",
                         other
                     )));
                 }
@@ -8328,7 +8395,7 @@ impl App {
         if results.is_empty() {
             self.push_display_message(DisplayMessage::system(
                 "No providers with OAuth credentials found.\n\
-                 Use `/login claude` or `/login openai` to authenticate."
+                 Use `/login anthropic` or `/login openai` to authenticate."
                     .to_string(),
             ));
             return;
@@ -8669,15 +8736,21 @@ impl App {
             "**Authentication Status:**\n\n\
              | Provider | Status | Method |\n\
              |----------|--------|--------|\n\
-             | Claude (Anthropic) | {} | {} |\n\
+             | Anthropic | {} | {} |\n\
              | OpenAI | {} | {} |\n\
-             | OpenRouter | {} | API key |\n\n\
-             Use `/login <provider>` to authenticate (claude, openai, openrouter).",
+             | OpenRouter | {} | API key |\n\
+             | Cursor | {} | CLI login |\n\
+             | Copilot | {} | CLI login |\n\
+             | Antigravity | {} | CLI login |\n\n\
+             Use `/login <provider>` to authenticate (anthropic/claude, openai, openrouter, cursor, copilot, antigravity).",
             icon(status.anthropic.state),
             claude_detail,
             icon(status.openai),
             openai_detail,
             icon(status.openrouter),
+            icon(status.cursor),
+            icon(status.copilot),
+            icon(status.antigravity),
         )));
     }
 
@@ -8852,6 +8925,148 @@ impl App {
         ));
         self.set_status_notice("Login: paste key…");
         self.pending_login = Some(PendingLogin::OpenRouter);
+    }
+
+    fn start_cursor_login(&mut self) {
+        let binary =
+            std::env::var("JCODE_CURSOR_CLI_PATH").unwrap_or_else(|_| "cursor-agent".to_string());
+
+        self.push_display_message(DisplayMessage::system(format!(
+            "Starting Cursor login...\n\nRunning `{} login`",
+            binary
+        )));
+        self.set_status_notice("Login: cursor...");
+
+        match Self::run_external_login_command(&binary, &["login"]) {
+            Ok(()) => {
+                self.push_display_message(DisplayMessage::system(
+                    "✓ **Cursor login command completed.**".to_string(),
+                ));
+                self.set_status_notice("Login: ✓ cursor");
+            }
+            Err(e) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Cursor login failed: {}\n\nInstall Cursor Agent and run `{} login`.",
+                    e, binary
+                )));
+                self.set_status_notice("Login: cursor failed");
+            }
+        }
+    }
+
+    fn start_copilot_login(&mut self) {
+        let (program, args, rendered) = crate::provider::copilot::copilot_login_command();
+
+        self.push_display_message(DisplayMessage::system(format!(
+            "Starting GitHub Copilot login...\n\nRunning `{}`",
+            rendered
+        )));
+        self.set_status_notice("Login: copilot...");
+
+        match Self::run_external_login_command_owned(&program, &args) {
+            Ok(()) => {
+                self.push_display_message(DisplayMessage::system(
+                    "✓ **Copilot login command completed.**".to_string(),
+                ));
+                self.set_status_notice("Login: ✓ copilot");
+            }
+            Err(e) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Copilot login failed: {}\n\nInstall Copilot CLI (https://gh.io/copilot-cli) and run `{}`.",
+                    e, rendered
+                )));
+                self.set_status_notice("Login: copilot failed");
+            }
+        }
+    }
+
+    fn start_antigravity_login(&mut self) {
+        let binary = std::env::var("JCODE_ANTIGRAVITY_CLI_PATH")
+            .unwrap_or_else(|_| "antigravity".to_string());
+
+        self.push_display_message(DisplayMessage::system(format!(
+            "Starting Antigravity login...\n\nRunning `{} login`",
+            binary
+        )));
+        self.set_status_notice("Login: antigravity...");
+
+        match Self::run_external_login_command(&binary, &["login"]) {
+            Ok(()) => {
+                self.push_display_message(DisplayMessage::system(
+                    "✓ **Antigravity login command completed.**".to_string(),
+                ));
+                self.set_status_notice("Login: ✓ antigravity");
+            }
+            Err(e) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Antigravity login failed: {}\n\nCheck `{}` is installed and run `{} login`.",
+                    e, binary, binary
+                )));
+                self.set_status_notice("Login: antigravity failed");
+            }
+        }
+    }
+
+    fn run_external_login_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
+        let raw_was_enabled = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+        if raw_was_enabled {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+
+        let status_result = std::process::Command::new(program).args(args).status();
+
+        if raw_was_enabled {
+            let _ = crossterm::terminal::enable_raw_mode();
+        }
+
+        let status = status_result.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to start command: {} {} ({})",
+                program,
+                args.join(" "),
+                e
+            )
+        })?;
+        if !status.success() {
+            anyhow::bail!(
+                "Command exited with non-zero status: {} {} ({})",
+                program,
+                args.join(" "),
+                status
+            );
+        }
+        Ok(())
+    }
+
+    fn run_external_login_command_owned(program: &str, args: &[String]) -> anyhow::Result<()> {
+        let raw_was_enabled = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+        if raw_was_enabled {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+
+        let status_result = std::process::Command::new(program).args(args).status();
+
+        if raw_was_enabled {
+            let _ = crossterm::terminal::enable_raw_mode();
+        }
+
+        let status = status_result.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to start command: {} {} ({})",
+                program,
+                args.join(" "),
+                e
+            )
+        })?;
+        if !status.success() {
+            anyhow::bail!(
+                "Command exited with non-zero status: {} {} ({})",
+                program,
+                args.join(" "),
+                status
+            );
+        }
+        Ok(())
     }
 
     fn handle_login_input(&mut self, pending: PendingLogin, input: String) {
@@ -9146,31 +9361,31 @@ impl App {
                     }
                 } else if crate::provider::ALL_OPENAI_MODELS.contains(&model.as_str()) {
                     let availability = crate::provider::model_availability_for_account(model);
-                    let (available, detail) = if auth.openai == crate::auth::AuthState::NotConfigured {
-                        (false, "no credentials".to_string())
-                    } else {
-                        match availability.state {
-                            crate::provider::AccountModelAvailabilityState::Available => {
-                                (true, String::new())
-                            }
-                            crate::provider::AccountModelAvailabilityState::Unavailable => {
-                                (
+                    let (available, detail) =
+                        if auth.openai == crate::auth::AuthState::NotConfigured {
+                            (false, "no credentials".to_string())
+                        } else {
+                            match availability.state {
+                                crate::provider::AccountModelAvailabilityState::Available => {
+                                    (true, String::new())
+                                }
+                                crate::provider::AccountModelAvailabilityState::Unavailable => (
                                     false,
                                     crate::provider::format_account_model_availability_detail(
                                         &availability,
                                     )
                                     .unwrap_or_else(|| "not available".to_string()),
-                                )
+                                ),
+                                crate::provider::AccountModelAvailabilityState::Unknown => {
+                                    let detail =
+                                        crate::provider::format_account_model_availability_detail(
+                                            &availability,
+                                        )
+                                        .unwrap_or_else(|| "availability unknown".to_string());
+                                    (true, detail)
+                                }
                             }
-                            crate::provider::AccountModelAvailabilityState::Unknown => {
-                                let detail = crate::provider::format_account_model_availability_detail(
-                                    &availability,
-                                )
-                                .unwrap_or_else(|| "availability unknown".to_string());
-                                (true, detail)
-                            }
-                        }
-                    };
+                        };
                     routes.push(crate::provider::ModelRoute {
                         model: model.clone(),
                         provider: "OpenAI".to_string(),
@@ -10612,14 +10827,10 @@ impl App {
                                         self.cancel_requested = false;
                                         self.interleave_message = None;
                                         self.pending_soft_interrupts.clear();
-                                        self.push_display_message(DisplayMessage {
-                                            role: "system".to_string(),
-                                            content: "Interrupted".to_string(),
-                                            tool_calls: vec![],
-                                            duration_secs: None,
-                                            title: None,
-                                            tool_data: None,
-                                        });
+                                        self.clear_streaming_render_state();
+                                        self.stream_buffer.clear();
+                                        self.streaming_tool_calls.clear();
+                                        self.push_display_message(DisplayMessage::system("Interrupted"));
                                         return Ok(());
                                     }
                                 }
@@ -10684,14 +10895,10 @@ impl App {
                                         self.cancel_requested = false;
                                         self.interleave_message = None;
                                         self.pending_soft_interrupts.clear();
-                                        self.push_display_message(DisplayMessage {
-                                            role: "system".to_string(),
-                                            content: "Interrupted".to_string(),
-                                            tool_calls: vec![],
-                                            duration_secs: None,
-                                            title: None,
-                                            tool_data: None,
-                                        });
+                                        self.clear_streaming_render_state();
+                                        self.stream_buffer.clear();
+                                        self.streaming_tool_calls.clear();
+                                        self.push_display_message(DisplayMessage::system("Interrupted"));
                                         return Ok(());
                                     }
                                     // Check for interleave request (Shift+Enter)
@@ -11256,14 +11463,10 @@ impl App {
                                             self.cancel_requested = false;
                                             self.interleave_message = None;
                                             self.pending_soft_interrupts.clear();
-                                            self.push_display_message(DisplayMessage {
-                                                role: "system".to_string(),
-                                                content: "Interrupted".to_string(),
-                                                tool_calls: vec![],
-                                                duration_secs: None,
-                                                title: None,
-                                                tool_data: None,
-                                            });
+                                            self.clear_streaming_render_state();
+                                            self.stream_buffer.clear();
+                                            self.streaming_tool_calls.clear();
+                                            self.push_display_message(DisplayMessage::system("Interrupted"));
                                             return Ok(());
                                         }
                                     }
@@ -11733,9 +11936,13 @@ impl App {
 
         if prefix.starts_with("/login ") || prefix.starts_with("/auth ") {
             return vec![
-                ("/login claude".into(), "Login to Claude (Anthropic OAuth)"),
+                ("/login anthropic".into(), "Login to Anthropic (OAuth)"),
+                ("/login claude".into(), "Alias for Anthropic login"),
                 ("/login openai".into(), "Login to OpenAI (OAuth)"),
                 ("/login openrouter".into(), "Login to OpenRouter (API key)"),
+                ("/login cursor".into(), "Login to Cursor CLI"),
+                ("/login copilot".into(), "Login to GitHub Copilot CLI"),
+                ("/login antigravity".into(), "Login to Antigravity CLI"),
             ];
         }
 
@@ -11768,7 +11975,7 @@ impl App {
             ("/auth".into(), "Show authentication status"),
             (
                 "/login".into(),
-                "Login to a provider (claude/openai/openrouter)",
+                "Login to a provider (anthropic/openai/openrouter/cursor/copilot/antigravity)",
             ),
         ];
 
@@ -12945,7 +13152,10 @@ impl super::TuiState for App {
             let is_anthropic_oauth = provider_name.contains("anthropic")
                 || provider_name.contains("claude")
                 || (provider_name == "remote" && has_anthropic_oauth && !has_openai_oauth);
-            let is_openai_provider = provider_name.contains("openai");
+            let is_openai_provider = provider_name.contains("openai")
+                || ((provider_name == "remote" || provider_name == "unknown")
+                    && has_openai_oauth
+                    && !has_anthropic_oauth);
             let is_api_key_provider = provider_name.contains("openrouter");
 
             let output_tps = if self.is_processing {
@@ -12959,7 +13169,11 @@ impl super::TuiState for App {
                 Some(super::info_widget::UsageInfo {
                     provider: super::info_widget::UsageProvider::Anthropic,
                     five_hour: usage.five_hour,
+                    five_hour_resets_at: usage.five_hour_resets_at.clone(),
                     seven_day: usage.seven_day,
+                    seven_day_resets_at: usage.seven_day_resets_at.clone(),
+                    spark: None,
+                    spark_resets_at: None,
                     total_cost: 0.0,
                     input_tokens: 0,
                     output_tokens: 0,
@@ -12968,12 +13182,70 @@ impl super::TuiState for App {
                     output_tps,
                     available: true,
                 })
-            } else if is_api_key_provider || is_openai_provider {
-                // Show costs for API-key providers (OpenRouter) and OpenAI
+            } else if is_openai_provider {
+                let openai_usage = crate::usage::get_openai_usage_sync();
+                if openai_usage.has_limits() {
+                    Some(super::info_widget::UsageInfo {
+                        provider: super::info_widget::UsageProvider::OpenAI,
+                        five_hour: openai_usage
+                            .five_hour
+                            .as_ref()
+                            .map(|w| w.usage_ratio)
+                            .unwrap_or(0.0),
+                        five_hour_resets_at: openai_usage
+                            .five_hour
+                            .as_ref()
+                            .and_then(|w| w.resets_at.clone()),
+                        seven_day: openai_usage
+                            .seven_day
+                            .as_ref()
+                            .map(|w| w.usage_ratio)
+                            .unwrap_or(0.0),
+                        seven_day_resets_at: openai_usage
+                            .seven_day
+                            .as_ref()
+                            .and_then(|w| w.resets_at.clone()),
+                        spark: openai_usage.spark.as_ref().map(|w| w.usage_ratio),
+                        spark_resets_at: openai_usage
+                            .spark
+                            .as_ref()
+                            .and_then(|w| w.resets_at.clone()),
+                        total_cost: 0.0,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cache_read_tokens: None,
+                        cache_write_tokens: None,
+                        output_tps,
+                        available: true,
+                    })
+                } else {
+                    Some(super::info_widget::UsageInfo {
+                        provider: super::info_widget::UsageProvider::CostBased,
+                        five_hour: 0.0,
+                        five_hour_resets_at: None,
+                        seven_day: 0.0,
+                        seven_day_resets_at: None,
+                        spark: None,
+                        spark_resets_at: None,
+                        total_cost: self.total_cost,
+                        input_tokens: self.total_input_tokens,
+                        output_tokens: self.total_output_tokens,
+                        cache_read_tokens: self.streaming_cache_read_tokens,
+                        cache_write_tokens: self.streaming_cache_creation_tokens,
+                        output_tps,
+                        available: true,
+                    })
+                }
+            } else if is_api_key_provider {
+                // Show costs for API-key providers (OpenRouter)
                 Some(super::info_widget::UsageInfo {
                     provider: super::info_widget::UsageProvider::CostBased,
                     five_hour: 0.0,
+                    five_hour_resets_at: None,
                     seven_day: 0.0,
+                    seven_day_resets_at: None,
+                    spark: None,
+                    spark_resets_at: None,
                     total_cost: self.total_cost,
                     input_tokens: self.total_input_tokens,
                     output_tokens: self.total_output_tokens,
@@ -13639,6 +13911,19 @@ mod tests {
         ));
         assert!(app.provider_session_id.is_none());
         assert!(app.session.provider_session_id.is_none());
+    }
+
+    #[test]
+    fn test_accumulate_streaming_output_tokens_uses_deltas() {
+        let mut app = create_test_app();
+        let mut seen = 0;
+
+        app.accumulate_streaming_output_tokens(10, &mut seen);
+        app.accumulate_streaming_output_tokens(30, &mut seen);
+        app.accumulate_streaming_output_tokens(30, &mut seen);
+
+        assert_eq!(app.streaming_total_output_tokens, 30);
+        assert_eq!(seen, 30);
     }
 
     #[test]
@@ -14422,10 +14707,7 @@ mod tests {
         use std::time::{Duration, SystemTime};
 
         let mut app = create_test_app();
-        let Some(repo_dir) = crate::build::get_repo_dir() else {
-            return;
-        };
-        let exe = crate::build::release_binary_path(&repo_dir);
+        let exe = crate::build::launcher_binary_path().unwrap();
 
         let mut created = false;
         if !exe.exists() {
@@ -14452,10 +14734,7 @@ mod tests {
         use std::time::{Duration, SystemTime};
 
         let mut app = create_test_app();
-        let Some(repo_dir) = crate::build::get_repo_dir() else {
-            return;
-        };
-        let exe = crate::build::release_binary_path(&repo_dir);
+        let exe = crate::build::launcher_binary_path().unwrap();
 
         let mut created = false;
         if !exe.exists() {
@@ -14542,6 +14821,51 @@ mod tests {
         );
 
         assert_eq!(app.connection_type.as_deref(), Some("websocket"));
+    }
+
+    #[test]
+    fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.processing_started = Some(Instant::now());
+        app.current_message_id = Some(42);
+        app.streaming_text = "partial".to_string();
+        app.streaming_tool_calls.push(crate::message::ToolCall {
+            id: "tool_1".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::Value::Null,
+            intent: None,
+        });
+        app.interleave_message = Some("queued interrupt".to_string());
+        app.pending_soft_interrupts
+            .push("pending soft interrupt".to_string());
+
+        remote.handle_tool_start("tool_1", "bash");
+        remote.handle_tool_input("{\"command\":\"sleep 10\"}");
+        remote.handle_tool_exec("tool_1", "edit");
+
+        app.handle_server_event(crate::protocol::ServerEvent::Interrupted, &mut remote);
+
+        assert!(!app.is_processing);
+        assert!(matches!(app.status, ProcessingStatus::Idle));
+        assert!(app.processing_started.is_none());
+        assert!(app.current_message_id.is_none());
+        assert!(app.streaming_text.is_empty());
+        assert!(app.streaming_tool_calls.is_empty());
+        assert!(app.interleave_message.is_none());
+        assert!(app.pending_soft_interrupts.is_empty());
+
+        let last = app
+            .display_messages()
+            .last()
+            .expect("missing interrupted message");
+        assert_eq!(last.role, "system");
+        assert_eq!(last.content, "Interrupted");
     }
 
     #[test]
@@ -14769,6 +15093,40 @@ mod tests {
             app.resume_session_id.as_deref(),
             Some("ses_resume_persistent")
         );
+    }
+
+    #[test]
+    fn test_prompt_jump_ctrl_brackets() {
+        let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
+
+        // Seed max scroll estimates before key handling.
+        render_and_snap(&app, &mut terminal);
+
+        assert_eq!(app.scroll_offset, 0);
+        assert!(!app.auto_scroll_paused);
+
+        app.handle_key(KeyCode::Char('['), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(app.auto_scroll_paused);
+        assert!(app.scroll_offset > 0);
+
+        let after_up = app.scroll_offset;
+        app.handle_key(KeyCode::Char(']'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(app.scroll_offset <= after_up);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_prompt_jump_ctrl_esc_fallback_on_macos() {
+        let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
+
+        render_and_snap(&app, &mut terminal);
+
+        assert_eq!(app.scroll_offset, 0);
+        app.handle_key(KeyCode::Esc, KeyModifiers::CONTROL).unwrap();
+        assert!(app.auto_scroll_paused);
+        assert!(app.scroll_offset > 0);
     }
 
     #[test]

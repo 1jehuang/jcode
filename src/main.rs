@@ -571,8 +571,13 @@ async fn main() -> Result<()> {
                         );
                         // Exec into the new binary
                         let args: Vec<String> = std::env::args().skip(1).collect();
+                        let exec_path = build::client_update_candidate(false)
+                            .map(|(p, _)| p)
+                            .unwrap_or(path);
                         let err = crate::platform::replace_process(
-                            ProcessCommand::new(&path).args(&args).arg("--no-update"),
+                            ProcessCommand::new(&exec_path)
+                                .args(&args)
+                                .arg("--no-update"),
                         );
                         eprintln!("Failed to exec new binary: {}", err);
                     }
@@ -1198,21 +1203,10 @@ fn hot_reload(session_id: &str) -> Result<()> {
         }
     }
 
-    // Pick binary: prefer the release build path in the repo, then PATH/current exe.
-    let exe = if let Some(repo_dir) = get_repo_dir() {
-        let candidate = build::release_binary_path(&repo_dir);
-        if candidate.exists() {
-            candidate
-        } else {
-            crate::build::jcode_path_in_path()
-                .or_else(|| std::env::current_exe().ok())
-                .ok_or_else(|| anyhow::anyhow!("No reloadable binary found on PATH"))?
-        }
-    } else {
-        crate::build::jcode_path_in_path()
-            .or_else(|| std::env::current_exe().ok())
-            .ok_or_else(|| anyhow::anyhow!("No reloadable binary found on PATH"))?
-    };
+    // Pick binary using the same candidate resolver as the CLI update badge.
+    let is_selfdev = std::env::var("JCODE_SELFDEV_MODE").is_ok();
+    let (exe, _label) = build::client_update_candidate(is_selfdev)
+        .ok_or_else(|| anyhow::anyhow!("No reloadable binary found"))?;
 
     // Show binary info
     if let Ok(metadata) = std::fs::metadata(&exe) {
@@ -1234,10 +1228,9 @@ fn hot_reload(session_id: &str) -> Result<()> {
         eprintln!("Reloading with binary built {}...", age);
     }
 
-    // Build command with --resume flag
+    // Build command with --resume flag.
     // In self-dev mode, preserve the self-dev subcommand so the session
     // continues in self-dev mode after reload.
-    let is_selfdev = std::env::var("JCODE_SELFDEV_MODE").is_ok();
 
     // Retry on ENOENT in case binary is being replaced by a concurrent cargo build
     for attempt in 0..3 {
@@ -1319,8 +1312,10 @@ fn hot_rebuild(session_id: &str) -> Result<()> {
         eprintln!("Warning: install failed: {}", e);
     }
 
-    // Get the binary path - use the known location in the repo
-    let exe = build::release_binary_path(&repo_dir);
+    // Get the binary path from the shared candidate resolver.
+    let exe = build::client_update_candidate(false)
+        .map(|(path, _)| path)
+        .unwrap_or_else(|| build::release_binary_path(&repo_dir));
     if !exe.exists() {
         anyhow::bail!("Binary not found at {:?}", exe);
     }
@@ -2841,8 +2836,11 @@ fn run_auto_update() -> Result<()> {
     let hash = String::from_utf8_lossy(&hash.stdout);
     eprintln!("Updated to {}. Restarting...", hash.trim());
 
-    // Exec into new binary with same args
-    let exe = std::env::current_exe()?;
+    // Exec into launcher/stable candidate with same args
+    let exe = build::client_update_candidate(false)
+        .map(|(p, _)| p)
+        .or_else(|| std::env::current_exe().ok())
+        .ok_or_else(|| anyhow::anyhow!("No executable path found after update"))?;
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let err =

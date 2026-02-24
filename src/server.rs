@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::agent::Agent;
+use crate::agent::{Agent, StreamError};
 use crate::ambient_runner::AmbientRunnerHandle;
 use crate::build;
 use crate::bus::{Bus, BusEvent, FileOp};
@@ -424,30 +424,7 @@ fn embedding_idle_unload_secs() -> u64 {
 }
 
 fn server_update_candidate() -> Option<(PathBuf, &'static str)> {
-    if is_selfdev_env() {
-        if let Ok(canary) = crate::build::canary_binary_path() {
-            if canary.exists() {
-                return Some((canary, "canary"));
-            }
-        }
-        if let Ok(rollback) = crate::build::rollback_binary_path() {
-            if rollback.exists() {
-                return Some((rollback, "rollback"));
-            }
-        }
-    }
-
-    if let Some(repo_dir) = crate::build::get_repo_dir() {
-        let exe = build::release_binary_path(&repo_dir);
-        if exe.exists() {
-            return Some((exe, "release"));
-        }
-    }
-
-    if let Some(exe) = crate::build::jcode_path_in_path() {
-        return Some((exe, "path"));
-    }
-    None
+    build::client_update_candidate(is_selfdev_env())
 }
 
 fn canonicalize_or(path: PathBuf) -> PathBuf {
@@ -1742,9 +1719,11 @@ async fn handle_client(
                                 )
                                 .await;
                             }
+                            let retry_after_secs = e.downcast_ref::<StreamError>().and_then(|se| se.retry_after_secs);
                             let _ = client_event_tx.send(ServerEvent::Error {
                                 id: done_id,
                                 message: e.to_string(),
+                                retry_after_secs,
                             });
                         }
                     }
@@ -1777,6 +1756,7 @@ async fn handle_client(
                 let event = ServerEvent::Error {
                     id: 0,
                     message: format!("Invalid request: {}", e),
+                    retry_after_secs: None,
                 };
                 let json = encode_event(&event);
                 let mut w = writer.lock().await;
@@ -1808,6 +1788,7 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: "Already processing a message".to_string(),
+                        retry_after_secs: None,
                     });
                     continue;
                 }
@@ -1892,9 +1873,7 @@ async fn handle_client(
                         .await;
                     }
                     if let Some(message_id) = processing_message_id.take() {
-                        let _ = client_event_tx.send(ServerEvent::TextDelta {
-                            text: "Interrupted".to_string(),
-                        });
+                        let _ = client_event_tx.send(ServerEvent::Interrupted);
                         let _ = client_event_tx.send(ServerEvent::Done { id: message_id });
                     }
                 }
@@ -2278,6 +2257,7 @@ async fn handle_client(
                 let _ = client_event_tx.send(ServerEvent::Error {
                     id,
                     message: "debug_command is only supported on the debug socket".to_string(),
+                    retry_after_secs: None,
                 });
             }
 
@@ -2529,6 +2509,7 @@ async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::Error {
                             id,
                             message: format!("Failed to restore session: {}", e),
+                            retry_after_secs: None,
                         });
                     }
                 }
@@ -2780,6 +2761,7 @@ async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::Error {
                             id,
                             message: format!("Failed to save split session: {}", e),
+                            retry_after_secs: None,
                         });
                         continue;
                     }
@@ -2928,9 +2910,11 @@ async fn handle_client(
                             Some(&event_counter),
                         )
                         .await;
+                        let retry_after_secs = e.downcast_ref::<StreamError>().and_then(|se| se.retry_after_secs);
                         let _ = client_event_tx.send(ServerEvent::Error {
                             id,
                             message: e.to_string(),
+                            retry_after_secs,
                         });
                     }
                 }
@@ -3030,6 +3014,7 @@ async fn handle_client(
                         id,
                         message: "Not in a swarm. Use a git repository to enable swarm features."
                             .to_string(),
+                        retry_after_secs: None,
                     });
                 }
             }
@@ -3121,6 +3106,7 @@ async fn handle_client(
                             let _ = client_event_tx.send(ServerEvent::Error {
                                 id,
                                 message: format!("DM failed: session '{}' not in swarm", target),
+                                retry_after_secs: None,
                             });
                             continue;
                         }
@@ -3221,6 +3207,7 @@ async fn handle_client(
                         id,
                         message: "Not in a swarm. Use a git repository to enable swarm features."
                             .to_string(),
+                        retry_after_secs: None,
                     });
                 }
             }
@@ -3284,6 +3271,7 @@ async fn handle_client(
                         id,
                         message: "Not in a swarm. Use a git repository to enable swarm features."
                             .to_string(),
+                        retry_after_secs: None,
                     });
                 }
             }
@@ -3306,6 +3294,7 @@ async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::Error {
                             id,
                             message: "Not in a swarm.".to_string(),
+                            retry_after_secs: None,
                         });
                         continue;
                     }
@@ -3328,6 +3317,7 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: "No coordinator for this swarm.".to_string(),
+                        retry_after_secs: None,
                     });
                     continue;
                 };
@@ -3523,6 +3513,7 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: "Only the coordinator can approve plan proposals.".to_string(),
+                        retry_after_secs: None,
                     });
                     continue;
                 }
@@ -3533,6 +3524,7 @@ async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::Error {
                             id,
                             message: "Not in a swarm.".to_string(),
+                            retry_after_secs: None,
                         });
                         continue;
                     }
@@ -3556,6 +3548,7 @@ async fn handle_client(
                                 "No pending plan proposal from session '{}'",
                                 proposer_session
                             ),
+                            retry_after_secs: None,
                         });
                         continue;
                     }
@@ -3675,6 +3668,7 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: "Only the coordinator can reject plan proposals.".to_string(),
+                        retry_after_secs: None,
                     });
                     continue;
                 }
@@ -3685,6 +3679,7 @@ async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::Error {
                             id,
                             message: "Not in a swarm.".to_string(),
+                            retry_after_secs: None,
                         });
                         continue;
                     }
@@ -3706,6 +3701,7 @@ async fn handle_client(
                             "No pending plan proposal from session '{}'",
                             proposer_session
                         ),
+                        retry_after_secs: None,
                     });
                     continue;
                 }
@@ -3797,6 +3793,7 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: "Only the coordinator can spawn new agents.".to_string(),
+                        retry_after_secs: None,
                     });
                     continue;
                 }
@@ -3806,6 +3803,7 @@ async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::Error {
                             id,
                             message: "Not in a swarm.".to_string(),
+                            retry_after_secs: None,
                         });
                         continue;
                     }
@@ -3899,6 +3897,7 @@ async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::Error {
                             id,
                             message: format!("Failed to spawn agent: {}", e),
+                            retry_after_secs: None,
                         });
                     }
                 }
@@ -3931,6 +3930,7 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: "Only the coordinator can stop agents.".to_string(),
+                        retry_after_secs: None,
                     });
                     continue;
                 }
@@ -4017,6 +4017,7 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: format!("Unknown session '{}'", target_session),
+                        retry_after_secs: None,
                     });
                 }
             }
@@ -4049,6 +4050,7 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: "Only the coordinator can assign roles.".to_string(),
+                        retry_after_secs: None,
                     });
                     continue;
                 }
@@ -4059,6 +4061,7 @@ async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::Error {
                             id,
                             message: "Not in a swarm.".to_string(),
+                            retry_after_secs: None,
                         });
                         continue;
                     }
@@ -4073,6 +4076,7 @@ async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::Error {
                             id,
                             message: format!("Unknown session '{}'", target_session),
+                            retry_after_secs: None,
                         });
                         continue;
                     }
@@ -4152,6 +4156,7 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: format!("Unknown session '{}'", target_session),
+                        retry_after_secs: None,
                     });
                 }
             }
@@ -4177,6 +4182,7 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: format!("Unknown session '{}'", target_session),
+                        retry_after_secs: None,
                     });
                 }
             }
@@ -4240,12 +4246,14 @@ async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::Error {
                             id,
                             message: "No swarm plan exists for this swarm.".to_string(),
+                            retry_after_secs: None,
                         });
                     }
                 } else {
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: "Not in a swarm.".to_string(),
+                        retry_after_secs: None,
                     });
                 }
             }
@@ -4279,6 +4287,7 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: "Only the coordinator can assign tasks.".to_string(),
+                        retry_after_secs: None,
                     });
                     continue;
                 }
@@ -4289,6 +4298,7 @@ async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::Error {
                             id,
                             message: "Not in a swarm.".to_string(),
+                            retry_after_secs: None,
                         });
                         continue;
                     }
@@ -4539,6 +4549,7 @@ async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::Error {
                             id,
                             message: format!("Task '{}' not found in swarm plan", task_id),
+                            retry_after_secs: None,
                         });
                     }
                 }
@@ -4580,6 +4591,7 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: "Not in a swarm.".to_string(),
+                        retry_after_secs: None,
                     });
                 }
             }
@@ -4623,6 +4635,7 @@ async fn handle_client(
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: "Not in a swarm.".to_string(),
+                        retry_after_secs: None,
                     });
                 }
             }
@@ -4632,6 +4645,7 @@ async fn handle_client(
                 let _ = client_event_tx.send(ServerEvent::Error {
                     id,
                     message: "ClientDebugCommand is for internal use only".to_string(),
+                    retry_after_secs: None,
                 });
             }
             Request::ClientDebugResponse { id, output } => {
@@ -6006,7 +6020,8 @@ async fn execute_debug_command(
             .trim()
             .to_lowercase();
         let claude_usage = crate::usage::get_sync();
-        let claude_usage_exhausted = claude_usage.five_hour >= 0.99 && claude_usage.seven_day >= 0.99;
+        let claude_usage_exhausted =
+            claude_usage.five_hour >= 0.99 && claude_usage.seven_day >= 0.99;
         let default_model = match provider.as_str() {
             "claude" | "anthropic" => {
                 if claude_usage_exhausted {
@@ -6441,6 +6456,7 @@ async fn handle_debug_client(
                 let event = ServerEvent::Error {
                     id: 0,
                     message: format!("Invalid request: {}", e),
+                    retry_after_secs: None,
                 };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;
@@ -6479,6 +6495,7 @@ async fn handle_debug_client(
                     let event = ServerEvent::Error {
                         id,
                         message: "Debug control is disabled. Set JCODE_DEBUG_CONTROL=1 or run in self-dev mode.".to_string(),
+                        retry_after_secs: None,
                     };
                     let json = encode_event(&event);
                     writer.write_all(json.as_bytes()).await?;
@@ -8170,6 +8187,7 @@ async fn handle_debug_client(
                 let event = ServerEvent::Error {
                     id: request.id(),
                     message: "Debug socket only allows ping, state, and debug_command".to_string(),
+                    retry_after_secs: None,
                 };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;
@@ -8770,6 +8788,7 @@ impl Client {
         Ok(ServerEvent::Error {
             id,
             message: "History response not received".to_string(),
+            retry_after_secs: None,
         })
     }
 
@@ -8930,8 +8949,9 @@ async fn do_server_reload_with_progress(
     }
 
     // Step 2: Check for binary
-    let (exe, exe_label) = server_update_candidate()
-        .ok_or_else(|| anyhow::anyhow!("No reloadable binary found (canary/stable or release)"))?;
+    let (exe, exe_label) = server_update_candidate().ok_or_else(|| {
+        anyhow::anyhow!("No reloadable binary found (canary/rollback/launcher/stable)")
+    })?;
     if !exe.exists() {
         send_progress("verify", "❌ No reloadable binary found", Some(false), None);
         send_progress(
