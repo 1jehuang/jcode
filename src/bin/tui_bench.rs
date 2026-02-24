@@ -376,6 +376,10 @@ impl TuiState for BenchState {
     fn working_dir(&self) -> Option<String> {
         None
     }
+
+    fn now_millis(&self) -> u64 {
+        self.started_at.elapsed().as_millis() as u64
+    }
 }
 
 fn make_text(len: usize) -> String {
