@@ -7,7 +7,7 @@
 //! Integrates with the Haiku sidecar for relevance verification and extraction.
 
 use crate::memory_graph::{EdgeKind, MemoryGraph, GRAPH_VERSION};
-use crate::sidecar::HaikuSidecar;
+use crate::sidecar::Sidecar;
 use crate::storage;
 use crate::tui::info_widget::{
     InjectedMemoryItem, MemoryActivity, MemoryEvent, MemoryEventKind, MemoryState,
@@ -1266,7 +1266,7 @@ impl MemoryManager {
         transcript: &str,
         session_id: &str,
     ) -> Result<Vec<String>> {
-        let sidecar = HaikuSidecar::new();
+        let sidecar = Sidecar::new();
         let extracted = sidecar.extract_memories(transcript).await?;
 
         let mut ids = Vec::new();
@@ -1322,7 +1322,7 @@ impl MemoryManager {
         });
         add_event(MemoryEventKind::SidecarStarted);
 
-        let sidecar = HaikuSidecar::new();
+        let sidecar = Sidecar::new();
         let mut relevant = Vec::new();
         let mut relevant_ids = Vec::new();
 
@@ -1523,7 +1523,7 @@ impl MemoryManager {
         });
         add_event(MemoryEventKind::SidecarStarted);
 
-        let sidecar = HaikuSidecar::new();
+        let sidecar = Sidecar::new();
         let mut relevant = Vec::new();
         let mut relevant_ids = Vec::new();
 

@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use crate::embedding;
 use crate::memory::{self, MemoryEntry, MemoryManager};
 use crate::memory_graph::{ClusterEntry, EdgeKind, MemoryGraph};
-use crate::sidecar::HaikuSidecar;
+use crate::sidecar::Sidecar;
 use crate::tui::info_widget::{MemoryEventKind, MemoryState};
 
 /// Context from a retrieval operation for post-retrieval maintenance
@@ -133,7 +133,7 @@ pub struct MemoryAgent {
     rx: mpsc::Receiver<AgentMessage>,
 
     /// Haiku sidecar for LLM decisions
-    sidecar: HaikuSidecar,
+    sidecar: Sidecar,
 
     /// Memory manager for storage
     memory_manager: MemoryManager,
@@ -159,7 +159,7 @@ impl MemoryAgent {
     fn new(rx: mpsc::Receiver<AgentMessage>) -> Self {
         Self {
             rx,
-            sidecar: HaikuSidecar::new(),
+            sidecar: Sidecar::new(),
             memory_manager: MemoryManager::new(),
             last_context_embedding: None,
             last_context_string: None,
@@ -1206,7 +1206,7 @@ pub fn trigger_final_extraction(transcript: String, session_id: String) {
             transcript.len()
         ));
 
-        let sidecar = crate::sidecar::HaikuSidecar::new();
+        let sidecar = crate::sidecar::Sidecar::new();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             sidecar.extract_memories(&transcript),

@@ -1662,7 +1662,7 @@ impl Agent {
         }
 
         // Extract using sidecar
-        let sidecar = crate::sidecar::HaikuSidecar::new();
+        let sidecar = crate::sidecar::Sidecar::new();
         match sidecar.extract_memories(&transcript).await {
             Ok(extracted) if !extracted.is_empty() => {
                 let manager = crate::memory::MemoryManager::new();

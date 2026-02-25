@@ -11,11 +11,11 @@ use crate::auth;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// Preferred sidecar model (fast + cheap) when OpenAI creds are available.
+/// Fast/cheap OpenAI model used when Codex credentials are available.
 pub const SIDECAR_OPENAI_MODEL: &str = "gpt-5.3-codex-spark";
 const SIDECAR_OPENAI_CHATGPT_MODEL: &str = "gpt-5.3-codex";
 
-/// Fallback sidecar model when only Claude creds are available.
+/// Fast/cheap Claude model used when only Claude credentials are available.
 const SIDECAR_CLAUDE_MODEL: &str = "claude-haiku-4-5-20241022";
 
 /// OpenAI Responses API
@@ -50,14 +50,14 @@ enum SidecarBackend {
 
 /// Lightweight client for fast sidecar calls
 #[derive(Clone)]
-pub struct HaikuSidecar {
+pub struct Sidecar {
     client: reqwest::Client,
     model: String,
     max_tokens: u32,
     backend: SidecarBackend,
 }
 
-impl HaikuSidecar {
+impl Sidecar {
     /// Create a new sidecar client, auto-selecting the best available backend.
     /// Prefers OpenAI (codex-spark) if creds exist, falls back to Claude.
     pub fn new() -> Self {
@@ -331,7 +331,7 @@ Output ONLY the formatted lines, no other text. If no memories worth extracting,
     }
 }
 
-impl Default for HaikuSidecar {
+impl Default for Sidecar {
     fn default() -> Self {
         Self::new()
     }
@@ -521,7 +521,7 @@ mod tests {
         let has_openai = crate::auth::codex::load_credentials().is_ok();
         let has_claude = crate::auth::claude::load_credentials().is_ok();
 
-        let sidecar = HaikuSidecar::new();
+        let sidecar = Sidecar::new();
         if has_openai {
             assert_eq!(sidecar.backend, SidecarBackend::OpenAI);
             assert_eq!(sidecar.model, SIDECAR_OPENAI_MODEL);
