@@ -59,9 +59,19 @@ pub struct HaikuSidecar {
 
 impl HaikuSidecar {
     /// Create a new sidecar client, auto-selecting the best available backend.
-    /// Prefers OpenAI (codex-spark) if creds exist, falls back to Claude.
+    /// Prefers OpenAI (codex-spark) if creds exist and are in direct API mode.
+    /// Falls back to Claude if OpenAI creds are ChatGPT mode (requires streaming).
     pub fn new() -> Self {
-        let (backend, model) = if auth::codex::load_credentials().is_ok() {
+        let use_openai = if let Ok(creds) = auth::codex::load_credentials() {
+            // ChatGPT mode (refresh_token or id_token) requires streaming, which
+            // the sidecar doesn't support. Only use OpenAI for direct API keys.
+            let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
+            !is_chatgpt_mode
+        } else {
+            false
+        };
+
+        let (backend, model) = if use_openai {
             (SidecarBackend::OpenAI, SIDECAR_OPENAI_MODEL.to_string())
         } else if auth::claude::load_credentials().is_ok() {
             (SidecarBackend::Claude, SIDECAR_CLAUDE_MODEL.to_string())
