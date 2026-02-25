@@ -1790,6 +1790,7 @@ fn profile_state() -> &'static Mutex<RenderProfile> {
 pub struct LayoutSnapshot {
     pub messages_area: Rect,
     pub diagram_area: Option<Rect>,
+    pub diff_pane_area: Option<Rect>,
 }
 
 static LAST_LAYOUT: OnceLock<Mutex<Option<LayoutSnapshot>>> = OnceLock::new();
@@ -1798,11 +1799,12 @@ fn last_layout_state() -> &'static Mutex<Option<LayoutSnapshot>> {
     LAST_LAYOUT.get_or_init(|| Mutex::new(None))
 }
 
-pub fn record_layout_snapshot(messages_area: Rect, diagram_area: Option<Rect>) {
+pub fn record_layout_snapshot(messages_area: Rect, diagram_area: Option<Rect>, diff_pane_area: Option<Rect>) {
     if let Ok(mut snapshot) = last_layout_state().lock() {
         *snapshot = Some(LayoutSnapshot {
             messages_area,
             diagram_area,
+            diff_pane_area,
         });
     }
 }
@@ -2275,7 +2277,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         capture.layout.messages_area = Some(messages_area.into());
         capture.layout.diagram_area = diagram_area.map(|r| r.into());
     }
-    record_layout_snapshot(messages_area, diagram_area);
+    record_layout_snapshot(messages_area, diagram_area, diff_pane_area);
 
     let margins = draw_messages(frame, app, messages_area, &prepared);
 
@@ -3479,13 +3481,6 @@ pub(crate) fn render_tool_message(
     };
 
     let centered = markdown::center_code_blocks();
-    let content_width = width.saturating_sub(4) as usize;
-    let tool_pad = if centered {
-        (width as usize).saturating_sub(content_width) / 2
-    } else {
-        0
-    };
-    let tool_pad_str: String = " ".repeat(tool_pad);
 
     let summary = get_tool_summary(tc);
 
@@ -3513,7 +3508,7 @@ pub(crate) fn render_tool_message(
     };
 
     let mut tool_line = vec![
-        Span::styled(format!("{}  {} ", tool_pad_str, icon), Style::default().fg(icon_color)),
+        Span::styled(format!("  {} ", icon), Style::default().fg(icon_color)),
         Span::styled(tc.name.clone(), Style::default().fg(TOOL_COLOR)),
         Span::styled(format!(" {}", summary), Style::default().fg(DIM_COLOR)),
     ];
@@ -3531,7 +3526,7 @@ pub(crate) fn render_tool_message(
         tool_line.push(Span::styled(")", Style::default().fg(DIM_COLOR)));
     }
 
-    lines.push(Line::from(tool_line).left_aligned());
+    lines.push(Line::from(tool_line));
 
     // Expand batch sub-calls as individual tool lines
     if tc.name == "batch" {
@@ -3562,13 +3557,12 @@ pub(crate) fn render_tool_message(
                 lines.push(
                     Line::from(vec![
                         Span::styled(
-                            format!("{}    {} ", tool_pad_str, sub_icon),
+                            format!("    {} ", sub_icon),
                             Style::default().fg(sub_icon_color),
                         ),
                         Span::styled(display_name.to_string(), Style::default().fg(TOOL_COLOR)),
                         Span::styled(format!(" {}", sub_summary), Style::default().fg(DIM_COLOR)),
                     ])
-                    .left_aligned(),
                 );
             }
         }
@@ -3636,8 +3630,7 @@ pub(crate) fn render_tool_message(
                 (result, true)
             };
 
-        // Use consistent left padding (matches tool call alignment in centered mode)
-        let pad_str: String = " ".repeat(tool_pad);
+        let pad_str = "";
 
         // Add diff block header
         lines.push(
@@ -3645,7 +3638,6 @@ pub(crate) fn render_tool_message(
                 format!("{}┌─ diff", pad_str),
                 Style::default().fg(DIM_COLOR),
             ))
-            .left_aligned(),
         );
 
         let mut shown_truncation = false;
@@ -3664,7 +3656,6 @@ pub(crate) fn render_tool_message(
                         format!("{}│ ... {} more changes ...", pad_str, skipped),
                         Style::default().fg(DIM_COLOR),
                     ))
-                    .left_aligned(),
                 );
                 shown_truncation = true;
             }
@@ -3691,7 +3682,7 @@ pub(crate) fn render_tool_message(
                 }
             }
 
-            lines.push(Line::from(spans).left_aligned());
+            lines.push(Line::from(spans));
         }
 
         // Add diff block footer
@@ -3700,7 +3691,25 @@ pub(crate) fn render_tool_message(
         } else {
             format!("{}└─", pad_str)
         };
-        lines.push(Line::from(Span::styled(footer, Style::default().fg(DIM_COLOR))).left_aligned());
+        lines.push(Line::from(Span::styled(footer, Style::default().fg(DIM_COLOR))));
+    }
+
+    // In centered mode, find the widest line and compute padding to center
+    // the whole block as a unit. All lines share the same left edge.
+    if centered {
+        let max_line_width = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.len()).sum::<usize>())
+            .max()
+            .unwrap_or(0);
+        let pad = (width as usize).saturating_sub(max_line_width) / 2;
+        if pad > 0 {
+            let pad_str: String = " ".repeat(pad);
+            for line in &mut lines {
+                line.spans.insert(0, Span::raw(pad_str.clone()));
+                line.alignment = Some(ratatui::layout::Alignment::Left);
+            }
+        }
     }
 
     lines
@@ -8167,7 +8176,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_tool_message_batch_subcall_lines_are_left_aligned() {
+    fn test_render_tool_message_batch_subcall_lines_alignment_unset() {
         let msg = DisplayMessage {
             role: "tool".to_string(),
             content:
@@ -8189,20 +8198,20 @@ mod tests {
             }),
         };
 
+        // In non-centered mode, lines have no alignment set
+        crate::tui::markdown::set_center_code_blocks(false);
         let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
-        let subcall_lines: Vec<_> = lines
-            .iter()
-            .filter(|line| {
-                let text = extract_line_text(line);
-                let trimmed = text.trim_start();
-                let indent = text.len() - trimmed.len();
-                indent > 4 && (trimmed.starts_with("✓") || trimmed.starts_with("✗"))
-            })
-            .collect();
-
-        assert_eq!(subcall_lines.len(), 2);
-        for line in subcall_lines {
-            assert_eq!(line.alignment, Some(Alignment::Left));
+        for line in &lines {
+            assert_eq!(line.alignment, None, "non-centered tool lines should have no alignment set");
         }
+
+        // In centered mode, lines are left-aligned with padding prepended
+        crate::tui::markdown::set_center_code_blocks(true);
+        let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+        for line in &lines {
+            assert_eq!(line.alignment, Some(Alignment::Left), "centered tool lines should be left-aligned with padding");
+            assert!(line.spans[0].content.starts_with(' '), "first span should be padding spaces");
+        }
+        crate::tui::markdown::set_center_code_blocks(false);
     }
 }
