@@ -209,6 +209,7 @@ pub struct RouteOption {
 }
 
 pub(crate) const REDRAW_FAST: Duration = Duration::from_millis(50);
+pub(crate) const REDRAW_IDLE_ANIM: Duration = Duration::from_millis(100);
 pub(crate) const REDRAW_IDLE: Duration = Duration::from_millis(250);
 pub(crate) const REDRAW_DEEP_IDLE: Duration = Duration::from_millis(1000);
 const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
@@ -244,8 +245,17 @@ pub(crate) fn should_animate(state: &dyn TuiState) -> bool {
 }
 
 pub(crate) fn redraw_interval(state: &dyn TuiState) -> Duration {
-    if should_animate(state) {
+    if state.is_processing()
+        || !state.streaming_text().is_empty()
+        || state.status_notice().is_some()
+        || state.rate_limit_remaining().is_some()
+        || startup_animation_active(state)
+    {
         return REDRAW_FAST;
+    }
+
+    if idle_donut_active(state) {
+        return REDRAW_IDLE_ANIM;
     }
 
     let deep_idle = state
