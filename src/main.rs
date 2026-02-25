@@ -297,8 +297,12 @@ struct Args {
     #[arg(long, global = true, num_args = 0..=1, default_missing_value = "")]
     resume: Option<String>,
 
-    /// Run standalone TUI without connecting to server (DEPRECATED: use server mode)
+    /// DEPRECATED: Run standalone TUI without connecting to server.
+    /// The default mode is now always client/server (even for self-dev).
+    /// Standalone mode is missing features like graceful cancel with partial
+    /// content preservation on the server side. Will be removed in a future version.
     #[arg(long, global = true, hide = true)]
+    #[deprecated = "Use default client/server mode instead"]
     standalone: bool,
 
     /// Disable auto-detection of jcode repository and self-dev mode
@@ -780,7 +784,12 @@ async fn run_main(mut args: Args) -> Result<()> {
                 return run_self_dev(false, args.resume).await;
             }
 
-            // Check for --standalone flag (DEPRECATED)
+            // DEPRECATED: Standalone mode runs everything in a single process
+            // (no server/client split). This is missing features that rely on the
+            // server architecture, such as graceful cancel with partial content
+            // preservation, hot-reload, and multi-client support.
+            // TODO: Remove standalone mode entirely in a future version.
+            #[allow(deprecated)]
             if args.standalone {
                 eprintln!("\x1b[33m⚠️  Warning: --standalone is deprecated and will be removed in a future version.\x1b[0m");
                 eprintln!("\x1b[33m   The default server/client mode now handles all use cases including self-dev.\x1b[0m\n");
@@ -1096,6 +1105,13 @@ async fn init_provider_and_registry(
     Ok((provider, registry))
 }
 
+/// Run TUI in standalone (single-process) mode.
+///
+/// DEPRECATED: This runs the agent and TUI in the same process without a
+/// server/client split. The default mode is now client/server, which supports
+/// graceful cancel (preserving partial streamed content), hot-reload, and
+/// multi-client connections. This function is retained only for the hidden
+/// `--standalone` flag and will be removed in a future version.
 async fn run_tui(
     provider: Arc<dyn provider::Provider>,
     registry: tool::Registry,
