@@ -637,7 +637,7 @@ pub struct App {
     // Diff display mode (toggle with Shift+Tab)
     diff_mode: crate::config::DiffDisplayMode,
     // Center all content (from config)
-    centered: bool,
+    pub(crate) centered: bool,
     // Diagram display mode (from config)
     diagram_mode: crate::config::DiagramDisplayMode,
     // Whether the pinned diagram pane has focus
@@ -12453,6 +12453,10 @@ impl App {
         self.centered = !self.centered;
         let mode = if self.centered { "Centered" } else { "Left-aligned" };
         self.set_status_notice(format!("Layout: {}", mode));
+    }
+
+    pub fn set_centered(&mut self, centered: bool) {
+        self.centered = centered;
     }
 
     // ==================== Debug Socket Methods ====================

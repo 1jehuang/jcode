@@ -61,6 +61,8 @@ pub struct KeybindingsConfig {
     pub effort_increase: String,
     /// Effort decrease key (default: "alt+left")
     pub effort_decrease: String,
+    /// Centered mode toggle key (default: "alt+c")
+    pub centered_toggle: String,
     /// Scroll to previous prompt key (default: "ctrl+[")
     pub scroll_prompt_up: String,
     /// Scroll to next prompt key (default: "ctrl+]")
@@ -84,6 +86,7 @@ impl Default for KeybindingsConfig {
             model_switch_prev: "ctrl+shift+tab".to_string(),
             effort_increase: "alt+right".to_string(),
             effort_decrease: "alt+left".to_string(),
+            centered_toggle: "alt+c".to_string(),
             scroll_prompt_up: "ctrl+[".to_string(),
             scroll_prompt_down: "ctrl+]".to_string(),
             scroll_bookmark: "ctrl+g".to_string(),
@@ -473,6 +476,9 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_EFFORT_DECREASE_KEY") {
             self.keybindings.effort_decrease = v;
         }
+        if let Ok(v) = std::env::var("JCODE_CENTERED_TOGGLE_KEY") {
+            self.keybindings.centered_toggle = v;
+        }
         if let Ok(v) = std::env::var("JCODE_SCROLL_PROMPT_UP_KEY") {
             self.keybindings.scroll_prompt_up = v;
         }
@@ -734,6 +740,9 @@ model_switch_prev = "ctrl+shift+tab"
 effort_increase = "alt+right"
 effort_decrease = "alt+left"
 
+# Centered mode toggle key
+centered_toggle = "alt+c"
+
 # Jump between user prompts
 # Also supports Ctrl+1..9 for recency rank jumps (1 = most recent).
 scroll_prompt_up = "ctrl+["
@@ -886,6 +895,7 @@ desktop_notifications = true
 - Model prev: `{}`
 - Effort increase: `{}`
 - Effort decrease: `{}`
+- Centered toggle: `{}`
 - Prompt up: `{}`
 - Prompt down: `{}`
 - Scroll bookmark: `{}`
@@ -947,6 +957,7 @@ desktop_notifications = true
             self.keybindings.model_switch_prev,
             self.keybindings.effort_increase,
             self.keybindings.effort_decrease,
+            self.keybindings.centered_toggle,
             self.keybindings.scroll_prompt_up,
             self.keybindings.scroll_prompt_down,
             self.keybindings.scroll_bookmark,

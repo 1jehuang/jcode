@@ -380,6 +380,12 @@ pub struct EffortSwitchKeys {
     pub decrease_label: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct CenteredToggleKeys {
+    pub toggle: KeyBinding,
+    pub toggle_label: String,
+}
+
 impl EffortSwitchKeys {
     pub fn direction_for(&self, code: KeyCode, modifiers: KeyModifiers) -> Option<i8> {
         if self.increase.matches(code.clone(), modifiers) {
@@ -420,6 +426,23 @@ pub fn load_effort_switch_keys() -> EffortSwitchKeys {
         decrease,
         increase_label,
         decrease_label,
+    }
+}
+
+pub fn load_centered_toggle_key() -> CenteredToggleKeys {
+    let cfg = config();
+
+    let default_toggle = KeyBinding {
+        code: KeyCode::Char('c'),
+        modifiers: KeyModifiers::ALT,
+    };
+
+    let (toggle, toggle_label) =
+        parse_or_default(&cfg.keybindings.centered_toggle, default_toggle, "Alt+C");
+
+    CenteredToggleKeys {
+        toggle,
+        toggle_label,
     }
 }
 
