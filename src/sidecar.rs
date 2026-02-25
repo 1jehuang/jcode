@@ -59,19 +59,9 @@ pub struct HaikuSidecar {
 
 impl HaikuSidecar {
     /// Create a new sidecar client, auto-selecting the best available backend.
-    /// Prefers OpenAI (codex-spark) if creds exist and are in direct API mode.
-    /// Falls back to Claude if OpenAI creds are ChatGPT mode (requires streaming).
+    /// Prefers OpenAI (codex-spark) if creds exist, falls back to Claude.
     pub fn new() -> Self {
-        let use_openai = if let Ok(creds) = auth::codex::load_credentials() {
-            // ChatGPT mode (refresh_token or id_token) requires streaming, which
-            // the sidecar doesn't support. Only use OpenAI for direct API keys.
-            let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
-            !is_chatgpt_mode
-        } else {
-            false
-        };
-
-        let (backend, model) = if use_openai {
+        let (backend, model) = if auth::codex::load_credentials().is_ok() {
             (SidecarBackend::OpenAI, SIDECAR_OPENAI_MODEL.to_string())
         } else if auth::claude::load_credentials().is_ok() {
             (SidecarBackend::Claude, SIDECAR_CLAUDE_MODEL.to_string())
@@ -103,7 +93,10 @@ impl HaikuSidecar {
         }
     }
 
-    /// Complete via OpenAI Responses API
+    /// Complete via OpenAI Responses API.
+    ///
+    /// - Direct API key mode: non-streaming, simple JSON response.
+    /// - ChatGPT OAuth mode: streaming SSE (required by chatgpt.com endpoint).
     async fn complete_openai(&self, system: &str, user_message: &str) -> Result<String> {
         let creds = auth::codex::load_credentials()
             .context("Failed to load OpenAI/Codex credentials for sidecar")?;
@@ -116,17 +109,20 @@ impl HaikuSidecar {
         };
         let url = format!("{}/{}", base.trim_end_matches('/'), OPENAI_RESPONSES_PATH);
 
+        let model = if is_chatgpt_mode && self.model == SIDECAR_OPENAI_MODEL {
+            SIDECAR_OPENAI_CHATGPT_MODEL
+        } else {
+            &self.model
+        };
+
         let mut instructions = String::new();
         if !system.is_empty() {
             instructions.push_str(system);
         }
 
+        // ChatGPT endpoint requires stream:true; direct API supports stream:false.
         let request = serde_json::json!({
-            "model": if is_chatgpt_mode && self.model == SIDECAR_OPENAI_MODEL {
-                SIDECAR_OPENAI_CHATGPT_MODEL
-            } else {
-                &self.model
-            },
+            "model": model,
             "instructions": instructions,
             "input": [{
                 "type": "message",
@@ -136,7 +132,7 @@ impl HaikuSidecar {
                     "text": user_message,
                 }],
             }],
-            "stream": false,
+            "stream": is_chatgpt_mode,
             "store": false,
         });
 
@@ -165,33 +161,15 @@ impl HaikuSidecar {
             anyhow::bail!("OpenAI API error ({}): {}", status, error_text);
         }
 
-        let result: serde_json::Value = response
-            .json()
-            .await
-            .context("Failed to parse OpenAI API response")?;
-
-        // Extract text from Responses API output
-        let mut text = String::new();
-        if let Some(output) = result.get("output").and_then(|v| v.as_array()) {
-            for item in output {
-                let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                if item_type == "message" {
-                    if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
-                        for block in content {
-                            let block_type =
-                                block.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                            if block_type == "output_text" || block_type == "text" {
-                                if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
-                                    text.push_str(t);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        if is_chatgpt_mode {
+            collect_openai_sse_text(response).await
+        } else {
+            let result: serde_json::Value = response
+                .json()
+                .await
+                .context("Failed to parse OpenAI API response")?;
+            extract_openai_response_text(&result)
         }
-
-        Ok(text)
     }
 
     /// Complete via Claude Messages API
@@ -370,6 +348,89 @@ pub struct ExtractedMemory {
     pub trust: String,
 }
 
+/// Collect text from an OpenAI Responses API SSE stream.
+///
+/// Parses `data: <json>` lines and accumulates text deltas from
+/// `response.output_text.delta` events, stopping on completion/done.
+async fn collect_openai_sse_text(response: reqwest::Response) -> Result<String> {
+    use futures::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut text = String::new();
+    let mut buf = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.context("Error reading SSE stream")?;
+        buf.push_str(&String::from_utf8_lossy(&bytes));
+
+        // Process all complete lines in the buffer
+        while let Some(newline_pos) = buf.find('\n') {
+            let line = buf[..newline_pos].trim_end_matches('\r').to_string();
+            buf = buf[newline_pos + 1..].to_string();
+
+            if let Some(data) = line.strip_prefix("data: ") {
+                if data == "[DONE]" {
+                    return Ok(text);
+                }
+                if let Ok(event) = serde_json::from_str::<SseEvent>(data) {
+                    match event.kind.as_str() {
+                        "response.output_text.delta" => {
+                            if let Some(delta) = event.delta {
+                                text.push_str(&delta);
+                            }
+                        }
+                        "response.completed" | "response.incomplete" => {
+                            return Ok(text);
+                        }
+                        "response.failed" | "error" => {
+                            let msg = event
+                                .error
+                                .as_ref()
+                                .and_then(|e| e.as_str())
+                                .unwrap_or("unknown error");
+                            anyhow::bail!("OpenAI SSE error: {}", msg);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(text)
+}
+
+/// Extract text from a non-streaming OpenAI Responses API JSON response.
+fn extract_openai_response_text(result: &serde_json::Value) -> Result<String> {
+    let mut text = String::new();
+    if let Some(output) = result.get("output").and_then(|v| v.as_array()) {
+        for item in output {
+            let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if item_type == "message" {
+                if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
+                    for block in content {
+                        let block_type =
+                            block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        if block_type == "output_text" || block_type == "text" {
+                            if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                                text.push_str(t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(text)
+}
+
+#[derive(Deserialize)]
+struct SseEvent {
+    #[serde(rename = "type")]
+    kind: String,
+    delta: Option<String>,
+    error: Option<serde_json::Value>,
+}
+
 // Claude API types
 
 #[derive(Serialize)]
@@ -455,15 +516,13 @@ mod tests {
 
     #[test]
     fn test_backend_selection_prefers_openai() {
-        // OpenAI is preferred only when creds are in direct API mode (not ChatGPT mode).
-        // ChatGPT mode (refresh_token/id_token) requires streaming, so we fall back to Claude.
-        let openai_direct = crate::auth::codex::load_credentials()
-            .map(|c| c.refresh_token.is_empty() && c.id_token.is_none())
-            .unwrap_or(false);
+        // OpenAI is preferred when creds exist (both direct API and ChatGPT mode).
+        // ChatGPT mode uses streaming SSE; direct API uses non-streaming JSON.
+        let has_openai = crate::auth::codex::load_credentials().is_ok();
         let has_claude = crate::auth::claude::load_credentials().is_ok();
 
         let sidecar = HaikuSidecar::new();
-        if openai_direct {
+        if has_openai {
             assert_eq!(sidecar.backend, SidecarBackend::OpenAI);
             assert_eq!(sidecar.model, SIDECAR_OPENAI_MODEL);
         } else if has_claude {
