@@ -199,6 +199,45 @@ impl Registry {
         }
     }
 
+    /// Base tools that are stateless and can be shared across sessions.
+    /// Created once and cached in a OnceLock, then cloned (cheap Arc bumps) per session.
+    fn base_tools(skills: &Arc<RwLock<SkillRegistry>>) -> HashMap<String, Arc<dyn Tool>> {
+        use std::sync::OnceLock;
+        static BASE: OnceLock<HashMap<String, Arc<dyn Tool>>> = OnceLock::new();
+        let base = BASE.get_or_init(|| {
+            let mut m = HashMap::new();
+            m.insert("read".into(), Arc::new(read::ReadTool::new()) as Arc<dyn Tool>);
+            m.insert("write".into(), Arc::new(write::WriteTool::new()) as _);
+            m.insert("edit".into(), Arc::new(edit::EditTool::new()) as _);
+            m.insert("multiedit".into(), Arc::new(multiedit::MultiEditTool::new()) as _);
+            m.insert("patch".into(), Arc::new(patch::PatchTool::new()) as _);
+            m.insert("apply_patch".into(), Arc::new(apply_patch::ApplyPatchTool::new()) as _);
+            m.insert("glob".into(), Arc::new(glob::GlobTool::new()) as _);
+            m.insert("grep".into(), Arc::new(grep::GrepTool::new()) as _);
+            m.insert("ls".into(), Arc::new(ls::LsTool::new()) as _);
+            m.insert("bash".into(), Arc::new(bash::BashTool::new()) as _);
+            m.insert("webfetch".into(), Arc::new(webfetch::WebFetchTool::new()) as _);
+            m.insert("websearch".into(), Arc::new(websearch::WebSearchTool::new()) as _);
+            m.insert("codesearch".into(), Arc::new(codesearch::CodeSearchTool::new()) as _);
+            m.insert("invalid".into(), Arc::new(invalid::InvalidTool::new()) as _);
+            m.insert("lsp".into(), Arc::new(lsp::LspTool::new()) as _);
+            m.insert("todowrite".into(), Arc::new(todo::TodoWriteTool::new()) as _);
+            m.insert("todoread".into(), Arc::new(todo::TodoReadTool::new()) as _);
+            m.insert("bg".into(), Arc::new(bg::BgTool::new()) as _);
+            m.insert("communicate".into(), Arc::new(communicate::CommunicateTool::new()) as _);
+            m.insert("session_search".into(), Arc::new(session_search::SessionSearchTool::new()) as _);
+            m.insert("remember".into(), Arc::new(remember::RememberTool::new()) as _);
+            m.insert("memory".into(), Arc::new(memory::MemoryTool::new()) as _);
+            m.insert("schedule".into(), Arc::new(ambient::ScheduleTool::new()) as _);
+            m
+        });
+        // Clone the Arc entries (cheap refcount bumps, not deep copies)
+        let mut tools = base.clone();
+        // SkillTool needs the skills registry reference (shared across sessions)
+        tools.insert("skill_manage".into(), Arc::new(skill::SkillTool::new(skills.clone())) as _);
+        tools
+    }
+
     pub async fn new(provider: Arc<dyn Provider>) -> Self {
         let skills = Arc::new(RwLock::new(SkillRegistry::load().unwrap_or_default()));
         let compaction = Arc::new(RwLock::new(CompactionManager::new()));
@@ -208,143 +247,23 @@ impl Registry {
             compaction: compaction.clone(),
         };
 
-        let mut tools_map = HashMap::new();
+        let mut tools_map = Self::base_tools(&skills);
 
-        // File operations
+        // Per-session tools that need provider/registry references
         tools_map.insert(
-            "read".to_string(),
-            Arc::new(read::ReadTool::new()) as Arc<dyn Tool>,
+            "subagent".into(),
+            Arc::new(task::SubagentTool::new(provider, registry.clone())) as _,
         );
         tools_map.insert(
-            "write".to_string(),
-            Arc::new(write::WriteTool::new()) as Arc<dyn Tool>,
+            "batch".into(),
+            Arc::new(batch::BatchTool::new(registry.clone())) as _,
         );
         tools_map.insert(
-            "edit".to_string(),
-            Arc::new(edit::EditTool::new()) as Arc<dyn Tool>,
-        );
-        tools_map.insert(
-            "multiedit".to_string(),
-            Arc::new(multiedit::MultiEditTool::new()) as Arc<dyn Tool>,
-        );
-        tools_map.insert(
-            "patch".to_string(),
-            Arc::new(patch::PatchTool::new()) as Arc<dyn Tool>,
-        );
-        tools_map.insert(
-            "apply_patch".to_string(),
-            Arc::new(apply_patch::ApplyPatchTool::new()) as Arc<dyn Tool>,
+            "conversation_search".into(),
+            Arc::new(conversation_search::ConversationSearchTool::new(compaction)) as _,
         );
 
-        // Search and navigation
-        tools_map.insert(
-            "glob".to_string(),
-            Arc::new(glob::GlobTool::new()) as Arc<dyn Tool>,
-        );
-        tools_map.insert(
-            "grep".to_string(),
-            Arc::new(grep::GrepTool::new()) as Arc<dyn Tool>,
-        );
-        tools_map.insert(
-            "ls".to_string(),
-            Arc::new(ls::LsTool::new()) as Arc<dyn Tool>,
-        );
-
-        // Execution
-        tools_map.insert(
-            "bash".to_string(),
-            Arc::new(bash::BashTool::new()) as Arc<dyn Tool>,
-        );
-
-        // Web
-        tools_map.insert(
-            "webfetch".to_string(),
-            Arc::new(webfetch::WebFetchTool::new()) as Arc<dyn Tool>,
-        );
-        tools_map.insert(
-            "websearch".to_string(),
-            Arc::new(websearch::WebSearchTool::new()) as Arc<dyn Tool>,
-        );
-        tools_map.insert(
-            "codesearch".to_string(),
-            Arc::new(codesearch::CodeSearchTool::new()) as Arc<dyn Tool>,
-        );
-
-        // Meta tools
-        tools_map.insert(
-            "invalid".to_string(),
-            Arc::new(invalid::InvalidTool::new()) as Arc<dyn Tool>,
-        );
-        tools_map.insert(
-            "skill_manage".to_string(),
-            Arc::new(skill::SkillTool::new(skills)) as Arc<dyn Tool>,
-        );
-        tools_map.insert(
-            "lsp".to_string(),
-            Arc::new(lsp::LspTool::new()) as Arc<dyn Tool>,
-        );
-        let subagent_tool = task::SubagentTool::new(provider, registry.clone());
-        tools_map.insert(
-            "subagent".to_string(),
-            Arc::new(subagent_tool) as Arc<dyn Tool>,
-        );
-        tools_map.insert(
-            "todowrite".to_string(),
-            Arc::new(todo::TodoWriteTool::new()) as Arc<dyn Tool>,
-        );
-        tools_map.insert(
-            "todoread".to_string(),
-            Arc::new(todo::TodoReadTool::new()) as Arc<dyn Tool>,
-        );
-        tools_map.insert(
-            "bg".to_string(),
-            Arc::new(bg::BgTool::new()) as Arc<dyn Tool>,
-        );
-
-        // Add batch with a reference to the registry
-        let batch_tool = batch::BatchTool::new(registry.clone());
-        tools_map.insert("batch".to_string(), Arc::new(batch_tool) as Arc<dyn Tool>);
-
-        // Conversation search for RAG over compacted history
-        let search_tool = conversation_search::ConversationSearchTool::new(compaction);
-        tools_map.insert(
-            "conversation_search".to_string(),
-            Arc::new(search_tool) as Arc<dyn Tool>,
-        );
-
-        // Agent communication tool
-        tools_map.insert(
-            "communicate".to_string(),
-            Arc::new(communicate::CommunicateTool::new()) as Arc<dyn Tool>,
-        );
-
-        // Cross-session search (RAG over past sessions)
-        tools_map.insert(
-            "session_search".to_string(),
-            Arc::new(session_search::SessionSearchTool::new()) as Arc<dyn Tool>,
-        );
-
-        // Simple remember tool for persisting learnings
-        tools_map.insert(
-            "remember".to_string(),
-            Arc::new(remember::RememberTool::new()) as Arc<dyn Tool>,
-        );
-
-        // Full memory tool with categories and lifecycle management
-        tools_map.insert(
-            "memory".to_string(),
-            Arc::new(memory::MemoryTool::new()) as Arc<dyn Tool>,
-        );
-
-        // Schedule tool for queueing future ambient tasks
-        tools_map.insert(
-            "schedule".to_string(),
-            Arc::new(ambient::ScheduleTool::new()) as Arc<dyn Tool>,
-        );
-
-        // Populate the registry
         *registry.tools.write().await = tools_map;
-
         registry
     }
 
