@@ -4902,9 +4902,24 @@ impl App {
             }
             ServerEvent::Interrupted => {
                 // Treat interruption as a system/status event, not assistant output.
+                // But preserve partial streamed content as a display message.
                 self.rate_limit_pending_message = None;
                 self.interleave_message = None;
                 self.pending_soft_interrupts.clear();
+                if let Some(chunk) = self.stream_buffer.flush() {
+                    self.streaming_text.push_str(&chunk);
+                }
+                if !self.streaming_text.is_empty() {
+                    let content = self.take_streaming_text();
+                    self.push_display_message(DisplayMessage {
+                        role: "assistant".to_string(),
+                        content,
+                        tool_calls: Vec::new(),
+                        duration_secs: self.processing_started.map(|t| t.elapsed().as_secs_f32()),
+                        title: None,
+                        tool_data: None,
+                    });
+                }
                 self.clear_streaming_render_state();
                 self.stream_buffer.clear();
                 self.streaming_tool_calls.clear();
@@ -11054,6 +11069,56 @@ impl App {
                                         self.cancel_requested = false;
                                         self.interleave_message = None;
                                         self.pending_soft_interrupts.clear();
+                                        // Save partial assistant response before clearing
+                                        if let Some(tool) = current_tool.take() {
+                                            tool_calls.push(tool);
+                                        }
+                                        if !text_content.is_empty() || !tool_calls.is_empty() {
+                                            let mut content_blocks = Vec::new();
+                                            if !text_content.is_empty() {
+                                                content_blocks.push(ContentBlock::Text {
+                                                    text: format!("{}\n\n[generation interrupted by user]", text_content),
+                                                    cache_control: None,
+                                                });
+                                            }
+                                            if store_reasoning_content && !reasoning_content.is_empty() {
+                                                content_blocks.push(ContentBlock::Reasoning {
+                                                    text: reasoning_content.clone(),
+                                                });
+                                            }
+                                            for tc in &tool_calls {
+                                                content_blocks.push(ContentBlock::ToolUse {
+                                                    id: tc.id.clone(),
+                                                    name: tc.name.clone(),
+                                                    input: tc.input.clone(),
+                                                });
+                                            }
+                                            if !content_blocks.is_empty() {
+                                                let content_clone = content_blocks.clone();
+                                                self.add_provider_message(Message {
+                                                    role: Role::Assistant,
+                                                    content: content_blocks,
+                                                    timestamp: Some(chrono::Utc::now()),
+                                                });
+                                                self.session.add_message(Role::Assistant, content_clone);
+                                                let _ = self.session.save();
+                                            }
+                                            // Flush buffer and show partial response
+                                            if let Some(chunk) = self.stream_buffer.flush() {
+                                                self.streaming_text.push_str(&chunk);
+                                            }
+                                            if !self.streaming_text.is_empty() {
+                                                let content = self.take_streaming_text();
+                                                self.push_display_message(DisplayMessage {
+                                                    role: "assistant".to_string(),
+                                                    content,
+                                                    tool_calls: tool_calls.iter().map(|t| t.name.clone()).collect(),
+                                                    duration_secs: self.processing_started.map(|t| t.elapsed().as_secs_f32()),
+                                                    title: None,
+                                                    tool_data: None,
+                                                });
+                                            }
+                                        }
                                         self.clear_streaming_render_state();
                                         self.stream_buffer.clear();
                                         self.streaming_tool_calls.clear();
@@ -11622,6 +11687,23 @@ impl App {
                                             self.cancel_requested = false;
                                             self.interleave_message = None;
                                             self.pending_soft_interrupts.clear();
+                                            // Partial text+tool_calls were already saved
+                                            // to the session before tool execution started.
+                                            // Just preserve the visual streaming content.
+                                            if let Some(chunk) = self.stream_buffer.flush() {
+                                                self.streaming_text.push_str(&chunk);
+                                            }
+                                            if !self.streaming_text.is_empty() {
+                                                let content = self.take_streaming_text();
+                                                self.push_display_message(DisplayMessage {
+                                                    role: "assistant".to_string(),
+                                                    content,
+                                                    tool_calls: Vec::new(),
+                                                    duration_secs: self.processing_started.map(|t| t.elapsed().as_secs_f32()),
+                                                    title: None,
+                                                    tool_data: None,
+                                                });
+                                            }
                                             self.clear_streaming_render_state();
                                             self.stream_buffer.clear();
                                             self.streaming_tool_calls.clear();

@@ -778,6 +778,18 @@ impl ClientApp {
                 self.upstream_provider = Some(provider);
             }
             ServerEvent::Interrupted => {
+                // Save partial streamed content as display message before clearing
+                if !self.streaming_text.is_empty() {
+                    let content = std::mem::take(&mut self.streaming_text);
+                    self.push_display_message(DisplayMessage {
+                        role: "assistant".to_string(),
+                        content,
+                        tool_calls: Vec::new(),
+                        duration_secs: self.processing_started.map(|t| t.elapsed().as_secs_f32()),
+                        title: None,
+                        tool_data: None,
+                    });
+                }
                 self.streaming_text.clear();
                 self.streaming_md_renderer.borrow_mut().reset();
                 crate::tui::mermaid::clear_streaming_preview_diagram();

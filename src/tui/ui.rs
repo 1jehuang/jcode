@@ -3668,17 +3668,43 @@ pub(crate) fn render_tool_message(
 
             // Build the line with syntax-highlighted content
             // Start with padding and box border
+            let border_prefix = format!("{}│ ", pad_str);
+            let prefix_visual_width = unicode_width::UnicodeWidthStr::width(border_prefix.as_str())
+                + unicode_width::UnicodeWidthStr::width(line.prefix.as_str());
+            let max_content_width = (width as usize).saturating_sub(prefix_visual_width + 1);
+
             let mut spans: Vec<Span<'static>> = vec![
-                Span::styled(format!("{}│ ", pad_str), Style::default().fg(DIM_COLOR)),
+                Span::styled(border_prefix, Style::default().fg(DIM_COLOR)),
                 Span::styled(line.prefix.clone(), Style::default().fg(base_color)),
             ];
 
-            // Apply syntax highlighting to content
+            // Apply syntax highlighting to content, truncating to fit width
             if !line.content.is_empty() {
-                let highlighted = markdown::highlight_line(line.content.as_str(), file_ext);
-                for span in highlighted {
-                    let tinted = tint_span_with_diff_color(span, base_color);
-                    spans.push(tinted);
+                let content = &line.content;
+                let content_vis_width = unicode_width::UnicodeWidthStr::width(content.as_str());
+                if max_content_width > 1 && content_vis_width > max_content_width {
+                    let mut end = 0;
+                    let mut vis_w = 0;
+                    let limit = max_content_width.saturating_sub(1);
+                    for (i, ch) in content.char_indices() {
+                        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                        if vis_w + cw > limit {
+                            break;
+                        }
+                        vis_w += cw;
+                        end = i + ch.len_utf8();
+                    }
+                    let truncated = &content[..end];
+                    let highlighted = markdown::highlight_line(truncated, file_ext);
+                    for span in highlighted {
+                        spans.push(tint_span_with_diff_color(span, base_color));
+                    }
+                    spans.push(Span::styled("…", Style::default().fg(DIM_COLOR)));
+                } else {
+                    let highlighted = markdown::highlight_line(content.as_str(), file_ext);
+                    for span in highlighted {
+                        spans.push(tint_span_with_diff_color(span, base_color));
+                    }
                 }
             }
 
