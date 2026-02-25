@@ -13507,6 +13507,9 @@ impl super::TuiState for App {
     fn pin_images(&self) -> bool {
         self.pin_images
     }
+    fn diff_line_wrap(&self) -> bool {
+        crate::config::config().display.diff_line_wrap
+    }
     fn picker_state(&self) -> Option<&super::PickerState> {
         self.picker_state.as_ref()
     }

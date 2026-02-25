@@ -1664,6 +1664,9 @@ impl TuiState for ClientApp {
     fn pin_images(&self) -> bool {
         crate::config::config().display.pin_images
     }
+    fn diff_line_wrap(&self) -> bool {
+        crate::config::config().display.diff_line_wrap
+    }
     fn picker_state(&self) -> Option<&super::PickerState> {
         None
     }

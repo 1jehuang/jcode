@@ -156,6 +156,8 @@ pub trait TuiState {
     fn diff_pane_scroll(&self) -> usize;
     /// Whether to pin read images to a side pane
     fn pin_images(&self) -> bool;
+    /// Whether to wrap lines in the pinned diff pane
+    fn diff_line_wrap(&self) -> bool;
     /// Interactive model/provider picker state (shown as inline row above input)
     fn picker_state(&self) -> Option<&PickerState>;
     /// Working directory for this session

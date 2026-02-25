@@ -369,6 +369,9 @@ impl TuiState for BenchState {
     fn pin_images(&self) -> bool {
         false
     }
+    fn diff_line_wrap(&self) -> bool {
+        true
+    }
     fn picker_state(&self) -> Option<&jcode::tui::PickerState> {
         None
     }

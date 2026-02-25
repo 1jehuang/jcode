@@ -1691,6 +1691,7 @@ struct BodyCacheKey {
     diff_mode: crate::config::DiffDisplayMode,
     messages_version: u64,
     diagram_mode: crate::config::DiagramDisplayMode,
+    centered: bool,
 }
 
 #[derive(Default)]
@@ -1712,6 +1713,7 @@ struct MessageCacheKey {
     message_hash: u64,
     content_len: usize,
     diagram_mode: crate::config::DiagramDisplayMode,
+    centered: bool,
 }
 
 #[derive(Default)]
@@ -2295,7 +2297,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             if let Some(ref mut capture) = debug_capture {
                 capture.render_order.push("draw_pinned_content".to_string());
             }
-            draw_pinned_content(frame, diff_area, &pinned_content, app.diff_pane_scroll());
+            draw_pinned_content(frame, diff_area, &pinned_content, app.diff_pane_scroll(), app.diff_line_wrap());
         }
     }
 
@@ -3198,6 +3200,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> PreparedMessages {
         diff_mode: app.diff_mode(),
         messages_version: app.display_messages_version(),
         diagram_mode: app.diagram_mode(),
+        centered: app.centered_mode(),
     };
 
     let mut cache = match body_cache().lock() {
@@ -3423,6 +3426,7 @@ where
         message_hash: hash_display_message(msg),
         content_len: msg.content.len(),
         diagram_mode: crate::config::config().display.diagram_mode,
+        centered: markdown::center_code_blocks(),
     };
 
     let mut cache = match message_cache().lock() {
@@ -3511,7 +3515,7 @@ pub(crate) fn render_tool_message(
         tool_line.push(Span::styled(")", Style::default().fg(DIM_COLOR)));
     }
 
-    lines.push(Line::from(tool_line));
+    lines.push(Line::from(tool_line).left_aligned());
 
     // Expand batch sub-calls as individual tool lines
     if tc.name == "batch" {
@@ -3627,7 +3631,7 @@ pub(crate) fn render_tool_message(
 
         // Calculate padding to center the block
         let max_width = width as usize;
-        let padding = if block_width < max_width {
+        let padding = if markdown::center_code_blocks() && block_width < max_width {
             (max_width - block_width) / 2
         } else {
             0
@@ -7523,6 +7527,7 @@ fn draw_pinned_content(
     area: Rect,
     entries: &[PinnedContentEntry],
     scroll: usize,
+    line_wrap: bool,
 ) {
     use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 
@@ -7726,7 +7731,11 @@ fn draw_pinned_content(
 
     let visible_lines: Vec<Line<'static>> = text_lines.into_iter().skip(scroll).collect();
 
-    let paragraph = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
+    let paragraph = if line_wrap {
+        Paragraph::new(visible_lines).wrap(Wrap { trim: false })
+    } else {
+        Paragraph::new(visible_lines)
+    };
     frame.render_widget(paragraph, inner);
 
     if has_protocol {

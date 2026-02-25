@@ -189,6 +189,8 @@ pub struct DisplayConfig {
     pub idle_animation: bool,
     /// Briefly animate user prompt line when it enters viewport (default: true)
     pub prompt_entry_animation: bool,
+    /// Wrap long lines in the pinned diff pane (default: true)
+    pub diff_line_wrap: bool,
 }
 
 impl Default for DisplayConfig {
@@ -206,6 +208,7 @@ impl Default for DisplayConfig {
             startup_animation: false,
             idle_animation: true,
             prompt_entry_animation: true,
+            diff_line_wrap: true,
         }
     }
 }
@@ -517,6 +520,11 @@ impl Config {
                 self.display.pin_images = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_DIFF_LINE_WRAP") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.diff_line_wrap = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_QUEUE_MODE") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.queue_mode = parsed;
@@ -762,6 +770,10 @@ diff_mode = "inline"
 # Pin read images to a side pane (default: true)
 pin_images = true
 
+# Wrap long lines in the pinned diff pane (default: true)
+# Set to false for horizontal scrolling instead of wrapping
+diff_line_wrap = true
+
 # Queue mode: wait until assistant is done before sending next message
 queue_mode = false
 
@@ -903,6 +915,7 @@ desktop_notifications = true
 **Display:**
 - Diff mode: {}
 - Pin images: {}
+- Diff line wrap: {}
 - Queue mode: {}
 - Mouse capture: {}
 - Debug socket: {}
@@ -963,6 +976,7 @@ desktop_notifications = true
             self.keybindings.scroll_bookmark,
             self.display.diff_mode.label(),
             self.display.pin_images,
+            self.display.diff_line_wrap,
             self.display.queue_mode,
             self.display.mouse_capture,
             self.display.debug_socket,
