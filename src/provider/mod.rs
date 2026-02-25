@@ -866,8 +866,10 @@ pub struct MultiProvider {
     /// Direct Anthropic API provider (no Python dependency)
     anthropic: Option<anthropic::AnthropicProvider>,
     openai: Option<openai::OpenAIProvider>,
-    /// GitHub Copilot CLI provider (fallback when OAuth quotas are exhausted)
-    copilot: Option<copilot::CopilotCliProvider>,
+    /// GitHub Copilot API provider (direct API, preferred)
+    copilot_api: Option<Arc<copilot::CopilotApiProvider>>,
+    /// GitHub Copilot CLI provider (legacy fallback)
+    copilot_cli: Option<copilot::CopilotCliProvider>,
     /// OpenRouter API provider (200+ models from various providers)
     openrouter: Option<openrouter::OpenRouterProvider>,
     active: RwLock<ActiveProvider>,
@@ -913,7 +915,7 @@ impl MultiProvider {
         match provider {
             ActiveProvider::Claude => self.anthropic.is_some() || self.claude.is_some(),
             ActiveProvider::OpenAI => self.openai.is_some(),
-            ActiveProvider::Copilot => self.copilot.is_some(),
+            ActiveProvider::Copilot => self.copilot_api.is_some() || self.copilot_cli.is_some(),
             ActiveProvider::OpenRouter => self.openrouter.is_some(),
         }
     }
@@ -1045,13 +1047,17 @@ impl MultiProvider {
                 }
             }
             ActiveProvider::Copilot => {
-                if let Some(ref copilot) = self.copilot {
+                if let Some(ref copilot) = self.copilot_api {
+                    copilot
+                        .complete(messages, tools, system, resume_session_id)
+                        .await
+                } else if let Some(ref copilot) = self.copilot_cli {
                     copilot
                         .complete(messages, tools, system, resume_session_id)
                         .await
                 } else {
                     Err(anyhow::anyhow!(
-                        "GitHub Copilot fallback is not available. Run `jcode login --provider copilot`."
+                        "GitHub Copilot is not available. Run `jcode login --provider copilot`."
                     ))
                 }
             }
@@ -1121,7 +1127,17 @@ impl MultiProvider {
                 }
             }
             ActiveProvider::Copilot => {
-                if let Some(ref copilot) = self.copilot {
+                if let Some(ref copilot) = self.copilot_api {
+                    copilot
+                        .complete_split(
+                            messages,
+                            tools,
+                            system_static,
+                            system_dynamic,
+                            resume_session_id,
+                        )
+                        .await
+                } else if let Some(ref copilot) = self.copilot_cli {
                     copilot
                         .complete_split(
                             messages,
@@ -1133,7 +1149,7 @@ impl MultiProvider {
                         .await
                 } else {
                     Err(anyhow::anyhow!(
-                        "GitHub Copilot fallback is not available. Run `jcode login --provider copilot`."
+                        "GitHub Copilot is not available. Run `jcode login --provider copilot`."
                     ))
                 }
             }
@@ -1176,7 +1192,9 @@ impl MultiProvider {
     pub fn new() -> Self {
         let has_claude_creds = auth::claude::load_credentials().is_ok();
         let has_openai_creds = auth::codex::load_credentials().is_ok();
-        let has_copilot_cli = auth::AuthStatus::check().copilot == auth::AuthState::Available;
+        let auth_status = auth::AuthStatus::check();
+        let has_copilot_api = auth_status.copilot_has_api_token;
+        let has_copilot_cli = auth_status.copilot_has_cli;
         let has_openrouter_creds = openrouter::OpenRouterProvider::has_credentials();
 
         // Check if we should use Claude CLI instead of direct API.
@@ -1215,7 +1233,28 @@ impl MultiProvider {
             None
         };
 
-        let copilot = if has_copilot_cli {
+        let copilot_api = if has_copilot_api {
+            match copilot::CopilotApiProvider::new() {
+                Ok(p) => {
+                    crate::logging::info("Copilot API provider initialized (direct API)");
+                    let provider = Arc::new(p);
+                    let p_clone = provider.clone();
+                    tokio::spawn(async move {
+                        p_clone.detect_tier_and_set_default().await;
+                    });
+                    Some(provider)
+                }
+                Err(e) => {
+                    crate::logging::info(&format!("Failed to initialize Copilot API: {}", e));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let copilot_cli = if has_copilot_cli && copilot_api.is_none() {
+            crate::logging::info("Using Copilot CLI provider (legacy fallback)");
             Some(copilot::CopilotCliProvider::new())
         } else {
             None
@@ -1239,7 +1278,7 @@ impl MultiProvider {
             ActiveProvider::Claude
         } else if openai.is_some() {
             ActiveProvider::OpenAI
-        } else if copilot.is_some() {
+        } else if copilot_api.is_some() || copilot_cli.is_some() {
             ActiveProvider::Copilot
         } else if openrouter.is_some() {
             ActiveProvider::OpenRouter
@@ -1252,7 +1291,8 @@ impl MultiProvider {
             claude,
             anthropic,
             openai,
-            copilot,
+            copilot_api,
+            copilot_cli,
             openrouter,
             active: RwLock::new(active),
             has_claude_creds,
@@ -1466,9 +1506,10 @@ impl Provider for MultiProvider {
                 .map(|o| o.model())
                 .unwrap_or_else(|| "gpt-5.3-codex-spark".to_string()),
             ActiveProvider::Copilot => self
-                .copilot
+                .copilot_api
                 .as_ref()
                 .map(|o| o.model())
+                .or_else(|| self.copilot_cli.as_ref().map(|o| o.model()))
                 .unwrap_or_else(|| "claude-sonnet-4".to_string()),
             ActiveProvider::OpenRouter => self
                 .openrouter
@@ -1480,6 +1521,24 @@ impl Provider for MultiProvider {
 
     fn set_model(&self, model: &str) -> Result<()> {
         self.spawn_openai_catalog_refresh_if_needed();
+
+        // Handle explicit "copilot:" prefix from model picker
+        if let Some(copilot_model) = model.strip_prefix("copilot:") {
+            if self.copilot_api.is_none() && self.copilot_cli.is_none() {
+                return Err(anyhow::anyhow!(
+                    "GitHub Copilot is not available. Run `jcode login --provider copilot`."
+                ));
+            }
+            *self.active.write().unwrap() = ActiveProvider::Copilot;
+            if let Some(ref copilot) = self.copilot_api {
+                copilot.set_model(copilot_model)
+            } else if let Some(ref copilot) = self.copilot_cli {
+                copilot.set_model(copilot_model)
+            } else {
+                Ok(())
+            }?;
+            return Ok(());
+        }
 
         // Detect which provider this model belongs to
         let target_provider = provider_for_model(model);
@@ -1546,7 +1605,9 @@ impl Provider for MultiProvider {
                     }
                 }
                 ActiveProvider::Copilot => {
-                    if let Some(ref copilot) = self.copilot {
+                    if let Some(ref copilot) = self.copilot_api {
+                        copilot.set_model(model)
+                    } else if let Some(ref copilot) = self.copilot_cli {
                         copilot.set_model(model)
                     } else {
                         Err(anyhow::anyhow!("Unknown model: {}", model))
@@ -1683,6 +1744,31 @@ impl Provider for MultiProvider {
                 available,
                 detail,
             });
+        }
+
+        // GitHub Copilot models
+        let has_copilot = self.copilot_api.is_some() || self.copilot_cli.is_some();
+        if has_copilot {
+            let api_method = if self.copilot_api.is_some() {
+                "api"
+            } else {
+                "cli"
+            };
+            let copilot_models = self
+                .copilot_api
+                .as_ref()
+                .map(|p| p.available_models())
+                .or_else(|| self.copilot_cli.as_ref().map(|p| p.available_models()))
+                .unwrap_or_default();
+            for model in copilot_models {
+                routes.push(ModelRoute {
+                    model: model.to_string(),
+                    provider: "Copilot".to_string(),
+                    api_method: api_method.to_string(),
+                    available: true,
+                    detail: String::new(),
+                });
+            }
         }
 
         // OpenRouter models (with per-provider endpoints)
@@ -1823,9 +1909,10 @@ impl Provider for MultiProvider {
                 .map(|o| o.handles_tools_internally())
                 .unwrap_or(false),
             ActiveProvider::Copilot => self
-                .copilot
+                .copilot_api
                 .as_ref()
                 .map(|o| o.handles_tools_internally())
+                .or_else(|| self.copilot_cli.as_ref().map(|o| o.handles_tools_internally()))
                 .unwrap_or(false),
             ActiveProvider::OpenRouter => false, // jcode executes tools
         }
@@ -1884,9 +1971,10 @@ impl Provider for MultiProvider {
                 .map(|o| o.supports_compaction())
                 .unwrap_or(false),
             ActiveProvider::Copilot => self
-                .copilot
+                .copilot_api
                 .as_ref()
                 .map(|o| o.supports_compaction())
+                .or_else(|| self.copilot_cli.as_ref().map(|o| o.supports_compaction()))
                 .unwrap_or(false),
             ActiveProvider::OpenRouter => self
                 .openrouter
@@ -1913,9 +2001,10 @@ impl Provider for MultiProvider {
                 .map(|o| o.context_window())
                 .unwrap_or(DEFAULT_CONTEXT_LIMIT),
             ActiveProvider::Copilot => self
-                .copilot
+                .copilot_api
                 .as_ref()
                 .map(|o| o.context_window())
+                .or_else(|| self.copilot_cli.as_ref().map(|o| o.context_window()))
                 .unwrap_or(DEFAULT_CONTEXT_LIMIT),
             ActiveProvider::OpenRouter => self
                 .openrouter
@@ -1946,7 +2035,11 @@ impl Provider for MultiProvider {
         } else {
             None
         };
-        let copilot = if matches!(active, ActiveProvider::Copilot) && self.copilot.is_some() {
+        let copilot_api = self.copilot_api.clone();
+        let copilot_cli = if matches!(active, ActiveProvider::Copilot)
+            && self.copilot_cli.is_some()
+            && copilot_api.is_none()
+        {
             Some(copilot::CopilotCliProvider::new())
         } else {
             None
@@ -1961,7 +2054,8 @@ impl Provider for MultiProvider {
             claude,
             anthropic,
             openai,
-            copilot,
+            copilot_api,
+            copilot_cli,
             openrouter,
             active: RwLock::new(active),
             has_claude_creds: self.has_claude_creds,
@@ -1971,7 +2065,11 @@ impl Provider for MultiProvider {
         };
 
         provider.spawn_openai_catalog_refresh_if_needed();
-        let _ = provider.set_model(&current_model);
+        if matches!(active, ActiveProvider::Copilot) {
+            let _ = provider.set_model(&format!("copilot:{}", current_model));
+        } else {
+            let _ = provider.set_model(&current_model);
+        }
         Arc::new(provider)
     }
 

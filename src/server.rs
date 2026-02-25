@@ -6033,7 +6033,7 @@ async fn execute_debug_command(
             "openai" | "codex" => "gpt-5.3-codex-spark",
             "openrouter" => "anthropic/claude-sonnet-4",
             "cursor" => "gpt-5",
-            "copilot" => "claude-sonnet-4",
+            "copilot" => "copilot:claude-sonnet-4",
             "antigravity" => "default",
             _ => {
                 return Err(anyhow::anyhow!(

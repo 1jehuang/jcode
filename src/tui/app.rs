@@ -9927,6 +9927,16 @@ impl App {
                         return Ok(());
                     }
 
+                    let bare_name = if entry.effort.is_some() {
+                        entry
+                            .name
+                            .rsplit_once(" (")
+                            .map(|(base, _)| base.to_string())
+                            .unwrap_or_else(|| entry.name.clone())
+                    } else {
+                        entry.name.clone()
+                    };
+
                     let spec = if route.api_method == "openrouter" && route.provider != "auto" {
                         if entry.name.contains('/') {
                             format!("{}@{}", entry.name, route.provider)
@@ -9935,15 +9945,10 @@ impl App {
                         }
                     } else if route.api_method == "openrouter" {
                         entry.name.clone()
-                    } else if entry.effort.is_some() {
-                        // Effort variant: strip the " (effort)" suffix to get bare model name
-                        entry
-                            .name
-                            .rsplit_once(" (")
-                            .map(|(base, _)| base.to_string())
-                            .unwrap_or_else(|| entry.name.clone())
+                    } else if route.provider == "Copilot" {
+                        format!("copilot:{}", bare_name)
                     } else {
-                        entry.name.clone()
+                        bare_name.clone()
                     };
 
                     let effort = entry.effort.clone();

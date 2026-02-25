@@ -1,5 +1,6 @@
 pub mod claude;
 pub mod codex;
+pub mod copilot;
 pub mod oauth;
 
 /// Authentication status for all supported providers
@@ -17,8 +18,12 @@ pub struct AuthStatus {
     pub openai_has_api_key: bool,
     /// Cursor CLI available (via `cursor-agent` binary)
     pub cursor: AuthState,
-    /// Copilot CLI available (`copilot` or `gh` present)
+    /// Copilot API available (GitHub OAuth token found)
     pub copilot: AuthState,
+    /// Copilot has API token (from hosts.json/apps.json/GITHUB_TOKEN)
+    pub copilot_has_api_token: bool,
+    /// Copilot has CLI available (legacy)
+    pub copilot_has_cli: bool,
     /// Antigravity CLI available
     pub antigravity: AuthState,
 }
@@ -138,10 +143,14 @@ impl AuthStatus {
             AuthState::NotConfigured
         };
 
-        status.copilot = if command_available_from_env("JCODE_COPILOT_CLI_PATH", "copilot")
+        status.copilot = if copilot::has_copilot_credentials() {
+            status.copilot_has_api_token = true;
+            AuthState::Available
+        } else if command_available_from_env("JCODE_COPILOT_CLI_PATH", "copilot")
             || command_exists("copilot")
             || command_exists("gh")
         {
+            status.copilot_has_cli = true;
             AuthState::Available
         } else {
             AuthState::NotConfigured
