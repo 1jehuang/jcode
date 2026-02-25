@@ -257,11 +257,7 @@ impl OpenAIProvider {
 
     fn chatgpt_instructions_with_selfdev(system: &str) -> String {
         if let Some(selfdev_section) = extract_selfdev_section(system) {
-            format!(
-                "{}\n\n{}",
-                CHATGPT_INSTRUCTIONS.trim_end(),
-                selfdev_section
-            )
+            format!("{}\n\n{}", CHATGPT_INSTRUCTIONS.trim_end(), selfdev_section)
         } else {
             CHATGPT_INSTRUCTIONS.to_string()
         }
