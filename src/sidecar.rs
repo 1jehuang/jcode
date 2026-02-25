@@ -455,12 +455,15 @@ mod tests {
 
     #[test]
     fn test_backend_selection_prefers_openai() {
-        // If both creds exist, OpenAI should be preferred
-        let has_openai = crate::auth::codex::load_credentials().is_ok();
+        // OpenAI is preferred only when creds are in direct API mode (not ChatGPT mode).
+        // ChatGPT mode (refresh_token/id_token) requires streaming, so we fall back to Claude.
+        let openai_direct = crate::auth::codex::load_credentials()
+            .map(|c| c.refresh_token.is_empty() && c.id_token.is_none())
+            .unwrap_or(false);
         let has_claude = crate::auth::claude::load_credentials().is_ok();
 
         let sidecar = HaikuSidecar::new();
-        if has_openai {
+        if openai_direct {
             assert_eq!(sidecar.backend, SidecarBackend::OpenAI);
             assert_eq!(sidecar.model, SIDECAR_OPENAI_MODEL);
         } else if has_claude {
