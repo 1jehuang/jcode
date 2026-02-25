@@ -23,11 +23,18 @@ use std::time::{Duration, Instant};
 static LAST_MAX_SCROLL: AtomicUsize = AtomicUsize::new(0);
 /// Number of recovered panics while rendering the frame.
 static DRAW_PANIC_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Total line count in the pinned diff/content pane (set during render).
+static PINNED_PANE_TOTAL_LINES: AtomicUsize = AtomicUsize::new(0);
 
 /// Get the last known max scroll value (from the most recent render frame).
 /// Returns 0 if no frame has been rendered yet.
 pub fn last_max_scroll() -> usize {
     LAST_MAX_SCROLL.load(Ordering::Relaxed)
+}
+
+/// Get the total line count from the pinned diff/content pane (set during render).
+pub fn pinned_pane_total_lines() -> usize {
+    PINNED_PANE_TOTAL_LINES.load(Ordering::Relaxed)
 }
 
 // Minimal color palette
@@ -7755,7 +7762,13 @@ fn draw_pinned_content(
         )));
     }
 
-    let visible_lines: Vec<Line<'static>> = text_lines.into_iter().skip(scroll).collect();
+    let total_lines = text_lines.len();
+    PINNED_PANE_TOTAL_LINES.store(total_lines, Ordering::Relaxed);
+
+    let max_scroll = total_lines.saturating_sub(inner.height as usize);
+    let clamped_scroll = scroll.min(max_scroll);
+
+    let visible_lines: Vec<Line<'static>> = text_lines.into_iter().skip(clamped_scroll).collect();
 
     let paragraph = if line_wrap {
         Paragraph::new(visible_lines).wrap(Wrap { trim: false })
@@ -7767,10 +7780,10 @@ fn draw_pinned_content(
     if has_protocol {
         for placement in &image_placements {
             let text_y = placement.after_text_line as u16;
-            if text_y < scroll as u16 {
+            if text_y < clamped_scroll as u16 {
                 continue;
             }
-            let y_in_inner = text_y.saturating_sub(scroll as u16);
+            let y_in_inner = text_y.saturating_sub(clamped_scroll as u16);
             if y_in_inner >= inner.height {
                 continue;
             }

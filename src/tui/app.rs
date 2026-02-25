@@ -662,6 +662,7 @@ pub struct App {
     // Scroll offset for pinned diff pane
     diff_pane_scroll: usize,
     diff_pane_focus: bool,
+    diff_pane_auto_scroll: bool,
     // Pin read images to side pane
     pin_images: bool,
     // Interactive model/provider picker
@@ -967,6 +968,7 @@ impl App {
             diagram_zoom: 100,
             diff_pane_scroll: 0,
             diff_pane_focus: false,
+            diff_pane_auto_scroll: true,
             pin_images: display.pin_images,
             picker_state: None,
             pending_model_switch: None,
@@ -1489,22 +1491,28 @@ impl App {
 
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
-                self.diff_pane_scroll = self.diff_pane_scroll.saturating_add(1);
+                self.diff_pane_scroll = self.diff_pane_scroll.saturating_add(3);
+                self.diff_pane_auto_scroll = false;
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.diff_pane_scroll = self.diff_pane_scroll.saturating_sub(1);
+                self.diff_pane_scroll = self.diff_pane_scroll.saturating_sub(3);
+                self.diff_pane_auto_scroll = false;
             }
-            KeyCode::Char('d') => {
-                self.diff_pane_scroll = self.diff_pane_scroll.saturating_add(10);
+            KeyCode::Char('d') | KeyCode::PageDown => {
+                self.diff_pane_scroll = self.diff_pane_scroll.saturating_add(20);
+                self.diff_pane_auto_scroll = false;
             }
-            KeyCode::Char('u') => {
-                self.diff_pane_scroll = self.diff_pane_scroll.saturating_sub(10);
+            KeyCode::Char('u') | KeyCode::PageUp => {
+                self.diff_pane_scroll = self.diff_pane_scroll.saturating_sub(20);
+                self.diff_pane_auto_scroll = false;
             }
-            KeyCode::Char('g') => {
+            KeyCode::Char('g') | KeyCode::Home => {
                 self.diff_pane_scroll = 0;
+                self.diff_pane_auto_scroll = false;
             }
-            KeyCode::Char('G') => {
+            KeyCode::Char('G') | KeyCode::End => {
                 self.diff_pane_scroll = usize::MAX;
+                self.diff_pane_auto_scroll = true;
             }
             KeyCode::Esc => {
                 self.set_diff_pane_focus(false);
@@ -11892,8 +11900,12 @@ impl App {
     }
 
     fn push_display_message(&mut self, message: DisplayMessage) {
+        let is_tool = message.role == "tool";
         self.display_messages.push(message);
         self.bump_display_messages_version();
+        if is_tool && self.diff_mode.is_pinned() && self.diff_pane_auto_scroll {
+            self.diff_pane_scroll = usize::MAX;
+        }
     }
 
     fn append_reload_message(&mut self, line: &str) {
