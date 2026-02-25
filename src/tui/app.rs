@@ -1003,6 +1003,9 @@ impl App {
         self.ambient_system_prompt = Some(system_prompt);
         crate::tool::ambient::register_ambient_session(self.session.id.clone());
         self.queued_messages.push(initial_message);
+        self.is_processing = true;
+        self.status = ProcessingStatus::Sending;
+        self.processing_started = Some(Instant::now());
         self.pending_turn = true;
     }
 
@@ -1012,6 +1015,9 @@ impl App {
             return;
         }
         self.queued_messages.push(message);
+        self.is_processing = true;
+        self.status = ProcessingStatus::Sending;
+        self.processing_started = Some(Instant::now());
         self.pending_turn = true;
     }
 
@@ -1372,6 +1378,9 @@ impl App {
                 // Trigger processing so the queued message gets sent to the LLM.
                 // Without this, the local event loop waits for user input since
                 // process_queued_messages only runs inside process_turn_with_input.
+                self.is_processing = true;
+                self.status = ProcessingStatus::Sending;
+                self.processing_started = Some(Instant::now());
                 self.pending_turn = true;
             }
         } else {
@@ -8018,6 +8027,7 @@ impl App {
             self.streaming_tps_elapsed = Duration::ZERO;
             self.streaming_total_output_tokens = 0;
             self.processing_started = Some(Instant::now());
+            self.is_processing = true;
             self.status = ProcessingStatus::Sending;
 
             match self.run_turn_interactive(terminal, event_stream).await {

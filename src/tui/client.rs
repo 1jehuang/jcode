@@ -661,6 +661,11 @@ impl ClientApp {
     fn handle_server_event(&mut self, event: ServerEvent) {
         match event {
             ServerEvent::TextDelta { text } => {
+                if !self.is_processing {
+                    self.is_processing = true;
+                    self.status = ProcessingStatus::Streaming;
+                    self.processing_started = Some(Instant::now());
+                }
                 if self.streaming_tps_start.is_none() {
                     self.streaming_tps_start = Some(Instant::now());
                 }
@@ -670,6 +675,11 @@ impl ClientApp {
                 self.streaming_text = text;
             }
             ServerEvent::ToolStart { id, name } => {
+                if !self.is_processing {
+                    self.is_processing = true;
+                    self.status = ProcessingStatus::Streaming;
+                    self.processing_started = Some(Instant::now());
+                }
                 if self.streaming_tps_start.is_none() {
                     self.streaming_tps_start = Some(Instant::now());
                 }
