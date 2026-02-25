@@ -197,7 +197,7 @@ impl OpenAIProvider {
         );
 
         Self {
-            client: Client::new(),
+            client: crate::provider::shared_http_client(),
             credentials: Arc::new(RwLock::new(credentials)),
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key,

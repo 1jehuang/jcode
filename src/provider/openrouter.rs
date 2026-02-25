@@ -732,7 +732,7 @@ impl OpenRouterProvider {
         let provider_routing = Self::parse_provider_routing();
 
         Ok(Self {
-            client: Client::new(),
+            client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
             api_key,
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
@@ -2602,7 +2602,7 @@ mod tests {
         stats.models.insert("test/model".to_string(), model_stats);
 
         let provider = OpenRouterProvider {
-            client: Client::new(),
+            client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new("test/model".to_string())),
             api_key: "test".to_string(),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
@@ -2650,7 +2650,7 @@ mod tests {
             .insert("moonshotai/kimi-k2.5".to_string(), model_stats);
 
         let provider = OpenRouterProvider {
-            client: Client::new(),
+            client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new("moonshotai/kimi-k2.5".to_string())),
             api_key: "test".to_string(),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
@@ -2667,7 +2667,7 @@ mod tests {
     #[test]
     fn test_kimi_fallback_prefers_fireworks_without_stats() {
         let provider = OpenRouterProvider {
-            client: Client::new(),
+            client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new("moonshotai/kimi-k2.5".to_string())),
             api_key: "test".to_string(),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),

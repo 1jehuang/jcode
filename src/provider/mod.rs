@@ -8,6 +8,14 @@ pub mod openai;
 pub mod openrouter;
 
 use crate::auth;
+
+/// Shared HTTP client for all providers. Creating a `reqwest::Client` is expensive
+/// (~10ms due to TLS init, connection pool setup), so we reuse a single instance.
+pub(crate) fn shared_http_client() -> reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| reqwest::Client::new()).clone()
+}
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -1920,26 +1928,49 @@ impl Provider for MultiProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         let current_model = self.model();
         let active = self.active_provider();
-        let provider = MultiProvider::new();
-        // Set the active provider based on what was active before
-        match active {
-            ActiveProvider::Claude => {} // Default
-            ActiveProvider::OpenAI => {
-                if provider.openai.is_some() {
-                    *provider.active.write().unwrap() = ActiveProvider::OpenAI;
-                }
-            }
-            ActiveProvider::Copilot => {
-                if provider.copilot.is_some() {
-                    *provider.active.write().unwrap() = ActiveProvider::Copilot;
-                }
-            }
-            ActiveProvider::OpenRouter => {
-                if provider.openrouter.is_some() {
-                    *provider.active.write().unwrap() = ActiveProvider::OpenRouter;
-                }
-            }
-        }
+
+        let claude = if matches!(active, ActiveProvider::Claude) && self.claude.is_some() {
+            Some(claude::ClaudeProvider::new())
+        } else {
+            None
+        };
+        let anthropic = if self.anthropic.is_some() {
+            Some(anthropic::AnthropicProvider::new())
+        } else {
+            None
+        };
+        let openai = if self.openai.is_some() {
+            auth::codex::load_credentials()
+                .ok()
+                .map(openai::OpenAIProvider::new)
+        } else {
+            None
+        };
+        let copilot = if matches!(active, ActiveProvider::Copilot) && self.copilot.is_some() {
+            Some(copilot::CopilotCliProvider::new())
+        } else {
+            None
+        };
+        let openrouter = if self.openrouter.is_some() {
+            openrouter::OpenRouterProvider::new().ok()
+        } else {
+            None
+        };
+
+        let provider = Self {
+            claude,
+            anthropic,
+            openai,
+            copilot,
+            openrouter,
+            active: RwLock::new(active),
+            has_claude_creds: self.has_claude_creds,
+            has_openai_creds: self.has_openai_creds,
+            has_openrouter_creds: self.has_openrouter_creds,
+            use_claude_cli: self.use_claude_cli,
+        };
+
+        provider.spawn_openai_catalog_refresh_if_needed();
         let _ = provider.set_model(&current_model);
         Arc::new(provider)
     }

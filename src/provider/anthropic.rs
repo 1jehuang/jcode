@@ -152,7 +152,7 @@ impl AnthropicProvider {
         });
 
         Self {
-            client: Client::new(),
+            client: crate::provider::shared_http_client(),
             model: Arc::new(std::sync::RwLock::new(model)),
             credentials: Arc::new(RwLock::new(None)),
         }
