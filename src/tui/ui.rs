@@ -3537,14 +3537,17 @@ pub(crate) fn render_tool_message(
                     ("✓", Color::Rgb(100, 180, 100))
                 };
 
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("    {} ", sub_icon),
-                        Style::default().fg(sub_icon_color),
-                    ),
-                    Span::styled(display_name.to_string(), Style::default().fg(TOOL_COLOR)),
-                    Span::styled(format!(" {}", sub_summary), Style::default().fg(DIM_COLOR)),
-                ]));
+                lines.push(
+                    Line::from(vec![
+                        Span::styled(
+                            format!("    {} ", sub_icon),
+                            Style::default().fg(sub_icon_color),
+                        ),
+                        Span::styled(display_name.to_string(), Style::default().fg(TOOL_COLOR)),
+                        Span::styled(format!(" {}", sub_summary), Style::default().fg(DIM_COLOR)),
+                    ])
+                    .left_aligned(),
+                );
             }
         }
     }
@@ -8094,5 +8097,43 @@ mod tests {
             "missing flat grep summary in {:?}",
             rendered
         );
+    }
+
+    #[test]
+    fn test_render_tool_message_batch_subcall_lines_are_left_aligned() {
+        let msg = DisplayMessage {
+            role: "tool".to_string(),
+            content:
+                "--- [1] read ---\nok\n\n--- [2] grep ---\nok\n\nCompleted: 2 succeeded, 0 failed"
+                    .to_string(),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: Some(ToolCall {
+                id: "call_batch_align".to_string(),
+                name: "batch".to_string(),
+                input: serde_json::json!({
+                    "tool_calls": [
+                        {"tool": "read", "file_path": "src/session.rs", "offset": 0, "limit": 420},
+                        {"tool": "grep", "pattern": "TODO", "path": "src"}
+                    ]
+                }),
+                intent: None,
+            }),
+        };
+
+        let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+        let subcall_lines: Vec<_> = lines
+            .iter()
+            .filter(|line| {
+                let text = extract_line_text(line);
+                text.starts_with("    ✓") || text.starts_with("    ✗")
+            })
+            .collect();
+
+        assert_eq!(subcall_lines.len(), 2);
+        for line in subcall_lines {
+            assert_eq!(line.alignment, Some(Alignment::Left));
+        }
     }
 }
