@@ -345,6 +345,7 @@ enum Command {
     Update,
 
     /// Self-development mode: run as canary with crash recovery wrapper
+    #[command(alias = "selfdev")]
     SelfDev {
         /// Build and test a new canary version before launching
         #[arg(long)]
@@ -446,6 +447,14 @@ enum Command {
         /// Video frames per second (default: 60)
         #[arg(long, default_value = "60")]
         fps: u32,
+
+        /// Force centered layout (overrides config)
+        #[arg(long, conflicts_with = "no_centered")]
+        centered: bool,
+
+        /// Force left-aligned (non-centered) layout (overrides config)
+        #[arg(long, conflicts_with = "centered")]
+        no_centered: bool,
     },
 }
 
@@ -725,7 +734,16 @@ async fn run_main(mut args: Args) -> Result<()> {
             cols,
             rows,
             fps,
+            centered,
+            no_centered,
         }) => {
+            let centered_override = if centered {
+                Some(true)
+            } else if no_centered {
+                Some(false)
+            } else {
+                None
+            };
             run_replay_command(
                 &session,
                 export,
@@ -736,6 +754,7 @@ async fn run_main(mut args: Args) -> Result<()> {
                 cols,
                 rows,
                 fps,
+                centered_override,
             )
             .await?;
         }
@@ -1308,7 +1327,8 @@ fn hot_rebuild(session_id: &str) -> Result<()> {
     }
 
     // Get the binary path from the shared candidate resolver.
-    let exe = build::client_update_candidate(false)
+    let is_selfdev = std::env::var("JCODE_SELFDEV_MODE").is_ok();
+    let exe = build::client_update_candidate(is_selfdev)
         .map(|(path, _)| path)
         .unwrap_or_else(|| build::release_binary_path(&repo_dir));
     if !exe.exists() {
@@ -1317,13 +1337,15 @@ fn hot_rebuild(session_id: &str) -> Result<()> {
 
     eprintln!("Restarting with session {}...", session_id);
 
-    // Build command with --resume flag
-    let err = crate::platform::replace_process(
-        ProcessCommand::new(&exe)
-            .arg("--resume")
-            .arg(session_id)
-            .current_dir(cwd),
-    );
+    // Build command with --resume flag.
+    // In self-dev mode, preserve the self-dev subcommand so the session
+    // continues in self-dev mode after rebuild.
+    let mut cmd = ProcessCommand::new(&exe);
+    if is_selfdev {
+        cmd.arg("self-dev");
+    }
+    cmd.arg("--resume").arg(session_id).current_dir(&cwd);
+    let err = crate::platform::replace_process(&mut cmd);
 
     // replace_process() only returns on error
     Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
@@ -2530,6 +2552,7 @@ async fn run_replay_command(
     cols: u16,
     rows: u16,
     fps: u32,
+    centered_override: Option<bool>,
 ) -> Result<()> {
     let session = replay::load_session(session_id_or_path)?;
 
@@ -2584,7 +2607,7 @@ async fn run_replay_command(
             session_name,
             timeline.len()
         );
-        video_export::export_video(&session, &timeline, speed, &output_path, cols, rows, fps)
+        video_export::export_video(&session, &timeline, speed, &output_path, cols, rows, fps, centered_override)
             .await?;
         return Ok(());
     }
@@ -2612,7 +2635,10 @@ async fn run_replay_command(
         crossterm::terminal::SetTitle(format!("{} replay: {}", icon, session_name))
     );
 
-    let app = tui::App::new_for_replay(session).await;
+    let mut app = tui::App::new_for_replay(session).await;
+    if let Some(centered) = centered_override {
+        app.set_centered(centered);
+    }
     let result = app.run_replay(terminal, timeline, speed).await;
 
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
@@ -3068,12 +3094,45 @@ const EXIT_RELOAD_REQUESTED: i32 = 42; // Agent wants to reload to new canary bu
 /// Path for self-dev shared server socket
 const SELFDEV_SOCKET: &str = "/tmp/jcode-selfdev.sock";
 
-/// Check if a server is actually responding (not just socket exists)
+/// Check if a server is actually responding (not just socket exists).
+///
+/// Connects, sends a JSON ping, and waits for any response.  A zombie
+/// server that still has the listener open but never reads will time out
+/// here, causing us to restart it instead of hanging forever.
 async fn is_server_alive(socket_path: &str) -> bool {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
     if !std::path::Path::new(socket_path).exists() {
         return false;
     }
-    crate::transport::Stream::connect(socket_path).await.is_ok()
+
+    let stream = match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        crate::transport::Stream::connect(socket_path),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        _ => return false,
+    };
+
+    let (reader, mut writer) = stream.into_split();
+    let ping = "{\"type\":\"ping\",\"id\":0}\n";
+    if writer.write_all(ping.as_bytes()).await.is_err() {
+        return false;
+    }
+
+    let mut buf_reader = tokio::io::BufReader::new(reader);
+    let mut line = String::new();
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        buf_reader.read_line(&mut line),
+    )
+    .await
+    {
+        Ok(Ok(n)) if n > 0 => true,
+        _ => false,
+    }
 }
 
 /// Wrapper that runs client, spawning server as detached daemon if needed

@@ -58,9 +58,13 @@ pub async fn export_video(
     width: u16,
     height: u16,
     fps: u32,
+    centered_override: Option<bool>,
 ) -> Result<()> {
     crate::tui::mermaid::set_video_export_mode(true);
-    let app = crate::tui::App::new_for_replay(session.clone()).await;
+    let mut app = crate::tui::App::new_for_replay(session.clone()).await;
+    if let Some(centered) = centered_override {
+        app.set_centered(centered);
+    }
 
     let (font_family, font_size) = get_terminal_font();
     eprintln!(
