@@ -2297,7 +2297,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             if let Some(ref mut capture) = debug_capture {
                 capture.render_order.push("draw_pinned_content".to_string());
             }
-            draw_pinned_content(frame, diff_area, &pinned_content, app.diff_pane_scroll(), app.diff_line_wrap());
+            draw_pinned_content(frame, diff_area, &pinned_content, app.diff_pane_scroll(), app.diff_line_wrap(), app.diff_pane_focus());
         }
     }
 
@@ -3471,6 +3471,15 @@ pub(crate) fn render_tool_message(
         return lines;
     };
 
+    let centered = markdown::center_code_blocks();
+    let content_width = width.saturating_sub(4) as usize;
+    let tool_pad = if centered {
+        (width as usize).saturating_sub(content_width) / 2
+    } else {
+        0
+    };
+    let tool_pad_str: String = " ".repeat(tool_pad);
+
     let summary = get_tool_summary(tc);
 
     // Determine status: error if content starts with error prefix
@@ -3497,7 +3506,7 @@ pub(crate) fn render_tool_message(
     };
 
     let mut tool_line = vec![
-        Span::styled(format!("  {} ", icon), Style::default().fg(icon_color)),
+        Span::styled(format!("{}  {} ", tool_pad_str, icon), Style::default().fg(icon_color)),
         Span::styled(tc.name.clone(), Style::default().fg(TOOL_COLOR)),
         Span::styled(format!(" {}", summary), Style::default().fg(DIM_COLOR)),
     ];
@@ -3546,7 +3555,7 @@ pub(crate) fn render_tool_message(
                 lines.push(
                     Line::from(vec![
                         Span::styled(
-                            format!("    {} ", sub_icon),
+                            format!("{}    {} ", tool_pad_str, sub_icon),
                             Style::default().fg(sub_icon_color),
                         ),
                         Span::styled(display_name.to_string(), Style::default().fg(TOOL_COLOR)),
@@ -3620,23 +3629,8 @@ pub(crate) fn render_tool_message(
                 (result, true)
             };
 
-        // Calculate max line width for centering (like code blocks)
-        let max_content_width = display_lines
-            .iter()
-            .map(|l| l.prefix.chars().count() + l.content.chars().count())
-            .max()
-            .unwrap_or(0);
-        let header_width = 5; // "┌─ " + some label space
-        let block_width = header_width.max(max_content_width + 2).max(10); // +2 for "│ " prefix
-
-        // Calculate padding to center the block
-        let max_width = width as usize;
-        let padding = if markdown::center_code_blocks() && block_width < max_width {
-            (max_width - block_width) / 2
-        } else {
-            0
-        };
-        let pad_str: String = " ".repeat(padding);
+        // Use consistent left padding (matches tool call alignment in centered mode)
+        let pad_str: String = " ".repeat(tool_pad);
 
         // Add diff block header
         lines.push(
@@ -5113,6 +5107,36 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
         }
         line.spans
             .push(Span::styled(notice, Style::default().fg(ACCENT_COLOR)));
+    }
+
+    // Append memory sidecar status when active
+    if let Some(activity) = crate::memory::get_activity() {
+        use info_widget::MemoryState;
+        let sidecar_color = Color::Rgb(100, 180, 255);
+        let spinner_idx = (elapsed * 8.0) as usize % SPINNER_FRAMES.len();
+        let spinner = SPINNER_FRAMES[spinner_idx];
+        let label: Option<String> = match &activity.state {
+            MemoryState::Idle | MemoryState::ToolAction { .. } => None,
+            MemoryState::Embedding => Some(format!("{} embedding…", spinner)),
+            MemoryState::SidecarChecking { count } => {
+                if *count > 0 {
+                    Some(format!("{} sidecar: {}…", spinner, count))
+                } else {
+                    Some(format!("{} sidecar…", spinner))
+                }
+            }
+            MemoryState::FoundRelevant { count } => {
+                Some(format!("✓ {} relevant", count))
+            }
+            MemoryState::Extracting { .. } => Some(format!("{} extracting…", spinner)),
+            MemoryState::Maintaining { .. } => Some(format!("{} maintaining…", spinner)),
+        };
+        if let Some(label) = label {
+            if !line.spans.is_empty() {
+                line.spans.push(Span::styled(" · ", Style::default().fg(DIM_COLOR)));
+            }
+            line.spans.push(Span::styled(label, Style::default().fg(sidecar_color)));
+        }
     }
 
     let aligned_line = if app.centered_mode() {
@@ -7528,6 +7552,7 @@ fn draw_pinned_content(
     entries: &[PinnedContentEntry],
     scroll: usize,
     line_wrap: bool,
+    focused: bool,
 ) {
     use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 
@@ -7585,10 +7610,11 @@ fn draw_pinned_content(
     }
     title_parts.push(Span::styled(" ", Style::default().fg(DIM_COLOR)));
 
+    let border_color = if focused { TOOL_COLOR } else { DIM_COLOR };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(DIM_COLOR))
+        .border_style(Style::default().fg(border_color))
         .title(Line::from(title_parts));
 
     let inner = block.inner(area);
