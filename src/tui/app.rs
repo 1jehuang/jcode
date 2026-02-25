@@ -1016,9 +1016,9 @@ impl App {
     }
 
     /// Create an App instance for remote mode (connecting to server)
-    pub async fn new_for_remote(resume_session: Option<String>) -> Self {
+    pub fn new_for_remote(resume_session: Option<String>) -> Self {
         let provider: Arc<dyn Provider> = Arc::new(NullProvider);
-        let registry = Registry::new(Arc::clone(&provider)).await;
+        let registry = Registry::empty();
         let mut app = Self::new(provider, registry);
         app.is_remote = true;
 
@@ -1034,9 +1034,9 @@ impl App {
     }
 
     /// Create an App instance for replay mode (playing back a saved session)
-    pub async fn new_for_replay(session: crate::session::Session) -> Self {
+    pub fn new_for_replay(session: crate::session::Session) -> Self {
         let provider: Arc<dyn Provider> = Arc::new(NullProvider);
-        let registry = Registry::new(Arc::clone(&provider)).await;
+        let registry = Registry::empty();
         let mut app = Self::new(provider, registry);
         app.is_remote = false;
         app.is_replay = true;

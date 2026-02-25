@@ -189,6 +189,16 @@ impl Clone for Registry {
 }
 
 impl Registry {
+    /// Create a lightweight empty registry (no tools, no skill loading).
+    /// Used by remote-mode clients that don't execute tools locally.
+    pub fn empty() -> Self {
+        Self {
+            tools: Arc::new(RwLock::new(HashMap::new())),
+            skills: Arc::new(RwLock::new(SkillRegistry::default())),
+            compaction: Arc::new(RwLock::new(CompactionManager::new())),
+        }
+    }
+
     pub async fn new(provider: Arc<dyn Provider>) -> Self {
         let skills = Arc::new(RwLock::new(SkillRegistry::load().unwrap_or_default()));
         let compaction = Arc::new(RwLock::new(CompactionManager::new()));

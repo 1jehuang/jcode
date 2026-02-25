@@ -2504,7 +2504,7 @@ async fn run_tui_client(
     }
 
     // Use App in remote mode - same UI, connects to server
-    let mut app = tui::App::new_for_remote(resume_session.clone()).await;
+    let mut app = tui::App::new_for_remote(resume_session.clone());
     if resume_session.is_none() {
         if let Some(msg) = startup_message {
             app.queue_startup_message(msg);
@@ -2635,7 +2635,7 @@ async fn run_replay_command(
         crossterm::terminal::SetTitle(format!("{} replay: {}", icon, session_name))
     );
 
-    let mut app = tui::App::new_for_replay(session).await;
+    let mut app = tui::App::new_for_replay(session);
     if let Some(centered) = centered_override {
         app.set_centered(centered);
     }
@@ -3253,7 +3253,7 @@ async fn run_canary_wrapper(
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
     }
 
-    let app = tui::App::new_for_remote(Some(session_id.to_string())).await;
+    let app = tui::App::new_for_remote(Some(session_id.to_string()));
 
     // Set terminal title
     let icon = id::session_icon(&session_name);
