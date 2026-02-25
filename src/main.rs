@@ -788,7 +788,7 @@ async fn run_main(mut args: Args) -> Result<()> {
             // (no server/client split). This is missing features that rely on the
             // server architecture, such as graceful cancel with partial content
             // preservation, hot-reload, and multi-client support.
-            // TODO: Remove standalone mode entirely in a future version.
+            // Use default client/server mode instead.
             #[allow(deprecated)]
             if args.standalone {
                 eprintln!("\x1b[33m⚠️  Warning: --standalone is deprecated and will be removed in a future version.\x1b[0m");
