@@ -38,7 +38,6 @@ pub struct UpdateMetadata {
     pub last_check: SystemTime,
     pub installed_version: Option<String>,
     pub installed_from: Option<String>,
-    pub previous_binary: Option<String>,
 }
 
 impl Default for UpdateMetadata {
@@ -47,7 +46,6 @@ impl Default for UpdateMetadata {
             last_check: SystemTime::UNIX_EPOCH,
             installed_version: None,
             installed_from: None,
-            previous_binary: None,
         }
     }
 }
@@ -329,10 +327,7 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
                     path.display()
                 ));
                 // Install the built binary
-                let current_stable = build::stable_binary_path()?;
-
                 let mut metadata = UpdateMetadata::load().unwrap_or_default();
-                maybe_record_previous_binary(&current_stable, &mut metadata);
 
                 let channel_version = format!("main-{}", latest_sha);
                 build::install_binary_at_version(&path, &channel_version)
@@ -555,9 +550,7 @@ pub fn download_and_install_blocking(release: &GitHubRelease) -> Result<PathBuf>
     crate::platform::set_permissions_executable(&temp_path)?;
 
     let version = release.tag_name.trim_start_matches('v');
-    let current_stable = build::stable_binary_path()?;
     let mut metadata = UpdateMetadata::load().unwrap_or_default();
-    maybe_record_previous_binary(&current_stable, &mut metadata);
 
     let versioned_path = build::install_binary_at_version(&temp_path, version)?;
     let _ = fs::remove_file(&temp_path);
@@ -570,21 +563,6 @@ pub fn download_and_install_blocking(release: &GitHubRelease) -> Result<PathBuf>
     metadata.save()?;
 
     Ok(versioned_path)
-}
-
-fn maybe_record_previous_binary(current_channel_link: &Path, metadata: &mut UpdateMetadata) {
-    if !current_channel_link.exists() {
-        return;
-    }
-
-    if let Ok(resolved) = fs::read_link(current_channel_link) {
-        metadata.previous_binary = Some(resolved.to_string_lossy().to_string());
-        return;
-    }
-
-    if let Ok(canonical) = fs::canonicalize(current_channel_link) {
-        metadata.previous_binary = Some(canonical.to_string_lossy().to_string());
-    }
 }
 
 pub enum UpdateCheckResult {
@@ -644,30 +622,6 @@ pub fn check_and_maybe_update(auto_install: bool) -> UpdateCheckResult {
         }
         Err(e) => UpdateCheckResult::Error(format!("Check failed: {}", e)),
     }
-}
-
-pub fn rollback() -> Result<Option<PathBuf>> {
-    let metadata = UpdateMetadata::load()?;
-
-    if let Some(ref previous) = metadata.previous_binary {
-        let previous_path = PathBuf::from(previous);
-        if previous_path.exists() {
-            let current_stable = build::stable_binary_path()?;
-            if let Some(parent) = current_stable.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let temp_symlink = current_stable
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(format!(".jcode-symlink-{}", std::process::id()));
-            crate::platform::atomic_symlink_swap(&previous_path, &current_stable, &temp_symlink)?;
-            let _ = build::update_launcher_symlink_to_stable();
-
-            return Ok(Some(previous_path));
-        }
-    }
-
-    Ok(None)
 }
 
 #[cfg(test)]
