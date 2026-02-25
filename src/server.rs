@@ -9150,12 +9150,20 @@ async fn graceful_shutdown_sessions(
     ));
 
     // Signal graceful shutdown on all active sessions
+    // Use try_lock to avoid deadlock: the agent that triggered the reload
+    // holds its Mutex while the selfdev tool loops, so lock().await would hang.
     {
         let sessions_guard = sessions.read().await;
         for session_id in &running_sessions {
             if let Some(agent_arc) = sessions_guard.get(session_id) {
-                let agent = agent_arc.lock().await;
-                agent.request_graceful_shutdown();
+                if let Ok(agent) = agent_arc.try_lock() {
+                    agent.request_graceful_shutdown();
+                } else {
+                    crate::logging::warn(&format!(
+                        "Server: session {} mutex held (likely running selfdev reload), skipping graceful signal",
+                        session_id
+                    ));
+                }
             }
         }
     }
