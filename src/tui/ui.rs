@@ -3236,13 +3236,14 @@ fn prepare_streaming_cached(
         };
     }
 
+    // Apply alignment based on centered mode
+    let centered = app.centered_mode();
+    markdown::set_center_code_blocks(centered);
+
     // Use incremental markdown rendering for streaming text
     // This is efficient because render_streaming_markdown uses internal caching
     let content_width = width.saturating_sub(4) as usize;
     let md_lines = app.render_streaming_markdown(content_width);
-
-    // Apply alignment based on centered mode
-    let centered = app.centered_mode();
     let align = if centered {
         ratatui::layout::Alignment::Center
     } else {
@@ -3264,6 +3265,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
     let mut lines: Vec<Line> = Vec::new();
     let mut user_line_indices: Vec<usize> = Vec::new();
     let centered = app.centered_mode();
+    markdown::set_center_code_blocks(centered);
     let align = if centered {
         ratatui::layout::Alignment::Center
     } else {
@@ -4274,19 +4276,36 @@ fn draw_messages(
 
     // Render text first
     if let Some(anim) = active_prompt_anim {
-        if anim.line_idx >= scroll && anim.line_idx < visible_end {
-            let rel_idx = anim.line_idx - scroll;
-            if let Some(line) = visible_lines.get_mut(rel_idx) {
-                let t = (now_ms.saturating_sub(anim.start_ms) as f32
-                    / PROMPT_ENTRY_ANIMATION_MS as f32)
-                    .clamp(0.0, 1.0);
-                for span in &mut line.spans {
-                    if !span.content.is_empty() {
-                        let base = match span.style.fg {
-                            Some(c) => c,
-                            None => USER_TEXT,
-                        };
-                        span.style = span.style.fg(prompt_entry_color(base, t));
+        let t = (now_ms.saturating_sub(anim.start_ms) as f32
+            / PROMPT_ENTRY_ANIMATION_MS as f32)
+            .clamp(0.0, 1.0);
+
+        // Find the end of this prompt: next prompt start or end of user indices
+        let prompt_end = wrapped_user_prompt_starts
+            .iter()
+            .find(|&&s| s > anim.line_idx)
+            .copied()
+            .unwrap_or(
+                wrapped_user_indices
+                    .last()
+                    .map(|&l| l + 1)
+                    .unwrap_or(anim.line_idx + 1),
+            );
+
+        for abs_idx in anim.line_idx..prompt_end {
+            if abs_idx >= scroll && abs_idx < visible_end {
+                if wrapped_user_indices.contains(&abs_idx) {
+                    let rel_idx = abs_idx - scroll;
+                    if let Some(line) = visible_lines.get_mut(rel_idx) {
+                        for span in &mut line.spans {
+                            if !span.content.is_empty() {
+                                let base = match span.style.fg {
+                                    Some(c) => c,
+                                    None => USER_TEXT,
+                                };
+                                span.style = span.style.fg(prompt_entry_color(base, t));
+                            }
+                        }
                     }
                 }
             }
