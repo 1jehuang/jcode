@@ -58,6 +58,9 @@ thread_local! {
     /// In this mode mermaid diagrams update an ephemeral side-panel preview
     /// instead of being persisted in ACTIVE_DIAGRAMS history.
     static STREAMING_RENDER_CONTEXT: Cell<bool> = const { Cell::new(false) };
+    /// Whether code blocks should be horizontally centered within available width.
+    /// Set to true in centered mode, false in left-aligned mode.
+    static CENTER_CODE_BLOCKS: Cell<bool> = const { Cell::new(true) };
 }
 
 pub fn set_diagram_mode_override(mode: Option<DiagramDisplayMode>) {
@@ -98,6 +101,14 @@ fn with_streaming_render_context<T>(f: impl FnOnce() -> T) -> T {
 
 fn streaming_render_context_enabled() -> bool {
     STREAMING_RENDER_CONTEXT.with(|ctx| ctx.get())
+}
+
+pub fn set_center_code_blocks(centered: bool) {
+    CENTER_CODE_BLOCKS.with(|ctx| ctx.set(centered));
+}
+
+fn center_code_blocks() -> bool {
+    CENTER_CODE_BLOCKS.with(|ctx| ctx.get())
 }
 
 struct HighlightCache {
@@ -738,10 +749,14 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     let max_code_width = code_widths.iter().copied().max().unwrap_or(0);
                     let block_width = header_width.max(max_code_width).max(2); // at least "└─"
 
-                    // Calculate padding to center the block
-                    let padding = if let Some(mw) = max_width {
-                        if block_width < mw {
-                            (mw - block_width) / 2
+                    // Calculate padding to center the block (only in centered mode)
+                    let padding = if center_code_blocks() {
+                        if let Some(mw) = max_width {
+                            if block_width < mw {
+                                (mw - block_width) / 2
+                            } else {
+                                0
+                            }
                         } else {
                             0
                         }
@@ -1613,9 +1628,13 @@ pub fn render_markdown_lazy(
                     let max_code_width = code_widths.iter().copied().max().unwrap_or(0);
                     let block_width = header_width.max(max_code_width).max(2);
 
-                    let padding = if let Some(mw) = max_width {
-                        if block_width < mw {
-                            (mw - block_width) / 2
+                    let padding = if center_code_blocks() {
+                        if let Some(mw) = max_width {
+                            if block_width < mw {
+                                (mw - block_width) / 2
+                            } else {
+                                0
+                            }
                         } else {
                             0
                         }
