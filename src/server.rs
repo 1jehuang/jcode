@@ -1495,6 +1495,10 @@ async fn handle_client(
     // This allows signaling "move to background" while the agent is processing
     let background_tool_signal = new_agent.background_tool_signal();
 
+    // Get a handle to the graceful shutdown signal BEFORE wrapping in Mutex
+    // This allows signaling cancel (checkpoint partial response) without needing the lock
+    let cancel_signal = new_agent.graceful_shutdown_signal();
+
     let agent = Arc::new(Mutex::new(new_agent));
     {
         let mut sessions_guard = sessions.write().await;
@@ -1852,12 +1856,28 @@ async fn handle_client(
 
             Request::Cancel { id } => {
                 let _ = id; // cancel request id (not the message id)
-                if let Some(handle) = processing_task.take() {
+                if let Some(mut handle) = processing_task.take() {
                     if handle.is_finished() {
                         processing_task = Some(handle);
                         continue;
                     }
-                    handle.abort();
+                    // Signal graceful shutdown so the agent checkpoints partial content
+                    // before exiting, then wait briefly for it to finish.
+                    cancel_signal.store(true, std::sync::atomic::Ordering::SeqCst);
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        &mut handle,
+                    ).await {
+                        Ok(_) => {
+                            // Task exited gracefully within timeout
+                        }
+                        Err(_) => {
+                            // Timed out waiting for graceful exit, force abort
+                            handle.abort();
+                        }
+                    }
+                    // Reset the signal for future turns
+                    cancel_signal.store(false, std::sync::atomic::Ordering::SeqCst);
                     processing_task = None;
                     client_is_processing = false;
                     if let Some(session_id) = processing_session_id.take() {
