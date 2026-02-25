@@ -366,6 +366,9 @@ impl TuiState for BenchState {
     fn diff_pane_scroll(&self) -> usize {
         0
     }
+    fn diff_pane_focus(&self) -> bool {
+        false
+    }
     fn pin_images(&self) -> bool {
         false
     }

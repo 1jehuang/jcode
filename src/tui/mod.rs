@@ -154,6 +154,8 @@ pub trait TuiState {
     fn diagram_zoom(&self) -> u8;
     /// Scroll offset for pinned diff pane (line index)
     fn diff_pane_scroll(&self) -> usize;
+    /// Whether the pinned diff pane is focused
+    fn diff_pane_focus(&self) -> bool;
     /// Whether to pin read images to a side pane
     fn pin_images(&self) -> bool;
     /// Whether to wrap lines in the pinned diff pane

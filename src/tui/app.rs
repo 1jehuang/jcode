@@ -661,6 +661,7 @@ pub struct App {
     diagram_zoom: u8,
     // Scroll offset for pinned diff pane
     diff_pane_scroll: usize,
+    diff_pane_focus: bool,
     // Pin read images to side pane
     pin_images: bool,
     // Interactive model/provider picker
@@ -965,6 +966,7 @@ impl App {
             diagram_pane_position: crate::config::DiagramPanePosition::default(),
             diagram_zoom: 100,
             diff_pane_scroll: 0,
+            diff_pane_focus: false,
             pin_images: display.pin_images,
             picker_state: None,
             pending_model_switch: None,
@@ -1451,11 +1453,66 @@ impl App {
             return;
         }
         self.diagram_focus = focus;
+        self.diff_pane_focus = false;
         if focus {
             self.set_status_notice("Focus: diagram (hjkl pan, [/] zoom, +/- resize)");
         } else {
             self.set_status_notice("Focus: chat");
         }
+    }
+
+    fn diff_pane_visible(&self) -> bool {
+        self.diff_mode.is_pinned()
+    }
+
+    fn set_diff_pane_focus(&mut self, focus: bool) {
+        if self.diff_pane_focus == focus {
+            return;
+        }
+        self.diff_pane_focus = focus;
+        self.diagram_focus = false;
+        if focus {
+            self.set_status_notice("Focus: diffs (j/k scroll, Esc to return)");
+        } else {
+            self.set_status_notice("Focus: chat");
+        }
+    }
+
+    fn handle_diff_pane_focus_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> bool {
+        if !self.diff_pane_focus || modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.diff_pane_scroll = self.diff_pane_scroll.saturating_add(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.diff_pane_scroll = self.diff_pane_scroll.saturating_sub(1);
+            }
+            KeyCode::Char('d') => {
+                self.diff_pane_scroll = self.diff_pane_scroll.saturating_add(10);
+            }
+            KeyCode::Char('u') => {
+                self.diff_pane_scroll = self.diff_pane_scroll.saturating_sub(10);
+            }
+            KeyCode::Char('g') => {
+                self.diff_pane_scroll = 0;
+            }
+            KeyCode::Char('G') => {
+                self.diff_pane_scroll = usize::MAX;
+            }
+            KeyCode::Esc => {
+                self.set_diff_pane_focus(false);
+            }
+            _ => {}
+        }
+
+        true
     }
 
     fn cycle_diagram(&mut self, direction: i32) {
@@ -1590,28 +1647,41 @@ impl App {
     }
 
     fn handle_diagram_ctrl_key(&mut self, code: KeyCode, diagram_available: bool) -> bool {
-        if !diagram_available {
-            return false;
+        if diagram_available {
+            match code {
+                KeyCode::Left => {
+                    self.cycle_diagram(-1);
+                    return true;
+                }
+                KeyCode::Right => {
+                    self.cycle_diagram(1);
+                    return true;
+                }
+                KeyCode::Char('h') => {
+                    self.set_diagram_focus(false);
+                    return true;
+                }
+                KeyCode::Char('l') => {
+                    self.set_diagram_focus(true);
+                    return true;
+                }
+                _ => {}
+            }
         }
-        match code {
-            KeyCode::Left => {
-                self.cycle_diagram(-1);
-                true
+        if self.diff_pane_visible() {
+            match code {
+                KeyCode::Char('l') => {
+                    self.set_diff_pane_focus(true);
+                    return true;
+                }
+                KeyCode::Char('h') => {
+                    self.set_diff_pane_focus(false);
+                    return true;
+                }
+                _ => {}
             }
-            KeyCode::Right => {
-                self.cycle_diagram(1);
-                true
-            }
-            KeyCode::Char('h') => {
-                self.set_diagram_focus(false);
-                true
-            }
-            KeyCode::Char('l') => {
-                self.set_diagram_focus(true);
-                true
-            }
-            _ => false,
         }
+        false
     }
 
     fn ctrl_prompt_rank(code: &KeyCode, modifiers: KeyModifiers) -> Option<usize> {
@@ -5381,6 +5451,9 @@ impl App {
         if self.handle_diagram_focus_key(code.clone(), modifiers, diagram_available) {
             return Ok(());
         }
+        if self.handle_diff_pane_focus_key(code.clone(), modifiers) {
+            return Ok(());
+        }
         // Most key handling is the same as local mode
         // Handle Alt combos
         if modifiers.contains(KeyModifiers::ALT) {
@@ -5458,6 +5531,9 @@ impl App {
         // Shift+Tab: cycle diff mode (Off → Inline → Pinned)
         if code == KeyCode::BackTab {
             self.diff_mode = self.diff_mode.cycle();
+            if !self.diff_mode.is_pinned() {
+                self.diff_pane_focus = false;
+            }
             let status = format!("Diffs: {}", self.diff_mode.label());
             self.set_status_notice(&status);
             return Ok(());
@@ -5484,7 +5560,7 @@ impl App {
                     self.recover_session_without_tools();
                     return Ok(());
                 }
-                KeyCode::Char('l') if !self.is_processing && !diagram_available => {
+                KeyCode::Char('l') if !self.is_processing && !diagram_available && !self.diff_pane_visible() => {
                     self.clear_display_messages();
                     self.queued_messages.clear();
                     return Ok(());
@@ -6076,6 +6152,9 @@ impl App {
         if self.handle_diagram_focus_key(code.clone(), modifiers, diagram_available) {
             return Ok(());
         }
+        if self.handle_diff_pane_focus_key(code.clone(), modifiers) {
+            return Ok(());
+        }
         // Handle Alt combos (readline word movement)
         if modifiers.contains(KeyModifiers::ALT) {
             match code {
@@ -6162,6 +6241,9 @@ impl App {
         // Shift+Tab: cycle diff mode (Off → Inline → Pinned)
         if code == KeyCode::BackTab {
             self.diff_mode = self.diff_mode.cycle();
+            if !self.diff_mode.is_pinned() {
+                self.diff_pane_focus = false;
+            }
             let status = format!("Diffs: {}", self.diff_mode.label());
             self.set_status_notice(&status);
             return Ok(());
@@ -6181,7 +6263,7 @@ impl App {
                     self.recover_session_without_tools();
                     return Ok(());
                 }
-                KeyCode::Char('l') if !self.is_processing && !diagram_available => {
+                KeyCode::Char('l') if !self.is_processing && !diagram_available && !self.diff_pane_visible() => {
                     self.clear_provider_messages();
                     self.clear_display_messages();
                     self.queued_messages.clear();
@@ -6771,7 +6853,7 @@ impl App {
                      **Available skills:** {}\n\n\
                      **Keyboard shortcuts:**\n\
                      • `Ctrl+C` / `Ctrl+D` - Quit (press twice to confirm)\n\
-                     • `Ctrl+H` / `Ctrl+L` - Focus chat/diagram (pinned mode)\n\
+                     • `Ctrl+H` / `Ctrl+L` - Focus chat/diagram/diffs (pinned mode)\n\
                      • `Ctrl+Left/Right` - Cycle diagrams in side pane\n\
                      • `h/j/k/l` or arrow keys - Pan diagram (when focused)\n\
                      • `[` / `]` - Zoom diagram (when focused)\n\
@@ -6969,7 +7051,7 @@ impl App {
             // Spawn extraction in background
             let context_owned = context.clone();
             tokio::spawn(async move {
-                let sidecar = crate::sidecar::HaikuSidecar::new();
+                let sidecar = crate::sidecar::Sidecar::new();
                 match sidecar.extract_memories(&context_owned).await {
                     Ok(extracted) if !extracted.is_empty() => {
                         let manager = crate::memory::MemoryManager::new();
@@ -11737,7 +11819,7 @@ impl App {
         }
 
         // Extract memories using sidecar
-        let sidecar = crate::sidecar::HaikuSidecar::new();
+        let sidecar = crate::sidecar::Sidecar::new();
         match sidecar.extract_memories(&transcript).await {
             Ok(extracted) if !extracted.is_empty() => {
                 let manager = crate::memory::MemoryManager::new();
@@ -13503,6 +13585,9 @@ impl super::TuiState for App {
     }
     fn diff_pane_scroll(&self) -> usize {
         self.diff_pane_scroll
+    }
+    fn diff_pane_focus(&self) -> bool {
+        self.diff_pane_focus
     }
     fn pin_images(&self) -> bool {
         self.pin_images

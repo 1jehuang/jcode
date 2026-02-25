@@ -1661,6 +1661,9 @@ impl TuiState for ClientApp {
     fn diff_pane_scroll(&self) -> usize {
         0
     }
+    fn diff_pane_focus(&self) -> bool {
+        false
+    }
     fn pin_images(&self) -> bool {
         crate::config::config().display.pin_images
     }

@@ -107,7 +107,7 @@ pub fn set_center_code_blocks(centered: bool) {
     CENTER_CODE_BLOCKS.with(|ctx| ctx.set(centered));
 }
 
-fn center_code_blocks() -> bool {
+pub fn center_code_blocks() -> bool {
     CENTER_CODE_BLOCKS.with(|ctx| ctx.get())
 }
 

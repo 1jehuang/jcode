@@ -8181,7 +8181,9 @@ mod tests {
             .iter()
             .filter(|line| {
                 let text = extract_line_text(line);
-                text.starts_with("    ✓") || text.starts_with("    ✗")
+                let trimmed = text.trim_start();
+                let indent = text.len() - trimmed.len();
+                indent > 4 && (trimmed.starts_with("✓") || trimmed.starts_with("✗"))
             })
             .collect();
 
