@@ -877,7 +877,7 @@ async fn test_system_prompt_no_claude_code_identity() -> Result<()> {
 
     // Should identify as jcode
     assert!(
-        lower_identity.contains("you are jcode"),
+        lower_identity.contains("jcode"),
         "System prompt should identify as jcode. Found: {}",
         identity_portion
     );

@@ -1419,8 +1419,8 @@ mod tests {
         assert!(buffer.is_empty());
     }
 
-    #[test]
-    fn test_available_models() {
+    #[tokio::test]
+    async fn test_available_models() {
         let provider = AnthropicProvider::new();
         let models = provider.available_models();
         assert!(models.contains(&"claude-opus-4-6"));
@@ -1430,8 +1430,8 @@ mod tests {
         assert!(models.contains(&"claude-haiku-4-5"));
     }
 
-    #[test]
-    fn test_dangling_tool_use_repair() {
+    #[tokio::test]
+    async fn test_dangling_tool_use_repair() {
         let provider = AnthropicProvider::new();
 
         // Create messages with a dangling tool_use (no corresponding tool_result)
@@ -1503,8 +1503,8 @@ mod tests {
         assert!(found_ids.contains("tool_456"));
     }
 
-    #[test]
-    fn test_no_repair_when_tool_results_present() {
+    #[tokio::test]
+    async fn test_no_repair_when_tool_results_present() {
         let provider = AnthropicProvider::new();
 
         // Create messages where tool_use has a corresponding tool_result
