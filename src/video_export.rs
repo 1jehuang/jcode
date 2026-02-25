@@ -3,6 +3,7 @@ use base64::Engine;
 use ratatui::buffer::Buffer;
 use ratatui::style::Color;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::replay::TimelineEvent;
@@ -119,22 +120,19 @@ async fn render_svg_pipeline(
     }
     std::fs::create_dir_all(&tmp_dir)?;
 
-    // Deduplicate frames: only render unique buffers
+    // Deduplicate frames: hash each buffer and only render unique ones
+    let mut unique_by_hash: HashMap<u64, usize> = HashMap::new();
     let mut unique_frames: Vec<(usize, &Buffer)> = Vec::new();
-    let mut frame_indices: Vec<usize> = Vec::new(); // maps frame# → unique index
+    let mut frame_indices: Vec<usize> = Vec::new();
 
     for (_t, buf) in frames {
-        let found = unique_frames
-            .iter()
-            .position(|(_, existing)| buffers_equal(existing, buf));
-        match found {
-            Some(idx) => frame_indices.push(idx),
-            None => {
-                let idx = unique_frames.len();
-                unique_frames.push((idx, buf));
-                frame_indices.push(idx);
-            }
-        }
+        let h = hash_buffer(buf);
+        let idx = *unique_by_hash.entry(h).or_insert_with(|| {
+            let idx = unique_frames.len();
+            unique_frames.push((idx, buf));
+            idx
+        });
+        frame_indices.push(idx);
     }
 
     eprintln!(
@@ -143,20 +141,10 @@ async fn render_svg_pipeline(
         frames.len()
     );
 
-    // Render unique SVGs and convert to PNG (parallel with concurrency limit)
+    // Render unique SVGs and convert to PNG in parallel
     let png_dir = tmp_dir.join("png");
     std::fs::create_dir_all(&png_dir)?;
 
-    // Write all SVGs first
-    let mut svg_paths = Vec::new();
-    for (i, (_, buf)) in unique_frames.iter().enumerate() {
-        let svg = buffer_to_svg(buf, font_family, font_size, cell_w, cell_h);
-        let svg_path = tmp_dir.join(format!("frame_{:06}.svg", i));
-        std::fs::write(&svg_path, &svg)?;
-        svg_paths.push(svg_path);
-    }
-
-    // Convert SVG→PNG in parallel batches
     let concurrency = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
@@ -164,28 +152,34 @@ async fn render_svg_pipeline(
     let total_unique = unique_frames.len();
     let rendered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    for chunk in svg_paths.chunks(concurrency) {
+    for chunk_start in (0..unique_frames.len()).step_by(concurrency) {
+        let chunk_end = (chunk_start + concurrency).min(unique_frames.len());
         let mut handles = Vec::new();
-        for (chunk_offset, svg_path) in chunk.iter().enumerate() {
-            let idx = rendered.load(std::sync::atomic::Ordering::Relaxed) + chunk_offset;
-            let png_path = png_dir.join(format!("unique_{:06}.png", idx));
+        for i in chunk_start..chunk_end {
+            let (_, buf) = unique_frames[i];
+            let svg = buffer_to_svg(buf, font_family, font_size, cell_w, cell_h);
+            let png_path = png_dir.join(format!("unique_{:06}.png", i));
             let rsvg = rsvg.clone();
-            let svg_path = svg_path.clone();
             let img_w = img_w;
             let img_h = img_h;
             handles.push(tokio::spawn(async move {
-                let status = tokio::process::Command::new(&rsvg)
+                use tokio::io::AsyncWriteExt;
+                let mut child = tokio::process::Command::new(&rsvg)
                     .arg("--width")
                     .arg(img_w.to_string())
                     .arg("--height")
                     .arg(img_h.to_string())
                     .arg("--output")
                     .arg(&png_path)
-                    .arg(&svg_path)
-                    .status()
-                    .await;
-                let _ = std::fs::remove_file(&svg_path);
-                status
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()?;
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(svg.as_bytes()).await?;
+                    drop(stdin);
+                }
+                child.wait().await
             }));
         }
         for handle in handles {
@@ -225,7 +219,7 @@ async fn render_svg_pipeline(
         .arg("-crf")
         .arg("18")
         .arg("-preset")
-        .arg("slow")
+        .arg("fast")
         .arg("-tune")
         .arg("animation")
         .arg("-r")
@@ -254,45 +248,51 @@ async fn render_svg_pipeline(
     Ok(())
 }
 
-fn buffers_equal(a: &Buffer, b: &Buffer) -> bool {
-    if a.area != b.area {
-        return false;
-    }
-    for y in 0..a.area.height {
-        for x in 0..a.area.width {
-            let ca = &a[(x, y)];
-            let cb = &b[(x, y)];
-            if ca.symbol() != cb.symbol()
-                || ca.fg != cb.fg
-                || ca.bg != cb.bg
-                || ca.modifier != cb.modifier
-            {
-                return false;
+fn hash_buffer(buf: &Buffer) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    buf.area.hash(&mut hasher);
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            let cell = &buf[(x, y)];
+            cell.symbol().hash(&mut hasher);
+            std::mem::discriminant(&cell.fg).hash(&mut hasher);
+            match cell.fg {
+                Color::Rgb(r, g, b) => { r.hash(&mut hasher); g.hash(&mut hasher); b.hash(&mut hasher); }
+                Color::Indexed(i) => i.hash(&mut hasher),
+                _ => {}
             }
+            std::mem::discriminant(&cell.bg).hash(&mut hasher);
+            match cell.bg {
+                Color::Rgb(r, g, b) => { r.hash(&mut hasher); g.hash(&mut hasher); b.hash(&mut hasher); }
+                Color::Indexed(i) => i.hash(&mut hasher),
+                _ => {}
+            }
+            cell.modifier.bits().hash(&mut hasher);
         }
     }
-    true
+    hasher.finish()
 }
 
 fn color_to_hex(color: Color) -> String {
     match color {
-        Color::Reset => "#d4d4d4".to_string(),
-        Color::Black => "#000000".to_string(),
-        Color::Red => "#cd3131".to_string(),
-        Color::Green => "#0dbc79".to_string(),
-        Color::Yellow => "#e5e510".to_string(),
-        Color::Blue => "#2472c8".to_string(),
-        Color::Magenta => "#bc3fbc".to_string(),
-        Color::Cyan => "#11a8cd".to_string(),
-        Color::Gray => "#808080".to_string(),
-        Color::DarkGray => "#666666".to_string(),
-        Color::LightRed => "#f14c4c".to_string(),
-        Color::LightGreen => "#23d18b".to_string(),
-        Color::LightYellow => "#f5f543".to_string(),
-        Color::LightBlue => "#3b8eea".to_string(),
-        Color::LightMagenta => "#d670d6".to_string(),
-        Color::LightCyan => "#29b8db".to_string(),
-        Color::White => "#e5e5e5".to_string(),
+        Color::Reset => "#d4d4d4".into(),
+        Color::Black => "#000000".into(),
+        Color::Red => "#cd3131".into(),
+        Color::Green => "#0dbc79".into(),
+        Color::Yellow => "#e5e510".into(),
+        Color::Blue => "#2472c8".into(),
+        Color::Magenta => "#bc3fbc".into(),
+        Color::Cyan => "#11a8cd".into(),
+        Color::Gray => "#808080".into(),
+        Color::DarkGray => "#666666".into(),
+        Color::LightRed => "#f14c4c".into(),
+        Color::LightGreen => "#23d18b".into(),
+        Color::LightYellow => "#f5f543".into(),
+        Color::LightBlue => "#3b8eea".into(),
+        Color::LightMagenta => "#d670d6".into(),
+        Color::LightCyan => "#29b8db".into(),
+        Color::White => "#e5e5e5".into(),
         Color::Rgb(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),
         Color::Indexed(i) => indexed_color_to_hex(i),
     }
@@ -300,7 +300,7 @@ fn color_to_hex(color: Color) -> String {
 
 fn color_to_bg_hex(color: Color) -> String {
     match color {
-        Color::Reset => "#000000".to_string(),
+        Color::Reset => "#000000".into(),
         _ => color_to_hex(color),
     }
 }
