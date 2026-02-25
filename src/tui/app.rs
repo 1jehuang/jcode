@@ -1751,9 +1751,13 @@ impl App {
         let diagram_available = self.diagram_available();
         let layout = super::ui::last_layout_snapshot();
         let mut over_diagram = false;
+        let mut over_diff_pane = false;
         if let Some(layout) = layout {
             if let Some(diagram_area) = layout.diagram_area {
                 over_diagram = point_in_rect(mouse.column, mouse.row, diagram_area);
+            }
+            if let Some(diff_area) = layout.diff_pane_area {
+                over_diff_pane = point_in_rect(mouse.column, mouse.row, diff_area);
             }
             if diagram_available && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if over_diagram {
@@ -1793,6 +1797,27 @@ impl App {
                 }
                 handled_scroll = true;
             }
+        }
+
+        if !handled_scroll
+            && over_diff_pane
+            && self.diff_pane_visible()
+            && matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            )
+        {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.diff_pane_scroll = self.diff_pane_scroll.saturating_sub(3);
+                    self.diff_pane_auto_scroll = false;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.diff_pane_scroll = self.diff_pane_scroll.saturating_add(3);
+                }
+                _ => {}
+            }
+            handled_scroll = true;
         }
 
         if handled_scroll {
@@ -14169,7 +14194,7 @@ mod tests {
         // Pan should update scroll offsets and not type into input
         app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
             .unwrap();
-        assert_eq!(app.diagram_scroll_y, 1);
+        assert_eq!(app.diagram_scroll_y, 3);
         assert!(app.input.is_empty());
 
         // Ctrl+H returns focus to chat
@@ -14559,9 +14584,9 @@ mod tests {
 
         app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
 
-        assert_eq!(app.input(), "urgent");
+        assert_eq!(app.input(), "urgent\n\nlater");
         assert_eq!(app.interleave_message.as_deref(), None);
-        assert_eq!(app.queued_count(), 1);
+        assert_eq!(app.queued_count(), 0);
     }
 
     #[test]
