@@ -2367,19 +2367,6 @@ fn login_cursor_flow() -> Result<()> {
 fn login_copilot_flow() -> Result<()> {
     eprintln!("Starting GitHub Copilot login...");
 
-    let (program, args, _rendered) = provider::copilot::copilot_login_command();
-    match run_external_login_command_owned(&program, &args) {
-        Ok(()) => {
-            eprintln!("Copilot login command completed.");
-            return Ok(());
-        }
-        Err(_) => {
-            eprintln!(
-                "Copilot CLI not found. Using built-in GitHub device flow..."
-            );
-        }
-    }
-
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(login_copilot_device_flow())
     })

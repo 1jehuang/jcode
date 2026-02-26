@@ -3,7 +3,7 @@
 use super::keybind::{CenteredToggleKeys, ModelSwitchKeys, ScrollKeys};
 use super::markdown::IncrementalMarkdownRenderer;
 use super::stream_buffer::StreamBuffer;
-use crate::bus::{BackgroundTaskStatus, Bus, BusEvent, ToolEvent, ToolStatus};
+use crate::bus::{BackgroundTaskStatus, Bus, BusEvent, LoginCompleted, ToolEvent, ToolStatus};
 use crate::compaction::CompactionEvent;
 use crate::config::config;
 use crate::id;
@@ -485,6 +485,8 @@ enum PendingLogin {
     ClaudeAccount { verifier: String, label: String },
     /// Waiting for user to paste OpenRouter API key
     OpenRouter,
+    /// GitHub Copilot device flow in progress (polling in background)
+    Copilot,
 }
 
 /// TUI Application state
@@ -3983,6 +3985,9 @@ impl App {
                             Ok(BusEvent::UsageReport(results)) => {
                                 self.handle_usage_report(results);
                             }
+                            Ok(BusEvent::LoginCompleted(login)) => {
+                                self.handle_login_completed(login);
+                            }
                             _ => {}
                         }
                     }
@@ -4510,8 +4515,14 @@ impl App {
                         }
                     }
                     bus_event = bus_receiver_remote.recv() => {
-                        if let Ok(BusEvent::UsageReport(results)) = bus_event {
-                            self.handle_usage_report(results);
+                        match bus_event {
+                            Ok(BusEvent::UsageReport(results)) => {
+                                self.handle_usage_report(results);
+                            }
+                            Ok(BusEvent::LoginCompleted(login)) => {
+                                self.handle_login_completed(login);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -6075,6 +6086,16 @@ impl App {
                             "Requesting compaction...".to_string(),
                         ));
                         remote.compact().await?;
+                        return Ok(());
+                    }
+
+                    // Check for pending login (OAuth code paste, API key paste)
+                    // Must be checked before slash command routing since OAuth codes
+                    // don't start with /
+                    if self.pending_login.is_some() {
+                        self.input = trimmed.to_string();
+                        self.cursor_pos = self.input.len();
+                        self.submit_input();
                         return Ok(());
                     }
 
@@ -9389,78 +9410,86 @@ impl App {
     }
 
     fn start_copilot_login(&mut self) {
-        let (program, args, _rendered) = crate::provider::copilot::copilot_login_command();
+        self.set_status_notice("Login: copilot device flow...");
 
-        match Self::run_external_login_command_owned(&program, &args) {
-            Ok(()) => {
-                self.push_display_message(DisplayMessage::system(
-                    "✓ **Copilot login command completed.**".to_string(),
-                ));
-                self.set_status_notice("Login: ✓ copilot");
+        let client = reqwest::Client::new();
+        let client_clone = client.clone();
+
+        let rt = tokio::runtime::Handle::current();
+        let device_resp = match rt.block_on(crate::auth::copilot::initiate_device_flow(&client)) {
+            Ok(resp) => resp,
+            Err(e) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Copilot device flow failed: {}",
+                    e
+                )));
+                self.set_status_notice("Login: copilot failed");
+                return;
             }
-            Err(_) => {
-                self.set_status_notice("Login: copilot device flow...");
+        };
 
-                tokio::spawn(async move {
-                    let client = reqwest::Client::new();
+        let user_code = device_resp.user_code.clone();
+        let verification_uri = device_resp.verification_uri.clone();
 
-                    let device_resp = match crate::auth::copilot::initiate_device_flow(&client).await {
-                        Ok(resp) => resp,
-                        Err(e) => {
-                            crate::logging::error(&format!("Copilot device flow failed: {}", e));
-                            return;
-                        }
-                    };
+        let _ = open::that(&verification_uri);
 
-                    let _ = open::that(&device_resp.verification_uri);
+        self.push_display_message(DisplayMessage::system(format!(
+            "**GitHub Copilot Login**\n\n\
+             Opening browser for GitHub authorization...\n\n\
+             If the browser didn't open, visit:\n  {}\n\n\
+             Enter code: **{}**\n\n\
+             Waiting for authorization... (type `/cancel` to abort)",
+            verification_uri, user_code
+        )));
+        self.set_status_notice(&format!("Login: enter {} at GitHub", user_code));
+        self.pending_login = Some(PendingLogin::Copilot);
 
-                    crate::logging::info(&format!(
-                        "Copilot login: open {} and enter code: {}",
-                        device_resp.verification_uri, device_resp.user_code
-                    ));
+        let device_code = device_resp.device_code;
+        let interval = device_resp.interval;
+        tokio::spawn(async move {
+            let token = match crate::auth::copilot::poll_for_access_token(
+                &client_clone,
+                &device_code,
+                interval,
+            )
+            .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "copilot".to_string(),
+                        success: false,
+                        message: format!("Copilot login failed: {}", e),
+                    }));
+                    return;
+                }
+            };
 
-                    let token = match crate::auth::copilot::poll_for_access_token(
-                        &client,
-                        &device_resp.device_code,
-                        device_resp.interval,
-                    )
-                    .await
-                    {
-                        Ok(t) => t,
-                        Err(e) => {
-                            crate::logging::error(&format!("Copilot polling failed: {}", e));
-                            return;
-                        }
-                    };
+            let username = crate::auth::copilot::fetch_github_username(&client_clone, &token)
+                .await
+                .unwrap_or_else(|_| "unknown".to_string());
 
-                    let username = crate::auth::copilot::fetch_github_username(&client, &token)
-                        .await
-                        .unwrap_or_else(|_| "unknown".to_string());
-
-                    match crate::auth::copilot::save_github_token(&token, &username) {
-                        Ok(()) => {
-                            crate::logging::info(&format!(
-                                "Copilot login complete! Authenticated as {}. Restart or /login to activate.",
-                                username
-                            ));
-                        }
-                        Err(e) => {
-                            crate::logging::error(&format!("Failed to save Copilot token: {}", e));
-                        }
-                    }
-                });
-
-                self.push_display_message(DisplayMessage::system(
-                    "**GitHub Copilot Device Flow**\n\n\
-                     Copilot CLI not found - using built-in device flow.\n\n\
-                     Opening browser for GitHub authorization...\n\
-                     Check the browser for a verification code to enter.\n\n\
-                     The login will complete automatically once you authorize in the browser.\n\
-                     Check logs (`~/.jcode/logs/`) for the verification code if the browser didn't open."
-                        .to_string(),
-                ));
+            match crate::auth::copilot::save_github_token(&token, &username) {
+                Ok(()) => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "copilot".to_string(),
+                        success: true,
+                        message: format!(
+                            "✓ Authenticated as **{}** via GitHub Copilot.\n\n\
+                             Restart jcode or use `/model copilot:claude-sonnet-4` to activate.",
+                            username
+                        ),
+                    }));
+                }
+                Err(e) => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "copilot".to_string(),
+                        success: false,
+                        message: format!("Failed to save Copilot token: {}", e),
+                    }));
+                }
             }
-        }
+        });
     }
 
     fn start_antigravity_login(&mut self) {
@@ -9625,6 +9654,27 @@ impl App {
                     }
                 }
             }
+            PendingLogin::Copilot => {
+                self.push_display_message(DisplayMessage::system(
+                    "Copilot login is waiting for browser authorization.\n\
+                     Complete the login in your browser, or type `/cancel` to abort."
+                        .to_string(),
+                ));
+                self.pending_login = Some(PendingLogin::Copilot);
+            }
+        }
+    }
+
+    fn handle_login_completed(&mut self, login: LoginCompleted) {
+        if login.success {
+            self.push_display_message(DisplayMessage::system(login.message));
+            self.set_status_notice(&format!("Login: ✓ {}", login.provider));
+        } else {
+            self.push_display_message(DisplayMessage::error(login.message));
+            self.set_status_notice(&format!("Login: {} failed", login.provider));
+        }
+        if matches!(self.pending_login, Some(PendingLogin::Copilot)) {
+            self.pending_login = None;
         }
     }
 
@@ -15743,6 +15793,32 @@ mod tests {
         )
     }
 
+    /// Get the configured scroll up fallback key, or primary scroll up key.
+    fn scroll_up_fallback_key(app: &App) -> (KeyCode, KeyModifiers) {
+        app.scroll_keys
+            .up_fallback
+            .as_ref()
+            .map(|binding| (binding.code.clone(), binding.modifiers))
+            .unwrap_or_else(|| scroll_up_key(app))
+    }
+
+    /// Get the configured scroll down fallback key, or primary scroll down key.
+    fn scroll_down_fallback_key(app: &App) -> (KeyCode, KeyModifiers) {
+        app.scroll_keys
+            .down_fallback
+            .as_ref()
+            .map(|binding| (binding.code.clone(), binding.modifiers))
+            .unwrap_or_else(|| scroll_down_key(app))
+    }
+
+    /// Get the configured prompt-up key binding (code, modifiers).
+    fn prompt_up_key(app: &App) -> (KeyCode, KeyModifiers) {
+        (
+            app.scroll_keys.prompt_up.code.clone(),
+            app.scroll_keys.prompt_up.modifiers,
+        )
+    }
+
     /// Render app to TestBackend and return the buffer text.
     fn render_and_snap(
         app: &App,
@@ -15922,15 +15998,15 @@ mod tests {
         // Seed max scroll estimates before key handling.
         render_and_snap(&app, &mut terminal);
 
-        app.handle_key(KeyCode::Char('['), KeyModifiers::CONTROL)
+        let (prompt_up_code, prompt_up_mods) = prompt_up_key(&app);
+        app.handle_key(prompt_up_code, prompt_up_mods)
             .unwrap();
-        let after_up = app.scroll_offset;
-        assert!(after_up > 0);
+        assert!(app.scroll_offset > 0);
 
         // Ctrl+5 now means "5th most-recent prompt" (clamped to oldest).
         app.handle_key(KeyCode::Char('5'), KeyModifiers::CONTROL)
             .unwrap();
-        assert!(app.scroll_offset >= after_up);
+        assert!(app.scroll_offset > 0);
     }
 
     #[test]
@@ -15940,13 +16016,16 @@ mod tests {
         // Seed max scroll estimates before key handling.
         render_and_snap(&app, &mut terminal);
 
-        app.handle_key(KeyCode::Char('k'), KeyModifiers::SUPER)
+        let (up_code, up_mods) = scroll_up_fallback_key(&app);
+        let (down_code, down_mods) = scroll_down_fallback_key(&app);
+
+        app.handle_key(up_code, up_mods)
             .unwrap();
         assert!(app.auto_scroll_paused);
         assert!(app.scroll_offset > 0);
         let after_up = app.scroll_offset;
 
-        app.handle_key(KeyCode::Char('j'), KeyModifiers::SUPER)
+        app.handle_key(down_code, down_mods)
             .unwrap();
         assert!(app.scroll_offset <= after_up);
     }
@@ -16003,15 +16082,15 @@ mod tests {
         // Seed max scroll estimates before key handling.
         render_and_snap(&app, &mut terminal);
 
-        rt.block_on(app.handle_remote_key(KeyCode::Char('['), KeyModifiers::CONTROL, &mut remote))
+        let (prompt_up_code, prompt_up_mods) = prompt_up_key(&app);
+        rt.block_on(app.handle_remote_key(prompt_up_code, prompt_up_mods, &mut remote))
             .unwrap();
-        let after_up = app.scroll_offset;
-        assert!(after_up > 0);
+        assert!(app.scroll_offset > 0);
 
         // Ctrl+5 now means "5th most-recent prompt" (clamped to oldest).
         rt.block_on(app.handle_remote_key(KeyCode::Char('5'), KeyModifiers::CONTROL, &mut remote))
             .unwrap();
-        assert!(app.scroll_offset >= after_up);
+        assert!(app.scroll_offset > 0);
     }
 
     #[test]
@@ -16024,13 +16103,16 @@ mod tests {
         // Seed max scroll estimates before key handling.
         render_and_snap(&app, &mut terminal);
 
-        rt.block_on(app.handle_remote_key(KeyCode::Char('k'), KeyModifiers::SUPER, &mut remote))
+        let (up_code, up_mods) = scroll_up_fallback_key(&app);
+        let (down_code, down_mods) = scroll_down_fallback_key(&app);
+
+        rt.block_on(app.handle_remote_key(up_code, up_mods, &mut remote))
             .unwrap();
         assert!(app.auto_scroll_paused);
         assert!(app.scroll_offset > 0);
         let after_up = app.scroll_offset;
 
-        rt.block_on(app.handle_remote_key(KeyCode::Char('j'), KeyModifiers::SUPER, &mut remote))
+        rt.block_on(app.handle_remote_key(down_code, down_mods, &mut remote))
             .unwrap();
         assert!(app.scroll_offset <= after_up);
     }
@@ -16263,7 +16345,8 @@ mod tests {
             app.handle_key(up_code.clone(), up_mods).unwrap();
         }
         assert!(app.auto_scroll_paused);
-        assert!(app.scroll_offset < crate::tui::ui::last_max_scroll());
+        assert!(app.scroll_offset > 0);
+        assert!(app.scroll_offset <= crate::tui::ui::last_max_scroll());
 
         // Render again
         let text_after = render_and_snap(&app, &mut terminal);

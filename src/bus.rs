@@ -112,6 +112,13 @@ pub struct BackgroundTaskCompleted {
 }
 
 #[derive(Clone, Debug)]
+pub struct LoginCompleted {
+    pub provider: String,
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Clone, Debug)]
 pub enum BusEvent {
     ToolUpdated(ToolEvent),
     TodoUpdated(TodoEvent),
@@ -122,6 +129,8 @@ pub enum BusEvent {
     BackgroundTaskCompleted(BackgroundTaskCompleted),
     /// Usage report fetched from providers
     UsageReport(Vec<crate::usage::ProviderUsage>),
+    /// OAuth/login flow completed in the background
+    LoginCompleted(LoginCompleted),
 }
 
 pub struct Bus {
