@@ -689,13 +689,30 @@ async fn get_usage() -> Arc<RwLock<UsageData>> {
 async fn fetch_usage() -> Result<UsageData> {
     let creds = auth::claude::load_credentials().context("Failed to load Claude credentials")?;
 
+    let now = chrono::Utc::now().timestamp_millis();
+    let access_token = if creds.expires_at < now + 300_000 && !creds.refresh_token.is_empty() {
+        let active_label = auth::claude::active_account_label()
+            .unwrap_or_else(|| "default".to_string());
+        match auth::oauth::refresh_claude_tokens_for_account(
+            &creds.refresh_token,
+            &active_label,
+        )
+        .await
+        {
+            Ok(refreshed) => refreshed.access_token,
+            Err(_) => creds.access_token,
+        }
+    } else {
+        creds.access_token
+    };
+
     let client = Client::new();
     let response = client
         .get(USAGE_URL)
         .header("Accept", "application/json")
         .header("Content-Type", "application/json")
         .header("User-Agent", "claude-cli/1.0.0")
-        .header("Authorization", format!("Bearer {}", creds.access_token))
+        .header("Authorization", format!("Bearer {}", access_token))
         .header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219")
         .send()
         .await
