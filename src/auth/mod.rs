@@ -339,7 +339,11 @@ mod tests {
 
     #[test]
     fn command_exists_for_known_binary() {
-        assert!(command_exists("ls"));
+        if cfg!(windows) {
+            assert!(command_exists("cmd") || command_exists("cmd.exe"));
+        } else {
+            assert!(command_exists("ls"));
+        }
     }
 
     #[test]
@@ -355,7 +359,11 @@ mod tests {
 
     #[test]
     fn command_exists_absolute_path() {
-        assert!(command_exists("/bin/ls") || command_exists("/usr/bin/ls"));
+        if cfg!(windows) {
+            assert!(command_exists(r"C:\Windows\System32\cmd.exe"));
+        } else {
+            assert!(command_exists("/bin/ls") || command_exists("/usr/bin/ls"));
+        }
     }
 
     #[test]
