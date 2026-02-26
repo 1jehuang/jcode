@@ -186,6 +186,35 @@ pub struct ToolCall {
     pub intent: Option<String>,
 }
 
+/// Connection phase for status bar transparency
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConnectionPhase {
+    /// Refreshing OAuth token
+    Authenticating,
+    /// TCP + TLS connection to API
+    Connecting,
+    /// HTTP request sent, waiting for first response byte
+    WaitingForResponse,
+    /// First byte received, stream is active
+    Streaming,
+    /// Retrying after a transient error
+    Retrying { attempt: u32, max: u32 },
+}
+
+impl std::fmt::Display for ConnectionPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectionPhase::Authenticating => write!(f, "authenticating"),
+            ConnectionPhase::Connecting => write!(f, "connecting"),
+            ConnectionPhase::WaitingForResponse => write!(f, "waiting for response"),
+            ConnectionPhase::Streaming => write!(f, "streaming"),
+            ConnectionPhase::Retrying { attempt, max } => {
+                write!(f, "retrying ({}/{})", attempt, max)
+            }
+        }
+    }
+}
+
 /// Streaming event from provider
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -222,6 +251,8 @@ pub enum StreamEvent {
     },
     /// Active transport/connection type for this stream
     ConnectionType { connection: String },
+    /// Connection phase update (for status bar transparency)
+    ConnectionPhase { phase: ConnectionPhase },
     /// Error occurred
     Error {
         message: String,

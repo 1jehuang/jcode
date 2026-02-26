@@ -233,8 +233,10 @@ fn format_tokens(tokens: u64) -> String {
 pub enum ProcessingStatus {
     #[default]
     Idle,
-    /// Sending request to API
+    /// Sending request to API (with optional connection phase detail)
     Sending,
+    /// Connection phase update from transport layer
+    Connecting(crate::message::ConnectionPhase),
     /// Model is reasoning/thinking (real-time duration tracking)
     Thinking(Instant),
     /// Receiving streaming response
@@ -2648,7 +2650,7 @@ impl App {
                         friendly_name: Some(self.session.display_name().to_string()),
                         status: match &self.status {
                             ProcessingStatus::Idle => "ready".to_string(),
-                            ProcessingStatus::Sending => "running".to_string(),
+                            ProcessingStatus::Sending | ProcessingStatus::Connecting(_) => "running".to_string(),
                             ProcessingStatus::Thinking(_) => "thinking".to_string(),
                             ProcessingStatus::Streaming => "running".to_string(),
                             ProcessingStatus::RunningTool(_) => "running".to_string(),
@@ -4817,7 +4819,7 @@ impl App {
                     self.insert_thought_line(thought_line);
                     return false;
                 }
-                if matches!(self.status, ProcessingStatus::Sending) {
+                if matches!(self.status, ProcessingStatus::Sending | ProcessingStatus::Connecting(_)) {
                     self.status = ProcessingStatus::Streaming;
                 } else if matches!(self.status, ProcessingStatus::Thinking(_)) {
                     self.status = ProcessingStatus::Streaming;
@@ -4941,6 +4943,17 @@ impl App {
             }
             ServerEvent::ConnectionType { connection } => {
                 self.connection_type = Some(connection);
+                false
+            }
+            ServerEvent::ConnectionPhase { phase } => {
+                let cp = match phase.as_str() {
+                    "authenticating" => crate::message::ConnectionPhase::Authenticating,
+                    "connecting" => crate::message::ConnectionPhase::Connecting,
+                    "waiting for response" => crate::message::ConnectionPhase::WaitingForResponse,
+                    "streaming" => crate::message::ConnectionPhase::Streaming,
+                    _ => crate::message::ConnectionPhase::Connecting,
+                };
+                self.status = ProcessingStatus::Connecting(cp);
                 false
             }
             ServerEvent::UpstreamProvider { provider } => {
@@ -10661,6 +10674,9 @@ impl App {
                     StreamEvent::ConnectionType { connection } => {
                         self.connection_type = Some(connection);
                     }
+                    StreamEvent::ConnectionPhase { phase } => {
+                        self.status = ProcessingStatus::Connecting(phase);
+                    }
                     StreamEvent::MessageEnd { .. } => {
                         if let Some(start) = self.streaming_tps_start.take() {
                             self.streaming_tps_elapsed += start.elapsed();
@@ -11442,6 +11458,9 @@ impl App {
                                     }
                                     StreamEvent::ConnectionType { connection } => {
                                         self.connection_type = Some(connection);
+                                    }
+                                    StreamEvent::ConnectionPhase { phase } => {
+                                        self.status = ProcessingStatus::Connecting(phase);
                                     }
                                     StreamEvent::MessageEnd { .. } => {
                                         if let Some(start) = self.streaming_tps_start.take() {
@@ -13459,6 +13478,9 @@ impl super::TuiState for App {
                     ProcessingStatus::Idle => ("ready".to_string(), None),
                     ProcessingStatus::Sending => {
                         ("running".to_string(), Some("sending".to_string()))
+                    }
+                    ProcessingStatus::Connecting(phase) => {
+                        ("running".to_string(), Some(phase.to_string()))
                     }
                     ProcessingStatus::Thinking(_) => ("thinking".to_string(), None),
                     ProcessingStatus::Streaming => {

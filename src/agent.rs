@@ -2014,6 +2014,11 @@ impl Agent {
                         }
                         self.last_connection_type = Some(connection);
                     }
+                    StreamEvent::ConnectionPhase { phase } => {
+                        if trace {
+                            eprintln!("[trace] connection_phase={}", phase);
+                        }
+                    }
                     StreamEvent::MessageEnd {
                         stop_reason: reason,
                     } => {
@@ -2710,6 +2715,11 @@ impl Agent {
                         self.last_connection_type = Some(connection.clone());
                         let _ = event_tx.send(ServerEvent::ConnectionType { connection });
                     }
+                    StreamEvent::ConnectionPhase { phase } => {
+                        let _ = event_tx.send(ServerEvent::ConnectionPhase {
+                            phase: phase.to_string(),
+                        });
+                    }
                     StreamEvent::MessageEnd {
                         stop_reason: reason,
                     } => {
@@ -3371,6 +3381,11 @@ impl Agent {
                     StreamEvent::ConnectionType { connection } => {
                         self.last_connection_type = Some(connection.clone());
                         let _ = event_tx.send(ServerEvent::ConnectionType { connection });
+                    }
+                    StreamEvent::ConnectionPhase { phase } => {
+                        let _ = event_tx.send(ServerEvent::ConnectionPhase {
+                            phase: phase.to_string(),
+                        });
                     }
                     StreamEvent::MessageEnd {
                         stop_reason: reason,

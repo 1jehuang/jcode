@@ -1795,6 +1795,12 @@ async fn stream_response(
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<(), OpenAIStreamFailure> {
+    use crate::message::ConnectionPhase;
+    let _ = tx
+        .send(Ok(StreamEvent::ConnectionPhase {
+            phase: ConnectionPhase::Authenticating,
+        }))
+        .await;
     let access_token = openai_access_token(&credentials).await?;
     let creds = credentials.read().await;
     let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
@@ -1814,12 +1820,26 @@ async fn stream_response(
         }
     }
 
+    let _ = tx
+        .send(Ok(StreamEvent::ConnectionPhase {
+            phase: ConnectionPhase::Connecting,
+        }))
+        .await;
+    let connect_start = std::time::Instant::now();
+
     let response = builder
         .json(&request)
         .send()
         .await
         .context("Failed to send request to OpenAI API")
         .map_err(OpenAIStreamFailure::Other)?;
+
+    let connect_ms = connect_start.elapsed().as_millis();
+    crate::logging::info(&format!(
+        "HTTP connection established in {}ms (status={})",
+        connect_ms,
+        response.status()
+    ));
 
     if !response.status().is_success() {
         let status = response.status();
@@ -1861,6 +1881,12 @@ async fn stream_response(
         };
         return Err(OpenAIStreamFailure::Other(anyhow::anyhow!("{}", msg)));
     }
+
+    let _ = tx
+        .send(Ok(StreamEvent::ConnectionPhase {
+            phase: ConnectionPhase::WaitingForResponse,
+        }))
+        .await;
 
     // Stream the response
     let mut stream = OpenAIResponsesStream::new(response.bytes_stream());
@@ -1920,6 +1946,7 @@ async fn stream_response_websocket(
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<(), OpenAIStreamFailure> {
+    use crate::message::ConnectionPhase;
     let request_model = request
         .get("model")
         .and_then(|m| m.as_str())
@@ -1965,6 +1992,13 @@ async fn stream_response_websocket(
     }
     drop(creds);
 
+    let _ = tx
+        .send(Ok(StreamEvent::ConnectionPhase {
+            phase: ConnectionPhase::Connecting,
+        }))
+        .await;
+    let connect_start = std::time::Instant::now();
+
     let connect_result = tokio::time::timeout(
         Duration::from_secs(WEBSOCKET_CONNECT_TIMEOUT_SECS),
         connect_async(ws_request),
@@ -1978,7 +2012,14 @@ async fn stream_response_websocket(
     })?;
 
     let (mut ws_stream, _response) = match connect_result {
-        Ok((stream, response)) => (stream, response),
+        Ok((stream, response)) => {
+            let connect_ms = connect_start.elapsed().as_millis();
+            crate::logging::info(&format!(
+                "WebSocket connection established in {}ms",
+                connect_ms
+            ));
+            (stream, response)
+        }
         Err(err) if is_ws_upgrade_required(&err) => {
             return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
                 "Falling back from websockets to HTTPS transport"

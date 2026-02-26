@@ -2044,6 +2044,14 @@ async fn stream_response(
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
 ) -> Result<()> {
+    use crate::message::ConnectionPhase;
+    let _ = tx
+        .send(Ok(StreamEvent::ConnectionPhase {
+            phase: ConnectionPhase::Connecting,
+        }))
+        .await;
+    let connect_start = std::time::Instant::now();
+
     let url = format!("{}/chat/completions", API_BASE);
     let response = client
         .post(&url)
@@ -2057,11 +2065,24 @@ async fn stream_response(
         .await
         .context("Failed to send request to OpenRouter")?;
 
+    let connect_ms = connect_start.elapsed().as_millis();
+    crate::logging::info(&format!(
+        "HTTP connection established in {}ms (status={})",
+        connect_ms,
+        response.status()
+    ));
+
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         anyhow::bail!("OpenRouter API error ({}): {}", status, body);
     }
+
+    let _ = tx
+        .send(Ok(StreamEvent::ConnectionPhase {
+            phase: ConnectionPhase::WaitingForResponse,
+        }))
+        .await;
 
     let mut stream = OpenRouterStream::new(
         response.bytes_stream(),

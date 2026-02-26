@@ -1556,6 +1556,7 @@ fn format_status_for_debug(app: &dyn TuiState) -> String {
             }
         }
         ProcessingStatus::Sending => "Sending...".to_string(),
+        ProcessingStatus::Connecting(ref phase) => format!("{}...", phase),
         ProcessingStatus::Thinking(_start) => {
             let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
             format!("Thinking... ({:.1}s)", elapsed)
@@ -4968,6 +4969,25 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
                 }
                 Line::from(spans)
             }
+            ProcessingStatus::Connecting(ref phase) => {
+                let label = format!(" {}… {}", phase, format_elapsed(elapsed));
+                let label_color = if elapsed > 15.0 {
+                    Color::Rgb(255, 193, 7)
+                } else {
+                    DIM_COLOR
+                };
+                let mut spans = vec![
+                    Span::styled(spinner, Style::default().fg(AI_COLOR)),
+                    Span::styled(label, Style::default().fg(label_color)),
+                ];
+                if !queued_suffix.is_empty() {
+                    spans.push(Span::styled(
+                        queued_suffix.clone(),
+                        Style::default().fg(QUEUED_COLOR),
+                    ));
+                }
+                Line::from(spans)
+            }
             ProcessingStatus::Thinking(_start) => {
                 let thinking_elapsed = elapsed;
                 let mut spans = vec![
@@ -4989,7 +5009,8 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
                 // Show stale indicator if no activity for >2s
                 let time_str = format_elapsed(elapsed);
                 let mut status_text = match stale_secs {
-                    Some(s) if s > 2.0 => format!("(idle {:.0}s) · {}", s, time_str),
+                    Some(s) if s > 10.0 => format!("(stalled {:.0}s) · {}", s, time_str),
+                    Some(s) if s > 2.0 => format!("(no tokens {:.0}s) · {}", s, time_str),
                     _ => time_str,
                 };
                 // Add TPS if available

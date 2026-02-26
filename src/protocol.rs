@@ -371,6 +371,10 @@ pub enum ServerEvent {
     #[serde(rename = "connection_type")]
     ConnectionType { connection: String },
 
+    /// Connection phase update (authenticating, connecting, waiting, etc.)
+    #[serde(rename = "connection_phase")]
+    ConnectionPhase { phase: String },
+
     /// Upstream provider info (e.g., which provider OpenRouter routed to)
     #[serde(rename = "upstream_provider")]
     UpstreamProvider { provider: String },

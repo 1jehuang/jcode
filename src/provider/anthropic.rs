@@ -658,6 +658,14 @@ async fn run_stream_with_retries(
         if attempt > 0 {
             // Exponential backoff: 1s, 2s, 4s
             let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
+            let _ = tx
+                .send(Ok(StreamEvent::ConnectionPhase {
+                    phase: crate::message::ConnectionPhase::Retrying {
+                        attempt: attempt as u32 + 1,
+                        max: MAX_RETRIES as u32,
+                    },
+                }))
+                .await;
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
             crate::logging::info(&format!(
                 "Retrying Anthropic API request (attempt {}/{})",
@@ -686,6 +694,11 @@ async fn run_stream_with_retries(
                     crate::logging::info(
                         "Anthropic OAuth authentication failed, forcing token refresh...",
                     );
+                    let _ = tx
+                        .send(Ok(StreamEvent::ConnectionPhase {
+                            phase: crate::message::ConnectionPhase::Authenticating,
+                        }))
+                        .await;
                     match force_refresh_oauth_token(Arc::clone(&credentials)).await {
                         Ok(refreshed_token) => {
                             crate::logging::info(
@@ -790,6 +803,7 @@ async fn stream_response(
     tx: mpsc::Sender<Result<StreamEvent>>,
     model_name: &str,
 ) -> Result<()> {
+    use crate::message::ConnectionPhase;
     if std::env::var("JCODE_ANTHROPIC_DEBUG")
         .map(|v| v == "1")
         .unwrap_or(false)
@@ -798,6 +812,14 @@ async fn stream_response(
             crate::logging::info(&format!("Anthropic request payload:\n{}", json));
         }
     }
+
+    let _ = tx
+        .send(Ok(StreamEvent::ConnectionPhase {
+            phase: ConnectionPhase::Connecting,
+        }))
+        .await;
+
+    let connect_start = std::time::Instant::now();
     // Build request with appropriate auth headers
     let url = if is_oauth { API_URL_OAUTH } else { API_URL };
 
@@ -836,11 +858,24 @@ async fn stream_response(
         .await
         .context("Failed to send request to Anthropic API")?;
 
+    let connect_ms = connect_start.elapsed().as_millis();
+    crate::logging::info(&format!(
+        "HTTP connection established in {}ms (status={})",
+        connect_ms,
+        response.status()
+    ));
+
     if !response.status().is_success() {
         let status = response.status();
         let error_text = response.text().await.unwrap_or_default();
         anyhow::bail!("Anthropic API error ({}): {}", status, error_text);
     }
+
+    let _ = tx
+        .send(Ok(StreamEvent::ConnectionPhase {
+            phase: ConnectionPhase::WaitingForResponse,
+        }))
+        .await;
 
     // Parse SSE stream
     let mut stream = response.bytes_stream();

@@ -774,6 +774,16 @@ impl ClientApp {
             ServerEvent::ConnectionType { connection } => {
                 self.connection_type = Some(connection);
             }
+            ServerEvent::ConnectionPhase { phase } => {
+                let cp = match phase.as_str() {
+                    "authenticating" => crate::message::ConnectionPhase::Authenticating,
+                    "connecting" => crate::message::ConnectionPhase::Connecting,
+                    "waiting for response" => crate::message::ConnectionPhase::WaitingForResponse,
+                    "streaming" => crate::message::ConnectionPhase::Streaming,
+                    _ => crate::message::ConnectionPhase::Connecting,
+                };
+                self.status = ProcessingStatus::Connecting(cp);
+            }
             ServerEvent::UpstreamProvider { provider } => {
                 self.upstream_provider = Some(provider);
             }
