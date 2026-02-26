@@ -9139,12 +9139,17 @@ impl App {
                 ));
                 self.set_status_notice("Login: ✓ copilot");
             }
-            Err(e) => {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Copilot login failed: {}\n\nInstall Copilot CLI (https://gh.io/copilot-cli) and run `{}`.",
-                    e, rendered
-                )));
-                self.set_status_notice("Login: copilot failed");
+            Err(_) => {
+                self.push_display_message(DisplayMessage::system(
+                    "Copilot CLI not found.\n\n\
+                     To authenticate with GitHub Copilot, run from a terminal:\n\
+                     ```\n\
+                     jcode login --provider copilot\n\
+                     ```\n\n\
+                     This will start an interactive device flow to link your GitHub account."
+                        .to_string(),
+                ));
+                self.set_status_notice("Login: copilot - use terminal");
             }
         }
     }

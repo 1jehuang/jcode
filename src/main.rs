@@ -2361,14 +2361,54 @@ fn login_cursor_flow() -> Result<()> {
 
 fn login_copilot_flow() -> Result<()> {
     eprintln!("Starting GitHub Copilot login...");
-    let (program, args, rendered) = provider::copilot::copilot_login_command();
-    run_external_login_command_owned(&program, &args).with_context(|| {
-        format!(
-            "Copilot login failed. Install Copilot CLI (https://gh.io/copilot-cli) and run `{}`.",
-            rendered
-        )
-    })?;
-    eprintln!("Copilot login command completed.");
+
+    let (program, args, _rendered) = provider::copilot::copilot_login_command();
+    match run_external_login_command_owned(&program, &args) {
+        Ok(()) => {
+            eprintln!("Copilot login command completed.");
+            return Ok(());
+        }
+        Err(_) => {
+            eprintln!(
+                "Copilot CLI not found. Using built-in GitHub device flow..."
+            );
+        }
+    }
+
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(login_copilot_device_flow())
+    })
+}
+
+async fn login_copilot_device_flow() -> Result<()> {
+    let client = reqwest::Client::new();
+
+    let device_resp = crate::auth::copilot::initiate_device_flow(&client).await?;
+
+    eprintln!();
+    eprintln!("  Open this URL in your browser:");
+    eprintln!("    {}", device_resp.verification_uri);
+    eprintln!();
+    eprintln!("  Enter code: {}", device_resp.user_code);
+    eprintln!();
+    eprintln!("  Waiting for authorization...");
+
+    let _ = open::that(&device_resp.verification_uri);
+
+    let token = crate::auth::copilot::poll_for_access_token(
+        &client,
+        &device_resp.device_code,
+        device_resp.interval,
+    )
+    .await?;
+
+    let username = crate::auth::copilot::fetch_github_username(&client, &token)
+        .await
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    crate::auth::copilot::save_github_token(&token, &username)?;
+
+    eprintln!("  ✓ Authenticated as {} via GitHub Copilot", username);
     Ok(())
 }
 
