@@ -3,6 +3,21 @@ pub mod codex;
 pub mod copilot;
 pub mod oauth;
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock, RwLock};
+use std::time::Instant;
+
+static AUTH_STATUS_CACHE: std::sync::LazyLock<RwLock<Option<(AuthStatus, Instant)>>> =
+    std::sync::LazyLock::new(|| RwLock::new(None));
+
+const AUTH_STATUS_CACHE_TTL_SECS: u64 = 30;
+
+/// Per-process cache for command existence lookups.
+/// CLI tools don't get installed/uninstalled while jcode is running, so caching
+/// indefinitely per process is correct and avoids repeated PATH scans.
+static COMMAND_EXISTS_CACHE: std::sync::LazyLock<Mutex<HashMap<String, bool>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// Authentication status for all supported providers
 #[derive(Debug, Clone, Default)]
 pub struct AuthStatus {
@@ -50,8 +65,34 @@ pub enum AuthState {
 }
 
 impl AuthStatus {
-    /// Check all authentication sources and return their status
+    /// Check all authentication sources and return their status.
+    /// Results are cached for 30 seconds to avoid expensive PATH scanning on every frame.
     pub fn check() -> Self {
+        if let Ok(cache) = AUTH_STATUS_CACHE.read() {
+            if let Some((ref status, ref when)) = *cache {
+                if when.elapsed().as_secs() < AUTH_STATUS_CACHE_TTL_SECS {
+                    return status.clone();
+                }
+            }
+        }
+
+        let status = Self::check_uncached();
+
+        if let Ok(mut cache) = AUTH_STATUS_CACHE.write() {
+            *cache = Some((status.clone(), Instant::now()));
+        }
+
+        status
+    }
+
+    /// Invalidate the cached auth status so the next `check()` does a fresh probe.
+    pub fn invalidate_cache() {
+        if let Ok(mut cache) = AUTH_STATUS_CACHE.write() {
+            *cache = None;
+        }
+    }
+
+    fn check_uncached() -> Self {
         let mut status = Self::default();
 
         // Check Anthropic (OAuth or API key)
@@ -176,24 +217,75 @@ fn command_exists(command: &str) -> bool {
         return false;
     }
 
+    // Absolute/relative path: direct stat, no caching needed
     let path = std::path::Path::new(command);
     if path.is_absolute() || contains_path_separator(command) {
         return explicit_command_exists(path);
     }
 
-    let path_var = match std::env::var_os("PATH") {
-        Some(path) if !path.is_empty() => path,
-        _ => return false,
-    };
-
-    for dir in std::env::split_paths(&path_var) {
-        for candidate in command_candidates(command) {
-            if dir.join(candidate).exists() {
-                return true;
-            }
+    // Check per-process cache first (O(1) on repeated calls)
+    if let Ok(cache) = COMMAND_EXISTS_CACHE.lock() {
+        if let Some(&cached) = cache.get(command) {
+            return cached;
         }
     }
 
+    let path_var = match std::env::var_os("PATH") {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            cache_command_result(command, false);
+            return false;
+        }
+    };
+
+    let wsl2 = is_wsl2();
+    let found = std::env::split_paths(&path_var)
+        // On WSL2 skip Windows DrvFs mounts (/mnt/c, /mnt/d, …) — they are
+        // accessed via the slow 9P filesystem and CLI tools are never there.
+        .filter(|dir| !(wsl2 && is_wsl2_windows_path(dir)))
+        .flat_map(|dir| {
+            command_candidates(command)
+                .into_iter()
+                .map(move |c| dir.join(c))
+        })
+        .any(|p| p.exists());
+
+    cache_command_result(command, found);
+    found
+}
+
+fn cache_command_result(command: &str, exists: bool) {
+    if let Ok(mut cache) = COMMAND_EXISTS_CACHE.lock() {
+        cache.insert(command.to_string(), exists);
+    }
+}
+
+/// Detect WSL2: reads `/proc/version` once and caches the result for the
+/// process lifetime.  Returns false on any platform without that file.
+fn is_wsl2() -> bool {
+    static IS_WSL2: OnceLock<bool> = OnceLock::new();
+    *IS_WSL2.get_or_init(|| {
+        std::fs::read_to_string("/proc/version")
+            .map(|s| s.to_ascii_lowercase().contains("microsoft"))
+            .unwrap_or(false)
+    })
+}
+
+/// Returns true for paths like `/mnt/c`, `/mnt/d`, … that are Windows drive
+/// mounts under WSL2 (DrvFs via 9P).
+fn is_wsl2_windows_path(dir: &std::path::Path) -> bool {
+    use std::path::Component;
+    let mut it = dir.components();
+    if !matches!(it.next(), Some(Component::RootDir)) {
+        return false;
+    }
+    if !matches!(it.next(), Some(Component::Normal(s)) if s == "mnt") {
+        return false;
+    }
+    if let Some(Component::Normal(drive)) = it.next() {
+        let s = drive.to_string_lossy();
+        return s.len() == 1 && s.chars().next().map_or(false, |c| c.is_ascii_alphabetic());
+    }
     false
 }
 
@@ -407,6 +499,40 @@ mod tests {
         assert_eq!(AuthState::NotConfigured, AuthState::NotConfigured);
         assert_ne!(AuthState::Available, AuthState::Expired);
         assert_ne!(AuthState::Available, AuthState::NotConfigured);
+    }
+
+    #[test]
+    fn is_wsl2_windows_path_matches_drive_mounts() {
+        assert!(is_wsl2_windows_path(std::path::Path::new("/mnt/c")));
+        assert!(is_wsl2_windows_path(std::path::Path::new("/mnt/d")));
+        assert!(is_wsl2_windows_path(std::path::Path::new("/mnt/z")));
+        assert!(is_wsl2_windows_path(std::path::Path::new("/mnt/c/Windows/System32")));
+    }
+
+    #[test]
+    fn is_wsl2_windows_path_rejects_non_drives() {
+        // /mnt/wsl is a WSL-internal mount, not a Windows drive
+        assert!(!is_wsl2_windows_path(std::path::Path::new("/mnt/wsl")));
+        // /usr/bin is a plain Linux directory
+        assert!(!is_wsl2_windows_path(std::path::Path::new("/usr/bin")));
+        // /mnt alone is not a drive
+        assert!(!is_wsl2_windows_path(std::path::Path::new("/mnt")));
+        // empty
+        assert!(!is_wsl2_windows_path(std::path::Path::new("")));
+    }
+
+    #[test]
+    fn command_exists_cached_on_second_call() {
+        // Clear cache first to isolate this test
+        if let Ok(mut cache) = COMMAND_EXISTS_CACHE.lock() {
+            cache.remove("surely_this_binary_does_not_exist_xyz_cache_test");
+        }
+        // First call populates the cache
+        let result1 = command_exists("surely_this_binary_does_not_exist_xyz_cache_test");
+        assert!(!result1);
+        // Second call must return same result (from cache)
+        let result2 = command_exists("surely_this_binary_does_not_exist_xyz_cache_test");
+        assert_eq!(result1, result2);
     }
 
     #[test]

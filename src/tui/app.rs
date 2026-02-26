@@ -9771,6 +9771,7 @@ impl App {
             }
             return;
         }
+        crate::auth::AuthStatus::invalidate_cache();
         if login.success {
             self.push_display_message(DisplayMessage::system(login.message));
             self.set_status_notice(&format!("Login: ✓ {}", login.provider));
