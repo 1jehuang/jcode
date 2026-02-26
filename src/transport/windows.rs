@@ -26,13 +26,33 @@ pub struct Listener {
 impl Listener {
     pub fn bind(path: &Path) -> io::Result<Self> {
         let pipe_name = path_to_pipe_name(path);
-        let server = ServerOptions::new()
+        match ServerOptions::new()
             .first_pipe_instance(true)
-            .create(&pipe_name)?;
-        Ok(Self {
-            pipe_name,
-            current_server: server,
-        })
+            .create(&pipe_name)
+        {
+            Ok(server) => Ok(Self {
+                pipe_name,
+                current_server: server,
+            }),
+            Err(e)
+                if e.raw_os_error()
+                    == Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32) =>
+            {
+                eprintln!(
+                    "[windows] Named pipe {} busy (access denied), retrying without first_pipe_instance",
+                    pipe_name
+                );
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let server = ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .create(&pipe_name)?;
+                Ok(Self {
+                    pipe_name,
+                    current_server: server,
+                })
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn accept(&mut self) -> io::Result<(Stream, PipeAddr)> {
@@ -296,9 +316,11 @@ pub fn is_socket_path(path: &Path) -> bool {
     ClientOptions::new().open(&pipe_name).is_ok()
 }
 
-pub fn remove_socket(_path: &Path) {
-    // Named pipes are automatically cleaned up when all handles are closed.
-    // No filesystem cleanup needed.
+pub fn remove_socket(path: &Path) {
+    let pipe_name = path_to_pipe_name(path);
+    if ClientOptions::new().open(&pipe_name).is_ok() {
+        eprintln!("[windows] Named pipe {} still open, will be replaced by new server", pipe_name);
+    }
 }
 
 pub fn stream_pair() -> io::Result<(Stream, Stream)> {

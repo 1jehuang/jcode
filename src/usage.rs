@@ -21,6 +21,9 @@ const OPENAI_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 /// Cache duration (refresh every 60 seconds)
 const CACHE_DURATION: Duration = Duration::from_secs(60);
 
+/// Error backoff duration (wait 5 minutes before retrying after auth/credential errors)
+const ERROR_BACKOFF: Duration = Duration::from_secs(300);
+
 /// Usage data from the API
 #[derive(Debug, Clone, Default)]
 pub struct UsageData {
@@ -46,7 +49,14 @@ impl UsageData {
     /// Check if data is stale and should be refreshed
     pub fn is_stale(&self) -> bool {
         match self.fetched_at {
-            Some(t) => t.elapsed() > CACHE_DURATION,
+            Some(t) => {
+                let ttl = if self.last_error.is_some() {
+                    ERROR_BACKOFF
+                } else {
+                    CACHE_DURATION
+                };
+                t.elapsed() > ttl
+            }
             None => true,
         }
     }
@@ -121,7 +131,14 @@ pub struct OpenAIUsageData {
 impl OpenAIUsageData {
     pub fn is_stale(&self) -> bool {
         match self.fetched_at {
-            Some(t) => t.elapsed() > CACHE_DURATION,
+            Some(t) => {
+                let ttl = if self.last_error.is_some() {
+                    ERROR_BACKOFF
+                } else {
+                    CACHE_DURATION
+                };
+                t.elapsed() > ttl
+            }
             None => true,
         }
     }
@@ -732,10 +749,14 @@ async fn refresh_usage(usage: Arc<RwLock<UsageData>>) {
             *usage.write().await = new_data;
         }
         Err(e) => {
+            let err_msg = e.to_string();
             let mut data = usage.write().await;
-            data.last_error = Some(e.to_string());
-            data.fetched_at = Some(Instant::now()); // Prevent spam retries
-            crate::logging::error(&format!("Usage fetch error: {}", e));
+            let is_new_error = data.last_error.as_deref() != Some(&err_msg);
+            data.last_error = Some(err_msg.clone());
+            data.fetched_at = Some(Instant::now());
+            if is_new_error {
+                crate::logging::error(&format!("Usage fetch error: {}", err_msg));
+            }
         }
     }
 }

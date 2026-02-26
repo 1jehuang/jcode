@@ -911,9 +911,9 @@ impl Server {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Remove existing sockets
-        let _ = std::fs::remove_file(&self.socket_path);
-        let _ = std::fs::remove_file(&self.debug_socket_path);
+        // Remove existing sockets (uses transport abstraction for cross-platform cleanup)
+        crate::transport::remove_socket(&self.socket_path);
+        crate::transport::remove_socket(&self.debug_socket_path);
 
         let mut main_listener = Listener::bind(&self.socket_path)?;
         let mut debug_listener = Listener::bind(&self.debug_socket_path)?;
