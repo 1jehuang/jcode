@@ -3646,6 +3646,7 @@ pub(crate) fn render_tool_message(
                 format!("{}┌─ diff", pad_str),
                 Style::default().fg(DIM_COLOR),
             ))
+            .alignment(ratatui::layout::Alignment::Left)
         );
 
         let mut shown_truncation = false;
@@ -3664,6 +3665,7 @@ pub(crate) fn render_tool_message(
                         format!("{}│ ... {} more changes ...", pad_str, skipped),
                         Style::default().fg(DIM_COLOR),
                     ))
+                    .alignment(ratatui::layout::Alignment::Left)
                 );
                 shown_truncation = true;
             }
@@ -3716,7 +3718,7 @@ pub(crate) fn render_tool_message(
                 }
             }
 
-            lines.push(Line::from(spans));
+            lines.push(Line::from(spans).alignment(ratatui::layout::Alignment::Left));
         }
 
         // Add diff block footer
@@ -3725,7 +3727,7 @@ pub(crate) fn render_tool_message(
         } else {
             format!("{}└─", pad_str)
         };
-        lines.push(Line::from(Span::styled(footer, Style::default().fg(DIM_COLOR))));
+        lines.push(Line::from(Span::styled(footer, Style::default().fg(DIM_COLOR))).alignment(ratatui::layout::Alignment::Left));
     }
 
     // In centered mode, find the widest line and compute padding to center
@@ -3733,7 +3735,12 @@ pub(crate) fn render_tool_message(
     if centered {
         let max_line_width = lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.len()).sum::<usize>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum::<usize>()
+            })
             .max()
             .unwrap_or(0);
         let pad = (width as usize).saturating_sub(max_line_width) / 2;
