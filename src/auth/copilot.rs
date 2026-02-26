@@ -374,18 +374,18 @@ pub async fn fetch_available_models(
 }
 
 /// Determine the best default model based on available models.
-/// - If claude-opus-4-6 is available -> paid tier -> use claude-opus-4-6
-/// - Otherwise -> free/basic tier -> use claude-sonnet-4-6
+/// - If claude-opus-4.6 is available -> paid tier -> use claude-opus-4.6
+/// - Otherwise -> free/basic tier -> use claude-sonnet-4.6 or claude-sonnet-4
 pub fn choose_default_model(available_models: &[CopilotModelInfo]) -> String {
     let model_ids: Vec<&str> = available_models
         .iter()
         .map(|m| m.id.as_str())
         .collect();
 
-    if model_ids.contains(&"claude-opus-4-6") {
-        "claude-opus-4-6".to_string()
-    } else if model_ids.contains(&"claude-sonnet-4-6") {
-        "claude-sonnet-4-6".to_string()
+    if model_ids.contains(&"claude-opus-4.6") {
+        "claude-opus-4.6".to_string()
+    } else if model_ids.contains(&"claude-sonnet-4.6") {
+        "claude-sonnet-4.6".to_string()
     } else if model_ids.contains(&"claude-sonnet-4") {
         "claude-sonnet-4".to_string()
     } else {

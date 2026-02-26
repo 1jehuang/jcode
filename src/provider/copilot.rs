@@ -28,14 +28,19 @@ const FALLBACK_MODELS: &[&str] = &[
 /// Context window sizes for Copilot models
 fn copilot_context_window(model: &str) -> usize {
     match model {
-        "claude-sonnet-4" | "claude-sonnet-4-6" => 128_000,
-        "claude-opus-4-6" => 200_000,
+        "claude-sonnet-4" | "claude-sonnet-4-6" | "claude-sonnet-4.6" => 128_000,
+        "claude-opus-4-6" | "claude-opus-4.6" | "claude-opus-4.6-fast" => 200_000,
+        "claude-opus-4.5" | "claude-opus-4-5" => 200_000,
+        "claude-sonnet-4.5" | "claude-sonnet-4-5" => 200_000,
+        "claude-haiku-4.5" | "claude-haiku-4-5" => 200_000,
         "gpt-4o" | "gpt-4o-mini" => 128_000,
-        "gpt-4.1" => 128_000,
-        "gpt-5" => 128_000,
+        m if m.starts_with("gpt-4o") => 128_000,
+        m if m.starts_with("gpt-4.1") => 128_000,
+        m if m.starts_with("gpt-5") => 128_000,
         "o3-mini" | "o4-mini" => 128_000,
-        "gemini-2.0-flash-001" => 1_000_000,
-        "gemini-2.5-pro" => 128_000,
+        m if m.starts_with("gemini-2.0-flash") => 1_000_000,
+        m if m.starts_with("gemini-2.5") => 1_000_000,
+        m if m.starts_with("gemini-3") => 1_000_000,
         _ => 128_000,
     }
 }
@@ -64,6 +69,10 @@ impl CopilotApiProvider {
             bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
         })
+    }
+
+    pub fn has_credentials() -> bool {
+        copilot_auth::has_copilot_credentials()
     }
 
     pub fn new_with_token(github_token: String) -> Self {
@@ -101,9 +110,10 @@ impl CopilotApiProvider {
                 let model_ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
                 let default = copilot_auth::choose_default_model(&models);
                 crate::logging::info(&format!(
-                    "Copilot tier detection: {} models available, default -> {}",
+                    "Copilot tier detection: {} models available, default -> {}. Models: {}",
                     model_ids.len(),
-                    default
+                    default,
+                    model_ids.join(", ")
                 ));
                 if let Ok(mut m) = self.model.try_write() {
                     *m = default;
@@ -568,17 +578,16 @@ impl Provider for CopilotApiProvider {
     }
 
     fn available_models(&self) -> Vec<&'static str> {
-        let fetched = self.fetched_models.read().ok();
-        if let Some(ref models) = fetched {
+        FALLBACK_MODELS.to_vec()
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        if let Ok(models) = self.fetched_models.read() {
             if !models.is_empty() {
-                let mut result: Vec<&'static str> = FALLBACK_MODELS.to_vec();
-                if models.iter().any(|m| m == "claude-opus-4-6") && !result.contains(&"claude-opus-4-6") {
-                    result.insert(0, "claude-opus-4-6");
-                }
-                return result;
+                return models.clone();
             }
         }
-        FALLBACK_MODELS.to_vec()
+        FALLBACK_MODELS.iter().map(|m| (*m).to_string()).collect()
     }
 
     fn supports_compaction(&self) -> bool {

@@ -1620,6 +1620,16 @@ impl Provider for MultiProvider {
         let mut models = Vec::new();
         models.extend(ALL_CLAUDE_MODELS.iter().map(|m| (*m).to_string()));
         models.extend(ALL_OPENAI_MODELS.iter().map(|m| (*m).to_string()));
+        {
+            let copilot_guard = self.copilot_api.read().unwrap();
+            if let Some(ref copilot) = *copilot_guard {
+                for m in copilot.available_models_display() {
+                    if !models.contains(&m) {
+                        models.push(m);
+                    }
+                }
+            }
+        }
         if let Some(ref openrouter) = self.openrouter {
             models.extend(openrouter.available_models_display());
         }
@@ -1734,16 +1744,24 @@ impl Provider for MultiProvider {
         {
             let copilot_guard = self.copilot_api.read().unwrap();
             if let Some(ref copilot) = *copilot_guard {
-                let copilot_models = copilot.available_models();
+                let copilot_models = copilot.available_models_display();
                 for model in copilot_models {
                     routes.push(ModelRoute {
-                        model: model.to_string(),
+                        model,
                         provider: "Copilot".to_string(),
                         api_method: "copilot".to_string(),
                         available: true,
                         detail: String::new(),
                     });
                 }
+            } else if copilot::CopilotApiProvider::has_credentials() {
+                routes.push(ModelRoute {
+                    model: "copilot models".to_string(),
+                    provider: "Copilot".to_string(),
+                    api_method: "copilot".to_string(),
+                    available: false,
+                    detail: "not initialized yet".to_string(),
+                });
             }
         }
 

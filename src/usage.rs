@@ -153,12 +153,10 @@ impl OpenAIUsageData {
 pub async fn fetch_all_provider_usage() -> Vec<ProviderUsage> {
     let mut results = Vec::new();
 
-    let (anthropic, openai) =
-        tokio::join!(fetch_anthropic_usage_report(), fetch_openai_usage_report());
+    let (anthropic_results, openai) =
+        tokio::join!(fetch_all_anthropic_usage_reports(), fetch_openai_usage_report());
 
-    if let Some(r) = anthropic {
-        results.push(r);
-    }
+    results.extend(anthropic_results);
     if let Some(r) = openai {
         results.push(r);
     }
@@ -347,19 +345,65 @@ fn parse_limit_name(entry: &serde_json::Value, fallback: &str) -> String {
         .to_string()
 }
 
-async fn fetch_anthropic_usage_report() -> Option<ProviderUsage> {
-    let creds = auth::claude::load_credentials().ok()?;
-    if creds.access_token.is_empty() {
-        return None;
+async fn fetch_all_anthropic_usage_reports() -> Vec<ProviderUsage> {
+    let accounts = match auth::claude::list_accounts() {
+        Ok(a) if !a.is_empty() => a,
+        _ => {
+            match auth::claude::load_credentials() {
+                Ok(creds) if !creds.access_token.is_empty() => {
+                    return vec![fetch_anthropic_usage_for_token(
+                        "Anthropic (Claude)".to_string(),
+                        creds.access_token.clone(),
+                        creds.expires_at,
+                    )
+                    .await];
+                }
+                _ => return Vec::new(),
+            }
+        }
+    };
+
+    let active_label = auth::claude::active_account_label();
+    let mut futures = Vec::new();
+    for account in &accounts {
+        let label = if accounts.len() > 1 {
+            let active_marker = if active_label.as_deref() == Some(&account.label) {
+                " *"
+            } else {
+                ""
+            };
+            format!("Anthropic - {}{}", account.label, active_marker)
+        } else {
+            "Anthropic (Claude)".to_string()
+        };
+        let access = account.access.clone();
+        let expires = account.expires;
+        futures.push(fetch_anthropic_usage_for_token(
+            label,
+            access,
+            expires,
+        ));
     }
 
+    let mut results = Vec::new();
+    for fut in futures {
+        results.push(fut.await);
+    }
+    results
+}
+
+async fn fetch_anthropic_usage_for_token(
+    display_name: String,
+    access_token: String,
+    expires_at: i64,
+) -> ProviderUsage {
     let now_ms = chrono::Utc::now().timestamp_millis();
-    if creds.expires_at < now_ms {
-        return Some(ProviderUsage {
-            provider_name: "Anthropic (Claude)".to_string(),
+    if expires_at < now_ms {
+        return ProviderUsage {
+            provider_name: display_name.to_string(),
             error: Some("OAuth token expired - use `/login claude` to re-authenticate".to_string()),
             ..Default::default()
-        });
+        };
     }
 
     let client = Client::new();
@@ -368,7 +412,7 @@ async fn fetch_anthropic_usage_report() -> Option<ProviderUsage> {
         .header("Accept", "application/json")
         .header("Content-Type", "application/json")
         .header("User-Agent", "claude-cli/1.0.0")
-        .header("Authorization", format!("Bearer {}", creds.access_token))
+        .header("Authorization", format!("Bearer {}", access_token))
         .header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219")
         .send()
         .await;
@@ -376,22 +420,22 @@ async fn fetch_anthropic_usage_report() -> Option<ProviderUsage> {
     let response = match response {
         Ok(r) => r,
         Err(e) => {
-            return Some(ProviderUsage {
-                provider_name: "Anthropic (Claude)".to_string(),
+            return ProviderUsage {
+                provider_name: display_name.to_string(),
                 error: Some(format!("Failed to fetch: {}", e)),
                 ..Default::default()
-            });
+            };
         }
     };
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Some(ProviderUsage {
-            provider_name: "Anthropic (Claude)".to_string(),
+        return ProviderUsage {
+            provider_name: display_name.to_string(),
             error: Some(format!("API error ({}): {}", status, body)),
             ..Default::default()
-        });
+        };
     }
 
     match response.json::<UsageResponse>().await {
@@ -433,18 +477,18 @@ async fn fetch_anthropic_usage_report() -> Option<ProviderUsage> {
                 ));
             }
 
-            Some(ProviderUsage {
-                provider_name: "Anthropic (Claude)".to_string(),
+            ProviderUsage {
+                provider_name: display_name.to_string(),
                 limits,
                 extra_info,
                 error: None,
-            })
+            }
         }
-        Err(e) => Some(ProviderUsage {
-            provider_name: "Anthropic (Claude)".to_string(),
+        Err(e) => ProviderUsage {
+            provider_name: display_name.to_string(),
             error: Some(format!("Failed to parse response: {}", e)),
             ..Default::default()
-        }),
+        },
     }
 }
 
@@ -538,15 +582,70 @@ async fn fetch_openai_usage_report() -> Option<ProviderUsage> {
     let mut limits = Vec::new();
     let mut extra_info = Vec::new();
 
-    if let Some(rate_limits) = json.get("rate_limits").and_then(|v| v.as_array()) {
-        for entry in rate_limits {
-            if let Some(obj) = entry.as_object() {
-                if let Some(usage_percent) = parse_usage_percent_from_obj(obj) {
-                    limits.push(UsageLimit {
-                        name: parse_limit_name(entry, "unknown"),
-                        usage_percent,
-                        resets_at: parse_resets_at_from_obj(obj),
-                    });
+    fn parse_wham_window(window: &serde_json::Value, name: &str) -> Option<UsageLimit> {
+        let obj = window.as_object()?;
+        let used_percent = obj.get("used_percent").and_then(parse_f32_value)?;
+        let resets_at = obj
+            .get("reset_at")
+            .and_then(parse_f32_value)
+            .map(|ts| {
+                chrono::DateTime::from_timestamp(ts as i64, 0)
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_else(|| format!("{}", ts as i64))
+            });
+        Some(UsageLimit {
+            name: name.to_string(),
+            usage_percent: used_percent,
+            resets_at,
+        })
+    }
+
+    fn parse_wham_rate_limit(rl: &serde_json::Value, primary_name: &str, secondary_name: &str) -> Vec<UsageLimit> {
+        let mut out = Vec::new();
+        if let Some(pw) = rl.get("primary_window") {
+            if let Some(limit) = parse_wham_window(pw, primary_name) {
+                out.push(limit);
+            }
+        }
+        if let Some(sw) = rl.get("secondary_window") {
+            if !sw.is_null() {
+                if let Some(limit) = parse_wham_window(sw, secondary_name) {
+                    out.push(limit);
+                }
+            }
+        }
+        out
+    }
+
+    if let Some(rl) = json.get("rate_limit") {
+        limits.extend(parse_wham_rate_limit(rl, "5-hour window", "7-day window"));
+    }
+
+    if let Some(additional) = json.get("additional_rate_limits").and_then(|v| v.as_array()) {
+        for entry in additional {
+            let limit_name = entry
+                .get("limit_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Additional");
+            if let Some(rl) = entry.get("rate_limit") {
+                let primary = format!("{} (5h)", limit_name);
+                let secondary = format!("{} (7d)", limit_name);
+                limits.extend(parse_wham_rate_limit(rl, &primary, &secondary));
+            }
+        }
+    }
+
+    if limits.is_empty() {
+        if let Some(rate_limits) = json.get("rate_limits").and_then(|v| v.as_array()) {
+            for entry in rate_limits {
+                if let Some(obj) = entry.as_object() {
+                    if let Some(usage_percent) = parse_usage_percent_from_obj(obj) {
+                        limits.push(UsageLimit {
+                            name: parse_limit_name(entry, "unknown"),
+                            usage_percent,
+                            resets_at: parse_resets_at_from_obj(obj),
+                        });
+                    }
                 }
             }
         }
@@ -555,7 +654,7 @@ async fn fetch_openai_usage_report() -> Option<ProviderUsage> {
     if limits.is_empty() {
         if let Some(obj) = json.as_object() {
             for (key, value) in obj {
-                if key == "rate_limits" {
+                if key == "rate_limits" || key == "rate_limit" || key == "additional_rate_limits" {
                     continue;
                 }
 
@@ -583,17 +682,14 @@ async fn fetch_openai_usage_report() -> Option<ProviderUsage> {
                             }
                         }
                     }
-                } else if let Some(s) = value.as_str() {
-                    extra_info.push((humanize_key(key), s.to_string()));
-                } else if let Some(b) = value.as_bool() {
-                    extra_info.push((humanize_key(key), if b { "yes" } else { "no" }.to_string()));
                 }
             }
         }
     }
 
     if let Some(plan) = json
-        .get("plan")
+        .get("plan_type")
+        .or_else(|| json.get("plan"))
         .or_else(|| json.get("subscription_type"))
         .and_then(|v| v.as_str())
     {
