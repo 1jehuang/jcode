@@ -480,9 +480,9 @@ fn parse_area_spec(spec: &str) -> Option<Rect> {
 #[derive(Debug, Clone)]
 enum PendingLogin {
     /// Waiting for user to paste Claude OAuth code (verifier needed for token exchange)
-    Claude { verifier: String },
+    Claude { verifier: String, redirect_uri: Option<String> },
     /// Waiting for user to paste Claude OAuth code for a specific named account
-    ClaudeAccount { verifier: String, label: String },
+    ClaudeAccount { verifier: String, label: String, redirect_uri: Option<String> },
     /// Waiting for user to paste OpenRouter API key
     OpenRouter,
     /// GitHub Copilot device flow in progress (polling in background)
@@ -9091,6 +9091,98 @@ impl App {
         let hash = hasher.finalize();
         let challenge = URL_SAFE_NO_PAD.encode(hash);
 
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(_) => {
+                self.start_claude_login_manual();
+                return;
+            }
+        };
+        let port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(_) => {
+                self.start_claude_login_manual();
+                return;
+            }
+        };
+        drop(listener);
+
+        let redirect_uri = format!("http://localhost:{}/callback", port);
+
+        let auth_url = format!(
+            "{}?code=true&client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
+            crate::auth::oauth::claude::AUTHORIZE_URL,
+            crate::auth::oauth::claude::CLIENT_ID,
+            urlencoding::encode(&redirect_uri),
+            urlencoding::encode(crate::auth::oauth::claude::SCOPES),
+            challenge,
+            verifier,
+        );
+
+        let _ = open::that(&auth_url);
+
+        self.push_display_message(DisplayMessage::system(format!(
+            "**Claude OAuth Login**\n\n\
+             Opening browser for authentication...\n\n\
+             Waiting for callback on port {}...\n\
+             If the browser didn't open, visit:\n{}\n\n\
+             Or paste the authorization code here to complete manually.",
+            port, auth_url
+        )));
+        self.set_status_notice("Login: waiting for browser...");
+        self.pending_login = Some(PendingLogin::Claude { verifier: verifier.clone(), redirect_uri: Some(redirect_uri.clone()) });
+
+        let verifier_clone = verifier;
+        let redirect_clone = redirect_uri;
+        tokio::spawn(async move {
+            match crate::auth::oauth::wait_for_callback_async(port, &verifier_clone).await {
+                Ok(code) => {
+                    match Self::claude_token_exchange(verifier_clone, code, "default", Some(redirect_clone)).await {
+                        Ok(msg) => {
+                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                                provider: "claude".to_string(),
+                                success: true,
+                                message: msg,
+                            }));
+                        }
+                        Err(e) => {
+                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                                provider: "claude".to_string(),
+                                success: false,
+                                message: format!("Claude login failed: {}", e),
+                            }));
+                        }
+                    }
+                }
+                Err(e) => {
+                    crate::logging::info(&format!("Callback server error (user may paste manually): {}", e));
+                }
+            }
+        });
+    }
+
+    fn start_claude_login_manual(&mut self) {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use sha2::{Digest, Sha256};
+
+        let verifier: String = {
+            use rand::Rng;
+            const CHARSET: &[u8] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+            let mut rng = rand::rng();
+            (0..64)
+                .map(|_| {
+                    let idx = rng.random_range(0..CHARSET.len());
+                    CHARSET[idx] as char
+                })
+                .collect()
+        };
+
+        let mut hasher = Sha256::new();
+        hasher.update(verifier.as_bytes());
+        let hash = hasher.finalize();
+        let challenge = URL_SAFE_NO_PAD.encode(hash);
+
         let auth_url = format!(
             "{}?code=true&client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
             crate::auth::oauth::claude::AUTHORIZE_URL,
@@ -9110,8 +9202,8 @@ impl App {
              After logging in, copy the authorization code and **paste it here**.",
             auth_url
         )));
-        self.set_status_notice("Login: paste code…");
-        self.pending_login = Some(PendingLogin::Claude { verifier });
+        self.set_status_notice("Login: paste code...");
+        self.pending_login = Some(PendingLogin::Claude { verifier, redirect_uri: None });
     }
 
     fn start_claude_login_for_account(&mut self, label: &str) {
@@ -9155,10 +9247,11 @@ impl App {
              After logging in, copy the authorization code and **paste it here**.",
             label, auth_url
         )));
-        self.set_status_notice(&format!("Login [{}]: paste code…", label));
+        self.set_status_notice(&format!("Login [{}]: paste code...", label));
         self.pending_login = Some(PendingLogin::ClaudeAccount {
             verifier,
             label: label.to_string(),
+            redirect_uri: None,
         });
     }
 
@@ -9411,46 +9504,45 @@ impl App {
 
     fn start_copilot_login(&mut self) {
         self.set_status_notice("Login: copilot device flow...");
-
-        let client = reqwest::Client::new();
-        let client_clone = client.clone();
-
-        let rt = tokio::runtime::Handle::current();
-        let device_resp = match rt.block_on(crate::auth::copilot::initiate_device_flow(&client)) {
-            Ok(resp) => resp,
-            Err(e) => {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Copilot device flow failed: {}",
-                    e
-                )));
-                self.set_status_notice("Login: copilot failed");
-                return;
-            }
-        };
-
-        let user_code = device_resp.user_code.clone();
-        let verification_uri = device_resp.verification_uri.clone();
-
-        let _ = open::that(&verification_uri);
-
-        self.push_display_message(DisplayMessage::system(format!(
-            "**GitHub Copilot Login**\n\n\
-             Opening browser for GitHub authorization...\n\n\
-             If the browser didn't open, visit:\n  {}\n\n\
-             Enter code: **{}**\n\n\
-             Waiting for authorization... (type `/cancel` to abort)",
-            verification_uri, user_code
-        )));
-        self.set_status_notice(&format!("Login: enter {} at GitHub", user_code));
         self.pending_login = Some(PendingLogin::Copilot);
 
-        let device_code = device_resp.device_code;
-        let interval = device_resp.interval;
         tokio::spawn(async move {
+            let client = reqwest::Client::new();
+
+            let device_resp = match crate::auth::copilot::initiate_device_flow(&client).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "copilot".to_string(),
+                        success: false,
+                        message: format!("Copilot device flow failed: {}", e),
+                    }));
+                    return;
+                }
+            };
+
+            let user_code = device_resp.user_code.clone();
+            let verification_uri = device_resp.verification_uri.clone();
+
+            let _ = open::that(&verification_uri);
+
+            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                provider: "copilot_code".to_string(),
+                success: true,
+                message: format!(
+                    "**GitHub Copilot Login**\n\n\
+                     Opening browser for GitHub authorization...\n\n\
+                     If the browser didn't open, visit:\n  {}\n\n\
+                     Enter code: **{}**\n\n\
+                     Waiting for authorization... (type `/cancel` to abort)",
+                    verification_uri, user_code
+                ),
+            }));
+
             let token = match crate::auth::copilot::poll_for_access_token(
-                &client_clone,
-                &device_code,
-                interval,
+                &client,
+                &device_resp.device_code,
+                device_resp.interval,
             )
             .await
             {
@@ -9465,7 +9557,7 @@ impl App {
                 }
             };
 
-            let username = crate::auth::copilot::fetch_github_username(&client_clone, &token)
+            let username = crate::auth::copilot::fetch_github_username(&client, &token)
                 .await
                 .unwrap_or_else(|_| "unknown".to_string());
 
@@ -9490,6 +9582,12 @@ impl App {
                 }
             }
         });
+
+        self.push_display_message(DisplayMessage::system(
+            "**GitHub Copilot Login**\n\n\
+             Starting device flow... please wait."
+                .to_string(),
+        ));
     }
 
     fn start_antigravity_login(&mut self) {
@@ -9588,11 +9686,11 @@ impl App {
         }
 
         match pending {
-            PendingLogin::Claude { verifier } => {
-                self.set_status_notice("Login: exchanging…");
+            PendingLogin::Claude { verifier, redirect_uri } => {
+                self.set_status_notice("Login: exchanging...");
                 let input_owned = input.clone();
                 tokio::spawn(async move {
-                    match Self::claude_token_exchange(verifier, input_owned, "default").await {
+                    match Self::claude_token_exchange(verifier, input_owned, "default", redirect_uri).await {
                         Ok(msg) => {
                             crate::logging::info(&format!("Claude login: {}", msg));
                         }
@@ -9605,12 +9703,12 @@ impl App {
                     "Exchanging authorization code for tokens...".to_string(),
                 ));
             }
-            PendingLogin::ClaudeAccount { verifier, label } => {
-                self.set_status_notice(&format!("Login [{}]: exchanging…", label));
+            PendingLogin::ClaudeAccount { verifier, label, redirect_uri } => {
+                self.set_status_notice(&format!("Login [{}]: exchanging...", label));
                 let input_owned = input.clone();
                 let label_clone = label.clone();
                 tokio::spawn(async move {
-                    match Self::claude_token_exchange(verifier, input_owned, &label_clone).await {
+                    match Self::claude_token_exchange(verifier, input_owned, &label_clone, redirect_uri).await {
                         Ok(msg) => {
                             crate::logging::info(&format!("Claude login [{}]: {}", label_clone, msg));
                         }
@@ -9666,6 +9764,13 @@ impl App {
     }
 
     fn handle_login_completed(&mut self, login: LoginCompleted) {
+        if login.provider == "copilot_code" {
+            self.push_display_message(DisplayMessage::system(login.message.clone()));
+            if let Some(code) = login.message.split("Enter code: **").nth(1).and_then(|s| s.split("**").next()) {
+                self.set_status_notice(&format!("Login: enter {} at GitHub", code));
+            }
+            return;
+        }
         if login.success {
             self.push_display_message(DisplayMessage::system(login.message));
             self.set_status_notice(&format!("Login: ✓ {}", login.provider));
@@ -9673,7 +9778,7 @@ impl App {
             self.push_display_message(DisplayMessage::error(login.message));
             self.set_status_notice(&format!("Login: {} failed", login.provider));
         }
-        if matches!(self.pending_login, Some(PendingLogin::Copilot)) {
+        if self.pending_login.is_some() {
             self.pending_login = None;
         }
     }
@@ -9682,6 +9787,7 @@ impl App {
         verifier: String,
         input: String,
         label: &str,
+        redirect_uri: Option<String>,
     ) -> Result<String, String> {
         let raw_code = if input.contains("code=") {
             let url = url::Url::parse(&input)
@@ -9708,7 +9814,7 @@ impl App {
             "client_id": crate::auth::oauth::claude::CLIENT_ID,
             "code": code,
             "code_verifier": verifier,
-            "redirect_uri": crate::auth::oauth::claude::REDIRECT_URI,
+            "redirect_uri": redirect_uri.as_deref().unwrap_or(crate::auth::oauth::claude::REDIRECT_URI),
         });
 
         if let Some(state) = state_from_callback {
