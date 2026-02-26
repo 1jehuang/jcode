@@ -8,7 +8,7 @@ use crate::message::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{SinkExt, Stream};
+use futures::{SinkExt, Stream, StreamExt as FuturesStreamExt};
 use reqwest::header::HeaderValue;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
@@ -19,12 +19,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tokio::net::TcpStream;
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
 const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
@@ -45,6 +47,8 @@ const WEBSOCKET_CONNECT_TIMEOUT_SECS: u64 = 8;
 const WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS: u64 = 8;
 const WEBSOCKET_IDLE_TIMEOUT_SECS: u64 = 8;
 const WEBSOCKET_COMPLETION_TIMEOUT_SECS: u64 = 300;
+/// Maximum age of a persistent WebSocket connection before forcing reconnect
+const WEBSOCKET_PERSISTENT_MAX_AGE_SECS: u64 = 3000; // 50 min (server limit is 60 min)
 const WEBSOCKET_MODEL_COOLDOWN_BASE_SECS: u64 = 600;
 const WEBSOCKET_MODEL_COOLDOWN_MAX_SECS: u64 = 3600;
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 16_384;
@@ -141,6 +145,19 @@ impl OpenAITransport {
     }
 }
 
+/// Persistent WebSocket connection state for incremental continuation.
+/// Keeps the connection alive across turns so we can use `previous_response_id`
+/// to send only new items instead of the full conversation each turn.
+struct PersistentWsState {
+    ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    last_response_id: String,
+    connected_at: Instant,
+    /// Number of messages sent in this conversation chain
+    message_count: usize,
+    /// Number of items we sent in the last full request (for detecting conversation changes)
+    last_input_item_count: usize,
+}
+
 pub struct OpenAIProvider {
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
@@ -152,6 +169,8 @@ pub struct OpenAIProvider {
     transport_mode: OpenAITransportMode,
     websocket_cooldowns: Arc<RwLock<HashMap<String, Instant>>>,
     websocket_failure_streaks: Arc<RwLock<HashMap<String, u32>>>,
+    /// Persistent WebSocket connection for incremental continuation
+    persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
 }
 
 impl OpenAIProvider {
@@ -207,6 +226,7 @@ impl OpenAIProvider {
             transport_mode,
             websocket_cooldowns: Arc::clone(&WEBSOCKET_COOLDOWNS),
             websocket_failure_streaks: Arc::clone(&WEBSOCKET_FAILURE_STREAKS),
+            persistent_ws: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1441,9 +1461,10 @@ impl Provider for OpenAIProvider {
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
         system: &str,
-        _resume_session_id: Option<&str>, // Not used by OpenAI provider
+        _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let input = build_responses_input(messages);
+        let input_item_count = input.len();
         let api_tools = build_tools(tools);
         let model_id = self.model_id().await;
         let (instructions, is_chatgpt_mode) = {
@@ -1488,10 +1509,18 @@ impl Provider for OpenAIProvider {
             }
         }
 
-        // Create channel for streaming events
+        // --- Persistent WebSocket continuation path ---
+        // Try to reuse an existing WebSocket connection with previous_response_id
+        // to send only incremental input items instead of the full conversation.
+        let persistent_ws = Arc::clone(&self.persistent_ws);
+        let use_websocket_transport = match self.transport_mode {
+            OpenAITransportMode::HTTPS => false,
+            OpenAITransportMode::WebSocket => true,
+            OpenAITransportMode::Auto => Self::should_prefer_websocket(&model_id),
+        };
+
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
-        // Clone what we need for the async task
         let credentials = Arc::clone(&self.credentials);
         let transport_mode = self.transport_mode;
         let websocket_cooldowns = Arc::clone(&self.websocket_cooldowns);
@@ -1499,15 +1528,45 @@ impl Provider for OpenAIProvider {
         let model_for_transport = model_id.clone();
         let client = self.client.clone();
 
-        // Spawn task to handle streaming with retry logic
         tokio::spawn(async move {
+            // Attempt persistent WebSocket continuation first
+            if use_websocket_transport {
+                let continuation_result = try_persistent_ws_continuation(
+                    &persistent_ws,
+                    &request,
+                    &input,
+                    input_item_count,
+                    &tx,
+                )
+                .await;
+
+                match continuation_result {
+                    PersistentWsResult::Success => {
+                        return;
+                    }
+                    PersistentWsResult::NotAvailable => {
+                        crate::logging::info(
+                            "No persistent WS connection available; using fresh connection",
+                        );
+                    }
+                    PersistentWsResult::Failed(err) => {
+                        crate::logging::warn(&format!(
+                            "Persistent WS continuation failed: {}; using fresh connection",
+                            err
+                        ));
+                        let mut guard = persistent_ws.lock().await;
+                        *guard = None;
+                    }
+                }
+            }
+
+            // Normal path: fresh connection with full input (with retry logic)
             let mut last_error = None;
             let mut force_https_for_request = false;
             let mut skip_backoff_once = false;
 
             for attempt in 0..MAX_RETRIES {
                 if attempt > 0 && !skip_backoff_once {
-                    // Exponential backoff: 1s, 2s, 4s
                     let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                     crate::logging::info(&format!(
@@ -1559,8 +1618,14 @@ impl Provider for OpenAIProvider {
 
                 let use_websocket = matches!(transport, OpenAITransport::WebSocket);
                 let result = if use_websocket {
-                    stream_response_websocket(Arc::clone(&credentials), request.clone(), tx.clone())
-                        .await
+                    stream_response_websocket_persistent(
+                        Arc::clone(&credentials),
+                        request.clone(),
+                        tx.clone(),
+                        Arc::clone(&persistent_ws),
+                        input_item_count,
+                    )
+                    .await
                 } else {
                     stream_response(
                         client.clone(),
@@ -1582,7 +1647,7 @@ impl Provider for OpenAIProvider {
                             .await;
                         }
                         return;
-                    } // Success
+                    }
                     Err(OpenAIStreamFailure::FallbackToHttps(error)) => {
                         let elapsed_ms = attempt_started.elapsed().as_millis();
                         crate::logging::warn(&format!(
@@ -1604,6 +1669,11 @@ impl Provider for OpenAIProvider {
                                 streak,
                                 cooldown.as_secs()
                             ));
+                        }
+                        // Clear persistent state on fallback
+                        {
+                            let mut guard = persistent_ws.lock().await;
+                            *guard = None;
                         }
                         last_error = Some(error);
                         continue;
@@ -1733,6 +1803,7 @@ impl Provider for OpenAIProvider {
             transport_mode: self.transport_mode,
             websocket_cooldowns: Arc::clone(&self.websocket_cooldowns),
             websocket_failure_streaks: Arc::clone(&self.websocket_failure_streaks),
+            persistent_ws: Arc::new(Mutex::new(None)),
         })
     }
 }
@@ -1940,7 +2011,9 @@ fn is_ws_upgrade_required(err: &WsError) -> bool {
     }
 }
 
-/// Stream the response from OpenAI API using websockets
+/// Stream the response from OpenAI API using websockets (legacy, non-persistent).
+/// Kept for reference; the persistent variant `stream_response_websocket_persistent` is used instead.
+#[allow(dead_code)]
 async fn stream_response_websocket(
     credentials: Arc<RwLock<CodexCredentials>>,
     request: Value,
@@ -2212,6 +2285,553 @@ async fn stream_response_websocket(
             }
         }
     }
+}
+
+/// Result of trying to continue on a persistent WebSocket connection
+enum PersistentWsResult {
+    Success,
+    NotAvailable,
+    Failed(String),
+}
+
+/// Try to continue a conversation on an existing persistent WebSocket connection
+/// using `previous_response_id` to send only incremental input.
+async fn try_persistent_ws_continuation(
+    persistent_ws: &Arc<Mutex<Option<PersistentWsState>>>,
+    request: &Value,
+    input: &[Value],
+    input_item_count: usize,
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+) -> PersistentWsResult {
+    let mut guard = persistent_ws.lock().await;
+    let state = match guard.as_mut() {
+        Some(s) => s,
+        None => return PersistentWsResult::NotAvailable,
+    };
+
+    // Check connection age - reconnect before the 60-min server limit
+    if state.connected_at.elapsed() >= Duration::from_secs(WEBSOCKET_PERSISTENT_MAX_AGE_SECS) {
+        crate::logging::info("Persistent WS connection too old; forcing reconnect");
+        *guard = None;
+        return PersistentWsResult::NotAvailable;
+    }
+
+    // The input array must be strictly growing for continuation to make sense.
+    // If the input_item_count is less than or equal to last time, the conversation
+    // was reset (e.g., after compaction) - we need a fresh connection.
+    if input_item_count <= state.last_input_item_count {
+        crate::logging::info(&format!(
+            "Input items didn't grow ({} <= {}); conversation may have been compacted, reconnecting",
+            input_item_count, state.last_input_item_count
+        ));
+        *guard = None;
+        return PersistentWsResult::NotAvailable;
+    }
+
+    // Compute incremental items: everything after the last_input_item_count
+    let incremental_items: Vec<Value> = input[state.last_input_item_count..].to_vec();
+    if incremental_items.is_empty() {
+        crate::logging::info("No incremental items to send; need fresh request");
+        *guard = None;
+        return PersistentWsResult::NotAvailable;
+    }
+
+    let previous_response_id = state.last_response_id.clone();
+    crate::logging::info(&format!(
+        "Persistent WS continuation: previous_response_id={}, incremental_items={} (was {} now {})",
+        previous_response_id,
+        incremental_items.len(),
+        state.last_input_item_count,
+        input_item_count,
+    ));
+
+    // Build the incremental request - only include new items + previous_response_id
+    let mut continuation_request = serde_json::json!({
+        "type": "response.create",
+        "previous_response_id": previous_response_id,
+        "input": incremental_items,
+    });
+
+    // Copy over model, tools, and other settings from the original request
+    if let Some(model) = request.get("model") {
+        continuation_request["model"] = model.clone();
+    }
+    if let Some(tools) = request.get("tools") {
+        continuation_request["tools"] = tools.clone();
+    }
+    if let Some(tool_choice) = request.get("tool_choice") {
+        continuation_request["tool_choice"] = tool_choice.clone();
+    }
+    if let Some(instructions) = request.get("instructions") {
+        continuation_request["instructions"] = instructions.clone();
+    }
+    if let Some(max_output_tokens) = request.get("max_output_tokens") {
+        continuation_request["max_output_tokens"] = max_output_tokens.clone();
+    }
+    if let Some(reasoning) = request.get("reasoning") {
+        continuation_request["reasoning"] = reasoning.clone();
+    }
+    if let Some(include) = request.get("include") {
+        continuation_request["include"] = include.clone();
+    }
+    continuation_request["store"] = serde_json::json!(false);
+    continuation_request["stream"] = serde_json::json!(true);
+    continuation_request["parallel_tool_calls"] = serde_json::json!(false);
+
+    let request_text = match serde_json::to_string(&continuation_request) {
+        Ok(t) => t,
+        Err(e) => return PersistentWsResult::Failed(format!("serialize error: {}", e)),
+    };
+
+    let _ = tx
+        .send(Ok(StreamEvent::ConnectionType {
+            connection: "websocket/persistent".to_string(),
+        }))
+        .await;
+
+    // Send the continuation request on the existing WebSocket
+    if let Err(e) = state.ws_stream.send(WsMessage::Text(request_text)).await {
+        return PersistentWsResult::Failed(format!("send error: {}", e));
+    }
+
+    // Stream the response, extracting the new response_id
+    let mut saw_text_delta = false;
+    let mut saw_response_completed = false;
+    let mut pending: VecDeque<StreamEvent> = VecDeque::new();
+    let mut new_response_id: Option<String> = None;
+    let stream_started = Instant::now();
+
+    loop {
+        if stream_started.elapsed() >= Duration::from_secs(WEBSOCKET_COMPLETION_TIMEOUT_SECS) {
+            return PersistentWsResult::Failed("completion timeout".to_string());
+        }
+
+        let timeout_secs = WEBSOCKET_IDLE_TIMEOUT_SECS;
+        let next_item =
+            match tokio::time::timeout(Duration::from_secs(timeout_secs), state.ws_stream.next())
+                .await
+            {
+                Ok(item) => item,
+                Err(_) => {
+                    return PersistentWsResult::Failed("idle timeout on persistent WS".to_string())
+                }
+            };
+
+        let Some(result) = next_item else {
+            if saw_response_completed {
+                break;
+            }
+            return PersistentWsResult::Failed(
+                "persistent WS stream ended before response.completed".to_string(),
+            );
+        };
+
+        match result {
+            Ok(WsMessage::Text(text)) => {
+                let text = text.to_string();
+                if is_websocket_fallback_notice(&text) {
+                    return PersistentWsResult::Failed("server requested fallback".to_string());
+                }
+
+                // Extract response_id from response.created event
+                if new_response_id.is_none() {
+                    if let Ok(val) = serde_json::from_str::<Value>(&text) {
+                        if val.get("type").and_then(|t| t.as_str()) == Some("response.created") {
+                            if let Some(id) = val
+                                .get("response")
+                                .and_then(|r| r.get("id"))
+                                .and_then(|id| id.as_str())
+                            {
+                                new_response_id = Some(id.to_string());
+                                crate::logging::info(&format!(
+                                    "Persistent WS got new response_id: {}",
+                                    id
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                if let Some(event) =
+                    parse_openai_response_event(&text, &mut saw_text_delta, &mut pending)
+                {
+                    if matches!(event, StreamEvent::MessageEnd { .. }) {
+                        saw_response_completed = true;
+                    }
+                    if let StreamEvent::Error { ref message, .. } = event {
+                        if is_retryable_error(&message.to_lowercase()) {
+                            return PersistentWsResult::Failed(format!(
+                                "stream error: {}",
+                                message
+                            ));
+                        }
+                    }
+                    if tx.send(Ok(event)).await.is_err() {
+                        break; // Receiver dropped
+                    }
+                }
+                while let Some(event) = pending.pop_front() {
+                    if matches!(event, StreamEvent::MessageEnd { .. }) {
+                        saw_response_completed = true;
+                    }
+                    if tx.send(Ok(event)).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            Ok(WsMessage::Ping(payload)) => {
+                let _ = state.ws_stream.send(WsMessage::Pong(payload)).await;
+            }
+            Ok(WsMessage::Close(_)) => {
+                if saw_response_completed {
+                    break;
+                }
+                return PersistentWsResult::Failed("server closed connection".to_string());
+            }
+            Ok(WsMessage::Pong(_)) | Ok(_) => {}
+            Err(e) => {
+                return PersistentWsResult::Failed(format!("ws error: {}", e));
+            }
+        }
+    }
+
+    // Update persistent state for next turn
+    if let Some(resp_id) = new_response_id {
+        state.last_response_id = resp_id;
+        state.last_input_item_count = input_item_count;
+        state.message_count += 1;
+        crate::logging::info(&format!(
+            "Persistent WS continuation success (chain length: {})",
+            state.message_count
+        ));
+        PersistentWsResult::Success
+    } else {
+        // Got response but no response_id - can't chain further
+        crate::logging::warn("Persistent WS: no response_id in response; breaking chain");
+        *guard = None;
+        PersistentWsResult::Success
+    }
+}
+
+/// Stream response via WebSocket, saving the connection for reuse.
+/// This replaces the old `stream_response_websocket` for the fresh-connection path.
+async fn stream_response_websocket_persistent(
+    credentials: Arc<RwLock<CodexCredentials>>,
+    request: Value,
+    tx: mpsc::Sender<Result<StreamEvent>>,
+    persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
+    input_item_count: usize,
+) -> Result<(), OpenAIStreamFailure> {
+    use crate::message::ConnectionPhase;
+    let request_model = request
+        .get("model")
+        .and_then(|m| m.as_str())
+        .map(|m| m.to_string());
+
+    let access_token = openai_access_token(&credentials).await?;
+    let creds = credentials.read().await;
+    let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
+    let ws_url = OpenAIProvider::responses_ws_url(&creds);
+    let mut ws_request = ws_url.into_client_request().map_err(|err| {
+        OpenAIStreamFailure::Other(anyhow::anyhow!(
+            "Failed to build websocket request: {}",
+            err
+        ))
+    })?;
+
+    let auth_header =
+        HeaderValue::from_str(&format!("Bearer {}", access_token)).map_err(|err| {
+            OpenAIStreamFailure::Other(anyhow::anyhow!("Invalid Authorization header: {}", err))
+        })?;
+    ws_request
+        .headers_mut()
+        .insert("Authorization", auth_header);
+    ws_request
+        .headers_mut()
+        .insert("Content-Type", HeaderValue::from_static("application/json"));
+
+    if is_chatgpt_mode {
+        ws_request
+            .headers_mut()
+            .insert("originator", HeaderValue::from_static(ORIGINATOR));
+        if let Some(account_id) = creds.account_id.as_ref() {
+            let account_header = HeaderValue::from_str(account_id).map_err(|err| {
+                OpenAIStreamFailure::Other(anyhow::anyhow!(
+                    "Invalid chatgpt-account-id header: {}",
+                    err
+                ))
+            })?;
+            ws_request
+                .headers_mut()
+                .insert("chatgpt-account-id", account_header);
+        }
+    }
+    drop(creds);
+
+    let _ = tx
+        .send(Ok(StreamEvent::ConnectionPhase {
+            phase: ConnectionPhase::Connecting,
+        }))
+        .await;
+    let connect_start = std::time::Instant::now();
+
+    let connect_result = tokio::time::timeout(
+        Duration::from_secs(WEBSOCKET_CONNECT_TIMEOUT_SECS),
+        connect_async(ws_request),
+    )
+    .await
+    .map_err(|_| {
+        OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+            "WebSocket connect timed out after {}s",
+            WEBSOCKET_CONNECT_TIMEOUT_SECS
+        ))
+    })?;
+
+    let (mut ws_stream, _response) = match connect_result {
+        Ok((stream, response)) => {
+            let connect_ms = connect_start.elapsed().as_millis();
+            crate::logging::info(&format!(
+                "WebSocket connection established in {}ms (persistent mode)",
+                connect_ms
+            ));
+            (stream, response)
+        }
+        Err(err) if is_ws_upgrade_required(&err) => {
+            return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                "Falling back from websockets to HTTPS transport"
+            )));
+        }
+        Err(err) => {
+            return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                "Failed to connect websocket stream: {}",
+                err
+            )));
+        }
+    };
+
+    let mut request_event = request;
+    if !request_event.is_object() {
+        return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+            "Invalid websocket request payload shape; expected an object"
+        )));
+    }
+    request_event
+        .as_object_mut()
+        .expect("request_event is object")
+        .insert(
+            "type".to_string(),
+            serde_json::Value::String("response.create".to_string()),
+        );
+
+    let request_text = serde_json::to_string(&request_event).map_err(|err| {
+        OpenAIStreamFailure::Other(anyhow::anyhow!(
+            "Failed to serialize OpenAI websocket request: {}",
+            err
+        ))
+    })?;
+    ws_stream
+        .send(WsMessage::Text(request_text))
+        .await
+        .map_err(|err| OpenAIStreamFailure::Other(anyhow::anyhow!(err)))?;
+
+    let mut saw_text_delta = false;
+    let mut saw_response_completed = false;
+    let mut saw_api_activity = false;
+    let ws_started_at = Instant::now();
+    let mut last_api_activity_at = Instant::now();
+    let mut pending: VecDeque<StreamEvent> = VecDeque::new();
+    let mut response_id: Option<String> = None;
+    let connected_at = Instant::now();
+
+    loop {
+        if !saw_response_completed
+            && ws_started_at.elapsed() >= Duration::from_secs(WEBSOCKET_COMPLETION_TIMEOUT_SECS)
+        {
+            return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                "WebSocket stream did not complete within {}s",
+                WEBSOCKET_COMPLETION_TIMEOUT_SECS
+            )));
+        }
+
+        if !saw_api_activity
+            && ws_started_at.elapsed() >= Duration::from_secs(WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS)
+        {
+            return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                "WebSocket stream did not emit API activity within {}s",
+                WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS
+            )));
+        }
+
+        if saw_api_activity
+            && last_api_activity_at.elapsed() >= Duration::from_secs(WEBSOCKET_IDLE_TIMEOUT_SECS)
+        {
+            return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                "WebSocket stream stalled without API activity for {}s",
+                WEBSOCKET_IDLE_TIMEOUT_SECS
+            )));
+        }
+
+        let timeout_secs = if saw_api_activity {
+            WEBSOCKET_IDLE_TIMEOUT_SECS
+        } else {
+            WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS
+        };
+        let next_item = tokio::time::timeout(Duration::from_secs(timeout_secs), ws_stream.next())
+            .await
+            .map_err(|_| {
+                OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                    "WebSocket stream timed out waiting for {} websocket activity ({}s)",
+                    if saw_api_activity { "next" } else { "first" },
+                    timeout_secs
+                ))
+            })?;
+
+        let Some(result) = next_item else {
+            if saw_response_completed {
+                break;
+            }
+            return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                "WebSocket stream ended before response.completed"
+            )));
+        };
+
+        match result {
+            Ok(message) => match message {
+                WsMessage::Text(text) => {
+                    let text = text.to_string();
+                    if is_websocket_fallback_notice(&text) {
+                        return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                            "{} reported by websocket stream",
+                            WEBSOCKET_FALLBACK_NOTICE
+                        )));
+                    }
+
+                    // Extract response_id from response.created event
+                    if response_id.is_none() {
+                        if let Ok(val) = serde_json::from_str::<Value>(&text) {
+                            if val.get("type").and_then(|t| t.as_str())
+                                == Some("response.created")
+                            {
+                                if let Some(id) = val
+                                    .get("response")
+                                    .and_then(|r| r.get("id"))
+                                    .and_then(|id| id.as_str())
+                                {
+                                    response_id = Some(id.to_string());
+                                    crate::logging::info(&format!(
+                                        "Fresh WS got response_id: {} (will save for continuation)",
+                                        id
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
+                    let mut made_api_activity = is_websocket_activity_payload(&text);
+                    if let Some(event) =
+                        parse_openai_response_event(&text, &mut saw_text_delta, &mut pending)
+                    {
+                        if is_stream_activity_event(&event) {
+                            made_api_activity = true;
+                        }
+                        if matches!(event, StreamEvent::MessageEnd { .. }) {
+                            saw_response_completed = true;
+                        }
+                        if let StreamEvent::Error { message, .. } = &event {
+                            if let Some(model_name) = request_model.as_deref() {
+                                maybe_record_runtime_model_unavailable_from_stream_error(
+                                    model_name, message,
+                                );
+                            }
+                            if is_retryable_error(&message.to_lowercase()) {
+                                return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+                                    "Stream error: {}",
+                                    message
+                                )));
+                            }
+                        }
+                        if tx.send(Ok(event)).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    while let Some(event) = pending.pop_front() {
+                        if is_stream_activity_event(&event) {
+                            made_api_activity = true;
+                        }
+                        if let StreamEvent::Error { message, .. } = &event {
+                            if let Some(model_name) = request_model.as_deref() {
+                                maybe_record_runtime_model_unavailable_from_stream_error(
+                                    model_name, message,
+                                );
+                            }
+                            if is_retryable_error(&message.to_lowercase()) {
+                                return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+                                    "Stream error: {}",
+                                    message
+                                )));
+                            }
+                        }
+                        if matches!(event, StreamEvent::MessageEnd { .. }) {
+                            saw_response_completed = true;
+                        }
+                        if tx.send(Ok(event)).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    if made_api_activity {
+                        saw_api_activity = true;
+                        last_api_activity_at = Instant::now();
+                    }
+                }
+                WsMessage::Ping(payload) => {
+                    let _ = ws_stream.send(WsMessage::Pong(payload)).await;
+                }
+                WsMessage::Close(_) => {
+                    if saw_response_completed {
+                        break;
+                    }
+                    return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                        "WebSocket stream closed before response.completed"
+                    )));
+                }
+                WsMessage::Binary(_) => {
+                    return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+                        "Unexpected binary websocket event"
+                    )));
+                }
+                WsMessage::Pong(_) => {}
+                _ => {}
+            },
+            Err(err) => {
+                return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+                    "Stream error: {}",
+                    err
+                )));
+            }
+        }
+    }
+
+    // Save the WebSocket connection and response_id for reuse on next turn
+    if let Some(resp_id) = response_id {
+        let mut guard = persistent_ws.lock().await;
+        crate::logging::info(&format!(
+            "Saving persistent WS connection (response_id={}, items={})",
+            resp_id, input_item_count
+        ));
+        *guard = Some(PersistentWsState {
+            ws_stream,
+            last_response_id: resp_id,
+            connected_at,
+            message_count: 1,
+            last_input_item_count: input_item_count,
+        });
+    } else {
+        crate::logging::info(
+            "No response_id captured from WS stream; connection not saved for reuse",
+        );
+    }
+
+    Ok(())
 }
 
 fn should_refresh_token(status: StatusCode, body: &str) -> bool {
