@@ -819,6 +819,7 @@ impl App {
         self.is_processing = true;
         self.status = ProcessingStatus::Sending;
         self.processing_started = Some(Instant::now());
+        self.last_stream_activity = Some(Instant::now());
         self.streaming_tps_start = None;
         self.streaming_tps_elapsed = Duration::ZERO;
         self.streaming_total_output_tokens = 0;
@@ -4349,12 +4350,54 @@ impl App {
                                 crate::logging::error("Failed to send queued continuation message");
                             }
                         }
+                        // Stall detection: if processing for too long with no server events,
+                        // cancel and reset so the user isn't stuck forever.
+                        const STALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+                        if self.is_processing {
+                            let stalled = self.last_stream_activity
+                                .map(|t| t.elapsed() > STALL_TIMEOUT)
+                                .unwrap_or_else(|| {
+                                    self.processing_started
+                                        .map(|t| t.elapsed() > STALL_TIMEOUT)
+                                        .unwrap_or(false)
+                                });
+                            if stalled {
+                                crate::logging::warn(&format!(
+                                    "Stream stall detected: no server events for {:?}, cancelling",
+                                    self.last_stream_activity.map(|t| t.elapsed())
+                                        .or(self.processing_started.map(|t| t.elapsed()))
+                                ));
+                                let _ = remote.cancel().await;
+                                self.is_processing = false;
+                                self.status = ProcessingStatus::Idle;
+                                self.current_message_id = None;
+                                self.processing_started = None;
+                                self.last_stream_activity = None;
+                                self.rate_limit_pending_message = None;
+                                if !self.streaming_text.is_empty() {
+                                    let content = self.take_streaming_text();
+                                    self.push_display_message(DisplayMessage {
+                                        role: "assistant".to_string(),
+                                        content,
+                                        tool_calls: vec![],
+                                        duration_secs: None,
+                                        title: None,
+                                        tool_data: None,
+                                    });
+                                }
+                                self.push_display_message(DisplayMessage::system(
+                                    "⚠ Stream stalled (no response for 5 minutes). Processing cancelled. You can resend your message.".to_string()
+                                ));
+                            }
+                        }
                     }
                     event = remote.next_event() => {
                         match event {
                             None => {
                                 self.rate_limit_pending_message = None;
                                 self.is_processing = false;
+                                self.current_message_id = None;
+                                self.last_stream_activity = None;
                                 disconnect_start = Some(std::time::Instant::now());
                                 self.push_display_message(DisplayMessage {
                                     role: "system".to_string(),
@@ -4758,6 +4801,10 @@ impl App {
         remote: &mut super::backend::RemoteConnection,
     ) -> bool {
         use crate::protocol::ServerEvent;
+
+        if self.is_processing {
+            self.last_stream_activity = Some(Instant::now());
+        }
 
         let call_output_tokens_seen = remote.call_output_tokens_seen();
 
