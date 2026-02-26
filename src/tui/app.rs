@@ -9124,13 +9124,7 @@ impl App {
     }
 
     fn start_copilot_login(&mut self) {
-        let (program, args, rendered) = crate::provider::copilot::copilot_login_command();
-
-        self.push_display_message(DisplayMessage::system(format!(
-            "Starting GitHub Copilot login...\n\nRunning `{}`",
-            rendered
-        )));
-        self.set_status_notice("Login: copilot...");
+        let (program, args, _rendered) = crate::provider::copilot::copilot_login_command();
 
         match Self::run_external_login_command_owned(&program, &args) {
             Ok(()) => {
@@ -9140,16 +9134,66 @@ impl App {
                 self.set_status_notice("Login: ✓ copilot");
             }
             Err(_) => {
+                self.set_status_notice("Login: copilot device flow...");
+
+                tokio::spawn(async move {
+                    let client = reqwest::Client::new();
+
+                    let device_resp = match crate::auth::copilot::initiate_device_flow(&client).await {
+                        Ok(resp) => resp,
+                        Err(e) => {
+                            crate::logging::error(&format!("Copilot device flow failed: {}", e));
+                            return;
+                        }
+                    };
+
+                    let _ = open::that(&device_resp.verification_uri);
+
+                    crate::logging::info(&format!(
+                        "Copilot login: open {} and enter code: {}",
+                        device_resp.verification_uri, device_resp.user_code
+                    ));
+
+                    let token = match crate::auth::copilot::poll_for_access_token(
+                        &client,
+                        &device_resp.device_code,
+                        device_resp.interval,
+                    )
+                    .await
+                    {
+                        Ok(t) => t,
+                        Err(e) => {
+                            crate::logging::error(&format!("Copilot polling failed: {}", e));
+                            return;
+                        }
+                    };
+
+                    let username = crate::auth::copilot::fetch_github_username(&client, &token)
+                        .await
+                        .unwrap_or_else(|_| "unknown".to_string());
+
+                    match crate::auth::copilot::save_github_token(&token, &username) {
+                        Ok(()) => {
+                            crate::logging::info(&format!(
+                                "Copilot login complete! Authenticated as {}. Restart or /login to activate.",
+                                username
+                            ));
+                        }
+                        Err(e) => {
+                            crate::logging::error(&format!("Failed to save Copilot token: {}", e));
+                        }
+                    }
+                });
+
                 self.push_display_message(DisplayMessage::system(
-                    "Copilot CLI not found.\n\n\
-                     To authenticate with GitHub Copilot, run from a terminal:\n\
-                     ```\n\
-                     jcode login --provider copilot\n\
-                     ```\n\n\
-                     This will start an interactive device flow to link your GitHub account."
+                    "**GitHub Copilot Device Flow**\n\n\
+                     Copilot CLI not found - using built-in device flow.\n\n\
+                     Opening browser for GitHub authorization...\n\
+                     Check the browser for a verification code to enter.\n\n\
+                     The login will complete automatically once you authorize in the browser.\n\
+                     Check logs (`~/.jcode/logs/`) for the verification code if the browser didn't open."
                         .to_string(),
                 ));
-                self.set_status_notice("Login: copilot - use terminal");
             }
         }
     }
