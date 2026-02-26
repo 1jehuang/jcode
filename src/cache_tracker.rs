@@ -280,4 +280,83 @@ mod tests {
         let msgs2 = vec![make_message(Role::User, "Different message")];
         assert!(tracker.record_request(&msgs2).is_none());
     }
+
+    /// Verify normal multi-turn conversation growth never triggers a false positive.
+    /// This is the pattern that happens every real session: each turn appends a new
+    /// assistant response and user message onto the unchanged prior history.
+    #[test]
+    fn test_no_false_positive_on_normal_growth() {
+        let mut tracker = CacheTracker::new();
+
+        // Turn 1: initial user message (no memory)
+        let turn1 = vec![make_message(Role::User, "Q1")];
+        assert!(tracker.record_request(&turn1).is_none(), "Turn 1: no violation");
+
+        // Turn 2: assistant replied, user sent follow-up (base messages without memory)
+        let turn2 = vec![
+            make_message(Role::User, "Q1"),
+            make_message(Role::Assistant, "A1"),
+            make_message(Role::User, "Q2"),
+        ];
+        assert!(tracker.record_request(&turn2).is_none(), "Turn 2: no violation");
+
+        // Turn 3: another exchange appended
+        let turn3 = vec![
+            make_message(Role::User, "Q1"),
+            make_message(Role::Assistant, "A1"),
+            make_message(Role::User, "Q2"),
+            make_message(Role::Assistant, "A2"),
+            make_message(Role::User, "Q3"),
+        ];
+        assert!(tracker.record_request(&turn3).is_none(), "Turn 3: no violation");
+
+        // Turn 4: another exchange appended
+        let turn4 = vec![
+            make_message(Role::User, "Q1"),
+            make_message(Role::Assistant, "A1"),
+            make_message(Role::User, "Q2"),
+            make_message(Role::Assistant, "A2"),
+            make_message(Role::User, "Q3"),
+            make_message(Role::Assistant, "A3"),
+            make_message(Role::User, "Q4"),
+        ];
+        assert!(tracker.record_request(&turn4).is_none(), "Turn 4: no violation");
+    }
+
+    /// Verify that memory injection (an ephemeral suffix NOT saved to conversation history)
+    /// does NOT cause false positives when tracked BEFORE the memory push.
+    /// This validates the fix where agent.rs calls record_request(&messages) — not
+    /// record_request(&messages_with_memory) — so the ephemeral suffix is invisible to
+    /// the tracker.
+    #[test]
+    fn test_no_false_positive_when_memory_excluded() {
+        let mut tracker = CacheTracker::new();
+
+        // Turn 1: base messages only (no memory injected yet)
+        let base1 = vec![make_message(Role::User, "Q1")];
+        assert!(tracker.record_request(&base1).is_none());
+
+        // Turn 2: conversation grew, no memory → no violation
+        let base2 = vec![
+            make_message(Role::User, "Q1"),
+            make_message(Role::Assistant, "A1"),
+            make_message(Role::User, "Q2"),
+        ];
+        assert!(tracker.record_request(&base2).is_none());
+
+        // Turn 3: conversation grew again → no violation
+        // (If we had tracked messages_with_memory containing a memory suffix at turn 2,
+        // this would falsely flag a violation because the suffix is replaced by A2 here.)
+        let base3 = vec![
+            make_message(Role::User, "Q1"),
+            make_message(Role::Assistant, "A1"),
+            make_message(Role::User, "Q2"),
+            make_message(Role::Assistant, "A2"),
+            make_message(Role::User, "Q3"),
+        ];
+        assert!(
+            tracker.record_request(&base3).is_none(),
+            "Should NOT flag a violation — memory suffix from turn 2 is NOT tracked here"
+        );
+    }
 }

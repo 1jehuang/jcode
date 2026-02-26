@@ -1744,6 +1744,16 @@ impl Agent {
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split(None);
 
+            // Check for client-side cache violations before memory injection.
+            // Memory is an ephemeral suffix that changes each turn; tracking it would cause
+            // false-positive violations every turn (prior turn's memory ≠ current history prefix).
+            if let Some(violation) = self.cache_tracker.record_request(&messages) {
+                logging::warn(&format!(
+                    "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
+                    violation.reason, violation.turn, violation.message_count
+                ));
+            }
+
             // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory = messages;
             if let Some(memory) = memory_pending.as_ref() {
@@ -1757,14 +1767,6 @@ impl Agent {
                 let memory_msg =
                     format!("<system-reminder>\n{}\n</system-reminder>", memory.prompt);
                 messages_with_memory.push(Message::user(&memory_msg));
-            }
-
-            // Check for client-side cache violations (fallback when provider doesn't report cache tokens)
-            if let Some(violation) = self.cache_tracker.record_request(&messages_with_memory) {
-                logging::warn(&format!(
-                    "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
-                    violation.reason, violation.turn, violation.message_count
-                ));
             }
 
             logging::info(&format!(
@@ -2467,6 +2469,16 @@ impl Agent {
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split(None);
 
+            // Check for client-side cache violations before memory injection.
+            // Memory is an ephemeral suffix that changes each turn; tracking it would cause
+            // false-positive violations every turn (prior turn's memory ≠ current history prefix).
+            if let Some(violation) = self.cache_tracker.record_request(&messages) {
+                logging::warn(&format!(
+                    "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
+                    violation.reason, violation.turn, violation.message_count
+                ));
+            }
+
             // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory = messages;
             if let Some(memory) = memory_pending.as_ref() {
@@ -2486,14 +2498,6 @@ impl Agent {
                 let memory_msg =
                     format!("<system-reminder>\n{}\n</system-reminder>", memory.prompt);
                 messages_with_memory.push(Message::user(&memory_msg));
-            }
-
-            // Check for client-side cache violations (fallback when provider doesn't report cache tokens)
-            if let Some(violation) = self.cache_tracker.record_request(&messages_with_memory) {
-                logging::warn(&format!(
-                    "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
-                    violation.reason, violation.turn, violation.message_count
-                ));
             }
 
             logging::info(&format!(
@@ -3128,6 +3132,16 @@ impl Agent {
             // Use split prompt for better caching - static content cached, dynamic not
             let split_prompt = self.build_system_prompt_split(None);
 
+            // Check for client-side cache violations before memory injection.
+            // Memory is an ephemeral suffix that changes each turn; tracking it would cause
+            // false-positive violations every turn (prior turn's memory ≠ current history prefix).
+            if let Some(violation) = self.cache_tracker.record_request(&messages) {
+                logging::warn(&format!(
+                    "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
+                    violation.reason, violation.turn, violation.message_count
+                ));
+            }
+
             // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory = messages;
             if let Some(memory) = memory_pending.as_ref() {
@@ -3147,14 +3161,6 @@ impl Agent {
                 let memory_msg =
                     format!("<system-reminder>\n{}\n</system-reminder>", memory.prompt);
                 messages_with_memory.push(Message::user(&memory_msg));
-            }
-
-            // Check for client-side cache violations (fallback when provider doesn't report cache tokens)
-            if let Some(violation) = self.cache_tracker.record_request(&messages_with_memory) {
-                logging::warn(&format!(
-                    "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
-                    violation.reason, violation.turn, violation.message_count
-                ));
             }
 
             logging::info(&format!(

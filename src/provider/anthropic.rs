@@ -1245,30 +1245,37 @@ fn build_system_param_split(
 }
 
 fn format_messages_with_identity(messages: Vec<ApiMessage>, is_oauth: bool) -> Vec<ApiMessage> {
-    if !is_oauth {
-        return messages;
-    }
+    let mut out = if is_oauth {
+        let mut v = Vec::with_capacity(messages.len() + 1);
+        v.push(ApiMessage {
+            role: "user".to_string(),
+            content: vec![ApiContentBlock::Text {
+                text: CLAUDE_CODE_IDENTITY.to_string(),
+                cache_control: None,
+            }],
+        });
+        v.extend(messages);
+        v
+    } else {
+        messages
+    };
 
-    let mut out = Vec::with_capacity(messages.len() + 1);
-    out.push(ApiMessage {
-        role: "user".to_string(),
-        content: vec![ApiContentBlock::Text {
-            text: CLAUDE_CODE_IDENTITY.to_string(),
-            cache_control: None,
-        }],
-    });
-    out.extend(messages);
-
-    // Add cache breakpoint to enable conversation caching
+    // Add cache breakpoints for both OAuth and non-OAuth paths
     add_message_cache_breakpoint(&mut out);
 
     out
 }
 
 /// Add cache_control to messages for conversation caching.
-/// Strategy: Cache everything except the last user message.
-/// This way, on subsequent turns, the entire conversation history up to
-/// the previous assistant response is cached.
+///
+/// Strategy: sliding two-marker window
+///   - Second-to-last assistant message → READ marker (re-uses cache snapshot from previous turn)
+///   - Last assistant message           → WRITE marker (creates new snapshot for the next turn)
+///
+/// This ensures each turn N+1 reads from turn N's conversation cache, paying only
+/// cache_read_input_tokens for the already-cached history instead of full input tokens.
+///
+/// Budget: system (1) + tools (1) + messages (up to 2) = 4 total, within Anthropic's limit.
 fn add_message_cache_breakpoint(messages: &mut [ApiMessage]) {
     crate::logging::info(&format!(
         "Conversation caching: {} messages to process",
@@ -1276,53 +1283,59 @@ fn add_message_cache_breakpoint(messages: &mut [ApiMessage]) {
     ));
 
     if messages.len() < 3 {
-        // Need at least: identity + user + something to cache
+        // Need at least: user + assistant + user to be worth caching
         crate::logging::info("Conversation caching: too few messages, skipping");
         return;
     }
 
-    // Find the last assistant message (second-to-last message if last is user)
-    // We want to cache up to and including the last complete exchange
-    let mut cache_index = None;
-
-    // Walk backwards to find the last assistant message before the final user message
+    // Collect indices of up to 2 most recent assistant messages (newest first)
+    let mut assistant_indices: Vec<usize> = Vec::with_capacity(2);
     for (i, msg) in messages.iter().enumerate().rev() {
         if msg.role == "assistant" {
-            cache_index = Some(i);
-            break;
+            assistant_indices.push(i);
+            if assistant_indices.len() == 2 {
+                break;
+            }
         }
     }
 
-    // Add cache_control to the last content block of that message
-    if let Some(idx) = cache_index {
+    if assistant_indices.is_empty() {
+        crate::logging::info("Conversation caching: no assistant message found");
+        return;
+    }
+
+    // Place cache_control on both (newest = WRITE for next turn, older = READ from prev turn)
+    let total = assistant_indices.len();
+    for (slot, &idx) in assistant_indices.iter().enumerate() {
+        let label = if slot == 0 { "WRITE (newest)" } else { "READ (prev-turn)" };
+        let mut added = false;
         if let Some(msg) = messages.get_mut(idx) {
-            // Find any Text or ToolUse block to add cache_control to (prefer last, but accept any)
-            let mut added_cache = false;
             for block in msg.content.iter_mut().rev() {
                 match block {
                     ApiContentBlock::Text { cache_control, .. }
                     | ApiContentBlock::ToolUse { cache_control, .. } => {
                         *cache_control = Some(CacheControlParam::ephemeral());
-                        added_cache = true;
+                        added = true;
                         break;
                     }
                     _ => {}
                 }
             }
-            if added_cache {
-                crate::logging::info(&format!(
-                    "Conversation caching: added cache breakpoint at message {}",
-                    idx
-                ));
-            } else {
-                crate::logging::info(&format!(
-                    "Conversation caching: no text block found in assistant message {}",
-                    idx
-                ));
-            }
         }
-    } else {
-        crate::logging::info("Conversation caching: no assistant message found");
+        if added {
+            crate::logging::info(&format!(
+                "Conversation caching: breakpoint {}/{} at message {} [{}]",
+                slot + 1,
+                total,
+                idx,
+                label
+            ));
+        } else {
+            crate::logging::info(&format!(
+                "Conversation caching: no cacheable block in assistant message {} [{}]",
+                idx, label
+            ));
+        }
     }
 }
 
@@ -1808,6 +1821,210 @@ mod tests {
             assert!(blocks[1].cache_control.is_none());
         } else {
             panic!("Expected Blocks variant");
+        }
+    }
+
+    // --- Cross-turn cache correctness tests ---
+    // These tests verify the two-marker sliding-window strategy that allows each turn
+    // to READ from the previous turn's conversation cache.
+
+    fn count_message_cache_breakpoints(messages: &[ApiMessage]) -> usize {
+        messages.iter().flat_map(|m| &m.content).filter(|b| {
+            matches!(
+                b,
+                ApiContentBlock::Text { cache_control: Some(_), .. }
+                    | ApiContentBlock::ToolUse { cache_control: Some(_), .. }
+            )
+        }).count()
+    }
+
+    fn cached_message_indices(messages: &[ApiMessage]) -> Vec<usize> {
+        messages.iter().enumerate().filter(|(_, m)| {
+            m.content.iter().any(|b| {
+                matches!(
+                    b,
+                    ApiContentBlock::Text { cache_control: Some(_), .. }
+                        | ApiContentBlock::ToolUse { cache_control: Some(_), .. }
+                )
+            })
+        }).map(|(i, _)| i).collect()
+    }
+
+    /// Helper to build a minimal conversation with N exchanges (user→assistant pairs).
+    /// Returns messages suitable for add_message_cache_breakpoint (includes a trailing user msg).
+    fn build_conversation(exchanges: usize) -> Vec<ApiMessage> {
+        let mut messages = vec![ApiMessage {
+            role: "user".to_string(),
+            content: vec![ApiContentBlock::Text {
+                text: "identity".to_string(),
+                cache_control: None,
+            }],
+        }];
+        for i in 0..exchanges {
+            messages.push(ApiMessage {
+                role: "user".to_string(),
+                content: vec![ApiContentBlock::Text {
+                    text: format!("Question {}", i + 1),
+                    cache_control: None,
+                }],
+            });
+            messages.push(ApiMessage {
+                role: "assistant".to_string(),
+                content: vec![ApiContentBlock::Text {
+                    text: format!("Answer {}", i + 1),
+                    cache_control: None,
+                }],
+            });
+        }
+        // Trailing user message (the current turn's input)
+        messages.push(ApiMessage {
+            role: "user".to_string(),
+            content: vec![ApiContentBlock::Text {
+                text: format!("Question {}", exchanges + 1),
+                cache_control: None,
+            }],
+        });
+        messages
+    }
+
+    #[test]
+    fn test_cache_one_exchange_single_marker() {
+        // Turn 2: only one assistant reply exists → one marker (WRITE only)
+        let mut messages = build_conversation(1);
+        add_message_cache_breakpoint(&mut messages);
+
+        let indices = cached_message_indices(&messages);
+        assert_eq!(indices.len(), 1, "One assistant message → one cache marker");
+        // The assistant message is at index 2 (identity=0, user=1, assistant=2, user=3)
+        assert_eq!(indices[0], 2);
+    }
+
+    #[test]
+    fn test_cache_two_exchanges_two_markers() {
+        // Turn 3: two assistant replies → two markers (READ prev + WRITE new)
+        let mut messages = build_conversation(2);
+        // identity=0, user=1, assistant=2, user=3, assistant=4, user=5
+        add_message_cache_breakpoint(&mut messages);
+
+        let indices = cached_message_indices(&messages);
+        assert_eq!(indices.len(), 2, "Two assistant messages → two cache markers");
+        assert!(indices.contains(&2), "Second-to-last assistant (READ marker) at index 2");
+        assert!(indices.contains(&4), "Last assistant (WRITE marker) at index 4");
+    }
+
+    #[test]
+    fn test_cache_many_exchanges_still_two_markers() {
+        // 10 exchanges → still only 2 markers (within the 4-breakpoint API limit)
+        let mut messages = build_conversation(10);
+        add_message_cache_breakpoint(&mut messages);
+
+        let count = count_message_cache_breakpoints(&messages);
+        assert_eq!(count, 2, "Should always place exactly 2 markers regardless of conversation length");
+    }
+
+    #[test]
+    fn test_cache_cross_turn_read_marker_preserved() {
+        // THE KEY REGRESSION TEST: simulates turn N → turn N+1 and verifies that the
+        // assistant message from turn N still has cache_control in the turn N+1 request.
+        // Without this, the turn N cache snapshot is written but never read.
+
+        // Turn 2: one assistant reply
+        let mut turn2 = build_conversation(1);
+        // identity=0, user=1, assistant=2, user=3
+        add_message_cache_breakpoint(&mut turn2);
+        let turn2_cached = cached_message_indices(&turn2);
+        assert_eq!(turn2_cached, vec![2], "Turn 2: cache marker at assistant index 2");
+
+        // The content of the assistant message from turn 2 (what gets written to cache)
+        let cached_text = match &turn2[2].content[0] {
+            ApiContentBlock::Text { text, .. } => text.clone(),
+            _ => panic!("Expected text block"),
+        };
+
+        // Turn 3: same conversation + one more exchange (assistant[2] is now second-to-last)
+        let mut turn3 = build_conversation(2);
+        // identity=0, user=1, assistant=2(same as before), user=3, assistant=4(new), user=5
+        add_message_cache_breakpoint(&mut turn3);
+        let turn3_cached = cached_message_indices(&turn3);
+
+        // CRITICAL: assistant at index 2 MUST still have cache_control in turn 3,
+        // so Anthropic can serve a cache READ hit for the turn-2 snapshot.
+        assert!(
+            turn3_cached.contains(&2),
+            "Turn 3 MUST keep cache_control on the turn-2 assistant message (index 2) \
+             so Anthropic can serve a cache_read hit. Without this, turn-2's cache is \
+             written but never read, wasting cache_creation tokens every turn."
+        );
+        assert!(
+            turn3_cached.contains(&4),
+            "Turn 3 must add cache_control on the new assistant message (index 4) to \
+             write a fresh cache snapshot for turn 4 to read"
+        );
+
+        // Verify it's actually the same content (same assistant message, not a different one)
+        match &turn3[2].content[0] {
+            ApiContentBlock::Text { text, cache_control } => {
+                assert_eq!(text, &cached_text);
+                assert!(cache_control.is_some(), "Must have cache_control set");
+            }
+            _ => panic!("Expected text block"),
+        }
+    }
+
+    #[test]
+    fn test_cache_non_oauth_path_gets_breakpoints() {
+        // Non-OAuth path should now also get conversation cache breakpoints
+        // (previously it returned early without calling add_message_cache_breakpoint)
+        let messages = vec![
+            ApiMessage {
+                role: "user".to_string(),
+                content: vec![ApiContentBlock::Text {
+                    text: "Hello".to_string(),
+                    cache_control: None,
+                }],
+            },
+            ApiMessage {
+                role: "assistant".to_string(),
+                content: vec![ApiContentBlock::Text {
+                    text: "Hi there!".to_string(),
+                    cache_control: None,
+                }],
+            },
+            ApiMessage {
+                role: "user".to_string(),
+                content: vec![ApiContentBlock::Text {
+                    text: "Follow-up".to_string(),
+                    cache_control: None,
+                }],
+            },
+        ];
+
+        let result = format_messages_with_identity(messages, false);
+        let indices = cached_message_indices(&result);
+        assert_eq!(
+            indices,
+            vec![1],
+            "Non-OAuth path should add cache breakpoint to assistant message"
+        );
+    }
+
+    #[test]
+    fn test_cache_total_breakpoints_within_api_limit() {
+        // Anthropic allows at most 4 cache_control parameters per request total
+        // (system blocks + tool definitions + message blocks).
+        // System: 1 (static block) + Tools: 1 (last tool) + Messages: up to 2 = 4 max.
+        // This test verifies messages never exceed 2 breakpoints.
+        for exchanges in 1..=20 {
+            let mut messages = build_conversation(exchanges);
+            add_message_cache_breakpoint(&mut messages);
+            let count = count_message_cache_breakpoints(&messages);
+            assert!(
+                count <= 2,
+                "Conversation with {} exchanges produced {} message breakpoints, exceeding \
+                 the 2-message budget (system+tools use the other 2 of Anthropic's 4-limit)",
+                exchanges,
+                count
+            );
         }
     }
 }
