@@ -9107,12 +9107,16 @@ async fn monitor_selfdev_signals(
         // Check for rebuild signal (reload with new canary)
         let rebuild_path = jcode_dir.join("rebuild-signal");
         if rebuild_path.exists() {
-            if let Ok(_hash) = std::fs::read_to_string(&rebuild_path) {
+            if let Ok(signal_content) = std::fs::read_to_string(&rebuild_path) {
                 let _ = std::fs::remove_file(&rebuild_path);
                 crate::logging::info("Server: reload signal received");
 
-                // Gracefully stop all active generations before exec'ing
-                graceful_shutdown_sessions(&sessions, &swarm_members).await;
+                // Parse signal: "hash:session_id" or just "hash"
+                let triggering_session = signal_content.split_once(':').map(|(_, sid)| sid.to_string());
+
+                // Gracefully stop all active generations except the triggering session
+                // (it's just sleeping in the selfdev tool, no point waiting for it)
+                graceful_shutdown_sessions(&sessions, &swarm_members, triggering_session.as_deref()).await;
 
                 // Get canary binary path
                 if let Ok(binary) = crate::build::canary_binary_path() {
@@ -9144,22 +9148,31 @@ async fn monitor_selfdev_signals(
 
 /// Signal all active sessions to gracefully stop generation and checkpoint.
 /// Waits up to 10 seconds for processing to finish.
+/// `skip_session` is the session that triggered the reload (selfdev tool) -
+/// it's just sleeping in an infinite loop and will never finish on its own.
 async fn graceful_shutdown_sessions(
     sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    skip_session: Option<&str>,
 ) {
-    // Find which sessions are actively processing
+    // Find which sessions are actively processing (excluding the triggering session)
     let running_sessions: Vec<String> = {
         let members = swarm_members.read().await;
         members
             .iter()
-            .filter(|(_, m)| m.status == "running")
+            .filter(|(id, m)| {
+                m.status == "running" && skip_session.map_or(true, |skip| !id.starts_with(skip))
+            })
             .map(|(id, _)| id.clone())
             .collect()
     };
 
     if running_sessions.is_empty() {
-        crate::logging::info("Server: no active generations, proceeding with reload");
+        if skip_session.is_some() {
+            crate::logging::info("Server: no other active generations, proceeding with reload immediately");
+        } else {
+            crate::logging::info("Server: no active generations, proceeding with reload");
+        }
         return;
     }
 

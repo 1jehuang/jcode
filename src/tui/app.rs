@@ -9568,7 +9568,7 @@ impl App {
                         success: true,
                         message: format!(
                             "✓ Authenticated as **{}** via GitHub Copilot.\n\n\
-                             Restart jcode or use `/model copilot:claude-sonnet-4` to activate.",
+                             Copilot models are now available in `/model`.",
                             username
                         ),
                     }));
@@ -9774,6 +9774,7 @@ impl App {
         if login.success {
             self.push_display_message(DisplayMessage::system(login.message));
             self.set_status_notice(&format!("Login: ✓ {}", login.provider));
+            self.provider.on_auth_changed();
         } else {
             self.push_display_message(DisplayMessage::error(login.message));
             self.set_status_notice(&format!("Login: {} failed", login.provider));

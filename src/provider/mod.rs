@@ -129,6 +129,10 @@ pub trait Provider: Send + Sync {
         Ok(())
     }
 
+    /// Called when auth credentials change (e.g., after login).
+    /// Providers can use this to hot-add sub-providers.
+    fn on_auth_changed(&self) {}
+
     /// Get the reasoning effort level (if applicable, e.g., OpenAI)
     fn reasoning_effort(&self) -> Option<String> {
         None
@@ -872,8 +876,8 @@ pub struct MultiProvider {
     /// Direct Anthropic API provider (no Python dependency)
     anthropic: Option<anthropic::AnthropicProvider>,
     openai: Option<openai::OpenAIProvider>,
-    /// GitHub Copilot API provider (direct API)
-    copilot_api: Option<Arc<copilot::CopilotApiProvider>>,
+    /// GitHub Copilot API provider (direct API, hot-swappable after login)
+    copilot_api: RwLock<Option<Arc<copilot::CopilotApiProvider>>>,
     /// OpenRouter API provider (200+ models from various providers)
     openrouter: Option<openrouter::OpenRouterProvider>,
     active: RwLock<ActiveProvider>,
@@ -919,7 +923,7 @@ impl MultiProvider {
         match provider {
             ActiveProvider::Claude => self.anthropic.is_some() || self.claude.is_some(),
             ActiveProvider::OpenAI => self.openai.is_some(),
-            ActiveProvider::Copilot => self.copilot_api.is_some(),
+            ActiveProvider::Copilot => self.copilot_api.read().unwrap().is_some(),
             ActiveProvider::OpenRouter => self.openrouter.is_some(),
         }
     }
@@ -1051,7 +1055,8 @@ impl MultiProvider {
                 }
             }
             ActiveProvider::Copilot => {
-                if let Some(ref copilot) = self.copilot_api {
+                let copilot = self.copilot_api.read().unwrap().clone();
+                if let Some(copilot) = copilot {
                     copilot
                         .complete(messages, tools, system, resume_session_id)
                         .await
@@ -1127,7 +1132,8 @@ impl MultiProvider {
                 }
             }
             ActiveProvider::Copilot => {
-                if let Some(ref copilot) = self.copilot_api {
+                let copilot = self.copilot_api.read().unwrap().clone();
+                if let Some(copilot) = copilot {
                     copilot
                         .complete_split(
                             messages,
@@ -1273,7 +1279,7 @@ impl MultiProvider {
             claude,
             anthropic,
             openai,
-            copilot_api,
+            copilot_api: RwLock::new(copilot_api),
             openrouter,
             active: RwLock::new(active),
             has_claude_creds,
@@ -1488,6 +1494,8 @@ impl Provider for MultiProvider {
                 .unwrap_or_else(|| "gpt-5.3-codex-spark".to_string()),
             ActiveProvider::Copilot => self
                 .copilot_api
+                .read()
+                .unwrap()
                 .as_ref()
                 .map(|o| o.model())
                 .unwrap_or_else(|| "claude-sonnet-4".to_string()),
@@ -1504,13 +1512,14 @@ impl Provider for MultiProvider {
 
         // Handle explicit "copilot:" prefix from model picker
         if let Some(copilot_model) = model.strip_prefix("copilot:") {
-            if self.copilot_api.is_none() {
+            let copilot_guard = self.copilot_api.read().unwrap();
+            if copilot_guard.is_none() {
                 return Err(anyhow::anyhow!(
                     "GitHub Copilot is not available. Run `jcode login --provider copilot`."
                 ));
             }
             *self.active.write().unwrap() = ActiveProvider::Copilot;
-            if let Some(ref copilot) = self.copilot_api {
+            if let Some(ref copilot) = *copilot_guard {
                 copilot.set_model(copilot_model)?;
             }
             
@@ -1582,7 +1591,8 @@ impl Provider for MultiProvider {
                     }
                 }
                 ActiveProvider::Copilot => {
-                    if let Some(ref copilot) = self.copilot_api {
+                    let copilot_guard = self.copilot_api.read().unwrap();
+                    if let Some(ref copilot) = *copilot_guard {
                         copilot.set_model(model)
                     } else {
                         Err(anyhow::anyhow!("Unknown model: {}", model))
@@ -1721,16 +1731,19 @@ impl Provider for MultiProvider {
         }
 
         // GitHub Copilot models
-        if let Some(ref copilot) = self.copilot_api {
-            let copilot_models = copilot.available_models();
-            for model in copilot_models {
-                routes.push(ModelRoute {
-                    model: model.to_string(),
-                    provider: "Copilot".to_string(),
-                    api_method: "copilot".to_string(),
-                    available: true,
-                    detail: String::new(),
-                });
+        {
+            let copilot_guard = self.copilot_api.read().unwrap();
+            if let Some(ref copilot) = *copilot_guard {
+                let copilot_models = copilot.available_models();
+                for model in copilot_models {
+                    routes.push(ModelRoute {
+                        model: model.to_string(),
+                        provider: "Copilot".to_string(),
+                        api_method: "copilot".to_string(),
+                        available: true,
+                        detail: String::new(),
+                    });
+                }
             }
         }
 
@@ -1853,6 +1866,32 @@ impl Provider for MultiProvider {
         Ok(())
     }
 
+    fn on_auth_changed(&self) {
+        let already_has = self.copilot_api.read().unwrap().is_some();
+        if !already_has {
+            let status = crate::auth::AuthStatus::check();
+            if status.copilot_has_api_token {
+                match copilot::CopilotApiProvider::new() {
+                    Ok(p) => {
+                        crate::logging::info("Hot-initialized Copilot API provider after login");
+                        let provider = Arc::new(p);
+                        let p_clone = provider.clone();
+                        tokio::spawn(async move {
+                            p_clone.detect_tier_and_set_default().await;
+                        });
+                        *self.copilot_api.write().unwrap() = Some(provider);
+                    }
+                    Err(e) => {
+                        crate::logging::info(&format!(
+                            "Failed to hot-initialize Copilot API after login: {}",
+                            e
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     fn handles_tools_internally(&self) -> bool {
         match self.active_provider() {
             ActiveProvider::Claude => {
@@ -1873,6 +1912,8 @@ impl Provider for MultiProvider {
                 .unwrap_or(false),
             ActiveProvider::Copilot => self
                 .copilot_api
+                .read()
+                .unwrap()
                 .as_ref()
                 .map(|o| o.handles_tools_internally())
                 .unwrap_or(false),
@@ -1934,6 +1975,8 @@ impl Provider for MultiProvider {
                 .unwrap_or(false),
             ActiveProvider::Copilot => self
                 .copilot_api
+                .read()
+                .unwrap()
                 .as_ref()
                 .map(|o| o.supports_compaction())
                 .unwrap_or(false),
@@ -1963,6 +2006,8 @@ impl Provider for MultiProvider {
                 .unwrap_or(DEFAULT_CONTEXT_LIMIT),
             ActiveProvider::Copilot => self
                 .copilot_api
+                .read()
+                .unwrap()
                 .as_ref()
                 .map(|o| o.context_window())
                 .unwrap_or(DEFAULT_CONTEXT_LIMIT),
@@ -1995,7 +2040,7 @@ impl Provider for MultiProvider {
         } else {
             None
         };
-        let copilot_api = self.copilot_api.clone();
+        let copilot_api = self.copilot_api.read().unwrap().clone();
         let openrouter = if self.openrouter.is_some() {
             openrouter::OpenRouterProvider::new().ok()
         } else {
@@ -2006,7 +2051,7 @@ impl Provider for MultiProvider {
             claude,
             anthropic,
             openai,
-            copilot_api,
+            copilot_api: RwLock::new(copilot_api),
             openrouter,
             active: RwLock::new(active),
             has_claude_creds: self.has_claude_creds,
