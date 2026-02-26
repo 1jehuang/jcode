@@ -1659,7 +1659,7 @@ impl Provider for MultiProvider {
                 routes.push(ModelRoute {
                     model: model.to_string(),
                     provider: "Anthropic".to_string(),
-                    api_method: "oauth".to_string(),
+                    api_method: "claude-oauth".to_string(),
                     available,
                     detail: detail.clone(),
                 });
@@ -1681,11 +1681,10 @@ impl Provider for MultiProvider {
                 });
             }
             if !has_oauth && !has_api_key {
-                // Show as unavailable
                 routes.push(ModelRoute {
                     model: model.to_string(),
                     provider: "Anthropic".to_string(),
-                    api_method: "oauth".to_string(),
+                    api_method: "claude-oauth".to_string(),
                     available: false,
                     detail: "no credentials".to_string(),
                 });
@@ -1715,7 +1714,7 @@ impl Provider for MultiProvider {
             routes.push(ModelRoute {
                 model: model.to_string(),
                 provider: "OpenAI".to_string(),
-                api_method: "oauth".to_string(),
+                api_method: "openai-oauth".to_string(),
                 available,
                 detail,
             });
@@ -1728,7 +1727,7 @@ impl Provider for MultiProvider {
                 routes.push(ModelRoute {
                     model: model.to_string(),
                     provider: "Copilot".to_string(),
-                    api_method: "api".to_string(),
+                    api_method: "copilot".to_string(),
                     available: true,
                     detail: String::new(),
                 });

@@ -10019,7 +10019,7 @@ impl App {
                         routes.push(crate::provider::ModelRoute {
                             model: model.clone(),
                             provider: "Anthropic".to_string(),
-                            api_method: "oauth".to_string(),
+                            api_method: "claude-oauth".to_string(),
                             available,
                             detail,
                         });
@@ -10054,7 +10054,7 @@ impl App {
                     routes.push(crate::provider::ModelRoute {
                         model: model.clone(),
                         provider: "OpenAI".to_string(),
-                        api_method: "oauth".to_string(),
+                        api_method: "openai-oauth".to_string(),
                         available,
                         detail,
                     });
@@ -10092,10 +10092,11 @@ impl App {
         fn route_sort_key(r: &super::RouteOption) -> (u8, u8, String) {
             let avail = if r.available { 0 } else { 1 };
             let method = match r.api_method.as_str() {
-                "oauth" => 0,
-                "api-key" => 1,
-                "openrouter" => 2,
-                _ => 3,
+                "claude-oauth" | "openai-oauth" => 0,
+                "copilot" => 1,
+                "api-key" => 2,
+                "openrouter" => 3,
+                _ => 4,
             };
             (avail, method, r.provider.clone())
         }
@@ -10175,7 +10176,7 @@ impl App {
                                 || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str()))
                                 || entry_routes
                                     .iter()
-                                    .any(|r| r.api_method == "oauth" && r.available)),
+                                    .any(|r| (r.api_method == "claude-oauth" || r.api_method == "openai-oauth") && r.available)),
                         old: old_threshold_secs > 0
                             && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
                         created_date: or_created.map(|t| format_created(t)),
@@ -10191,7 +10192,7 @@ impl App {
                         || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str()))
                         || entry_routes
                             .iter()
-                            .any(|r| r.api_method == "oauth" && r.available));
+                            .any(|r| (r.api_method == "claude-oauth" || r.api_method == "openai-oauth") && r.available));
                 models.push(super::ModelEntry {
                     name: name.clone(),
                     routes: entry_routes,
