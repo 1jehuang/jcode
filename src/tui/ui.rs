@@ -2138,7 +2138,14 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     } else {
         0
     };
-    let picker_height: u16 = if app.picker_state().is_some() { 8 } else { 0 };
+    let picker_height: u16 = if let Some(picker) = app.picker_state() {
+        let visible_models = picker.filtered.len() as u16;
+        let rows_needed = visible_models + 1; // +1 for header
+        let max_height: u16 = 20;
+        rows_needed.min(max_height)
+    } else {
+        0
+    };
     let input_height = base_input_height + hint_line_height;
 
     // Count user messages to show next prompt number
