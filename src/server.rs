@@ -915,8 +915,8 @@ impl Server {
         let _ = std::fs::remove_file(&self.socket_path);
         let _ = std::fs::remove_file(&self.debug_socket_path);
 
-        let main_listener = Listener::bind(&self.socket_path)?;
-        let debug_listener = Listener::bind(&self.debug_socket_path)?;
+        let mut main_listener = Listener::bind(&self.socket_path)?;
+        let mut debug_listener = Listener::bind(&self.debug_socket_path)?;
 
         // Set logging context for this server
         crate::logging::set_server(&self.identity.name);

@@ -85,10 +85,13 @@ impl Stream {
     }
 
     pub fn split(&mut self) -> (SplitReadRef<'_>, SplitWriteRef<'_>) {
-        (
-            SplitReadRef { stream: self },
-            SplitWriteRef { stream: self },
-        )
+        let ptr = self as *mut Stream;
+        unsafe {
+            (
+                SplitReadRef { stream: &mut *ptr },
+                SplitWriteRef { stream: &mut *ptr },
+            )
+        }
     }
 
     pub fn pair() -> io::Result<(Self, Self)> {
@@ -295,4 +298,8 @@ pub fn is_socket_path(path: &Path) -> bool {
 pub fn remove_socket(_path: &Path) {
     // Named pipes are automatically cleaned up when all handles are closed.
     // No filesystem cleanup needed.
+}
+
+pub fn stream_pair() -> io::Result<(Stream, Stream)> {
+    Stream::pair()
 }

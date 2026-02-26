@@ -10709,10 +10709,8 @@ impl App {
                         self.thinking_start = Some(start);
                         self.thinking_buffer.clear();
                         self.thinking_prefix_emitted = false;
-                        // Update status to Thinking for real-time duration display
-                        if !config().display.show_thinking {
-                            self.status = ProcessingStatus::Thinking(start);
-                        }
+                        // Always show Thinking in status bar (even when thinking content is visible)
+                        self.status = ProcessingStatus::Thinking(start);
                     }
                     StreamEvent::ThinkingDelta(thinking_text) => {
                         // Buffer thinking content and emit with prefix only once
@@ -11465,10 +11463,8 @@ impl App {
                                         self.thinking_start = Some(start);
                                         self.thinking_buffer.clear();
                                         self.thinking_prefix_emitted = false;
-                                        // Update status to Thinking for real-time duration display
-                                        if !config().display.show_thinking {
-                                            self.status = ProcessingStatus::Thinking(start);
-                                        }
+                                        // Always show Thinking in status bar
+                                        self.status = ProcessingStatus::Thinking(start);
                                         self.broadcast_debug(super::backend::DebugEvent::ThinkingStart);
                                     }
                                     StreamEvent::ThinkingDelta(thinking_text) => {
@@ -12847,7 +12843,7 @@ impl App {
             // Clean up old socket
             let _ = std::fs::remove_file(&socket_path);
 
-            let listener = match Listener::bind(&socket_path) {
+            let mut listener = match Listener::bind(&socket_path) {
                 Ok(l) => l,
                 Err(e) => {
                     crate::logging::error(&format!("Failed to bind debug socket: {}", e));
@@ -13950,6 +13946,7 @@ fn spawn_in_new_terminal(
     _exe: &std::path::Path,
     _session_id: &str,
     _cwd: &std::path::Path,
+    _socket: Option<&str>,
 ) -> anyhow::Result<bool> {
     Ok(false)
 }
