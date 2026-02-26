@@ -152,6 +152,12 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Invalidate any cached credentials (e.g., after account switch).
+    /// Providers that cache OAuth tokens should clear them.
+    async fn invalidate_credentials(&self) {
+        // Default: no-op
+    }
+
     /// Returns true if jcode should use its own compaction for this provider.
     fn supports_compaction(&self) -> bool {
         false

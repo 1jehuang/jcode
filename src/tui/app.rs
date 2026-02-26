@@ -481,6 +481,8 @@ fn parse_area_spec(spec: &str) -> Option<Rect> {
 enum PendingLogin {
     /// Waiting for user to paste Claude OAuth code (verifier needed for token exchange)
     Claude { verifier: String },
+    /// Waiting for user to paste Claude OAuth code for a specific named account
+    ClaudeAccount { verifier: String, label: String },
     /// Waiting for user to paste OpenRouter API key
     OpenRouter,
 }
@@ -6873,6 +6875,9 @@ impl App {
             "auth" | "login" => {
                 "`/auth` / `/login`\nShow authentication status for all providers.\n\n`/login <provider>`\nStart login flow for a provider (anthropic/claude, openai, openrouter, cursor, copilot, antigravity)."
             }
+            "account" | "accounts" => {
+                "`/account`\nList all Anthropic OAuth accounts.\n\n`/account add <label>`\nAdd a new account via OAuth login.\n\n`/account switch <label>`\nSwitch the active account.\n\n`/account remove <label>`\nRemove an account."
+            }
             "client-reload" if self.is_remote => {
                 "`/client-reload`\nForce client binary reload in remote mode."
             }
@@ -6965,6 +6970,7 @@ impl App {
                      • `/compact` - Manually compact context (summarize old messages)\n\
                      • `/fix` - Attempt session recovery (context/tool/session issues)\n\
                      • `/auth` / `/login` - Show auth status, `/login <provider>` to authenticate (anthropic/openai/openrouter/cursor/copilot/antigravity)\n\
+                     • `/account` - Manage Anthropic accounts (list/add/switch/remove)\n\
                      • `/debug-visual` - Enable visual debugging for TUI issues\n\
                      • `/<skill>` - Activate a skill\n\n\
                      **Available skills:** {}\n\n\
@@ -7823,6 +7829,52 @@ impl App {
                         "Unknown provider '{}'. Use: anthropic/claude, openai, openrouter, cursor, copilot, or antigravity",
                         other
                     )));
+                }
+            }
+            return;
+        }
+
+        if trimmed == "/account" || trimmed == "/accounts" {
+            self.show_accounts();
+            return;
+        }
+
+        if let Some(sub) = trimmed.strip_prefix("/account ") {
+            let parts: Vec<&str> = sub.trim().splitn(2, ' ').collect();
+            match parts[0] {
+                "list" | "ls" => self.show_accounts(),
+                "switch" | "use" => {
+                    if let Some(label) = parts.get(1) {
+                        self.switch_account(label.trim());
+                    } else {
+                        self.push_display_message(DisplayMessage::error(
+                            "Usage: `/account switch <label>`".to_string(),
+                        ));
+                    }
+                }
+                "add" | "login" => {
+                    let label = parts.get(1).map(|s| s.trim()).unwrap_or("default");
+                    self.start_claude_login_for_account(label);
+                }
+                "remove" | "rm" | "delete" => {
+                    if let Some(label) = parts.get(1) {
+                        self.remove_account(label.trim());
+                    } else {
+                        self.push_display_message(DisplayMessage::error(
+                            "Usage: `/account remove <label>`".to_string(),
+                        ));
+                    }
+                }
+                other => {
+                    let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
+                    if accounts.iter().any(|a| a.label == other) {
+                        self.switch_account(other);
+                    } else {
+                        self.push_display_message(DisplayMessage::error(format!(
+                            "Unknown subcommand '{}'. Use: list, switch, add, remove",
+                            other
+                        )));
+                    }
                 }
             }
             return;
@@ -8956,19 +9008,37 @@ impl App {
             "not configured"
         };
 
+        let account_info = {
+            let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
+            if accounts.len() > 1 {
+                let active = crate::auth::claude::active_account_label()
+                    .unwrap_or_else(|| "?".to_string());
+                format!(
+                    " ({} accounts, active: `{}`)",
+                    accounts.len(),
+                    active
+                )
+            } else if accounts.len() == 1 {
+                format!(" (account: `{}`)", accounts[0].label)
+            } else {
+                String::new()
+            }
+        };
+
         self.push_display_message(DisplayMessage::system(format!(
             "**Authentication Status:**\n\n\
              | Provider | Status | Method |\n\
              |----------|--------|--------|\n\
-             | Anthropic | {} | {} |\n\
+             | Anthropic | {} | {}{} |\n\
              | OpenAI | {} | {} |\n\
              | OpenRouter | {} | API key |\n\
              | Cursor | {} | CLI login |\n\
              | Copilot | {} | CLI login |\n\
              | Antigravity | {} | CLI login |\n\n\
-             Use `/login <provider>` to authenticate (anthropic/claude, openai, openrouter, cursor, copilot, antigravity).",
+             Use `/login <provider>` to authenticate, `/account` to manage Anthropic accounts.",
             icon(status.anthropic.state),
             claude_detail,
+            account_info,
             icon(status.openai),
             openai_detail,
             icon(status.openrouter),
@@ -9021,6 +9091,141 @@ impl App {
         )));
         self.set_status_notice("Login: paste code…");
         self.pending_login = Some(PendingLogin::Claude { verifier });
+    }
+
+    fn start_claude_login_for_account(&mut self, label: &str) {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use sha2::{Digest, Sha256};
+
+        let verifier: String = {
+            use rand::Rng;
+            const CHARSET: &[u8] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+            let mut rng = rand::rng();
+            (0..64)
+                .map(|_| {
+                    let idx = rng.random_range(0..CHARSET.len());
+                    CHARSET[idx] as char
+                })
+                .collect()
+        };
+
+        let mut hasher = Sha256::new();
+        hasher.update(verifier.as_bytes());
+        let hash = hasher.finalize();
+        let challenge = URL_SAFE_NO_PAD.encode(hash);
+
+        let auth_url = format!(
+            "{}?code=true&client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
+            crate::auth::oauth::claude::AUTHORIZE_URL,
+            crate::auth::oauth::claude::CLIENT_ID,
+            urlencoding::encode(crate::auth::oauth::claude::REDIRECT_URI),
+            urlencoding::encode(crate::auth::oauth::claude::SCOPES),
+            challenge,
+            verifier,
+        );
+
+        let _ = open::that(&auth_url);
+
+        self.push_display_message(DisplayMessage::system(format!(
+            "**Claude OAuth Login** (account: `{}`)\n\n\
+             Opening browser for authentication...\n\n\
+             If the browser didn't open, visit:\n{}\n\n\
+             After logging in, copy the authorization code and **paste it here**.",
+            label, auth_url
+        )));
+        self.set_status_notice(&format!("Login [{}]: paste code…", label));
+        self.pending_login = Some(PendingLogin::ClaudeAccount {
+            verifier,
+            label: label.to_string(),
+        });
+    }
+
+    fn show_accounts(&mut self) {
+        let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
+        let active_label = crate::auth::claude::active_account_label();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        if accounts.is_empty() {
+            self.push_display_message(DisplayMessage::system(
+                "**Anthropic Accounts:** none configured\n\n\
+                 Use `/account add <label>` to add an account, or `/login claude` for a default account."
+                    .to_string(),
+            ));
+            return;
+        }
+
+        let mut lines = vec!["**Anthropic Accounts:**\n".to_string()];
+        lines.push("| Account | Status | Subscription | Active |".to_string());
+        lines.push("|---------|--------|-------------|--------|".to_string());
+
+        for account in &accounts {
+            let is_active = active_label.as_deref() == Some(&account.label);
+            let status = if account.expires > now_ms {
+                "✓ valid"
+            } else {
+                "⚠ expired"
+            };
+            let sub = account
+                .subscription_type
+                .as_deref()
+                .unwrap_or("unknown");
+            let active_mark = if is_active { "◉" } else { "" };
+            lines.push(format!(
+                "| {} | {} | {} | {} |",
+                account.label, status, sub, active_mark
+            ));
+        }
+
+        lines.push(String::new());
+        lines.push("Commands: `/account switch <label>`, `/account add <label>`, `/account remove <label>`".to_string());
+
+        self.push_display_message(DisplayMessage::system(lines.join("\n")));
+    }
+
+    fn switch_account(&mut self, label: &str) {
+        match crate::auth::claude::set_active_account(label) {
+            Ok(()) => {
+                {
+                    let provider = self.provider.clone();
+                    let label_owned = label.to_string();
+                    tokio::spawn(async move {
+                        provider.invalidate_credentials().await;
+                        crate::logging::info(&format!(
+                            "Switched to Anthropic account '{}'",
+                            label_owned
+                        ));
+                    });
+                }
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Switched to Anthropic account `{}`.",
+                    label
+                )));
+            }
+            Err(e) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Failed to switch account: {}",
+                    e
+                )));
+            }
+        }
+    }
+
+    fn remove_account(&mut self, label: &str) {
+        match crate::auth::claude::remove_account(label) {
+            Ok(()) => {
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Removed Anthropic account `{}`.",
+                    label
+                )));
+            }
+            Err(e) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Failed to remove account: {}",
+                    e
+                )));
+            }
+        }
     }
 
     fn start_openai_login(&mut self) {
@@ -9358,7 +9563,7 @@ impl App {
                 self.set_status_notice("Login: exchanging…");
                 let input_owned = input.clone();
                 tokio::spawn(async move {
-                    match Self::claude_token_exchange(verifier, input_owned).await {
+                    match Self::claude_token_exchange(verifier, input_owned, "default").await {
                         Ok(msg) => {
                             crate::logging::info(&format!("Claude login: {}", msg));
                         }
@@ -9370,6 +9575,28 @@ impl App {
                 self.push_display_message(DisplayMessage::system(
                     "Exchanging authorization code for tokens...".to_string(),
                 ));
+            }
+            PendingLogin::ClaudeAccount { verifier, label } => {
+                self.set_status_notice(&format!("Login [{}]: exchanging…", label));
+                let input_owned = input.clone();
+                let label_clone = label.clone();
+                tokio::spawn(async move {
+                    match Self::claude_token_exchange(verifier, input_owned, &label_clone).await {
+                        Ok(msg) => {
+                            crate::logging::info(&format!("Claude login [{}]: {}", label_clone, msg));
+                        }
+                        Err(e) => {
+                            crate::logging::error(&format!(
+                                "Claude login [{}] failed: {}",
+                                label_clone, e
+                            ));
+                        }
+                    }
+                });
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Exchanging authorization code for account `{}`...",
+                    label
+                )));
             }
             PendingLogin::OpenRouter => {
                 let key = input.trim().to_string();
@@ -9401,7 +9628,11 @@ impl App {
         }
     }
 
-    async fn claude_token_exchange(verifier: String, input: String) -> Result<String, String> {
+    async fn claude_token_exchange(
+        verifier: String,
+        input: String,
+        label: &str,
+    ) -> Result<String, String> {
         let raw_code = if input.contains("code=") {
             let url = url::Url::parse(&input)
                 .or_else(|_| url::Url::parse(&format!("https://example.com?{}", input)))
@@ -9468,10 +9699,10 @@ impl App {
             id_token: tokens.id_token,
         };
 
-        crate::auth::oauth::save_claude_tokens(&oauth_tokens)
+        crate::auth::oauth::save_claude_tokens_for_account(&oauth_tokens, label)
             .map_err(|e| format!("Failed to save tokens: {}", e))?;
 
-        Ok("Successfully logged in to Claude!".to_string())
+        Ok(format!("Successfully logged in to Claude! (account: {})", label))
     }
 
     fn save_openrouter_key(key: &str) -> anyhow::Result<()> {
@@ -12302,6 +12533,27 @@ impl App {
             ];
         }
 
+        if prefix.starts_with("/account ") || prefix.starts_with("/accounts ") {
+            let mut suggestions = vec![
+                ("/account list".into(), "List all Anthropic accounts"),
+                (
+                    "/account add".into(),
+                    "Add a new account (start OAuth login)",
+                ),
+                ("/account switch".into(), "Switch active account"),
+                ("/account remove".into(), "Remove an account"),
+            ];
+            if let Ok(accounts) = crate::auth::claude::list_accounts() {
+                for account in accounts {
+                    suggestions.push((
+                        format!("/account switch {}", account.label),
+                        "Switch to this account",
+                    ));
+                }
+            }
+            return suggestions;
+        }
+
         // Built-in commands
         let mut commands: Vec<(String, &'static str)> = vec![
             ("/help".into(), "Show help and keyboard shortcuts"),
@@ -12332,6 +12584,10 @@ impl App {
             (
                 "/login".into(),
                 "Login to a provider (anthropic/openai/openrouter/cursor/copilot/antigravity)",
+            ),
+            (
+                "/account".into(),
+                "Manage Anthropic accounts (list/add/switch/remove)",
             ),
         ];
 

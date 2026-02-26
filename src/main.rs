@@ -340,7 +340,11 @@ enum Command {
     },
 
     /// Login to a provider via OAuth
-    Login,
+    Login {
+        /// Account label for multi-account support (default: "default")
+        #[arg(long, short = 'a')]
+        account: Option<String>,
+    },
 
     /// Run in simple REPL mode (no TUI)
     Repl,
@@ -681,8 +685,8 @@ async fn run_main(mut args: Args) -> Result<()> {
             let mut agent = agent::Agent::new(provider, registry);
             agent.run_once(&message).await?;
         }
-        Some(Command::Login) => {
-            run_login(&args.provider).await?;
+        Some(Command::Login { account }) => {
+            run_login(&args.provider, account.as_deref()).await?;
         }
         Some(Command::Repl) => {
             // Simple REPL mode (no TUI)
@@ -859,7 +863,7 @@ async fn run_main(mut args: Args) -> Result<()> {
                         io::stdin().read_line(&mut input)?;
 
                         match input.trim() {
-                            "1" => login_claude_flow().await?,
+                            "1" => login_claude_flow("default").await?,
                             "2" => login_openai_flow().await?,
                             "3" => login_openrouter_flow()?,
                             _ => anyhow::bail!("Invalid choice. Run 'jcode login' to try again."),
@@ -1055,7 +1059,7 @@ async fn init_provider_and_registry(
 
                 match input.trim() {
                     "1" => {
-                        login_claude_flow().await?;
+                        login_claude_flow("default").await?;
                         eprintln!();
                         Arc::new(provider::MultiProvider::new())
                     }
@@ -2182,13 +2186,14 @@ fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn run_login(choice: &ProviderChoice) -> Result<()> {
+async fn run_login(choice: &ProviderChoice, account_label: Option<&str>) -> Result<()> {
     match choice {
         ProviderChoice::Claude | ProviderChoice::ClaudeSubprocess => {
             if matches!(choice, ProviderChoice::ClaudeSubprocess) {
                 eprintln!("Warning: Claude subprocess transport is deprecated. Direct Claude API mode is preferred.");
             }
-            login_claude_flow().await?;
+            let label = account_label.unwrap_or("default");
+            login_claude_flow(label).await?;
         }
         ProviderChoice::Openai => {
             login_openai_flow().await?;
@@ -2219,7 +2224,7 @@ async fn run_login(choice: &ProviderChoice) -> Result<()> {
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
             match input.trim() {
-                "1" => login_claude_flow().await?,
+                "1" => login_claude_flow(account_label.unwrap_or("default")).await?,
                 "2" => login_openai_flow().await?,
                 "3" => login_openrouter_flow()?,
                 "4" => login_cursor_flow()?,
@@ -2234,12 +2239,12 @@ async fn run_login(choice: &ProviderChoice) -> Result<()> {
     Ok(())
 }
 
-async fn login_claude_flow() -> Result<()> {
-    eprintln!("Logging in to Claude...");
+async fn login_claude_flow(label: &str) -> Result<()> {
+    eprintln!("Logging in to Claude (account: {})...", label);
     let tokens = auth::oauth::login_claude().await?;
-    auth::oauth::save_claude_tokens(&tokens)?;
+    auth::oauth::save_claude_tokens_for_account(&tokens, label)?;
     eprintln!("Successfully logged in to Claude!");
-    eprintln!("Stored at ~/.jcode/auth.json");
+    eprintln!("Account '{}' stored at ~/.jcode/auth.json", label);
     Ok(())
 }
 

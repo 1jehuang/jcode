@@ -189,7 +189,14 @@ impl AnthropicProvider {
         if fresh_creds.expires_at < now + 300_000 && !fresh_creds.refresh_token.is_empty() {
             crate::logging::info("OAuth token expired or expiring soon, attempting refresh...");
 
-            match oauth::refresh_claude_tokens(&fresh_creds.refresh_token).await {
+            let active_label = auth::claude::active_account_label()
+                .unwrap_or_else(|| "default".to_string());
+            match oauth::refresh_claude_tokens_for_account(
+                &fresh_creds.refresh_token,
+                &active_label,
+            )
+            .await
+            {
                 Ok(refreshed) => {
                     crate::logging::info("OAuth token refreshed successfully");
 
@@ -572,8 +579,13 @@ impl Provider for AnthropicProvider {
         Arc::new(Self {
             client: self.client.clone(),
             model: Arc::new(std::sync::RwLock::new(self.model.read().unwrap().clone())),
-            credentials: Arc::new(RwLock::new(None)), // Fresh credentials cache for fork
+            credentials: Arc::new(RwLock::new(None)),
         })
+    }
+
+    async fn invalidate_credentials(&self) {
+        let mut cached = self.credentials.write().await;
+        *cached = None;
     }
 
     fn native_result_sender(&self) -> Option<NativeToolResultSender> {
@@ -778,7 +790,9 @@ async fn force_refresh_oauth_token(
         loaded.refresh_token
     };
 
-    let refreshed = oauth::refresh_claude_tokens(&refresh_token)
+    let active_label = auth::claude::active_account_label()
+        .unwrap_or_else(|| "default".to_string());
+    let refreshed = oauth::refresh_claude_tokens_for_account(&refresh_token, &active_label)
         .await
         .context("OAuth refresh endpoint rejected the refresh token")?;
 

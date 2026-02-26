@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::RwLock;
 
 #[derive(Debug, Clone)]
 pub struct ClaudeCredentials {
@@ -12,6 +13,59 @@ pub struct ClaudeCredentials {
     pub subscription_type: Option<String>,
 }
 
+/// Represents a named Anthropic OAuth account stored in jcode's auth.json.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnthropicAccount {
+    pub label: String,
+    pub access: String,
+    pub refresh: String,
+    pub expires: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription_type: Option<String>,
+}
+
+/// Multi-account jcode auth.json format.
+/// Backwards-compatible: also reads the old single-account `{"anthropic": {...}}` layout.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JcodeAuthFile {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anthropic_accounts: Vec<AnthropicAccount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_anthropic_account: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    anthropic: Option<LegacyAnthropicAuth>,
+}
+
+/// Legacy single-account format (for migration).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyAnthropicAuth {
+    #[serde(default)]
+    access: String,
+    #[serde(default)]
+    refresh: String,
+    #[serde(default)]
+    expires: i64,
+}
+
+/// Runtime override for the active account label.
+/// This allows `/account switch <label>` to take effect without rewriting the file.
+static ACTIVE_ACCOUNT_OVERRIDE: RwLock<Option<String>> = RwLock::new(None);
+
+pub fn set_active_account_override(label: Option<String>) {
+    if let Ok(mut guard) = ACTIVE_ACCOUNT_OVERRIDE.write() {
+        *guard = label;
+    }
+}
+
+pub fn get_active_account_override() -> Option<String> {
+    ACTIVE_ACCOUNT_OVERRIDE
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+}
+
+// -- Claude Code credentials file format --
 #[derive(Deserialize)]
 struct CredentialsFile {
     #[serde(rename = "claudeAiOauth")]
@@ -30,6 +84,19 @@ struct ClaudeOAuth {
     subscription_type: Option<String>,
 }
 
+// -- OpenCode auth.json format --
+#[derive(Deserialize)]
+struct OpenCodeAuth {
+    anthropic: Option<OpenCodeAnthropicAuth>,
+}
+
+#[derive(Deserialize)]
+struct OpenCodeAnthropicAuth {
+    access: String,
+    refresh: String,
+    expires: i64,
+}
+
 fn claude_code_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     Ok(home.join(".claude").join(".credentials.json"))
@@ -44,36 +111,156 @@ fn opencode_path() -> Result<PathBuf> {
         .join("auth.json"))
 }
 
-fn jcode_path() -> Result<PathBuf> {
+pub fn jcode_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     Ok(home.join(".jcode").join("auth.json"))
 }
 
-// OpenCode auth.json format
-#[derive(Deserialize)]
-struct OpenCodeAuth {
-    anthropic: Option<OpenCodeAnthropicAuth>,
+// ---- Multi-account helpers ----
+
+/// Read the jcode auth file, auto-migrating from legacy format if needed.
+pub fn load_auth_file() -> Result<JcodeAuthFile> {
+    let path = jcode_path()?;
+    if !path.exists() {
+        return Ok(JcodeAuthFile::default());
+    }
+
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("Could not read jcode credentials from {:?}", path))?;
+
+    let mut auth: JcodeAuthFile =
+        serde_json::from_str(&content).context("Could not parse jcode auth.json")?;
+
+    if auth.anthropic_accounts.is_empty() {
+        if let Some(legacy) = auth.anthropic.take() {
+            if !legacy.access.is_empty() {
+                crate::logging::info(
+                    "Migrating legacy single-account auth.json to multi-account format",
+                );
+                auth.anthropic_accounts.push(AnthropicAccount {
+                    label: "default".to_string(),
+                    access: legacy.access,
+                    refresh: legacy.refresh,
+                    expires: legacy.expires,
+                    subscription_type: Some("max".to_string()),
+                });
+                auth.active_anthropic_account = Some("default".to_string());
+                let _ = save_auth_file(&auth);
+            }
+        }
+    }
+
+    Ok(auth)
 }
 
-#[derive(Deserialize)]
-struct OpenCodeAnthropicAuth {
-    access: String,
-    refresh: String,
+/// Write the jcode auth file (multi-account format).
+pub fn save_auth_file(auth: &JcodeAuthFile) -> Result<()> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
+    let creds_dir = home.join(".jcode");
+    std::fs::create_dir_all(&creds_dir)?;
+
+    let clean = JcodeAuthFile {
+        anthropic_accounts: auth.anthropic_accounts.clone(),
+        active_anthropic_account: auth.active_anthropic_account.clone(),
+        anthropic: None,
+    };
+
+    let json = serde_json::to_string_pretty(&clean)?;
+    let auth_path = creds_dir.join("auth.json");
+    std::fs::write(&auth_path, json)?;
+    crate::platform::set_permissions_owner_only(&auth_path)?;
+    Ok(())
+}
+
+/// List all configured Anthropic accounts.
+pub fn list_accounts() -> Result<Vec<AnthropicAccount>> {
+    let auth = load_auth_file()?;
+    Ok(auth.anthropic_accounts)
+}
+
+/// Get the label of the currently active account (runtime override > file > first account).
+pub fn active_account_label() -> Option<String> {
+    if let Some(override_label) = get_active_account_override() {
+        return Some(override_label);
+    }
+    let auth = load_auth_file().ok()?;
+    auth.active_anthropic_account
+        .or_else(|| auth.anthropic_accounts.first().map(|a| a.label.clone()))
+}
+
+/// Persist the active account choice to disk (and set the runtime override).
+pub fn set_active_account(label: &str) -> Result<()> {
+    let mut auth = load_auth_file()?;
+    if !auth.anthropic_accounts.iter().any(|a| a.label == label) {
+        anyhow::bail!("No account with label '{}' found", label);
+    }
+    auth.active_anthropic_account = Some(label.to_string());
+    save_auth_file(&auth)?;
+    set_active_account_override(Some(label.to_string()));
+    Ok(())
+}
+
+/// Add or update an account. Returns the label used.
+pub fn upsert_account(account: AnthropicAccount) -> Result<String> {
+    let mut auth = load_auth_file()?;
+    let label = account.label.clone();
+
+    if let Some(existing) = auth.anthropic_accounts.iter_mut().find(|a| a.label == label) {
+        *existing = account;
+    } else {
+        auth.anthropic_accounts.push(account);
+    }
+
+    if auth.active_anthropic_account.is_none() || auth.anthropic_accounts.len() == 1 {
+        auth.active_anthropic_account = Some(label.clone());
+    }
+
+    save_auth_file(&auth)?;
+    Ok(label)
+}
+
+/// Remove an account by label.
+pub fn remove_account(label: &str) -> Result<()> {
+    let mut auth = load_auth_file()?;
+    let before = auth.anthropic_accounts.len();
+    auth.anthropic_accounts.retain(|a| a.label != label);
+    if auth.anthropic_accounts.len() == before {
+        anyhow::bail!("No account with label '{}' found", label);
+    }
+
+    if auth.active_anthropic_account.as_deref() == Some(label) {
+        auth.active_anthropic_account = auth.anthropic_accounts.first().map(|a| a.label.clone());
+    }
+
+    save_auth_file(&auth)?;
+
+    if get_active_account_override().as_deref() == Some(label) {
+        set_active_account_override(auth.active_anthropic_account.clone());
+    }
+
+    Ok(())
+}
+
+/// Update tokens for a specific account (called after token refresh).
+pub fn update_account_tokens(
+    label: &str,
+    access: &str,
+    refresh: &str,
     expires: i64,
+) -> Result<()> {
+    let mut auth = load_auth_file()?;
+    if let Some(account) = auth.anthropic_accounts.iter_mut().find(|a| a.label == label) {
+        account.access = access.to_string();
+        account.refresh = refresh.to_string();
+        account.expires = expires;
+        save_auth_file(&auth)?;
+        Ok(())
+    } else {
+        anyhow::bail!("No account with label '{}' found for token update", label);
+    }
 }
 
-// jcode auth.json format
-#[derive(Deserialize)]
-struct JcodeAuth {
-    anthropic: Option<JcodeAnthropicAuth>,
-}
-
-#[derive(Deserialize)]
-struct JcodeAnthropicAuth {
-    access: String,
-    refresh: String,
-    expires: i64,
-}
+// ---- Credential loading (used by provider) ----
 
 /// Check if OAuth credentials are available (quick check, doesn't validate)
 pub fn has_credentials() -> bool {
@@ -90,39 +277,38 @@ pub fn get_subscription_type() -> Option<String> {
 pub fn is_max_subscription() -> bool {
     match get_subscription_type() {
         Some(t) => t != "pro",
-        None => true, // unknown = don't restrict
+        None => true,
     }
 }
 
+/// Load credentials for the active Anthropic account.
+/// Falls through jcode accounts -> Claude Code -> OpenCode, preferring non-expired tokens.
 pub fn load_credentials() -> Result<ClaudeCredentials> {
     let now_ms = chrono::Utc::now().timestamp_millis();
 
-    // Try valid credentials in preferred order.
-    // jcode is first so tokens refreshed by jcode are used immediately next launch.
-    let mut expired_candidates = Vec::new();
-    for (source, loader) in [
-        (
-            "jcode",
-            load_jcode_credentials as fn() -> Result<ClaudeCredentials>,
-        ),
-        (
-            "claude",
-            load_claude_code_credentials as fn() -> Result<ClaudeCredentials>,
-        ),
-        (
-            "opencode",
-            load_opencode_credentials as fn() -> Result<ClaudeCredentials>,
-        ),
-    ] {
-        if let Ok(creds) = loader() {
-            if creds.expires_at > now_ms {
-                return Ok(creds);
-            }
-            expired_candidates.push((source, creds));
+    let mut expired_candidates: Vec<(&str, ClaudeCredentials)> = Vec::new();
+
+    if let Ok(creds) = load_jcode_credentials() {
+        if creds.expires_at > now_ms {
+            return Ok(creds);
         }
+        expired_candidates.push(("jcode", creds));
     }
 
-    // Fall back to any available credentials (even if expired)
+    if let Ok(creds) = load_claude_code_credentials() {
+        if creds.expires_at > now_ms {
+            return Ok(creds);
+        }
+        expired_candidates.push(("claude", creds));
+    }
+
+    if let Ok(creds) = load_opencode_credentials() {
+        if creds.expires_at > now_ms {
+            return Ok(creds);
+        }
+        expired_candidates.push(("opencode", creds));
+    }
+
     if let Some((source, creds)) = expired_candidates.into_iter().next() {
         crate::logging::info(&format!(
             "{} Claude OAuth token expired; will attempt refresh.",
@@ -132,6 +318,52 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
     }
 
     anyhow::bail!("No Claude OAuth credentials found (checked jcode, Claude Code, OpenCode)")
+}
+
+/// Load credentials for a specific jcode account by label.
+pub fn load_credentials_for_account(label: &str) -> Result<ClaudeCredentials> {
+    let auth = load_auth_file()?;
+    let account = auth
+        .anthropic_accounts
+        .iter()
+        .find(|a| a.label == label)
+        .with_context(|| format!("No account with label '{}'", label))?;
+
+    Ok(ClaudeCredentials {
+        access_token: account.access.clone(),
+        refresh_token: account.refresh.clone(),
+        expires_at: account.expires,
+        subscription_type: account.subscription_type.clone(),
+    })
+}
+
+/// Load credentials from the active jcode account (multi-account aware).
+fn load_jcode_credentials() -> Result<ClaudeCredentials> {
+    let auth = load_auth_file()?;
+    if auth.anthropic_accounts.is_empty() {
+        anyhow::bail!("No anthropic accounts configured in jcode auth.json");
+    }
+
+    let active_label = get_active_account_override()
+        .or(auth.active_anthropic_account)
+        .unwrap_or_else(|| "default".to_string());
+
+    let account = auth
+        .anthropic_accounts
+        .iter()
+        .find(|a| a.label == active_label)
+        .or_else(|| auth.anthropic_accounts.first())
+        .context("No anthropic accounts in jcode auth.json")?;
+
+    Ok(ClaudeCredentials {
+        access_token: account.access.clone(),
+        refresh_token: account.refresh.clone(),
+        expires_at: account.expires,
+        subscription_type: account
+            .subscription_type
+            .clone()
+            .or_else(|| Some("max".to_string())),
+    })
 }
 
 fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
@@ -151,26 +383,6 @@ fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
         refresh_token: oauth.refresh_token,
         expires_at: oauth.expires_at,
         subscription_type: oauth.subscription_type,
-    })
-}
-
-fn load_jcode_credentials() -> Result<ClaudeCredentials> {
-    let path = jcode_path()?;
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("Could not read jcode credentials from {:?}", path))?;
-
-    let auth: JcodeAuth =
-        serde_json::from_str(&content).context("Could not parse jcode auth credentials")?;
-
-    let anthropic = auth
-        .anthropic
-        .context("No anthropic OAuth credentials in jcode auth file")?;
-
-    Ok(ClaudeCredentials {
-        access_token: anthropic.access,
-        refresh_token: anthropic.refresh,
-        expires_at: anthropic.expires,
-        subscription_type: Some("max".to_string()),
     })
 }
 

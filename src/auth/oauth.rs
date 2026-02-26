@@ -316,94 +316,45 @@ pub async fn login_openai() -> Result<OAuthTokens> {
     })
 }
 
-/// Save Claude tokens to jcode's credentials file
+/// Save Claude tokens to jcode's credentials file (default account).
 pub fn save_claude_tokens(tokens: &OAuthTokens) -> Result<()> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
-    let creds_dir = home.join(".jcode");
-    std::fs::create_dir_all(&creds_dir)?;
+    save_claude_tokens_for_account(tokens, "default")
+}
 
-    #[derive(Serialize)]
-    struct AuthFile {
-        anthropic: AnthropicAuth,
-    }
-
-    #[derive(Serialize)]
-    struct AnthropicAuth {
-        #[serde(rename = "type")]
-        auth_type: String,
-        access: String,
-        refresh: String,
-        expires: i64,
-    }
-
-    let auth = AuthFile {
-        anthropic: AnthropicAuth {
-            auth_type: "oauth".to_string(),
-            access: tokens.access_token.clone(),
-            refresh: tokens.refresh_token.clone(),
-            expires: tokens.expires_at,
-        },
+/// Save Claude tokens for a named account.
+pub fn save_claude_tokens_for_account(tokens: &OAuthTokens, label: &str) -> Result<()> {
+    let account = claude_auth::AnthropicAccount {
+        label: label.to_string(),
+        access: tokens.access_token.clone(),
+        refresh: tokens.refresh_token.clone(),
+        expires: tokens.expires_at,
+        subscription_type: None,
     };
-
-    let json = serde_json::to_string_pretty(&auth)?;
-    let auth_path = creds_dir.join("auth.json");
-    std::fs::write(&auth_path, json)?;
-    crate::platform::set_permissions_owner_only(&auth_path)?;
-
+    claude_auth::upsert_account(account)?;
     Ok(())
 }
 
-/// Load Claude tokens from jcode's credentials file
+/// Load Claude tokens from jcode's credentials file (active account).
 pub fn load_claude_tokens() -> Result<OAuthTokens> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
-    let auth_path = home.join(".jcode").join("auth.json");
-
-    let jcode_result = load_jcode_tokens(&auth_path);
-    if let Ok(tokens) = jcode_result {
-        return Ok(tokens);
-    }
-
     if let Ok(creds) = claude_auth::load_credentials() {
-        let tokens = OAuthTokens {
+        return Ok(OAuthTokens {
             access_token: creds.access_token,
             refresh_token: creds.refresh_token,
             expires_at: creds.expires_at,
             id_token: None,
-        };
-        let _ = save_claude_tokens(&tokens);
-        return Ok(tokens);
+        });
     }
 
-    if let Some(err) = jcode_result.err() {
-        eprintln!("Failed to load jcode credentials: {}", err);
-    }
     anyhow::bail!("No Claude Max OAuth credentials found. Run 'jcode login --provider claude'.");
 }
 
-fn load_jcode_tokens(auth_path: &std::path::Path) -> Result<OAuthTokens> {
-    if !auth_path.exists() {
-        anyhow::bail!("No jcode credentials found at {:?}", auth_path);
-    }
-
-    #[derive(Deserialize)]
-    struct AuthFile {
-        anthropic: AnthropicAuth,
-    }
-
-    #[derive(Deserialize)]
-    struct AnthropicAuth {
-        access: String,
-        refresh: String,
-        expires: i64,
-    }
-
-    let content = std::fs::read_to_string(auth_path)?;
-    let auth: AuthFile = serde_json::from_str(&content)?;
-
+/// Load Claude tokens for a specific named account.
+pub fn load_claude_tokens_for_account(label: &str) -> Result<OAuthTokens> {
+    let creds = claude_auth::load_credentials_for_account(label)?;
     Ok(OAuthTokens {
-        access_token: auth.anthropic.access,
-        refresh_token: auth.anthropic.refresh,
-        expires_at: auth.anthropic.expires,
+        access_token: creds.access_token,
+        refresh_token: creds.refresh_token,
+        expires_at: creds.expires_at,
         id_token: None,
     })
 }
@@ -444,8 +395,53 @@ pub async fn refresh_claude_tokens(refresh_token: &str) -> Result<OAuthTokens> {
         id_token: None,
     };
 
-    // Save the refreshed tokens
-    save_claude_tokens(&oauth_tokens)?;
+    // Save the refreshed tokens to the active account
+    let active_label = claude_auth::active_account_label().unwrap_or_else(|| "default".to_string());
+    save_claude_tokens_for_account(&oauth_tokens, &active_label)?;
+
+    Ok(oauth_tokens)
+}
+
+/// Refresh Claude OAuth tokens for a specific account.
+pub async fn refresh_claude_tokens_for_account(
+    refresh_token: &str,
+    label: &str,
+) -> Result<OAuthTokens> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(claude::TOKEN_URL)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": claude::CLIENT_ID,
+        }))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let text = resp.text().await?;
+        anyhow::bail!("Token refresh failed for account '{}': {}", label, text);
+    }
+
+    #[derive(Deserialize)]
+    struct TokenResponse {
+        access_token: String,
+        refresh_token: String,
+        expires_in: i64,
+    }
+
+    let tokens: TokenResponse = resp.json().await?;
+    let expires_at = chrono::Utc::now().timestamp_millis() + (tokens.expires_in * 1000);
+
+    let oauth_tokens = OAuthTokens {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expires_at,
+        id_token: None,
+    };
+
+    save_claude_tokens_for_account(&oauth_tokens, label)?;
 
     Ok(oauth_tokens)
 }
