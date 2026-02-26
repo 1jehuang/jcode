@@ -717,19 +717,21 @@ mod tests {
     async fn test_batch_resolves_oauth_names() {
         let provider: Arc<dyn Provider> = Arc::new(MockProvider);
         let registry = Registry::new(provider).await;
+        let temp_dir = std::env::temp_dir();
+        let temp_dir_str = temp_dir.to_string_lossy().to_string();
 
         let ctx = ToolContext {
             session_id: "test".to_string(),
             message_id: "test".to_string(),
             tool_call_id: "test".to_string(),
-            working_dir: Some(std::path::PathBuf::from("/tmp")),
+            working_dir: Some(temp_dir),
             stdin_request_tx: None,
         };
 
         let result = registry
             .execute(
                 "file_grep",
-                serde_json::json!({"pattern": "nonexistent_xyz", "path": "/tmp"}),
+                serde_json::json!({"pattern": "nonexistent_xyz", "path": temp_dir_str}),
                 ctx,
             )
             .await;

@@ -10,7 +10,7 @@ fn provider_login_hint(provider_name: &str) -> Option<&'static str> {
     match provider_name.to_ascii_lowercase().as_str() {
         "cursor" => Some("Run `jcode login --provider cursor` to re-authenticate."),
         "copilot" => Some(
-            "Run `jcode login --provider copilot` to authenticate (or install Copilot CLI via https://gh.io/copilot-cli).",
+            "Run `jcode login --provider copilot` to authenticate via GitHub device flow.",
         ),
         "antigravity" => Some("Run `jcode login --provider antigravity` to re-authenticate."),
         _ => None,

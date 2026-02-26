@@ -22,8 +22,6 @@ pub struct AuthStatus {
     pub copilot: AuthState,
     /// Copilot has API token (from hosts.json/apps.json/GITHUB_TOKEN)
     pub copilot_has_api_token: bool,
-    /// Copilot has CLI available (legacy)
-    pub copilot_has_cli: bool,
     /// Antigravity CLI available
     pub antigravity: AuthState,
 }
@@ -145,12 +143,6 @@ impl AuthStatus {
 
         status.copilot = if copilot::has_copilot_credentials() {
             status.copilot_has_api_token = true;
-            AuthState::Available
-        } else if command_available_from_env("JCODE_COPILOT_CLI_PATH", "copilot")
-            || command_exists("copilot")
-            || command_exists("gh")
-        {
-            status.copilot_has_cli = true;
             AuthState::Available
         } else {
             AuthState::NotConfigured
@@ -300,11 +292,15 @@ mod tests {
     #[test]
     fn command_candidates_adds_extension_on_windows() {
         let _ = std::env::set_var("PATHEXT", ".EXE;.BAT");
-        let mut candidates = command_candidates("testcmd");
+        let candidates = command_candidates("testcmd");
         if cfg!(windows) {
-            assert!(candidates.iter().any(|c| c == "testcmd"));
-            assert!(candidates.iter().any(|c| c == "testcmd.exe"));
-            assert!(candidates.iter().any(|c| c == "testcmd.bat"));
+            let normalized: Vec<String> = candidates
+                .iter()
+                .map(|c| c.to_string_lossy().to_ascii_lowercase())
+                .collect();
+            assert!(normalized.iter().any(|c| c == "testcmd"));
+            assert!(normalized.iter().any(|c| c == "testcmd.exe"));
+            assert!(normalized.iter().any(|c| c == "testcmd.bat"));
         } else {
             assert_eq!(candidates.len(), 1);
             assert!(candidates.iter().any(|c| c == "testcmd"));

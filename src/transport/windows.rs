@@ -95,7 +95,10 @@ impl Stream {
     }
 
     pub fn pair() -> io::Result<(Self, Self)> {
-        let pipe_name = format!(r"\\.\pipe\jcode-pair-{}", std::process::id());
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static PAIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let counter = PAIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pipe_name = format!(r"\\.\pipe\jcode-pair-{}-{}", std::process::id(), counter);
         let server = ServerOptions::new()
             .first_pipe_instance(true)
             .create(&pipe_name)?;

@@ -1003,9 +1003,9 @@ async fn init_provider_and_registry(
             Arc::new(provider::cursor::CursorCliProvider::new())
         }
         ProviderChoice::Copilot => {
-            eprintln!("Using GitHub Copilot CLI provider (experimental)");
+            eprintln!("Using GitHub Copilot API provider");
             std::env::set_var("JCODE_ACTIVE_PROVIDER", "copilot");
-            Arc::new(provider::copilot::CopilotCliProvider::new())
+            Arc::new(provider::MultiProvider::new())
         }
         ProviderChoice::Openrouter => {
             eprintln!("Using OpenRouter provider");
@@ -1081,7 +1081,7 @@ async fn init_provider_and_registry(
                     "5" => {
                         login_copilot_flow()?;
                         eprintln!();
-                        Arc::new(provider::copilot::CopilotCliProvider::new())
+                        Arc::new(provider::MultiProvider::new())
                     }
                     "6" => {
                         login_antigravity_flow()?;
