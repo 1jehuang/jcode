@@ -523,3 +523,195 @@ pub async fn refresh_openai_tokens(refresh_token: &str) -> Result<OAuthTokens> {
     save_openai_tokens(&oauth_tokens)?;
     Ok(oauth_tokens)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pkce_verifier_and_challenge_are_different() {
+        let (verifier, challenge) = generate_pkce();
+        assert_ne!(verifier, challenge);
+        assert_eq!(verifier.len(), 64);
+        assert!(!challenge.is_empty());
+    }
+
+    #[test]
+    fn pkce_challenge_is_base64url() {
+        let (_, challenge) = generate_pkce();
+        assert!(!challenge.contains('+'));
+        assert!(!challenge.contains('/'));
+        assert!(!challenge.contains('='));
+    }
+
+    #[test]
+    fn pkce_challenge_is_sha256_of_verifier() {
+        let (verifier, challenge) = generate_pkce();
+        let mut hasher = Sha256::new();
+        hasher.update(verifier.as_bytes());
+        let hash = hasher.finalize();
+        let expected = URL_SAFE_NO_PAD.encode(hash);
+        assert_eq!(challenge, expected);
+    }
+
+    #[test]
+    fn pkce_generates_unique_values() {
+        let (v1, c1) = generate_pkce();
+        let (v2, c2) = generate_pkce();
+        assert_ne!(v1, v2);
+        assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn state_is_random_hex() {
+        let state = generate_state();
+        assert_eq!(state.len(), 32);
+        assert!(state.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn state_generates_unique_values() {
+        let s1 = generate_state();
+        let s2 = generate_state();
+        assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn oauth_tokens_serialization_roundtrip() {
+        let tokens = OAuthTokens {
+            access_token: "at_abc".to_string(),
+            refresh_token: "rt_def".to_string(),
+            expires_at: 1234567890,
+            id_token: Some("idt_ghi".to_string()),
+        };
+        let json = serde_json::to_string(&tokens).unwrap();
+        let parsed: OAuthTokens = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.access_token, "at_abc");
+        assert_eq!(parsed.refresh_token, "rt_def");
+        assert_eq!(parsed.expires_at, 1234567890);
+        assert_eq!(parsed.id_token, Some("idt_ghi".to_string()));
+    }
+
+    #[test]
+    fn oauth_tokens_without_id_token() {
+        let tokens = OAuthTokens {
+            access_token: "at".to_string(),
+            refresh_token: "rt".to_string(),
+            expires_at: 0,
+            id_token: None,
+        };
+        let json = serde_json::to_string(&tokens).unwrap();
+        assert!(!json.contains("id_token"));
+        let parsed: OAuthTokens = serde_json::from_str(&json).unwrap();
+        assert!(parsed.id_token.is_none());
+    }
+
+    #[test]
+    fn claude_oauth_constants() {
+        assert!(!claude::CLIENT_ID.is_empty());
+        assert!(claude::AUTHORIZE_URL.starts_with("https://"));
+        assert!(claude::TOKEN_URL.starts_with("https://"));
+        assert!(claude::REDIRECT_URI.starts_with("https://"));
+        assert!(!claude::SCOPES.is_empty());
+    }
+
+    #[test]
+    fn openai_oauth_constants() {
+        assert!(!openai::CLIENT_ID.is_empty());
+        assert!(openai::AUTHORIZE_URL.starts_with("https://"));
+        assert!(openai::TOKEN_URL.starts_with("https://"));
+        assert!(openai::REDIRECT_URI.starts_with("http"));
+        assert!(!openai::SCOPES.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_for_callback_async_parses_code() {
+        let state = "test_state_abc";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let state_clone = state.to_string();
+        let handle = tokio::spawn(async move {
+            wait_for_callback_async(port, &state_clone).await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut stream =
+            tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+                .await
+                .unwrap();
+        use tokio::io::AsyncWriteExt;
+        stream
+            .write_all(
+                format!(
+                    "GET /callback?code=test_code_123&state={} HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                    state
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let result = handle.await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "test_code_123");
+    }
+
+    #[tokio::test]
+    async fn wait_for_callback_async_rejects_wrong_state() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let handle = tokio::spawn(async move {
+            wait_for_callback_async(port, "expected_state").await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut stream =
+            tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+                .await
+                .unwrap();
+        use tokio::io::AsyncWriteExt;
+        stream
+            .write_all(b"GET /callback?code=code123&state=wrong_state HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let result = handle.await.unwrap();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("State mismatch"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_callback_async_rejects_missing_code() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let handle = tokio::spawn(async move {
+            wait_for_callback_async(port, "state123").await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut stream =
+            tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+                .await
+                .unwrap();
+        use tokio::io::AsyncWriteExt;
+        stream
+            .write_all(b"GET /callback?state=state123 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let result = handle.await.unwrap();
+        assert!(result.is_err());
+    }
+}

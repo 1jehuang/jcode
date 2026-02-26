@@ -306,4 +306,114 @@ mod tests {
             assert!(candidates.iter().any(|c| c == "testcmd"));
         }
     }
+
+    #[test]
+    fn auth_state_default_is_not_configured() {
+        let state = AuthState::default();
+        assert_eq!(state, AuthState::NotConfigured);
+    }
+
+    #[test]
+    fn auth_status_default_all_not_configured() {
+        let status = AuthStatus::default();
+        assert_eq!(status.anthropic.state, AuthState::NotConfigured);
+        assert_eq!(status.openrouter, AuthState::NotConfigured);
+        assert_eq!(status.openai, AuthState::NotConfigured);
+        assert_eq!(status.copilot, AuthState::NotConfigured);
+        assert_eq!(status.cursor, AuthState::NotConfigured);
+        assert_eq!(status.antigravity, AuthState::NotConfigured);
+        assert!(!status.openai_has_oauth);
+        assert!(!status.openai_has_api_key);
+        assert!(!status.copilot_has_api_token);
+        assert!(!status.anthropic.has_oauth);
+        assert!(!status.anthropic.has_api_key);
+    }
+
+    #[test]
+    fn provider_auth_default() {
+        let auth = ProviderAuth::default();
+        assert_eq!(auth.state, AuthState::NotConfigured);
+        assert!(!auth.has_oauth);
+        assert!(!auth.has_api_key);
+    }
+
+    #[test]
+    fn command_exists_for_known_binary() {
+        assert!(command_exists("ls"));
+    }
+
+    #[test]
+    fn command_exists_empty_string() {
+        assert!(!command_exists(""));
+        assert!(!command_exists("   "));
+    }
+
+    #[test]
+    fn command_exists_nonexistent() {
+        assert!(!command_exists("surely_this_binary_does_not_exist_xyz"));
+    }
+
+    #[test]
+    fn command_exists_absolute_path() {
+        assert!(command_exists("/bin/ls") || command_exists("/usr/bin/ls"));
+    }
+
+    #[test]
+    fn command_exists_absolute_nonexistent() {
+        assert!(!command_exists("/nonexistent/path/to/binary"));
+    }
+
+    #[test]
+    fn contains_path_separator_detection() {
+        assert!(contains_path_separator("/usr/bin/test"));
+        assert!(contains_path_separator("./test"));
+        assert!(!contains_path_separator("test"));
+    }
+
+    #[test]
+    fn has_extension_detection() {
+        assert!(has_extension(std::path::Path::new("test.exe")));
+        assert!(!has_extension(std::path::Path::new("test")));
+        assert!(has_extension(std::path::Path::new("test.sh")));
+    }
+
+    #[test]
+    fn dedup_preserves_order() {
+        let input = vec![
+            std::ffi::OsString::from("a"),
+            std::ffi::OsString::from("b"),
+            std::ffi::OsString::from("a"),
+            std::ffi::OsString::from("c"),
+        ];
+        let result = dedup_preserve_order(input);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], "a");
+        assert_eq!(result[1], "b");
+        assert_eq!(result[2], "c");
+    }
+
+    #[test]
+    fn auth_state_equality() {
+        assert_eq!(AuthState::Available, AuthState::Available);
+        assert_eq!(AuthState::Expired, AuthState::Expired);
+        assert_eq!(AuthState::NotConfigured, AuthState::NotConfigured);
+        assert_ne!(AuthState::Available, AuthState::Expired);
+        assert_ne!(AuthState::Available, AuthState::NotConfigured);
+    }
+
+    #[test]
+    fn auth_status_check_returns_valid_struct() {
+        let status = AuthStatus::check();
+        // Just verify it runs without panicking and has coherent state
+        match status.anthropic.state {
+            AuthState::Available | AuthState::Expired | AuthState::NotConfigured => {}
+        }
+        match status.openai {
+            AuthState::Available | AuthState::Expired | AuthState::NotConfigured => {}
+        }
+        // If copilot has api token, state should be Available
+        if status.copilot_has_api_token {
+            assert_eq!(status.copilot, AuthState::Available);
+        }
+    }
 }
