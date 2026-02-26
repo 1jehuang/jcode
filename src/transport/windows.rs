@@ -289,10 +289,8 @@ impl io::Write for SyncStream {
 }
 
 pub fn is_socket_path(path: &Path) -> bool {
-    // Named pipes don't exist on the filesystem, so check
-    // if connecting would succeed
     let pipe_name = path_to_pipe_name(path);
-    std::fs::metadata(&pipe_name).is_ok()
+    ClientOptions::new().open(&pipe_name).is_ok()
 }
 
 pub fn remove_socket(_path: &Path) {

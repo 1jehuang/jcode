@@ -805,7 +805,7 @@ async fn run_main(mut args: Args) -> Result<()> {
                 .await?;
             } else {
                 // Default: TUI client mode - start server if needed
-                let server_running = if server::socket_path().exists() {
+                let server_running = if crate::transport::is_socket_path(&server::socket_path()) {
                     // Test if server is actually responding
                     crate::transport::Stream::connect(server::socket_path())
                         .await
@@ -946,7 +946,7 @@ async fn run_main(mut args: Args) -> Result<()> {
                                 );
                             }
                         }
-                        if server::socket_path().exists() {
+                        if crate::transport::is_socket_path(&server::socket_path()) {
                             if crate::transport::Stream::connect(server::socket_path())
                                 .await
                                 .is_ok()
@@ -1398,7 +1398,7 @@ async fn run_debug_command(
         server::debug_socket_path()
     };
 
-    if !debug_socket.exists() {
+    if !crate::transport::is_socket_path(&debug_socket) {
         eprintln!("Debug socket not found at {:?}", debug_socket);
         eprintln!("\nMake sure:");
         eprintln!("  1. A jcode server is running (jcode or jcode serve)");
@@ -1853,7 +1853,7 @@ async fn debug_list_servers() -> Result<()> {
         let alive = match crate::transport::Stream::connect(&socket_path).await {
             Ok(_) => true,
             Err(err)
-                if err.kind() == std::io::ErrorKind::ConnectionRefused && socket_path.exists() =>
+                if err.kind() == std::io::ErrorKind::ConnectionRefused && crate::transport::is_socket_path(&socket_path) =>
             {
                 server::cleanup_socket_pair(&socket_path);
                 stale_main_removed = true;
@@ -1863,12 +1863,12 @@ async fn debug_list_servers() -> Result<()> {
         };
 
         let mut stale_debug_removed = false;
-        let debug_enabled = if debug_socket.exists() {
+        let debug_enabled = if crate::transport::is_socket_path(&debug_socket) {
             match crate::transport::Stream::connect(&debug_socket).await {
                 Ok(_) => true,
                 Err(err)
                     if err.kind() == std::io::ErrorKind::ConnectionRefused
-                        && debug_socket.exists() =>
+                        && crate::transport::is_socket_path(&debug_socket) =>
                 {
                     server::cleanup_socket_pair(&debug_socket);
                     stale_debug_removed = true;
@@ -1963,7 +1963,7 @@ async fn debug_start_server(arg: &str, socket_path: Option<String>) -> Result<()
     let socket_pathbuf = std::path::PathBuf::from(&socket);
 
     // Check if server already running
-    if socket_pathbuf.exists() {
+    if crate::transport::is_socket_path(&socket_pathbuf) {
         if crate::transport::Stream::connect(&socket_pathbuf)
             .await
             .is_ok()
@@ -2008,7 +2008,7 @@ async fn debug_start_server(arg: &str, socket_path: Option<String>) -> Result<()
         if start.elapsed() > std::time::Duration::from_secs(10) {
             anyhow::bail!("Server failed to start within 10 seconds");
         }
-        if socket_pathbuf.exists() {
+        if crate::transport::is_socket_path(&socket_pathbuf) {
             if crate::transport::Stream::connect(&socket_pathbuf)
                 .await
                 .is_ok()
@@ -2023,7 +2023,7 @@ async fn debug_start_server(arg: &str, socket_path: Option<String>) -> Result<()
 
     // Check if debug socket is available
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    if debug_socket.exists() {
+    if crate::transport::is_socket_path(&debug_socket) {
         eprintln!("✓ Debug socket at {}", debug_socket.display());
     } else {
         eprintln!("⚠ Debug socket not enabled. Add to ~/.jcode/config.toml:");
@@ -3158,7 +3158,7 @@ const SELFDEV_SOCKET: &str = "/tmp/jcode-selfdev.sock";
 async fn is_server_alive(socket_path: &str) -> bool {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-    if !std::path::Path::new(socket_path).exists() {
+    if !crate::transport::is_socket_path(std::path::Path::new(socket_path)) {
         return false;
     }
 
