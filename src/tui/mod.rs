@@ -162,6 +162,8 @@ pub trait TuiState {
     fn diff_line_wrap(&self) -> bool;
     /// Interactive model/provider picker state (shown as inline row above input)
     fn picker_state(&self) -> Option<&PickerState>;
+    /// Changelog overlay scroll offset (None = not showing)
+    fn changelog_scroll(&self) -> Option<usize>;
     /// Working directory for this session
     fn working_dir(&self) -> Option<String>;
     /// Monotonic clock for viewport animations
@@ -216,7 +218,9 @@ const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
 pub(crate) const STARTUP_ANIMATION_WINDOW: Duration = Duration::from_millis(3000);
 
 pub(crate) fn startup_animation_active(state: &dyn TuiState) -> bool {
+    let tier = crate::perf::profile().tier;
     crate::config::config().display.startup_animation
+        && tier.startup_animation_enabled()
         && state.animation_elapsed() < STARTUP_ANIMATION_WINDOW.as_secs_f32()
         && !state.is_processing()
         && state.display_messages().is_empty()
@@ -229,7 +233,9 @@ pub(crate) fn startup_animation_active(state: &dyn TuiState) -> bool {
 }
 
 pub(crate) fn idle_donut_active(state: &dyn TuiState) -> bool {
+    let tier = crate::perf::profile().tier;
     crate::config::config().display.idle_animation
+        && tier.idle_animation_enabled()
         && state.display_messages().is_empty()
         && !state.is_processing()
         && state.streaming_text().is_empty()
@@ -245,13 +251,18 @@ pub(crate) fn should_animate(state: &dyn TuiState) -> bool {
 }
 
 pub(crate) fn redraw_interval(state: &dyn TuiState) -> Duration {
+    let tier = crate::perf::profile().tier;
+
     if state.is_processing()
         || !state.streaming_text().is_empty()
         || state.status_notice().is_some()
         || state.rate_limit_remaining().is_some()
         || startup_animation_active(state)
     {
-        return REDRAW_FAST;
+        return match tier {
+            crate::perf::PerformanceTier::Minimal => REDRAW_IDLE_ANIM,
+            _ => REDRAW_FAST,
+        };
     }
 
     if idle_donut_active(state) {

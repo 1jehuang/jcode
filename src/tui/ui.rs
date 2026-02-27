@@ -2070,6 +2070,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         return;
     }
 
+    if let Some(scroll) = app.changelog_scroll() {
+        draw_changelog_overlay(frame, area, scroll);
+        return;
+    }
+
     // Initialize visual debug capture if enabled
     let mut debug_capture = if visual_debug::is_enabled() {
         Some(FrameCaptureBuilder::new(area.width, area.height))
@@ -2230,8 +2235,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let base_input_height = calculate_input_lines(app.input(), available_width).min(10) as u16;
     // Add 1 line for command suggestions when typing /, or for Shift+Enter hint when processing
     let suggestions = app.command_suggestions();
-    let hint_line_height = if !suggestions.is_empty() && !app.is_processing() {
-        1 // Command suggestions
+    let has_slash_input = app.input().trim_start().starts_with('/');
+    let hint_line_height = if !suggestions.is_empty() && (has_slash_input || !app.is_processing()) {
+        1 // Command suggestions (shown even during streaming when typing /commands)
     } else if app.is_processing() && !app.input().is_empty() {
         1 // Shift+Enter hint
     } else {
@@ -2969,6 +2975,9 @@ fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>>
     }
     if client_update {
         status_items.push("cli↑");
+    }
+    if let Some(badge) = crate::perf::profile().tier.badge() {
+        status_items.push(badge);
     }
 
     if !status_items.is_empty() {
@@ -4077,6 +4086,79 @@ fn rect_within_bounds(rect: Rect, bounds: Rect) -> bool {
     rect.x >= bounds.x && rect.y >= bounds.y && right <= bounds_right && bottom <= bounds_bottom
 }
 
+fn draw_changelog_overlay(frame: &mut Frame, area: Rect, scroll: usize) {
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+    frame.render_widget(Clear, area);
+
+    let groups = get_grouped_changelog();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if groups.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No changelog entries available.",
+            Style::default().fg(DIM_COLOR),
+        )));
+    } else {
+        for group in &groups {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", group.version),
+                Style::default()
+                    .fg(Color::Rgb(200, 200, 220))
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
+            for entry in &group.entries {
+                lines.push(Line::from(vec![
+                    Span::styled("    • ", Style::default().fg(DIM_COLOR)),
+                    Span::styled(
+                        entry.clone(),
+                        Style::default().fg(Color::Rgb(170, 170, 185)),
+                    ),
+                ]));
+            }
+            lines.push(Line::from(""));
+        }
+    }
+
+    let total_lines = lines.len();
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    let scroll = scroll.min(max_scroll);
+
+    let scroll_info = if total_lines > visible_height {
+        let pct = if max_scroll > 0 {
+            (scroll * 100) / max_scroll
+        } else {
+            100
+        };
+        format!(" {}% ", pct)
+    } else {
+        String::new()
+    };
+
+    let title = format!(" Changelog {} ", scroll_info);
+    let block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Rgb(200, 200, 220))
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::from(Span::styled(
+            " Esc to close · j/k scroll · Space/PageUp page ",
+            Style::default().fg(DIM_COLOR),
+        )))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(DIM_COLOR));
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .scroll((scroll as u16, 0));
+
+    frame.render_widget(paragraph, area);
+}
+
 fn draw_debug_overlay(
     frame: &mut Frame,
     placements: &[info_widget::WidgetPlacement],
@@ -4382,13 +4464,15 @@ fn draw_messages(
     let visible_end = (scroll + visible_height).min(wrapped_lines.len());
 
     let now_ms = app.now_millis();
-    if crate::config::config().display.prompt_entry_animation {
+    let prompt_anim_enabled = crate::config::config().display.prompt_entry_animation
+        && crate::perf::profile().tier.prompt_entry_animation_enabled();
+    if prompt_anim_enabled {
         update_prompt_entry_animation(wrapped_user_prompt_starts, scroll, visible_end, now_ms);
     } else {
         record_prompt_viewport(scroll, visible_end);
     }
 
-    let active_prompt_anim = if crate::config::config().display.prompt_entry_animation {
+    let active_prompt_anim = if prompt_anim_enabled {
         active_prompt_entry_animation(now_ms)
     } else {
         None
@@ -6347,7 +6431,8 @@ fn draw_input(
 
     // Check for command suggestions
     let suggestions = app.command_suggestions();
-    let has_suggestions = !suggestions.is_empty() && !app.is_processing();
+    let has_slash_input = input_text.trim_start().starts_with('/');
+    let has_suggestions = !suggestions.is_empty() && (has_slash_input || !app.is_processing());
 
     // Build prompt parts: number (dim) + caret (colored) + space
     let (prompt_char, caret_color) = if app.is_processing() {
@@ -6384,28 +6469,61 @@ fn draw_input(
     let mut hint_shown = false;
     let mut hint_line: Option<String> = None;
     if has_suggestions {
-        // Limit suggestions and add Tab hint
-        let max_suggestions = 5;
-        let limited: Vec<_> = suggestions.iter().take(max_suggestions).collect();
-        let more_count = suggestions.len().saturating_sub(max_suggestions);
+        let input_trimmed = input_text.trim();
+        let exact_match = suggestions.iter().find(|(cmd, _)| cmd == input_trimmed);
 
-        let mut spans = vec![Span::styled("  Tab: ", Style::default().fg(DIM_COLOR))];
-        for (i, (cmd, _desc)) in limited.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::styled(" │ ", Style::default().fg(DIM_COLOR)));
+        if suggestions.len() == 1 || exact_match.is_some() {
+            // Single match or exact match: show command + description
+            let (cmd, desc) = exact_match.unwrap_or(&suggestions[0]);
+            let mut spans = vec![
+                Span::styled("  ", Style::default().fg(DIM_COLOR)),
+                Span::styled(
+                    cmd.to_string(),
+                    Style::default().fg(Color::Rgb(138, 180, 248)),
+                ),
+                Span::styled(
+                    format!(" - {}", desc),
+                    Style::default().fg(DIM_COLOR),
+                ),
+            ];
+            if suggestions.len() > 1 {
+                spans.push(Span::styled(
+                    format!("  Tab: +{} more", suggestions.len() - 1),
+                    Style::default().fg(DIM_COLOR),
+                ));
             }
-            spans.push(Span::styled(
-                cmd.to_string(),
-                Style::default().fg(Color::Rgb(138, 180, 248)), // USER_COLOR - soft blue
-            ));
+            lines.push(Line::from(spans));
+        } else {
+            // Multiple matches: show names with Tab hint
+            let max_suggestions = 5;
+            let limited: Vec<_> = suggestions.iter().take(max_suggestions).collect();
+            let more_count = suggestions.len().saturating_sub(max_suggestions);
+
+            let mut spans = vec![Span::styled("  Tab: ", Style::default().fg(DIM_COLOR))];
+            for (i, (cmd, desc)) in limited.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::styled(" │ ", Style::default().fg(DIM_COLOR)));
+                }
+                spans.push(Span::styled(
+                    cmd.to_string(),
+                    Style::default().fg(Color::Rgb(138, 180, 248)),
+                ));
+                // Show description for first suggestion only (space is limited)
+                if i == 0 {
+                    spans.push(Span::styled(
+                        format!(" ({})", desc),
+                        Style::default().fg(DIM_COLOR),
+                    ));
+                }
+            }
+            if more_count > 0 {
+                spans.push(Span::styled(
+                    format!(" (+{})", more_count),
+                    Style::default().fg(DIM_COLOR),
+                ));
+            }
+            lines.push(Line::from(spans));
         }
-        if more_count > 0 {
-            spans.push(Span::styled(
-                format!(" (+{})", more_count),
-                Style::default().fg(DIM_COLOR),
-            ));
-        }
-        lines.push(Line::from(spans));
     } else if app.is_processing() && !input_text.is_empty() {
         // Show hint for Shift+Enter when processing and user has typed something
         hint_shown = true;

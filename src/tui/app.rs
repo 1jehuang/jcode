@@ -717,6 +717,8 @@ pub struct App {
     ambient_system_prompt: Option<String>,
     /// Pending login flow: if set, next input is intercepted as OAuth code or API key
     pending_login: Option<PendingLogin>,
+    /// Scroll offset for changelog overlay (None = not visible)
+    changelog_scroll: Option<usize>,
 }
 
 impl ScrollTestState {
@@ -1002,6 +1004,7 @@ impl App {
             streaming_md_renderer: RefCell::new(IncrementalMarkdownRenderer::new(None)),
             ambient_system_prompt: None,
             pending_login: None,
+            changelog_scroll: None,
         }
     }
 
@@ -6250,6 +6253,10 @@ impl App {
         let mut modifiers = modifiers;
         ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
+        if self.changelog_scroll.is_some() {
+            return self.handle_changelog_key(code);
+        }
+
         // If picker is active and not in preview mode, handle picker keys first
         if let Some(ref picker) = self.picker_state {
             if !picker.preview {
@@ -7832,28 +7839,7 @@ impl App {
         }
 
         if trimmed == "/changelog" {
-            let groups = super::ui::get_grouped_changelog();
-            let content = if groups.is_empty() {
-                "No changelog entries available.".to_string()
-            } else {
-                let mut lines = Vec::new();
-                for group in &groups {
-                    lines.push(format!("**{}**", group.version));
-                    for entry in &group.entries {
-                        lines.push(format!("  • {}", entry));
-                    }
-                    lines.push(String::new());
-                }
-                lines.join("\n")
-            };
-            self.push_display_message(DisplayMessage {
-                role: "system".to_string(),
-                content,
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
+            self.changelog_scroll = Some(0);
             return;
         }
 
@@ -10163,6 +10149,7 @@ impl App {
             "gpt-5.3-codex",
             "claude-opus-4-6",
             "claude-opus-4-6[1m]",
+            "claude-opus-4.6",
             "claude-sonnet-4-6",
             "claude-sonnet-4-6[1m]",
             "moonshotai/kimi-k2.5",
@@ -10176,6 +10163,8 @@ impl App {
         ];
 
         const OPENAI_OAUTH_ONLY_MODELS: &[&str] = &["gpt-5.3-codex-spark", "gpt-5.3-codex"];
+
+        const COPILOT_OAUTH_MODELS: &[&str] = &["claude-opus-4.6", "gpt-5.3-codex"];
 
         // Find the latest recommended model's created timestamp from OpenRouter cache,
         // then mark anything more than 1 month older as "old".
@@ -10230,10 +10219,11 @@ impl App {
                         recommended: RECOMMENDED_MODELS.contains(&name.as_str())
                             && (*effort == "xhigh" || *effort == "high")
                             && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
-                                || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str()))
+                                || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str())
+                                || COPILOT_OAUTH_MODELS.contains(&name.as_str()))
                                 || entry_routes
                                     .iter()
-                                    .any(|r| (r.api_method == "claude-oauth" || r.api_method == "openai-oauth") && r.available)),
+                                    .any(|r| (r.api_method == "claude-oauth" || r.api_method == "openai-oauth" || r.api_method == "copilot") && r.available)),
                         old: old_threshold_secs > 0
                             && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
                         created_date: or_created.map(|t| format_created(t)),
@@ -10246,10 +10236,11 @@ impl App {
                     && or_created.map(|t| t < old_threshold_secs).unwrap_or(false);
                 let is_recommended = RECOMMENDED_MODELS.contains(&name.as_str())
                     && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
-                        || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str()))
+                        || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str())
+                        || COPILOT_OAUTH_MODELS.contains(&name.as_str()))
                         || entry_routes
                             .iter()
-                            .any(|r| (r.api_method == "claude-oauth" || r.api_method == "openai-oauth") && r.available));
+                            .any(|r| (r.api_method == "claude-oauth" || r.api_method == "openai-oauth" || r.api_method == "copilot") && r.available));
                 models.push(super::ModelEntry {
                     name: name.clone(),
                     routes: entry_routes,
@@ -12672,14 +12663,28 @@ impl App {
         if needle.is_empty() {
             return Some(0);
         }
+        // Both needle and haystack should start with '/', match from char 1 onward
+        let n = needle.strip_prefix('/').unwrap_or(needle);
+        let h = haystack.strip_prefix('/').unwrap_or(haystack);
+        if n.is_empty() {
+            return Some(0);
+        }
+        // First char of the command (after /) must match
+        if !h.starts_with(&n[..n.chars().next().unwrap().len_utf8()]) {
+            return None;
+        }
         let mut score = 0usize;
         let mut pos = 0usize;
-        for ch in needle.chars() {
-            let Some(idx) = haystack[pos..].find(ch) else {
+        for ch in n.chars() {
+            let Some(idx) = h[pos..].find(ch) else {
                 return None;
             };
             score += idx;
             pos += idx + ch.len_utf8();
+        }
+        // Penalize large gaps - reject if average gap is too big
+        if n.len() > 1 && score > n.len() * 3 {
+            return None;
         }
         Some(score)
     }
@@ -12856,8 +12861,14 @@ impl App {
             return false;
         }
 
-        // If only one suggestion and it matches exactly, nothing to do
+        // If only one suggestion and it matches exactly, add trailing space for commands
+        // that accept arguments, then we're done
         if current_suggestions.len() == 1 && current_suggestions[0].0 == self.input {
+            if !self.input.ends_with(' ') && Self::command_accepts_args(&self.input) {
+                self.input.push(' ');
+                self.cursor_pos = self.input.len();
+                return true;
+            }
             self.tab_completion_state = None;
             return false;
         }
@@ -12866,6 +12877,10 @@ impl App {
         let (cmd, _) = &current_suggestions[0];
         let base = self.input.clone();
         self.input = cmd.clone();
+        // If unique match, add trailing space for arg-accepting commands
+        if current_suggestions.len() == 1 && Self::command_accepts_args(&self.input) {
+            self.input.push(' ');
+        }
         self.cursor_pos = self.input.len();
         self.tab_completion_state = Some((base, 0));
         true
@@ -12874,6 +12889,22 @@ impl App {
     /// Reset tab completion state (call when user types/modifies input)
     pub fn reset_tab_completion(&mut self) {
         self.tab_completion_state = None;
+    }
+
+    fn command_accepts_args(cmd: &str) -> bool {
+        matches!(
+            cmd.trim(),
+            "/help"
+                | "/model"
+                | "/effort"
+                | "/login"
+                | "/auth"
+                | "/account"
+                | "/memory"
+                | "/swarm"
+                | "/rewind"
+                | "/config"
+        )
     }
 
     pub fn cursor_pos(&self) -> usize {
@@ -13444,6 +13475,34 @@ impl App {
         } else {
             None
         }
+    }
+    fn handle_changelog_key(&mut self, code: KeyCode) -> Result<()> {
+        let scroll = self.changelog_scroll.unwrap_or(0);
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.changelog_scroll = None;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.changelog_scroll = Some(scroll.saturating_add(1));
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.changelog_scroll = Some(scroll.saturating_sub(1));
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                self.changelog_scroll = Some(scroll.saturating_add(20));
+            }
+            KeyCode::PageUp => {
+                self.changelog_scroll = Some(scroll.saturating_sub(20));
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.changelog_scroll = Some(0);
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.changelog_scroll = Some(usize::MAX);
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 
@@ -14316,6 +14375,10 @@ impl super::TuiState for App {
     }
     fn picker_state(&self) -> Option<&super::PickerState> {
         self.picker_state.as_ref()
+    }
+
+    fn changelog_scroll(&self) -> Option<usize> {
+        self.changelog_scroll
     }
 
     fn working_dir(&self) -> Option<String> {

@@ -1706,6 +1706,10 @@ impl TuiState for ClientApp {
         None
     }
 
+    fn changelog_scroll(&self) -> Option<usize> {
+        None
+    }
+
     fn working_dir(&self) -> Option<String> {
         std::env::current_dir()
             .ok()

@@ -379,6 +379,10 @@ impl TuiState for BenchState {
         None
     }
 
+    fn changelog_scroll(&self) -> Option<usize> {
+        None
+    }
+
     fn working_dir(&self) -> Option<String> {
         None
     }
