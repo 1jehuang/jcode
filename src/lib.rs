@@ -21,6 +21,7 @@ pub mod memory_agent;
 pub mod memory_graph;
 pub mod message;
 pub mod notifications;
+pub mod perf;
 pub mod plan;
 pub mod platform;
 pub mod prompt;

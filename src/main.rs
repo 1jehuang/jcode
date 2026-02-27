@@ -37,6 +37,7 @@ mod memory_agent;
 mod memory_graph;
 mod message;
 mod notifications;
+mod perf;
 mod plan;
 mod platform;
 mod prompt;
@@ -544,6 +545,9 @@ async fn main() -> Result<()> {
     logging::init();
     logging::cleanup_old_logs();
     logging::info("jcode starting");
+
+    // Profile system performance on background thread (result ready before first frame)
+    perf::init_background();
 
     let args = Args::parse();
 

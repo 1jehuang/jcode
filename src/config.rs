@@ -191,6 +191,8 @@ pub struct DisplayConfig {
     pub prompt_entry_animation: bool,
     /// Wrap long lines in the pinned diff pane (default: true)
     pub diff_line_wrap: bool,
+    /// Performance tier override: auto/full/reduced/minimal (default: auto)
+    pub performance: String,
 }
 
 impl Default for DisplayConfig {
@@ -209,6 +211,7 @@ impl Default for DisplayConfig {
             idle_animation: true,
             prompt_entry_animation: true,
             diff_line_wrap: true,
+            performance: String::new(),
         }
     }
 }
@@ -560,6 +563,12 @@ impl Config {
                 self.display.prompt_entry_animation = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_PERFORMANCE") {
+            let trimmed = v.trim().to_lowercase();
+            if matches!(trimmed.as_str(), "auto" | "full" | "reduced" | "minimal") {
+                self.display.performance = trimmed;
+            }
+        }
 
         // Features
         if let Ok(v) = std::env::var("JCODE_MEMORY_ENABLED") {
@@ -795,6 +804,13 @@ idle_animation = true
 # Briefly animate a user prompt line when it enters the viewport (default: true)
 prompt_entry_animation = true
 
+# Performance tier: auto/full/reduced/minimal (default: auto)
+# auto = detect system load, memory, terminal type, SSH
+# full = all animations enabled
+# reduced = skip startup/idle animations, keep spinners
+# minimal = disable all animations, slower redraw rate
+# performance = "auto"
+
 [features]
 # Memory: retrieval + extraction sidecar features
 memory = true
@@ -922,6 +938,7 @@ desktop_notifications = true
 - Startup animation: {}
 - Idle animation: {}
 - Prompt entry animation: {}
+- Performance tier: {}
 
 **Features:**
 - Memory: {}
@@ -983,6 +1000,7 @@ desktop_notifications = true
             self.display.startup_animation,
             self.display.idle_animation,
             self.display.prompt_entry_animation,
+            if self.display.performance.is_empty() { "auto" } else { &self.display.performance },
             self.features.memory,
             self.features.swarm,
             self.features.update_channel,
