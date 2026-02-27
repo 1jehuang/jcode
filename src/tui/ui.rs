@@ -1466,17 +1466,18 @@ struct ChangelogEntry<'a> {
     subject: &'a str,
 }
 
-/// Parse the embedded changelog. Format per line: "hash:tag:subject"
+/// Parse the embedded changelog. Format per entry: "hash:tag:subject"
 /// where tag is either a version like "v0.4.2" or empty.
+/// Entries are separated by ASCII unit separator (0x1F).
 fn parse_changelog() -> Vec<ChangelogEntry<'static>> {
     let changelog: &'static str = env!("JCODE_CHANGELOG");
     if changelog.is_empty() {
         return Vec::new();
     }
     changelog
-        .lines()
-        .filter_map(|line| {
-            let (hash, rest) = line.split_once(':')?;
+        .split('\x1f')
+        .filter_map(|entry| {
+            let (hash, rest) = entry.split_once(':')?;
             let (tag, subject) = rest.split_once(':')?;
             Some(ChangelogEntry { hash, tag, subject })
         })

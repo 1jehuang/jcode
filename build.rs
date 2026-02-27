@@ -58,11 +58,11 @@ fn main() {
         .unwrap_or_default();
 
     // Get recent commit messages with version tag decorations.
-    // Format: "hash:decorations:subject" per line. Decorations include "tag: vX.Y.Z"
-    // when a commit is tagged, empty otherwise. We grab enough commits to cover
-    // several releases so /changelog can group by version.
+    // Format: "hash|decorations|subject" per line (pipe-delimited to avoid
+    // conflict with colons in decorations like "tag: v0.5.0").
+    // We grab enough commits to cover several releases so /changelog can group by version.
     let output = Command::new("git")
-        .args(["log", "--oneline", "-100", "--format=%h:%D:%s"])
+        .args(["log", "--oneline", "-100", "--format=%h|%D|%s"])
         .output()
         .ok();
 
@@ -70,12 +70,16 @@ fn main() {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .unwrap_or_default();
 
-    // Normalize to "hash:tag:subject" — extract version tag or leave empty
+    // Normalize to "hash:tag:subject" — extract version tag or leave empty.
+    // Join with ASCII unit separator (0x1F) since cargo:rustc-env treats
+    // newlines as separate directives.
     let changelog = raw_log
         .lines()
         .filter_map(|line| {
-            let (hash, rest) = line.split_once(':')?;
-            let (decorations, subject) = rest.split_once(':')?;
+            let mut parts = line.splitn(3, '|');
+            let hash = parts.next()?;
+            let decorations = parts.next().unwrap_or("");
+            let subject = parts.next()?;
             let tag = decorations
                 .split(',')
                 .map(|d| d.trim())
@@ -85,7 +89,7 @@ fn main() {
             Some(format!("{}:{}:{}", hash, tag, subject))
         })
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\x1f");
 
     // Build version string:
     //   Release: v0.2.0 (abc1234)
