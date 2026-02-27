@@ -1262,7 +1262,7 @@ impl MultiProvider {
         };
 
         // Default to OAuth/CLI providers first. Keep direct API (OpenRouter) lowest.
-        let active = if claude.is_some() || anthropic.is_some() {
+        let mut active = if claude.is_some() || anthropic.is_some() {
             ActiveProvider::Claude
         } else if openai.is_some() {
             ActiveProvider::OpenAI
@@ -1274,6 +1274,44 @@ impl MultiProvider {
             // No credentials - default to Claude (will fail on use)
             ActiveProvider::Claude
         };
+
+        // Apply configured default_provider from config/env if the provider is available
+        let cfg = crate::config::config();
+        if let Some(ref pref) = cfg.provider.default_provider {
+            let preferred = match pref.as_str() {
+                "claude" | "anthropic" => Some(ActiveProvider::Claude),
+                "openai" => Some(ActiveProvider::OpenAI),
+                "copilot" => Some(ActiveProvider::Copilot),
+                "openrouter" => Some(ActiveProvider::OpenRouter),
+                _ => {
+                    crate::logging::warn(&format!(
+                        "Unknown default_provider '{}' in config (expected: claude|openai|copilot|openrouter)",
+                        pref
+                    ));
+                    None
+                }
+            };
+            if let Some(pref_provider) = preferred {
+                let is_configured = match pref_provider {
+                    ActiveProvider::Claude => claude.is_some() || anthropic.is_some(),
+                    ActiveProvider::OpenAI => openai.is_some(),
+                    ActiveProvider::Copilot => copilot_api.is_some(),
+                    ActiveProvider::OpenRouter => openrouter.is_some(),
+                };
+                if is_configured {
+                    active = pref_provider;
+                    crate::logging::info(&format!(
+                        "Using preferred provider '{}' from config",
+                        pref
+                    ));
+                } else {
+                    crate::logging::warn(&format!(
+                        "Preferred provider '{}' is not configured, using auto-detected default",
+                        pref
+                    ));
+                }
+            }
+        }
 
         let result = Self {
             claude,
@@ -1287,6 +1325,21 @@ impl MultiProvider {
             has_openrouter_creds,
             use_claude_cli,
         };
+
+        // Apply configured default_model from config/env
+        if let Some(ref model) = cfg.provider.default_model {
+            if let Err(e) = result.set_model(model) {
+                crate::logging::warn(&format!(
+                    "Failed to apply default_model '{}' from config: {}",
+                    model, e
+                ));
+            } else {
+                crate::logging::info(&format!(
+                    "Applied default model '{}' from config",
+                    model
+                ));
+            }
+        }
 
         // Prime OpenAI model/account availability in the background.
         result.spawn_openai_catalog_refresh_if_needed();

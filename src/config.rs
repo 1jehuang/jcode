@@ -282,8 +282,10 @@ impl Default for FeatureConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {
-    /// Default model to use
+    /// Default model to use (e.g. "claude-opus-4-6", "copilot:claude-opus-4.6")
     pub default_model: Option<String>,
+    /// Default provider to use (claude|openai|copilot|openrouter)
+    pub default_provider: Option<String>,
     /// Reasoning effort for OpenAI Responses API (none|low|medium|high|xhigh)
     pub openai_reasoning_effort: Option<String>,
     /// OpenAI transport mode (auto|websocket|https)
@@ -294,6 +296,7 @@ impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
             default_model: None,
+            default_provider: None,
             openai_reasoning_effort: Some("xhigh".to_string()),
             openai_transport: None,
         }
@@ -698,6 +701,12 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_MODEL") {
             self.provider.default_model = Some(v);
         }
+        if let Ok(v) = std::env::var("JCODE_PROVIDER") {
+            let trimmed = v.trim().to_lowercase();
+            if !trimmed.is_empty() {
+                self.provider.default_provider = Some(trimmed);
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_OPENAI_REASONING_EFFORT") {
             let trimmed = v.trim().to_string();
             if !trimmed.is_empty() {
@@ -723,6 +732,27 @@ impl Config {
 
         let content = toml::to_string_pretty(self)?;
         std::fs::write(&path, content)?;
+        Ok(())
+    }
+
+    /// Update just the default model and provider in the config file.
+    /// This reloads, patches, and saves so it doesn't clobber other fields.
+    pub fn set_default_model(model: Option<&str>, provider: Option<&str>) -> anyhow::Result<()> {
+        let mut cfg = Self::load();
+        cfg.provider.default_model = model.map(|s| s.to_string());
+        cfg.provider.default_provider = provider.map(|s| s.to_string());
+        cfg.save()?;
+
+        // Update the global singleton so current session reflects the change
+        let global = CONFIG.get_or_init(|| cfg.clone());
+        // CONFIG is a OnceLock so we can't mutate it directly, but the file is saved
+        // and will take effect on next restart. For this session we log it.
+        let _ = global; // suppress unused
+        crate::logging::info(&format!(
+            "Saved default model: {}, provider: {}",
+            model.unwrap_or("(none)"),
+            provider.unwrap_or("(auto)")
+        ));
         Ok(())
     }
 
@@ -822,7 +852,11 @@ update_channel = "stable"
 
 [provider]
 # Default model (optional, uses provider default if not set)
-# default_model = "gpt-5.3-codex-spark"
+# Set via /model picker with Ctrl+D to save as default
+# default_model = "claude-opus-4-6"
+# Default provider (optional: claude|openai|copilot|openrouter)
+# When set, this provider is preferred on startup if available
+# default_provider = "copilot"
 # OpenAI reasoning effort (none|low|medium|high|xhigh)
 openai_reasoning_effort = "xhigh"
 # OpenAI transport mode (auto|websocket|https)
@@ -947,6 +981,7 @@ desktop_notifications = true
 
 **Provider:**
 - Default model: {}
+- Default provider: {}
 - OpenAI reasoning effort: {}
 - OpenAI transport: {}
 
@@ -1008,6 +1043,10 @@ desktop_notifications = true
                 .default_model
                 .as_deref()
                 .unwrap_or("(provider default)"),
+            self.provider
+                .default_provider
+                .as_deref()
+                .unwrap_or("(auto)"),
             self.provider
                 .openai_reasoning_effort
                 .as_deref()

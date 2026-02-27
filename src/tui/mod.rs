@@ -194,6 +194,7 @@ pub struct ModelEntry {
     pub routes: Vec<RouteOption>,
     pub selected_route: usize,
     pub is_current: bool,
+    pub is_default: bool,
     pub recommended: bool,
     pub old: bool,
     /// Human-readable created date (e.g. "Jan 2026") for OpenRouter models

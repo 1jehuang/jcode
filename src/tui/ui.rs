@@ -4836,6 +4836,10 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
             "  ↑↓ ←→ ↵ Esc",
             Style::default().fg(Color::Rgb(60, 60, 80)),
         ));
+        header_spans.push(Span::styled(
+            "  ^D=default",
+            Style::default().fg(Color::Rgb(60, 60, 80)).italic(),
+        ));
     }
 
     let mut lines: Vec<Line> = Vec::new();
@@ -4892,22 +4896,23 @@ fn draw_picker_line(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         let unavailable = route.map(|r| !r.available).unwrap_or(true);
 
         // -- Build model column spans (with fuzzy highlighting) --
+        let default_marker = if entry.is_default { " ⚙" } else { "" };
         let suffix = if entry.recommended && !entry.is_current {
-            " ★".to_string()
+            format!(" ★{}", default_marker)
         } else if entry.old && !entry.is_current {
             if let Some(ref date) = entry.created_date {
-                format!(" {}", date)
+                format!(" {}{}", date, default_marker)
             } else {
-                " old".to_string()
+                format!(" old{}", default_marker)
             }
         } else if let Some(ref date) = entry.created_date {
             if !entry.is_current {
-                format!(" {}", date)
+                format!(" {}{}", date, default_marker)
             } else {
-                String::new()
+                default_marker.to_string()
             }
         } else {
-            String::new()
+            default_marker.to_string()
         };
         let display_name = format!("{}{}", entry.name, suffix);
         let padded_model: String = {

@@ -9992,6 +9992,20 @@ impl App {
             self.provider.model().to_string()
         };
 
+        let cfg = crate::config::Config::load();
+        let config_default_model = cfg.provider.default_model.clone();
+
+        let is_config_default = |name: &str| -> bool {
+            match &config_default_model {
+                None => false,
+                Some(default) => {
+                    let bare = default.strip_prefix("copilot:").unwrap_or(default);
+                    let bare = bare.split('@').next().unwrap_or(bare);
+                    name == default || name == bare
+                }
+            }
+        };
+
         // Gather routes from provider (local) or build from available info (remote)
         let routes: Vec<crate::provider::ModelRoute> = if self.is_remote {
             // Remote mode: build routes from available models + auth status
@@ -10228,6 +10242,7 @@ impl App {
                             && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
                         created_date: or_created.map(|t| format_created(t)),
                         effort: Some(effort.to_string()),
+                        is_default: is_config_default(name),
                     });
                 }
             } else {
@@ -10250,6 +10265,7 @@ impl App {
                     old: is_old,
                     created_date: or_created.map(|t| format_created(t)),
                     effort: None,
+                    is_default: is_config_default(name),
                 });
             }
         }
@@ -10461,6 +10477,71 @@ impl App {
                             }
                         }
                     }
+                }
+            }
+            KeyCode::Char('d') if _modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(ref picker) = self.picker_state {
+                    if picker.filtered.is_empty() {
+                        return Ok(());
+                    }
+                    let idx = picker.filtered[picker.selected];
+                    let entry = &picker.models[idx];
+                    let route = entry.routes.get(entry.selected_route);
+
+                    let bare_name = if entry.effort.is_some() {
+                        entry
+                            .name
+                            .rsplit_once(" (")
+                            .map(|(base, _)| base.to_string())
+                            .unwrap_or_else(|| entry.name.clone())
+                    } else {
+                        entry.name.clone()
+                    };
+
+                    let (model_spec, provider_key) = if let Some(r) = route {
+                        let spec = if r.api_method == "copilot" {
+                            format!("copilot:{}", bare_name)
+                        } else if r.api_method == "openrouter" && r.provider != "auto" {
+                            if bare_name.contains('/') {
+                                format!("{}@{}", bare_name, r.provider)
+                            } else {
+                                format!("anthropic/{}@{}", bare_name, r.provider)
+                            }
+                        } else if r.api_method == "openrouter" {
+                            bare_name.clone()
+                        } else {
+                            bare_name.clone()
+                        };
+                        let pkey = match r.api_method.as_str() {
+                            "claude-oauth" | "api-key" if crate::provider::ALL_CLAUDE_MODELS.contains(&bare_name.as_str()) => Some("claude"),
+                            "openai-oauth" => Some("openai"),
+                            "copilot" => Some("copilot"),
+                            "openrouter" => Some("openrouter"),
+                            _ => None,
+                        };
+                        (spec, pkey)
+                    } else {
+                        (bare_name.clone(), None)
+                    };
+
+                    let notice = format!(
+                        "Default → {} via {}",
+                        model_spec,
+                        provider_key.unwrap_or("auto")
+                    );
+
+                    match crate::config::Config::set_default_model(
+                        Some(&model_spec),
+                        provider_key,
+                    ) {
+                        Ok(()) => {
+                            self.set_status_notice(notice);
+                        }
+                        Err(e) => {
+                            self.set_status_notice(format!("Failed to save default: {}", e));
+                        }
+                    }
+                    self.picker_state = None;
                 }
             }
             KeyCode::Enter => {
