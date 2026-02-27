@@ -608,3 +608,94 @@ impl Provider for CopilotApiProvider {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_provider(fetched: Vec<String>) -> CopilotApiProvider {
+        CopilotApiProvider {
+            client: reqwest::Client::new(),
+            model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
+            github_token: "test-token".to_string(),
+            bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
+            fetched_models: Arc::new(RwLock::new(fetched)),
+        }
+    }
+
+    #[test]
+    fn available_models_display_returns_fetched_when_populated() {
+        let fetched = vec![
+            "claude-opus-4.6".to_string(),
+            "claude-sonnet-4.6".to_string(),
+            "gpt-5.3-codex".to_string(),
+            "gemini-3-pro-preview".to_string(),
+        ];
+        let provider = make_test_provider(fetched.clone());
+        let display = provider.available_models_display();
+        assert_eq!(display, fetched);
+    }
+
+    #[test]
+    fn available_models_display_returns_fallback_when_empty() {
+        let provider = make_test_provider(Vec::new());
+        let display = provider.available_models_display();
+        let expected: Vec<String> = FALLBACK_MODELS.iter().map(|m| m.to_string()).collect();
+        assert_eq!(display, expected);
+    }
+
+    #[test]
+    fn available_models_static_always_returns_fallback() {
+        let fetched = vec![
+            "claude-opus-4.6".to_string(),
+            "gpt-5.3-codex".to_string(),
+        ];
+        let provider = make_test_provider(fetched);
+        let static_models = provider.available_models();
+        let expected: Vec<&str> = FALLBACK_MODELS.to_vec();
+        assert_eq!(static_models, expected);
+    }
+
+    #[test]
+    fn set_model_accepts_any_model_id() {
+        let provider = make_test_provider(Vec::new());
+        assert!(provider.set_model("claude-opus-4.6").is_ok());
+        assert_eq!(provider.model(), "claude-opus-4.6");
+
+        assert!(provider.set_model("some-new-model-2026").is_ok());
+        assert_eq!(provider.model(), "some-new-model-2026");
+    }
+
+    #[test]
+    fn set_model_rejects_empty() {
+        let provider = make_test_provider(Vec::new());
+        assert!(provider.set_model("").is_err());
+        assert!(provider.set_model("   ").is_err());
+    }
+
+    #[test]
+    fn context_window_handles_dot_and_dash_names() {
+        assert_eq!(copilot_context_window("claude-opus-4.6"), 200_000);
+        assert_eq!(copilot_context_window("claude-opus-4-6"), 200_000);
+        assert_eq!(copilot_context_window("claude-opus-4.6-fast"), 200_000);
+        assert_eq!(copilot_context_window("claude-sonnet-4.6"), 128_000);
+        assert_eq!(copilot_context_window("claude-sonnet-4-6"), 128_000);
+        assert_eq!(copilot_context_window("gpt-5.3-codex"), 128_000);
+        assert_eq!(copilot_context_window("gemini-3-pro-preview"), 1_000_000);
+        assert_eq!(copilot_context_window("gemini-2.5-pro"), 1_000_000);
+        assert_eq!(copilot_context_window("unknown-model"), 128_000);
+    }
+
+    #[test]
+    fn has_credentials_returns_bool() {
+        let _ = CopilotApiProvider::has_credentials();
+    }
+
+    #[test]
+    fn fork_preserves_fetched_models() {
+        let fetched = vec!["model-a".to_string(), "model-b".to_string()];
+        let provider = make_test_provider(fetched.clone());
+        let forked = provider.fork();
+        assert_eq!(forked.available_models_display(), fetched);
+    }
+}

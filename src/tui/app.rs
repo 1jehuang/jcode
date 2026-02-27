@@ -10060,6 +10060,20 @@ impl App {
                         available,
                         detail,
                     });
+                } else {
+                    // Copilot or other provider models
+                    let (available, provider_name) = if auth.copilot == crate::auth::AuthState::Available {
+                        (true, "Copilot".to_string())
+                    } else {
+                        (false, "unknown".to_string())
+                    };
+                    routes.push(crate::provider::ModelRoute {
+                        model: model.clone(),
+                        provider: provider_name,
+                        api_method: "copilot".to_string(),
+                        available,
+                        detail: String::new(),
+                    });
                 }
             }
             routes
@@ -14972,6 +14986,124 @@ mod tests {
 
         // Input should be preserved
         assert_eq!(app.input(), "/model");
+    }
+
+    fn configure_test_remote_models_with_copilot(app: &mut App) {
+        app.is_remote = true;
+        app.remote_provider_model = Some("claude-sonnet-4".to_string());
+        app.remote_available_models = vec![
+            "claude-sonnet-4-6".to_string(),
+            "gpt-5.3-codex".to_string(),
+            "claude-opus-4.6".to_string(),
+            "gemini-3-pro-preview".to_string(),
+            "grok-code-fast-1".to_string(),
+        ];
+    }
+
+    #[test]
+    fn test_model_picker_includes_copilot_models_in_remote_mode() {
+        let mut app = create_test_app();
+        configure_test_remote_models_with_copilot(&mut app);
+
+        app.open_model_picker();
+
+        let picker = app
+            .picker_state
+            .as_ref()
+            .expect("model picker should be open");
+
+        let model_names: Vec<&str> = picker.models.iter().map(|m| m.name.as_str()).collect();
+
+        assert!(
+            model_names.contains(&"claude-opus-4.6"),
+            "picker should contain copilot model claude-opus-4.6, got: {:?}",
+            model_names
+        );
+        assert!(
+            model_names.contains(&"gemini-3-pro-preview"),
+            "picker should contain copilot model gemini-3-pro-preview, got: {:?}",
+            model_names
+        );
+        assert!(
+            model_names.contains(&"grok-code-fast-1"),
+            "picker should contain copilot model grok-code-fast-1, got: {:?}",
+            model_names
+        );
+    }
+
+    #[test]
+    fn test_model_picker_copilot_models_have_copilot_route() {
+        let mut app = create_test_app();
+        configure_test_remote_models_with_copilot(&mut app);
+
+        app.open_model_picker();
+
+        let picker = app
+            .picker_state
+            .as_ref()
+            .expect("model picker should be open");
+
+        // grok-code-fast-1 is NOT in ALL_CLAUDE_MODELS or ALL_OPENAI_MODELS,
+        // so it should get a copilot route
+        let grok_entry = picker
+            .models
+            .iter()
+            .find(|m| m.name == "grok-code-fast-1")
+            .expect("grok-code-fast-1 should be in picker");
+
+        assert!(
+            grok_entry
+                .routes
+                .iter()
+                .any(|r| r.api_method == "copilot"),
+            "grok-code-fast-1 should have a copilot route, got: {:?}",
+            grok_entry.routes
+        );
+    }
+
+    #[test]
+    fn test_model_picker_copilot_selection_prefixes_model() {
+        let mut app = create_test_app();
+        configure_test_remote_models_with_copilot(&mut app);
+
+        app.open_model_picker();
+
+        let picker = app
+            .picker_state
+            .as_ref()
+            .expect("model picker should be open");
+
+        // Find grok-code-fast-1 (which should only be a copilot route)
+        let grok_idx = picker
+            .models
+            .iter()
+            .position(|m| m.name == "grok-code-fast-1")
+            .expect("grok-code-fast-1 should be in picker");
+
+        // Navigate to it and select
+        let filtered_pos = picker
+            .filtered
+            .iter()
+            .position(|&i| i == grok_idx)
+            .expect("grok-code-fast-1 should be in filtered list");
+
+        // Set the selected position to grok's position
+        app.picker_state.as_mut().unwrap().selected = filtered_pos;
+
+        // Press Enter to select
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+
+        // In remote mode, selection should produce a pending_model_switch with copilot: prefix
+        if let Some(ref spec) = app.pending_model_switch {
+            assert!(
+                spec.starts_with("copilot:"),
+                "copilot model should be prefixed with 'copilot:', got: {}",
+                spec
+            );
+        }
+        // Picker should be closed
+        assert!(app.picker_state.is_none());
     }
 
     #[test]

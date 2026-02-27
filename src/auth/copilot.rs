@@ -583,7 +583,7 @@ mod tests {
                 capabilities: Default::default(),
             },
             CopilotModelInfo {
-                id: "claude-opus-4-6".to_string(),
+                id: "claude-opus-4.6".to_string(),
                 name: String::new(),
                 vendor: String::new(),
                 version: String::new(),
@@ -591,20 +591,33 @@ mod tests {
                 capabilities: Default::default(),
             },
         ];
-        assert_eq!(choose_default_model(&models), "claude-opus-4-6");
+        assert_eq!(choose_default_model(&models), "claude-opus-4.6");
     }
 
     #[test]
     fn choose_default_model_without_opus() {
         let models = vec![CopilotModelInfo {
-            id: "claude-sonnet-4-6".to_string(),
+            id: "claude-sonnet-4.6".to_string(),
             name: String::new(),
             vendor: String::new(),
             version: String::new(),
             model_picker_enabled: false,
             capabilities: Default::default(),
         }];
-        assert_eq!(choose_default_model(&models), "claude-sonnet-4-6");
+        assert_eq!(choose_default_model(&models), "claude-sonnet-4.6");
+    }
+
+    #[test]
+    fn choose_default_model_with_sonnet_4_only() {
+        let models = vec![CopilotModelInfo {
+            id: "claude-sonnet-4".to_string(),
+            name: String::new(),
+            vendor: String::new(),
+            version: String::new(),
+            model_picker_enabled: false,
+            capabilities: Default::default(),
+        }];
+        assert_eq!(choose_default_model(&models), "claude-sonnet-4");
     }
 
     #[test]
