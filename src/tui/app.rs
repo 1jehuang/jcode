@@ -16774,10 +16774,10 @@ mod tests {
         assert!(app.auto_scroll_paused);
         assert!(app.scroll_offset > 0);
 
-        // Render again (also refreshes global LAST_MAX_SCROLL, avoiding
-        // races when other tests run in parallel and overwrite the static).
+        // Render again - verifies scroll_offset produces a valid frame.
+        // Note: LAST_MAX_SCROLL is a process-wide global that parallel tests
+        // can overwrite at any time, so we don't assert against it here.
         let text_after = render_and_snap(&app, &mut terminal);
-        assert!(app.scroll_offset <= crate::tui::ui::last_max_scroll());
 
         assert_ne!(
             text_before, text_after,
