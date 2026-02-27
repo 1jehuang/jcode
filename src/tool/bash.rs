@@ -16,6 +16,21 @@ const DEFAULT_TIMEOUT_MS: u64 = 120000;
 const STDIN_POLL_INTERVAL_MS: u64 = 500;
 const STDIN_INITIAL_DELAY_MS: u64 = 300;
 
+fn build_shell_command(cmd_str: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("cmd.exe");
+        cmd.arg("/C").arg(cmd_str);
+        cmd
+    }
+    #[cfg(not(windows))]
+    {
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c").arg(cmd_str);
+        cmd
+    }
+}
+
 pub struct BashTool;
 
 impl BashTool {
@@ -42,19 +57,30 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a bash command. Use for system commands, git operations, running scripts, etc. \
-         Avoid using for file operations (reading, writing, editing) - use dedicated tools instead. \
-         Set run_in_background=true for long-running commands - you'll get a task_id to check later."
+        if cfg!(windows) {
+            "Execute a shell command (cmd.exe). Use for system commands, git operations, running scripts, etc. \
+             Avoid using for file operations (reading, writing, editing) - use dedicated tools instead. \
+             Set run_in_background=true for long-running commands - you'll get a task_id to check later."
+        } else {
+            "Execute a bash command. Use for system commands, git operations, running scripts, etc. \
+             Avoid using for file operations (reading, writing, editing) - use dedicated tools instead. \
+             Set run_in_background=true for long-running commands - you'll get a task_id to check later."
+        }
     }
 
     fn parameters_schema(&self) -> Value {
+        let cmd_desc = if cfg!(windows) {
+            "The shell command to execute (via cmd.exe)"
+        } else {
+            "The bash command to execute"
+        };
         json!({
             "type": "object",
             "required": ["command"],
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The bash command to execute"
+                    "description": cmd_desc
                 },
                 "description": {
                     "type": "string",
@@ -86,10 +112,8 @@ impl Tool for BashTool {
 
         let has_stdin_channel = ctx.stdin_request_tx.is_some();
 
-        let mut command = Command::new("bash");
+        let mut command = build_shell_command(&params.command);
         command
-            .arg("-c")
-            .arg(&params.command)
             .kill_on_drop(true)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -279,10 +303,8 @@ impl BashTool {
 
         let info = crate::background::global()
             .spawn("bash", &ctx.session_id, move |output_path| async move {
-                let mut cmd = Command::new("bash");
-                cmd.arg("-c")
-                    .arg(&command)
-                    .kill_on_drop(true)
+                let mut cmd = build_shell_command(&command);
+                cmd.kill_on_drop(true)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
                 if let Some(ref dir) = working_dir {
