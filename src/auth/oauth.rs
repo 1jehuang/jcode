@@ -261,12 +261,14 @@ pub async fn login_openai() -> Result<OAuthTokens> {
     let (verifier, challenge) = generate_pkce();
     let state = generate_state();
 
-    // Build authorization URL with Codex-specific params
+    let port = openai::DEFAULT_PORT;
+    let redirect_uri = openai::redirect_uri(port);
+
     let auth_url = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=codex_cli_rs",
         openai::AUTHORIZE_URL,
         openai::CLIENT_ID,
-        urlencoding::encode(openai::REDIRECT_URI),
+        urlencoding::encode(&redirect_uri),
         urlencoding::encode(openai::SCOPES),
         challenge,
         state
@@ -279,7 +281,7 @@ pub async fn login_openai() -> Result<OAuthTokens> {
     let _ = open::that(&auth_url);
 
     // Wait for callback
-    let code = wait_for_callback(9876, &state)?;
+    let code = wait_for_callback(port, &state)?;
 
     // Exchange code for tokens
     let client = reqwest::Client::new();
@@ -291,7 +293,7 @@ pub async fn login_openai() -> Result<OAuthTokens> {
             openai::CLIENT_ID,
             code,
             verifier,
-            urlencoding::encode(openai::REDIRECT_URI)
+            urlencoding::encode(&redirect_uri)
         ))
         .send()
         .await?;
@@ -624,7 +626,7 @@ mod tests {
         assert!(!openai::CLIENT_ID.is_empty());
         assert!(openai::AUTHORIZE_URL.starts_with("https://"));
         assert!(openai::TOKEN_URL.starts_with("https://"));
-        assert!(openai::REDIRECT_URI.starts_with("http"));
+        assert!(openai::redirect_uri(openai::DEFAULT_PORT).starts_with("http"));
         assert!(!openai::SCOPES.is_empty());
     }
 

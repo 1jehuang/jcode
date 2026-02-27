@@ -9377,11 +9377,14 @@ impl App {
             hex::encode(bytes)
         };
 
+        let port = crate::auth::oauth::openai::DEFAULT_PORT;
+        let redirect_uri = crate::auth::oauth::openai::redirect_uri(port);
+
         let auth_url = format!(
             "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=codex_cli_rs",
             crate::auth::oauth::openai::AUTHORIZE_URL,
             crate::auth::oauth::openai::CLIENT_ID,
-            urlencoding::encode(crate::auth::oauth::openai::REDIRECT_URI),
+            urlencoding::encode(&redirect_uri),
             urlencoding::encode(crate::auth::oauth::openai::SCOPES),
             challenge,
             state,
@@ -9406,8 +9409,8 @@ impl App {
             "**OpenAI OAuth Login**\n\n\
              Opening browser for authentication...\n\n\
              If the browser didn't open, visit:\n{}\n\n\
-             Waiting for callback on `localhost:9876`... (this will complete automatically)",
-            auth_url
+             Waiting for callback on `localhost:{}`... (this will complete automatically)",
+            auth_url, port
         )));
         self.set_status_notice("Login: waiting…");
     }
@@ -9416,7 +9419,9 @@ impl App {
         verifier: String,
         expected_state: String,
     ) -> Result<String, String> {
-        let code = crate::auth::oauth::wait_for_callback_async(9876, &expected_state)
+        let port = crate::auth::oauth::openai::DEFAULT_PORT;
+        let redirect_uri = crate::auth::oauth::openai::redirect_uri(port);
+        let code = crate::auth::oauth::wait_for_callback_async(port, &expected_state)
             .await
             .map_err(|e| format!("Callback failed: {}", e))?;
 
@@ -9429,7 +9434,7 @@ impl App {
                 crate::auth::oauth::openai::CLIENT_ID,
                 code,
                 verifier,
-                urlencoding::encode(crate::auth::oauth::openai::REDIRECT_URI)
+                urlencoding::encode(&redirect_uri)
             ))
             .send()
             .await
