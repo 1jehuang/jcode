@@ -1459,6 +1459,19 @@ fn binary_age() -> Option<String> {
     Some(build_age)
 }
 
+/// Return all embedded changelog entries (commit subjects, newest first).
+pub fn get_all_changelog_entries() -> Vec<String> {
+    let changelog = env!("JCODE_CHANGELOG");
+    if changelog.is_empty() {
+        return Vec::new();
+    }
+    changelog
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .map(|(_, subject)| subject.to_string())
+        .collect()
+}
+
 /// Get changelog entries the user hasn't seen yet.
 /// Reads the last-seen commit hash from ~/.jcode/last_seen_changelog,
 /// filters the embedded changelog to only new entries, then saves the latest hash.

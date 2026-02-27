@@ -6889,6 +6889,7 @@ impl App {
             "info" => "`/info`\nShow session metadata and token usage.",
             "usage" => "`/usage`\nFetch and display subscription usage limits for all connected OAuth providers (Anthropic, OpenAI/ChatGPT).\nShows 5-hour and 7-day windows, reset times, and extra usage status.",
             "version" => "`/version`\nShow jcode version/build details.",
+            "changelog" => "`/changelog`\nShow recent changes embedded in this build.",
             "quit" => "`/quit`\nExit jcode.",
             "config" => {
                 "`/config`\nShow active configuration.\n\n`/config init`\nCreate default config file.\n\n`/config edit`\nOpen config in `$EDITOR`."
@@ -6985,6 +6986,7 @@ impl App {
                      • `/swarm [on|off|status]` - Toggle swarm features for this session\n\
                      • `/reload` - Smart reload (client/server if newer binary exists)\n\
                      • `/rebuild` - Full rebuild (git pull + cargo build + tests){}\n\
+                     • `/changelog` - Show recent changes in this build\n\
                      • `/split` - Split session into a new window (clones conversation)\n\
                      • `/clear` - Clear conversation\n\
                      • `/rewind` - Show history with numbers, `/rewind N` to rewind\n\
@@ -7821,6 +7823,29 @@ impl App {
             self.push_display_message(DisplayMessage {
                 role: "system".to_string(),
                 content: format!("jcode {}{}", version, is_canary),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+            return;
+        }
+
+        if trimmed == "/changelog" {
+            let entries = super::ui::get_all_changelog_entries();
+            let content = if entries.is_empty() {
+                "No changelog entries available.".to_string()
+            } else {
+                let version = env!("JCODE_VERSION");
+                let mut lines = vec![format!("**Recent changes** ({})\n", version)];
+                for entry in &entries {
+                    lines.push(format!("• {}", entry));
+                }
+                lines.join("\n")
+            };
+            self.push_display_message(DisplayMessage {
+                role: "system".to_string(),
+                content,
                 tool_calls: vec![],
                 duration_secs: None,
                 title: None,
@@ -12760,6 +12785,7 @@ impl App {
             ("/memory".into(), "Toggle memory feature (on/off/status)"),
             ("/swarm".into(), "Toggle swarm feature (on/off/status)"),
             ("/version".into(), "Show current version"),
+            ("/changelog".into(), "Show recent changes in this build"),
             ("/info".into(), "Show session info and tokens"),
             ("/usage".into(), "Show subscription usage limits"),
             ("/reload".into(), "Smart reload (if newer binary exists)"),
