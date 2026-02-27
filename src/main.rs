@@ -843,12 +843,10 @@ async fn run_main(mut args: Args) -> Result<()> {
                     let has_openai = has_openai.unwrap_or(false);
                     let has_openrouter =
                         provider::openrouter::OpenRouterProvider::has_credentials();
-                    let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
 
                     if !has_claude
                         && !has_openai
                         && !has_openrouter
-                        && !has_api_key
                         && args.provider == ProviderChoice::Auto
                     {
                         eprintln!("No credentials found. Let's log in!\n");
