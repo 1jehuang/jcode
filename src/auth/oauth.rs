@@ -23,8 +23,12 @@ pub mod openai {
     pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
     pub const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
     pub const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-    pub const REDIRECT_URI: &str = "http://localhost:9876/callback";
+    pub const DEFAULT_PORT: u16 = 1455;
     pub const SCOPES: &str = "openid profile email offline_access";
+
+    pub fn redirect_uri(port: u16) -> String {
+        format!("http://localhost:{}/auth/callback", port)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

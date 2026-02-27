@@ -844,17 +844,25 @@ async fn run_main(mut args: Args) -> Result<()> {
                     let has_openrouter =
                         provider::openrouter::OpenRouterProvider::has_credentials();
 
+                    let has_copilot = auth::copilot::has_copilot_credentials();
+                    let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
+
                     if !has_claude
                         && !has_openai
                         && !has_openrouter
+                        && !has_copilot
+                        && !has_api_key
                         && args.provider == ProviderChoice::Auto
                     {
                         eprintln!("No credentials found. Let's log in!\n");
                         eprintln!("Choose a provider:");
-                        eprintln!("  1. Claude (Claude Max subscription)");
-                        eprintln!("  2. OpenAI (ChatGPT Pro subscription)");
-                        eprintln!("  3. OpenRouter (API key - 200+ models)");
-                        eprint!("\nEnter 1-3: ");
+                        eprintln!("  1. Claude      - requires Claude Pro or Max subscription");
+                        eprintln!("  2. OpenAI      - requires ChatGPT Plus or Pro subscription");
+                        eprintln!("  3. GitHub Copilot (free)");
+                        eprintln!("  4. OpenRouter  - API key, pay-per-token, 200+ models");
+                        eprintln!();
+                        eprintln!("  Options 1-2 are recommended if you have a subscription.");
+                        eprint!("\nEnter 1-4: ");
                         io::stdout().flush()?;
 
                         let mut input = String::new();
@@ -863,7 +871,8 @@ async fn run_main(mut args: Args) -> Result<()> {
                         match input.trim() {
                             "1" => login_claude_flow("default").await?,
                             "2" => login_openai_flow().await?,
-                            "3" => login_openrouter_flow()?,
+                            "3" => login_copilot_flow()?,
+                            "4" => login_openrouter_flow()?,
                             _ => anyhow::bail!("Invalid choice. Run 'jcode login' to try again."),
                         }
                         eprintln!();
@@ -2210,12 +2219,14 @@ async fn run_login(choice: &ProviderChoice, account_label: Option<&str>) -> Resu
         }
         ProviderChoice::Auto => {
             eprintln!("Choose a provider to log in:");
-            eprintln!("  1. Claude (Claude Max)");
-            eprintln!("  2. OpenAI (ChatGPT Pro)");
-            eprintln!("  3. OpenRouter (API key - 200+ models)");
-            eprintln!("  4. Cursor");
-            eprintln!("  5. GitHub Copilot");
+            eprintln!("  1. Claude         - requires Claude Pro or Max subscription");
+            eprintln!("  2. OpenAI         - requires ChatGPT Plus or Pro subscription");
+            eprintln!("  3. GitHub Copilot (free)");
+            eprintln!("  4. OpenRouter     - API key, pay-per-token, 200+ models");
+            eprintln!("  5. Cursor");
             eprintln!("  6. Antigravity");
+            eprintln!();
+            eprintln!("  Options 1-2 are recommended if you have a subscription.");
             eprint!("\nEnter 1-6: ");
             io::stdout().flush()?;
 
@@ -2224,9 +2235,9 @@ async fn run_login(choice: &ProviderChoice, account_label: Option<&str>) -> Resu
             match input.trim() {
                 "1" => login_claude_flow(account_label.unwrap_or("default")).await?,
                 "2" => login_openai_flow().await?,
-                "3" => login_openrouter_flow()?,
-                "4" => login_cursor_flow()?,
-                "5" => login_copilot_flow()?,
+                "3" => login_copilot_flow()?,
+                "4" => login_openrouter_flow()?,
+                "5" => login_cursor_flow()?,
                 "6" => login_antigravity_flow()?,
                 _ => anyhow::bail!(
                     "Invalid choice. Use --provider claude|openai|openrouter|cursor|copilot|antigravity"
