@@ -120,7 +120,7 @@ You need at least one of:
 | Provider | Setup |
 |---|---|
 | **Claude** (recommended) | Install [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code), run `claude login` |
-| **GitHub Copilot** | Install [GitHub CLI](https://cli.github.com/), run `gh auth login`, or install [Copilot CLI](https://github.com/github/copilot-cli) |
+| **GitHub Copilot** | Run `gh auth login` or have [Copilot CLI](https://github.com/github/copilot-cli) credentials |
 | **OpenAI / Codex** | Run `codex login` to authenticate |
 | **OpenRouter** | Set `OPENROUTER_API_KEY=sk-or-v1-...` |
 | **Direct API Key** | Set `ANTHROPIC_API_KEY=sk-ant-...` |
