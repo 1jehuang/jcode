@@ -19,8 +19,8 @@ impl PerformanceTier {
     pub fn badge(self) -> Option<&'static str> {
         match self {
             Self::Full => None,
-            Self::Reduced => Some("⚡reduced"),
-            Self::Minimal => Some("⚡minimal"),
+            Self::Reduced => Some("perf:reduced"),
+            Self::Minimal => Some("perf:minimal"),
         }
     }
 
