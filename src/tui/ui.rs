@@ -1459,17 +1459,76 @@ fn binary_age() -> Option<String> {
     Some(build_age)
 }
 
-/// Return all embedded changelog entries (commit subjects, newest first).
-pub fn get_all_changelog_entries() -> Vec<String> {
-    let changelog = env!("JCODE_CHANGELOG");
+/// A changelog entry: hash, optional version tag, and commit subject.
+struct ChangelogEntry<'a> {
+    hash: &'a str,
+    tag: &'a str,
+    subject: &'a str,
+}
+
+/// Parse the embedded changelog. Format per line: "hash:tag:subject"
+/// where tag is either a version like "v0.4.2" or empty.
+fn parse_changelog() -> Vec<ChangelogEntry<'static>> {
+    let changelog: &'static str = env!("JCODE_CHANGELOG");
     if changelog.is_empty() {
         return Vec::new();
     }
     changelog
         .lines()
-        .filter_map(|line| line.split_once(':'))
-        .map(|(_, subject)| subject.to_string())
+        .filter_map(|line| {
+            let (hash, rest) = line.split_once(':')?;
+            let (tag, subject) = rest.split_once(':')?;
+            Some(ChangelogEntry { hash, tag, subject })
+        })
         .collect()
+}
+
+/// A group of changelog entries under a version heading.
+pub struct ChangelogGroup {
+    pub version: String,
+    pub entries: Vec<String>,
+}
+
+/// Return all embedded changelog entries grouped by release version.
+/// Each group has a version label (e.g. "v0.4.2") and the commit subjects
+/// that belong to that release. Commits before any tag are grouped under
+/// the current build version.
+pub fn get_grouped_changelog() -> Vec<ChangelogGroup> {
+    let entries = parse_changelog();
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    let current_version = env!("JCODE_VERSION");
+    let version_label = current_version
+        .split_whitespace()
+        .next()
+        .unwrap_or(current_version);
+
+    let mut groups: Vec<ChangelogGroup> = Vec::new();
+    let mut current_group = ChangelogGroup {
+        version: format!("{} (unreleased)", version_label),
+        entries: Vec::new(),
+    };
+
+    for entry in &entries {
+        if !entry.tag.is_empty() {
+            if !current_group.entries.is_empty() {
+                groups.push(current_group);
+            }
+            current_group = ChangelogGroup {
+                version: entry.tag.to_string(),
+                entries: vec![entry.subject.to_string()],
+            };
+        } else {
+            current_group.entries.push(entry.subject.to_string());
+        }
+    }
+    if !current_group.entries.is_empty() {
+        groups.push(current_group);
+    }
+
+    groups
 }
 
 /// Get changelog entries the user hasn't seen yet.
@@ -1479,22 +1538,11 @@ pub fn get_all_changelog_entries() -> Vec<String> {
 fn get_unseen_changelog_entries() -> &'static Vec<String> {
     static ENTRIES: OnceLock<Vec<String>> = OnceLock::new();
     ENTRIES.get_or_init(|| {
-        let changelog = env!("JCODE_CHANGELOG");
-        if changelog.is_empty() {
-            return Vec::new();
-        }
-
-        // Parse "hash:subject" lines
-        let all_entries: Vec<(&str, &str)> = changelog
-            .lines()
-            .filter_map(|line| line.split_once(':'))
-            .collect();
-
+        let all_entries = parse_changelog();
         if all_entries.is_empty() {
             return Vec::new();
         }
 
-        // Read last-seen hash
         let state_file = dirs::home_dir()
             .map(|h| h.join(".jcode").join("last_seen_changelog"))
             .unwrap_or_else(|| std::path::PathBuf::from(".jcode/last_seen_changelog"));
@@ -1504,28 +1552,25 @@ fn get_unseen_changelog_entries() -> &'static Vec<String> {
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
 
-        // Filter: take entries until we hit the last-seen hash
         let new_entries: Vec<String> = if last_seen_hash.is_empty() {
-            // First time ever — show last 5 as a welcome
             all_entries
                 .iter()
                 .take(5)
-                .map(|(_, subject)| subject.to_string())
+                .map(|e| e.subject.to_string())
                 .collect()
         } else {
             all_entries
                 .iter()
-                .take_while(|(hash, _)| *hash != last_seen_hash)
-                .map(|(_, subject)| subject.to_string())
+                .take_while(|e| e.hash != last_seen_hash)
+                .map(|e| e.subject.to_string())
                 .collect()
         };
 
-        // Save the latest hash so next session only shows new stuff
-        if let Some((latest_hash, _)) = all_entries.first() {
+        if let Some(first) = all_entries.first() {
             if let Some(parent) = state_file.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let _ = std::fs::write(&state_file, latest_hash);
+            let _ = std::fs::write(&state_file, first.hash);
         }
 
         new_entries

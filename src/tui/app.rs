@@ -7832,14 +7832,17 @@ impl App {
         }
 
         if trimmed == "/changelog" {
-            let entries = super::ui::get_all_changelog_entries();
-            let content = if entries.is_empty() {
+            let groups = super::ui::get_grouped_changelog();
+            let content = if groups.is_empty() {
                 "No changelog entries available.".to_string()
             } else {
-                let version = env!("JCODE_VERSION");
-                let mut lines = vec![format!("**Recent changes** ({})\n", version)];
-                for entry in &entries {
-                    lines.push(format!("• {}", entry));
+                let mut lines = Vec::new();
+                for group in &groups {
+                    lines.push(format!("**{}**", group.version));
+                    for entry in &group.entries {
+                        lines.push(format!("  • {}", entry));
+                    }
+                    lines.push(String::new());
                 }
                 lines.join("\n")
             };

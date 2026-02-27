@@ -57,17 +57,35 @@ fn main() {
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
 
-    // Get recent commit messages (last 20 commits, with short hash for tracking "last seen")
-    // Format: "hash:subject" per line so runtime can filter to only new-since-last-seen
+    // Get recent commit messages with version tag decorations.
+    // Format: "hash:decorations:subject" per line. Decorations include "tag: vX.Y.Z"
+    // when a commit is tagged, empty otherwise. We grab enough commits to cover
+    // several releases so /changelog can group by version.
     let output = Command::new("git")
-        .args(["log", "--oneline", "-20", "--format=%h:%s"])
+        .args(["log", "--oneline", "-100", "--format=%h:%D:%s"])
         .output()
         .ok();
 
-    let changelog = output
+    let raw_log = output
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
         .unwrap_or_default();
+
+    // Normalize to "hash:tag:subject" — extract version tag or leave empty
+    let changelog = raw_log
+        .lines()
+        .filter_map(|line| {
+            let (hash, rest) = line.split_once(':')?;
+            let (decorations, subject) = rest.split_once(':')?;
+            let tag = decorations
+                .split(',')
+                .map(|d| d.trim())
+                .find(|d| d.starts_with("tag: v"))
+                .and_then(|d| d.strip_prefix("tag: "))
+                .unwrap_or("");
+            Some(format!("{}:{}:{}", hash, tag, subject))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     // Build version string:
     //   Release: v0.2.0 (abc1234)
