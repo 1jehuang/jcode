@@ -867,6 +867,7 @@ async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
     let resp = client
         .get(auth::copilot::COPILOT_TOKEN_URL)
         .header("Authorization", format!("token {}", github_token))
+        .header("User-Agent", auth::copilot::EDITOR_VERSION)
         .header("Editor-Version", auth::copilot::EDITOR_VERSION)
         .header("Editor-Plugin-Version", auth::copilot::EDITOR_PLUGIN_VERSION)
         .header("Accept", "application/json")
