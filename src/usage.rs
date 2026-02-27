@@ -354,6 +354,8 @@ async fn fetch_all_anthropic_usage_reports() -> Vec<ProviderUsage> {
                     return vec![fetch_anthropic_usage_for_token(
                         "Anthropic (Claude)".to_string(),
                         creds.access_token.clone(),
+                        creds.refresh_token.clone(),
+                        "default".to_string(),
                         creds.expires_at,
                     )
                     .await];
@@ -368,7 +370,7 @@ async fn fetch_all_anthropic_usage_reports() -> Vec<ProviderUsage> {
     for account in &accounts {
         let label = if accounts.len() > 1 {
             let active_marker = if active_label.as_deref() == Some(&account.label) {
-                " *"
+                " ✦"
             } else {
                 ""
             };
@@ -377,10 +379,14 @@ async fn fetch_all_anthropic_usage_reports() -> Vec<ProviderUsage> {
             "Anthropic (Claude)".to_string()
         };
         let access = account.access.clone();
+        let refresh = account.refresh.clone();
+        let account_label = account.label.clone();
         let expires = account.expires;
         futures.push(fetch_anthropic_usage_for_token(
             label,
             access,
+            refresh,
+            account_label,
             expires,
         ));
     }
@@ -395,16 +401,36 @@ async fn fetch_all_anthropic_usage_reports() -> Vec<ProviderUsage> {
 async fn fetch_anthropic_usage_for_token(
     display_name: String,
     access_token: String,
+    refresh_token: String,
+    account_label: String,
     expires_at: i64,
 ) -> ProviderUsage {
     let now_ms = chrono::Utc::now().timestamp_millis();
-    if expires_at < now_ms {
-        return ProviderUsage {
-            provider_name: display_name.to_string(),
-            error: Some("OAuth token expired - use `/login claude` to re-authenticate".to_string()),
-            ..Default::default()
-        };
-    }
+    let access_token = if expires_at < now_ms + 300_000 && !refresh_token.is_empty() {
+        match crate::auth::oauth::refresh_claude_tokens_for_account(
+            &refresh_token,
+            &account_label,
+        )
+        .await
+        {
+            Ok(refreshed) => refreshed.access_token,
+            Err(_) => {
+                if expires_at < now_ms {
+                    return ProviderUsage {
+                        provider_name: display_name,
+                        error: Some(
+                            "OAuth token expired - use `/login claude` to re-authenticate"
+                                .to_string(),
+                        ),
+                        ..Default::default()
+                    };
+                }
+                access_token
+            }
+        }
+    } else {
+        access_token
+    };
 
     let client = Client::new();
     let response = client

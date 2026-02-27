@@ -8698,18 +8698,21 @@ impl App {
             return;
         }
 
-        let mut output = String::from("**Subscription Usage**\n");
+        let mut output = String::from("## Subscription Usage\n\n");
 
-        for provider in &results {
-            output.push_str(&format!("\n**{}**\n", provider.provider_name));
+        for (i, provider) in results.iter().enumerate() {
+            if i > 0 {
+                output.push_str("---\n\n");
+            }
+            output.push_str(&format!("### {}\n\n", provider.provider_name));
 
             if let Some(ref err) = provider.error {
-                output.push_str(&format!("  ⚠ {}\n", err));
+                output.push_str(&format!("⚠ {}\n\n", err));
                 continue;
             }
 
             if provider.limits.is_empty() && provider.extra_info.is_empty() {
-                output.push_str("  No usage data available\n");
+                output.push_str("No usage data available\n\n");
                 continue;
             }
 
@@ -8721,12 +8724,17 @@ impl App {
                 } else {
                     String::new()
                 };
-                output.push_str(&format!("  {} {}{}\n", limit.name, bar, reset_info));
+                output.push_str(&format!("- **{}**: {}{}\n", limit.name, bar, reset_info));
+            }
+
+            if !provider.limits.is_empty() {
+                output.push('\n');
             }
 
             for (key, value) in &provider.extra_info {
-                output.push_str(&format!("  {}: {}\n", key, value));
+                output.push_str(&format!("- {}: {}\n", key, value));
             }
+            output.push('\n');
         }
 
         self.push_display_message(DisplayMessage::system(output));
