@@ -65,6 +65,74 @@ const MODEL_PICKER_MIN_MESSAGES_HEIGHT: u16 = 3;
 
 const LUMINANCE: &[u8] = b".,-~:;=!*#$@";
 
+struct RenderBuffers {
+    output: Vec<Vec<u8>>,
+    zbuffer: Vec<Vec<f32>>,
+    width: usize,
+    height: usize,
+}
+
+impl RenderBuffers {
+    fn new() -> Self {
+        Self {
+            output: Vec::new(),
+            zbuffer: Vec::new(),
+            width: 0,
+            height: 0,
+        }
+    }
+
+    fn resize_and_clear(&mut self, width: usize, height: usize) {
+        if self.width != width || self.height != height {
+            self.output.resize_with(height, Vec::new);
+            self.output.truncate(height);
+            self.zbuffer.resize_with(height, Vec::new);
+            self.zbuffer.truncate(height);
+            for row in &mut self.output {
+                row.resize(width, b' ');
+            }
+            for row in &mut self.zbuffer {
+                row.resize(width, 0.0);
+            }
+            self.width = width;
+            self.height = height;
+        }
+        for row in &mut self.output {
+            row.fill(b' ');
+        }
+        for row in &mut self.zbuffer {
+            row.fill(0.0);
+        }
+    }
+
+    fn to_strings(&self) -> Vec<String> {
+        self.output
+            .iter()
+            .map(|row| String::from_utf8_lossy(row).into_owned())
+            .collect()
+    }
+}
+
+thread_local! {
+    static RENDER_BUF: std::cell::RefCell<RenderBuffers> = std::cell::RefCell::new(RenderBuffers::new());
+}
+
+fn with_render_buffers<F>(width: usize, height: usize, f: F) -> Vec<String>
+where
+    F: FnOnce(&mut Vec<Vec<u8>>, &mut Vec<Vec<f32>>),
+{
+    RENDER_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.resize_and_clear(width, height);
+        let buf = &mut *buf;
+        f(&mut buf.output, &mut buf.zbuffer);
+        buf.output
+            .iter()
+            .map(|row| String::from_utf8_lossy(row).into_owned())
+            .collect()
+    })
+}
+
 fn render_donut(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     let a = elapsed * 1.5;
     let b = elapsed * 0.8;
@@ -73,8 +141,7 @@ fn render_donut(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     let cos_b = b.cos();
     let sin_b = b.sin();
 
-    let mut output = vec![vec![b' '; width]; height];
-    let mut zbuffer = vec![vec![0.0f32; width]; height];
+    with_render_buffers(width, height, |output, zbuffer| {
 
     let mut theta: f32 = 0.0;
     while theta < std::f32::consts::TAU {
@@ -118,10 +185,7 @@ fn render_donut(elapsed: f32, width: usize, height: usize) -> Vec<String> {
         theta += 0.07;
     }
 
-    output
-        .into_iter()
-        .map(|row| String::from_utf8(row).unwrap_or_default())
-        .collect()
+    })
 }
 
 fn render_startup_animation(
@@ -141,8 +205,7 @@ fn render_startup_animation(
 }
 
 fn render_globe(elapsed: f32, width: usize, height: usize) -> Vec<String> {
-    let mut output = vec![vec![b' '; width]; height];
-    let mut zbuffer = vec![vec![0.0f32; width]; height];
+    with_render_buffers(width, height, |output, zbuffer| {
     let rot = elapsed * 0.8;
     let cos_r = rot.cos();
     let sin_r = rot.sin();
@@ -192,10 +255,7 @@ fn render_globe(elapsed: f32, width: usize, height: usize) -> Vec<String> {
         }
         lat += 0.03;
     }
-    output
-        .into_iter()
-        .map(|row| String::from_utf8(row).unwrap_or_default())
-        .collect()
+    })
 }
 
 fn rotate_xyz(x: f32, y: f32, z: f32, ax: f32, ay: f32, az: f32) -> (f32, f32, f32) {
@@ -264,8 +324,7 @@ fn draw_line_3d(
 }
 
 fn render_cube(elapsed: f32, width: usize, height: usize) -> Vec<String> {
-    let mut output = vec![vec![b' '; width]; height];
-    let mut zbuffer = vec![vec![0.0f32; width]; height];
+    with_render_buffers(width, height, |output, zbuffer| {
     let ax = elapsed * 0.7;
     let ay = elapsed * 1.1;
     let az = elapsed * 0.3;
@@ -302,8 +361,8 @@ fn render_cube(elapsed: f32, width: usize, height: usize) -> Vec<String> {
         let (x0, y0, z0) = rotated[a];
         let (x1, y1, z1) = rotated[b];
         draw_line_3d(
-            &mut output,
-            &mut zbuffer,
+            output,
+            zbuffer,
             x0,
             y0,
             z0,
@@ -323,15 +382,11 @@ fn render_cube(elapsed: f32, width: usize, height: usize) -> Vec<String> {
             }
         }
     }
-    output
-        .into_iter()
-        .map(|row| String::from_utf8(row).unwrap_or_default())
-        .collect()
+    })
 }
 
 fn render_mobius(elapsed: f32, width: usize, height: usize) -> Vec<String> {
-    let mut output = vec![vec![b' '; width]; height];
-    let mut zbuffer = vec![vec![0.0f32; width]; height];
+    with_render_buffers(width, height, |output, zbuffer| {
     let rot = elapsed * 0.6;
     let cam_dist = 6.0;
     let mut u: f32 = 0.0;
@@ -364,15 +419,11 @@ fn render_mobius(elapsed: f32, width: usize, height: usize) -> Vec<String> {
         }
         u += 0.03;
     }
-    output
-        .into_iter()
-        .map(|row| String::from_utf8(row).unwrap_or_default())
-        .collect()
+    })
 }
 
 fn render_octahedron(elapsed: f32, width: usize, height: usize) -> Vec<String> {
-    let mut output = vec![vec![b' '; width]; height];
-    let mut zbuffer = vec![vec![0.0f32; width]; height];
+    with_render_buffers(width, height, |output, zbuffer| {
     let ax = elapsed * 0.9;
     let ay = elapsed * 0.6;
     let az = elapsed * 0.4;
@@ -408,8 +459,8 @@ fn render_octahedron(elapsed: f32, width: usize, height: usize) -> Vec<String> {
         let (x0, y0, z0) = rotated[a];
         let (x1, y1, z1) = rotated[b];
         draw_line_3d(
-            &mut output,
-            &mut zbuffer,
+            output,
+            zbuffer,
             x0,
             y0,
             z0,
@@ -429,14 +480,11 @@ fn render_octahedron(elapsed: f32, width: usize, height: usize) -> Vec<String> {
             }
         }
     }
-    output
-        .into_iter()
-        .map(|row| String::from_utf8(row).unwrap_or_default())
-        .collect()
+    })
 }
 
 fn render_lorenz(elapsed: f32, width: usize, height: usize) -> Vec<String> {
-    let mut output = vec![vec![b' '; width]; height];
+    with_render_buffers(width, height, |output, _zbuffer| {
     let sigma: f32 = 10.0;
     let rho: f32 = 28.0;
     let beta: f32 = 8.0 / 3.0;
@@ -451,7 +499,7 @@ fn render_lorenz(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     let scale_y = height as f32 / 55.0;
     let cx = width as f32 / 2.0;
     let cy = height as f32 * 0.65;
-    let total_steps = 4000 + (elapsed * 500.0) as usize;
+    let total_steps = (4000 + (elapsed * 500.0) as usize).min(8000);
     let trail_start = total_steps.saturating_sub(3000);
     for step in 0..total_steps {
         let dx = sigma * (y - x);
@@ -477,15 +525,11 @@ fn render_lorenz(elapsed: f32, width: usize, height: usize) -> Vec<String> {
             }
         }
     }
-    output
-        .into_iter()
-        .map(|row| String::from_utf8(row).unwrap_or_default())
-        .collect()
+    })
 }
 
 fn render_dna_helix(elapsed: f32, width: usize, height: usize) -> Vec<String> {
-    let mut output = vec![vec![b' '; width]; height];
-    let mut zbuffer = vec![vec![0.0f32; width]; height];
+    with_render_buffers(width, height, |output, zbuffer| {
     let cx = width as f32 / 2.0;
     let radius = width as f32 * 0.2;
     let speed = elapsed * 2.0;
@@ -529,10 +573,7 @@ fn render_dna_helix(elapsed: f32, width: usize, height: usize) -> Vec<String> {
             }
         }
     }
-    output
-        .into_iter()
-        .map(|row| String::from_utf8(row).unwrap_or_default())
-        .collect()
+    })
 }
 
 /// Duration of the startup fade-in animation in seconds
@@ -2812,26 +2853,6 @@ fn build_startup_animation_lines(app: &dyn TuiState, term_width: u16) -> Vec<Lin
     lines
         .into_iter()
         .map(|line| line.alignment(align))
-        .collect()
-}
-
-/// Build chroma-colored text (each character gets a different hue in the rainbow wave)
-fn chroma_spans(text: &str, elapsed: f32, offset: f32, bold: bool) -> Vec<Span<'static>> {
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len().max(1) as f32;
-
-    chars
-        .into_iter()
-        .enumerate()
-        .map(|(i, ch)| {
-            let pos = offset + (i as f32 / len) * 0.3; // Spread across 0.3 of the spectrum
-            let color = header_chroma_color(pos, elapsed);
-            let mut style = Style::default().fg(color);
-            if bold {
-                style = style.add_modifier(ratatui::style::Modifier::BOLD);
-            }
-            Span::styled(ch.to_string(), style)
-        })
         .collect()
 }
 
@@ -5495,6 +5516,35 @@ fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, start_num: usi
     frame.render_widget(paragraph, area);
 }
 
+struct IdleBuffers {
+    hit: Vec<bool>,
+    lum_map: Vec<f32>,
+    z_buf: Vec<f32>,
+    size: usize,
+}
+
+impl IdleBuffers {
+    fn new() -> Self {
+        Self { hit: Vec::new(), lum_map: Vec::new(), z_buf: Vec::new(), size: 0 }
+    }
+
+    fn resize_and_clear(&mut self, len: usize) {
+        if self.size != len {
+            self.hit.resize(len, false);
+            self.lum_map.resize(len, 0.0);
+            self.z_buf.resize(len, 0.0);
+            self.size = len;
+        }
+        self.hit.fill(false);
+        self.lum_map.fill(0.0);
+        self.z_buf.fill(0.0);
+    }
+}
+
+thread_local! {
+    static IDLE_BUF: std::cell::RefCell<IdleBuffers> = std::cell::RefCell::new(IdleBuffers::new());
+}
+
 fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     if area.width < 4 || area.height < 2 {
         return;
@@ -5509,16 +5559,20 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let sw = cw * SUB_X;
     let sh = ch * SUB_Y;
 
-    let mut hit = vec![false; sw * sh];
-    let mut lum_map = vec![0.0f32; sw * sh];
-    let mut z_buf = vec![0.0f32; sw * sh];
+    IDLE_BUF.with(|cell| {
+    let mut bufs = cell.borrow_mut();
+    bufs.resize_and_clear(sw * sh);
+    let bufs = &mut *bufs;
 
     let variant = idle_animation_variant();
     match variant % 3 {
-        0 => sample_donut(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
-        1 => sample_knot(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
-        _ => sample_gyroscope(elapsed, sw, sh, &mut hit, &mut lum_map, &mut z_buf),
+        0 => sample_donut(elapsed, sw, sh, &mut bufs.hit, &mut bufs.lum_map, &mut bufs.z_buf),
+        1 => sample_knot(elapsed, sw, sh, &mut bufs.hit, &mut bufs.lum_map, &mut bufs.z_buf),
+        _ => sample_gyroscope(elapsed, sw, sh, &mut bufs.hit, &mut bufs.lum_map, &mut bufs.z_buf),
     }
+
+    let hit = &bufs.hit;
+    let lum_map = &bufs.lum_map;
 
     let time_hue = elapsed * 40.0;
     let centered = app.centered_mode();
@@ -5572,6 +5626,7 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
         .collect();
 
     frame.render_widget(Paragraph::new(lines), area);
+    }); // IDLE_BUF
 }
 
 fn sample_donut(
