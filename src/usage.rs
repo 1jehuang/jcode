@@ -153,11 +153,21 @@ impl OpenAIUsageData {
 pub async fn fetch_all_provider_usage() -> Vec<ProviderUsage> {
     let mut results = Vec::new();
 
-    let (anthropic_results, openai) =
-        tokio::join!(fetch_all_anthropic_usage_reports(), fetch_openai_usage_report());
+    let (anthropic_results, openai, openrouter, copilot) = tokio::join!(
+        fetch_all_anthropic_usage_reports(),
+        fetch_openai_usage_report(),
+        fetch_openrouter_usage_report(),
+        fetch_copilot_usage_report(),
+    );
 
     results.extend(anthropic_results);
     if let Some(r) = openai {
+        results.push(r);
+    }
+    if let Some(r) = openrouter {
+        results.push(r);
+    }
+    if let Some(r) = copilot {
         results.push(r);
     }
 
@@ -724,6 +734,215 @@ async fn fetch_openai_usage_report() -> Option<ProviderUsage> {
 
     Some(ProviderUsage {
         provider_name: "OpenAI (ChatGPT)".to_string(),
+        limits,
+        extra_info,
+        error: None,
+    })
+}
+
+async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
+    let api_key = std::env::var("OPENROUTER_API_KEY")
+        .ok()
+        .or_else(|| {
+            let config_path = dirs::config_dir()?.join("jcode").join("openrouter.env");
+            let content = std::fs::read_to_string(config_path).ok()?;
+            content
+                .lines()
+                .find_map(|line| line.strip_prefix("OPENROUTER_API_KEY="))
+                .map(|k| k.trim().to_string())
+        })
+        .filter(|k| !k.is_empty())?;
+
+    let client = Client::new();
+
+    let (key_resp, credits_resp) = tokio::join!(
+        client
+            .get("https://openrouter.ai/api/v1/key")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send(),
+        client
+            .get("https://openrouter.ai/api/v1/credits")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+    );
+
+    let mut limits = Vec::new();
+    let mut extra_info = Vec::new();
+
+    if let Ok(resp) = credits_resp {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(data) = json.get("data") {
+                    let total_credits = data
+                        .get("total_credits")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let total_usage = data
+                        .get("total_usage")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let balance = total_credits - total_usage;
+
+                    if total_credits > 0.0 {
+                        let usage_pct = (total_usage / total_credits * 100.0) as f32;
+                        limits.push(UsageLimit {
+                            name: "Credits".to_string(),
+                            usage_percent: usage_pct,
+                            resets_at: None,
+                        });
+                    }
+
+                    extra_info.push((
+                        "Balance".to_string(),
+                        format!("${:.2} / ${:.2}", balance, total_credits),
+                    ));
+                }
+            }
+        }
+    }
+
+    if let Ok(resp) = key_resp {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(data) = json.get("data") {
+                    let usage_daily = data
+                        .get("usage_daily")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let usage_weekly = data
+                        .get("usage_weekly")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let usage_monthly = data
+                        .get("usage_monthly")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+
+                    extra_info.push(("Today".to_string(), format!("${:.2}", usage_daily)));
+                    extra_info.push(("This week".to_string(), format!("${:.2}", usage_weekly)));
+                    extra_info.push(("This month".to_string(), format!("${:.2}", usage_monthly)));
+
+                    if let Some(limit) = data.get("limit").and_then(|v| v.as_f64()) {
+                        let remaining = data
+                            .get("limit_remaining")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0);
+                        let used = limit - remaining;
+                        let pct = if limit > 0.0 {
+                            (used / limit * 100.0) as f32
+                        } else {
+                            0.0
+                        };
+                        limits.push(UsageLimit {
+                            name: "Key limit".to_string(),
+                            usage_percent: pct,
+                            resets_at: None,
+                        });
+                        extra_info.push((
+                            "Key limit".to_string(),
+                            format!("${:.2} / ${:.2}", remaining, limit),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if limits.is_empty() && extra_info.is_empty() {
+        return None;
+    }
+
+    Some(ProviderUsage {
+        provider_name: "OpenRouter".to_string(),
+        limits,
+        extra_info,
+        error: None,
+    })
+}
+
+async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
+    let github_token = auth::copilot::load_github_token().ok()?;
+
+    let client = Client::new();
+    let resp = client
+        .get(auth::copilot::COPILOT_TOKEN_URL)
+        .header("Authorization", format!("token {}", github_token))
+        .header("Editor-Version", auth::copilot::EDITOR_VERSION)
+        .header("Editor-Plugin-Version", auth::copilot::EDITOR_PLUGIN_VERSION)
+        .header("Accept", "application/json")
+        .send()
+        .await;
+
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            return Some(ProviderUsage {
+                provider_name: "GitHub Copilot".to_string(),
+                error: Some(format!("Failed to fetch: {}", e)),
+                ..Default::default()
+            });
+        }
+    };
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Some(ProviderUsage {
+            provider_name: "GitHub Copilot".to_string(),
+            error: Some(format!("API error ({}): {}", status, body)),
+            ..Default::default()
+        });
+    }
+
+    let json: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            return Some(ProviderUsage {
+                provider_name: "GitHub Copilot".to_string(),
+                error: Some(format!("Failed to parse response: {}", e)),
+                ..Default::default()
+            });
+        }
+    };
+
+    let mut limits = Vec::new();
+    let mut extra_info = Vec::new();
+
+    if let Some(sku) = json.get("sku").and_then(|v| v.as_str()) {
+        extra_info.push(("Plan".to_string(), sku.to_string()));
+    }
+
+    if let Some(quotas) = json.get("limited_user_quotas").and_then(|v| v.as_object()) {
+        for (name, value) in quotas {
+            if let Some(obj) = value.as_object() {
+                let used = obj.get("used").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let limit = obj.get("limit").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                if limit > 0.0 {
+                    let pct = (used / limit * 100.0) as f32;
+                    limits.push(UsageLimit {
+                        name: humanize_key(name),
+                        usage_percent: pct,
+                        resets_at: json
+                            .get("limited_user_reset_date")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                    });
+                }
+            }
+        }
+    }
+
+    let chat_enabled = json.get("chat_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    extra_info.push(("Chat".to_string(), if chat_enabled { "enabled" } else { "disabled" }.to_string()));
+
+    if limits.is_empty() && extra_info.len() <= 1 {
+        if extra_info.is_empty() {
+            return None;
+        }
+    }
+
+    Some(ProviderUsage {
+        provider_name: "GitHub Copilot".to_string(),
         limits,
         extra_info,
         error: None,
