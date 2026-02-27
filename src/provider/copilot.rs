@@ -153,11 +153,17 @@ impl CopilotApiProvider {
             || status == reqwest::StatusCode::FORBIDDEN
     }
 
-    /// Build OpenAI-compatible messages array from our message format
+    /// Build OpenAI-compatible messages array from our message format.
+    ///
+    /// Properly pairs tool_use blocks (in assistant messages) with their
+    /// corresponding tool_result blocks (in user messages), handling
+    /// out-of-order results and missing outputs.
     fn build_messages(system: &str, messages: &[ChatMessage]) -> Vec<Value> {
-        let mut result = Vec::new();
+        use std::collections::{HashMap, HashSet};
 
-        // System message
+        let mut result = Vec::new();
+        let missing_output = format!("[Error] {}", TOOL_OUTPUT_MISSING_TEXT);
+
         if !system.is_empty() {
             result.push(json!({
                 "role": "system",
@@ -165,26 +171,74 @@ impl CopilotApiProvider {
             }));
         }
 
-        for msg in messages {
+        let mut tool_result_last_pos: HashMap<String, usize> = HashMap::new();
+        for (idx, msg) in messages.iter().enumerate() {
+            if let Role::User = msg.role {
+                for block in &msg.content {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                        tool_result_last_pos.insert(tool_use_id.clone(), idx);
+                    }
+                }
+            }
+        }
+
+        let mut tool_calls_seen: HashSet<String> = HashSet::new();
+        let mut pending_tool_results: HashMap<String, String> = HashMap::new();
+        let mut used_tool_results: HashSet<String> = HashSet::new();
+
+        for (idx, msg) in messages.iter().enumerate() {
             match msg.role {
                 Role::User => {
-                    let text = msg
-                        .content
-                        .iter()
-                        .filter_map(|b| match b {
-                            ContentBlock::Text { text, .. } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    result.push(json!({
-                        "role": "user",
-                        "content": text,
-                    }));
+                    let mut text_parts: Vec<&str> = Vec::new();
+                    for block in &msg.content {
+                        match block {
+                            ContentBlock::Text { text, .. } => {
+                                text_parts.push(text.as_str());
+                            }
+                            ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                is_error,
+                            } => {
+                                if used_tool_results.contains(tool_use_id) {
+                                    continue;
+                                }
+                                let output = if is_error == &Some(true) {
+                                    format!("[Error] {}", content)
+                                } else if content.is_empty() {
+                                    TOOL_OUTPUT_MISSING_TEXT.to_string()
+                                } else {
+                                    content.clone()
+                                };
+                                if tool_calls_seen.contains(tool_use_id) {
+                                    result.push(json!({
+                                        "role": "tool",
+                                        "tool_call_id": tool_use_id,
+                                        "content": output,
+                                    }));
+                                    used_tool_results.insert(tool_use_id.clone());
+                                } else if !pending_tool_results.contains_key(tool_use_id) {
+                                    pending_tool_results
+                                        .insert(tool_use_id.clone(), output);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    let text = text_parts.join("\n");
+                    if !text.is_empty() {
+                        result.push(json!({
+                            "role": "user",
+                            "content": text,
+                        }));
+                    }
                 }
                 Role::Assistant => {
                     let mut content_text = String::new();
                     let mut tool_calls = Vec::new();
+                    let mut post_tool_outputs: Vec<(String, String)> = Vec::new();
+                    let mut missing_tool_outputs: Vec<String> = Vec::new();
 
                     for block in &msg.content {
                         match block {
@@ -200,6 +254,22 @@ impl CopilotApiProvider {
                                         "arguments": input.to_string(),
                                     }
                                 }));
+                                tool_calls_seen.insert(id.clone());
+                                if let Some(output) =
+                                    pending_tool_results.remove(id)
+                                {
+                                    post_tool_outputs.push((id.clone(), output));
+                                    used_tool_results.insert(id.clone());
+                                } else {
+                                    let has_future_output = tool_result_last_pos
+                                        .get(id)
+                                        .map(|pos| *pos > idx)
+                                        .unwrap_or(false);
+                                    if !has_future_output {
+                                        missing_tool_outputs.push(id.clone());
+                                        used_tool_results.insert(id.clone());
+                                    }
+                                }
                             }
                             _ => {}
                         }
@@ -216,29 +286,27 @@ impl CopilotApiProvider {
                         assistant_msg["tool_calls"] = json!(tool_calls);
                     }
 
-                    result.push(assistant_msg);
-                }
-                _ => {
-                    for block in &msg.content {
-                        if let ContentBlock::ToolResult {
-                            tool_use_id,
-                            content,
-                            ..
-                        } = block
-                        {
-                            let text = if content.is_empty() {
-                                TOOL_OUTPUT_MISSING_TEXT.to_string()
-                            } else {
-                                content.clone()
-                            };
+                    if !content_text.is_empty() || !tool_calls.is_empty() {
+                        result.push(assistant_msg);
+
+                        for (tool_call_id, output) in post_tool_outputs {
                             result.push(json!({
                                 "role": "tool",
-                                "tool_call_id": tool_use_id,
-                                "content": text,
+                                "tool_call_id": tool_call_id,
+                                "content": output,
+                            }));
+                        }
+
+                        for missing_id in missing_tool_outputs {
+                            result.push(json!({
+                                "role": "tool",
+                                "tool_call_id": missing_id,
+                                "content": missing_output.clone(),
                             }));
                         }
                     }
                 }
+
             }
         }
 
@@ -697,5 +765,151 @@ mod tests {
         let provider = make_test_provider(fetched.clone());
         let forked = provider.fork();
         assert_eq!(forked.available_models_display(), fetched);
+    }
+
+    fn make_msg(role: Role, blocks: Vec<ContentBlock>) -> ChatMessage {
+        ChatMessage {
+            role,
+            content: blocks,
+            timestamp: None,
+        }
+    }
+
+    #[test]
+    fn build_messages_pairs_tool_use_with_tool_result() {
+        let messages = vec![
+            make_msg(Role::User, vec![ContentBlock::Text { text: "hello".into(), cache_control: None }]),
+            make_msg(Role::Assistant, vec![
+                ContentBlock::Text { text: "let me check".into(), cache_control: None },
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": "echo hi"}),
+                },
+            ]),
+            make_msg(Role::User, vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: "hi\n".into(),
+                is_error: None,
+            }]),
+        ];
+
+        let built = CopilotApiProvider::build_messages("system prompt", &messages);
+
+        assert_eq!(built.len(), 4);
+        assert_eq!(built[0]["role"], "system");
+        assert_eq!(built[1]["role"], "user");
+        assert_eq!(built[1]["content"], "hello");
+        assert_eq!(built[2]["role"], "assistant");
+        assert!(built[2]["tool_calls"].is_array());
+        assert_eq!(built[2]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(built[3]["role"], "tool");
+        assert_eq!(built[3]["tool_call_id"], "call_1");
+        assert_eq!(built[3]["content"], "hi\n");
+    }
+
+    #[test]
+    fn build_messages_injects_missing_tool_output() {
+        let messages = vec![
+            make_msg(Role::User, vec![ContentBlock::Text { text: "go".into(), cache_control: None }]),
+            make_msg(Role::Assistant, vec![
+                ContentBlock::ToolUse {
+                    id: "call_orphan".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": "crash"}),
+                },
+            ]),
+        ];
+
+        let built = CopilotApiProvider::build_messages("", &messages);
+
+        assert_eq!(built.len(), 3);
+        assert_eq!(built[1]["role"], "assistant");
+        assert_eq!(built[2]["role"], "tool");
+        assert_eq!(built[2]["tool_call_id"], "call_orphan");
+        assert!(built[2]["content"].as_str().unwrap().contains("missing"));
+    }
+
+    #[test]
+    fn build_messages_handles_batch_multiple_tool_calls() {
+        let messages = vec![
+            make_msg(Role::User, vec![ContentBlock::Text { text: "do things".into(), cache_control: None }]),
+            make_msg(Role::Assistant, vec![
+                ContentBlock::ToolUse {
+                    id: "call_a".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": "a"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_b".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": "b"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_c".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": "c"}),
+                },
+            ]),
+            make_msg(Role::User, vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_a".into(),
+                    content: "result_a".into(),
+                    is_error: None,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_b".into(),
+                    content: "result_b".into(),
+                    is_error: None,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_c".into(),
+                    content: "result_c".into(),
+                    is_error: None,
+                },
+            ]),
+        ];
+
+        let built = CopilotApiProvider::build_messages("", &messages);
+
+        assert_eq!(built[0]["role"], "user");
+        assert_eq!(built[1]["role"], "assistant");
+        let tc = built[1]["tool_calls"].as_array().unwrap();
+        assert_eq!(tc.len(), 3);
+
+        assert_eq!(built[2]["role"], "tool");
+        assert_eq!(built[2]["tool_call_id"], "call_a");
+        assert_eq!(built[2]["content"], "result_a");
+        assert_eq!(built[3]["role"], "tool");
+        assert_eq!(built[3]["tool_call_id"], "call_b");
+        assert_eq!(built[3]["content"], "result_b");
+        assert_eq!(built[4]["role"], "tool");
+        assert_eq!(built[4]["tool_call_id"], "call_c");
+        assert_eq!(built[4]["content"], "result_c");
+    }
+
+    #[test]
+    fn build_messages_skips_empty_user_text() {
+        let messages = vec![
+            make_msg(Role::Assistant, vec![
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"file": "x"}),
+                },
+            ]),
+            make_msg(Role::User, vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: "file content".into(),
+                is_error: None,
+            }]),
+        ];
+
+        let built = CopilotApiProvider::build_messages("", &messages);
+
+        assert_eq!(built.len(), 2);
+        assert_eq!(built[0]["role"], "assistant");
+        assert_eq!(built[1]["role"], "tool");
+        assert_eq!(built[1]["content"], "file content");
     }
 }
