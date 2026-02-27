@@ -4,13 +4,10 @@
 //! Uses tract for pure-Rust ONNX inference (no external dependencies).
 //!
 //! Performance optimizations:
-//! - Bucketed sequence lengths: instead of always padding to 256, we pre-build
-//!   optimized plans for [32, 64, 128, 256] and pick the smallest that fits.
-//!   Short texts (~10-20 tokens) get ~4-8x speedup.
 //! - LRU embedding cache: recent embeddings are cached to avoid redundant inference.
+//!   Repeated queries (common during memory agent context updates) return instantly.
 
 use anyhow::{Context, Result};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -24,12 +21,6 @@ use crate::storage::jcode_dir;
 const MODEL_NAME: &str = "all-MiniLM-L6-v2";
 const EMBEDDING_DIM: usize = 384;
 const MAX_SEQ_LENGTH: usize = 256;
-
-/// Sequence length buckets for optimized inference.
-/// We pre-build a tract plan for each bucket size. At inference time we pick
-/// the smallest bucket that fits the actual token count, avoiding wasted
-/// computation on pad tokens.
-const SEQ_BUCKETS: &[usize] = &[32, 64, 128, 256];
 
 /// LRU cache capacity for recent embeddings
 const EMBEDDING_CACHE_CAPACITY: usize = 128;
@@ -48,14 +39,9 @@ static EMBEDDER_CACHE: OnceLock<Mutex<EmbedderCache>> = OnceLock::new();
 /// Embedding vector type
 pub type EmbeddingVec = Vec<f32>;
 
-type TractPlan = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
-
-/// The embedder handles model loading and inference.
-///
-/// Holds one optimized tract plan per sequence-length bucket so that short
-/// texts don't pay the cost of running through 256 positions.
+/// The embedder handles model loading and inference
 pub struct Embedder {
-    plans: HashMap<usize, TractPlan>,
+    model: SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>,
     tokenizer: Tokenizer,
 }
 
@@ -70,7 +56,7 @@ struct EmbedderCache {
     embed_failures: u64,
     total_embed_ms: u64,
     /// LRU embedding cache: maps text hash -> (embedding, insertion order)
-    embedding_lru: HashMap<u64, (EmbeddingVec, u64)>,
+    embedding_lru: std::collections::HashMap<u64, (EmbeddingVec, u64)>,
     lru_counter: u64,
     cache_hits: u64,
 }
@@ -87,7 +73,7 @@ impl Default for EmbedderCache {
             embed_calls: 0,
             embed_failures: 0,
             total_embed_ms: 0,
-            embedding_lru: HashMap::new(),
+            embedding_lru: std::collections::HashMap::new(),
             lru_counter: 0,
             cache_hits: 0,
         }
@@ -121,20 +107,8 @@ fn saturating_u64_from_u128(value: u128) -> u64 {
     }
 }
 
-/// Pick the smallest bucket that can hold `token_count` tokens.
-fn bucket_for(token_count: usize) -> usize {
-    for &b in SEQ_BUCKETS {
-        if token_count <= b {
-            return b;
-        }
-    }
-    MAX_SEQ_LENGTH
-}
-
 impl Embedder {
-    /// Load the model from disk (or download if missing).
-    ///
-    /// Builds an optimized tract plan for each sequence-length bucket.
+    /// Load the model from disk (or download if missing)
     pub fn load() -> Result<Self> {
         let model_dir = models_dir()?;
         let model_path = model_dir.join("model.onnx");
@@ -147,75 +121,52 @@ impl Embedder {
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
-        let model_bytes = std::fs::read(&model_path)
-            .context("Failed to read ONNX model file")?;
+        let model = tract_onnx::onnx()
+            .model_for_path(&model_path)
+            .context("Failed to load ONNX model")?
+            .with_input_fact(0, f32::fact([1, MAX_SEQ_LENGTH]).into())?
+            .with_input_fact(1, i64::fact([1, MAX_SEQ_LENGTH]).into())?
+            .with_input_fact(2, i64::fact([1, MAX_SEQ_LENGTH]).into())?
+            .into_optimized()
+            .context("Failed to optimize model")?
+            .into_runnable()
+            .context("Failed to make model runnable")?;
 
-        let mut plans = HashMap::with_capacity(SEQ_BUCKETS.len());
-        for &seq_len in SEQ_BUCKETS {
-            let mut cursor = std::io::Cursor::new(&model_bytes);
-            let plan = tract_onnx::onnx()
-                .model_for_read(&mut cursor)
-                .context("Failed to load ONNX model")?
-                .with_input_fact(0, f32::fact([1, seq_len]).into())?
-                .with_input_fact(1, i64::fact([1, seq_len]).into())?
-                .with_input_fact(2, i64::fact([1, seq_len]).into())?
-                .into_optimized()
-                .with_context(|| format!("Failed to optimize model for seq_len={}", seq_len))?
-                .into_runnable()
-                .with_context(|| format!("Failed to make model runnable for seq_len={}", seq_len))?;
-            plans.insert(seq_len, plan);
-        }
-
-        crate::logging::info(&format!(
-            "Embedding model loaded with {} bucket plans: {:?}",
-            plans.len(),
-            SEQ_BUCKETS
-        ));
-
-        Ok(Self { plans, tokenizer })
+        Ok(Self { model, tokenizer })
     }
 
-    /// Generate embedding for a single text.
-    ///
-    /// Picks the smallest pre-built plan that fits the actual token count,
-    /// avoiding wasted computation on padding.
+    /// Generate embedding for a single text
     pub fn embed(&self, text: &str) -> Result<EmbeddingVec> {
         let encoding = self
             .tokenizer
             .encode(text, true)
             .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
 
+        let mut input_ids = vec![0i64; MAX_SEQ_LENGTH];
+        let mut attention_mask = vec![0i64; MAX_SEQ_LENGTH];
+        let token_type_ids = vec![0i64; MAX_SEQ_LENGTH];
+
         let ids = encoding.get_ids();
-        let token_count = ids.len().min(MAX_SEQ_LENGTH);
-        let bucket = bucket_for(token_count);
+        let len = ids.len().min(MAX_SEQ_LENGTH);
 
-        let plan = self
-            .plans
-            .get(&bucket)
-            .ok_or_else(|| anyhow::anyhow!("No plan for bucket size {}", bucket))?;
-
-        let mut input_ids = vec![0i64; bucket];
-        let mut attention_mask = vec![0i64; bucket];
-        let token_type_ids = vec![0i64; bucket];
-
-        for i in 0..token_count {
+        for i in 0..len {
             input_ids[i] = ids[i] as i64;
             attention_mask[i] = 1;
         }
 
         let input_ids_tensor: Tensor =
-            tract_ndarray::Array2::from_shape_vec((1, bucket), input_ids)?
+            tract_ndarray::Array2::from_shape_vec((1, MAX_SEQ_LENGTH), input_ids)?
                 .into_tensor()
                 .cast_to::<f32>()?
                 .into_owned();
 
         let attention_mask_tensor: Tensor =
-            tract_ndarray::Array2::from_shape_vec((1, bucket), attention_mask)?.into();
+            tract_ndarray::Array2::from_shape_vec((1, MAX_SEQ_LENGTH), attention_mask)?.into();
 
         let token_type_ids_tensor: Tensor =
-            tract_ndarray::Array2::from_shape_vec((1, bucket), token_type_ids)?.into();
+            tract_ndarray::Array2::from_shape_vec((1, MAX_SEQ_LENGTH), token_type_ids)?.into();
 
-        let outputs = plan.run(tvec![
+        let outputs = self.model.run(tvec![
             input_ids_tensor.into(),
             attention_mask_tensor.into(),
             token_type_ids_tensor.into(),
@@ -229,7 +180,7 @@ impl Embedder {
             let hidden_dim = shape[2];
             let mut embedding = vec![0f32; hidden_dim];
 
-            let valid_tokens = token_count.min(seq_len);
+            let valid_tokens = len.min(seq_len);
 
             for i in 0..valid_tokens {
                 for j in 0..hidden_dim {
@@ -633,19 +584,5 @@ mod tests {
     #[test]
     fn test_idle_unload_noop_when_not_loaded() {
         assert!(!maybe_unload_if_idle(Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn test_bucket_for() {
-        assert_eq!(bucket_for(1), 32);
-        assert_eq!(bucket_for(10), 32);
-        assert_eq!(bucket_for(32), 32);
-        assert_eq!(bucket_for(33), 64);
-        assert_eq!(bucket_for(64), 64);
-        assert_eq!(bucket_for(65), 128);
-        assert_eq!(bucket_for(128), 128);
-        assert_eq!(bucket_for(129), 256);
-        assert_eq!(bucket_for(256), 256);
-        assert_eq!(bucket_for(300), 256);
     }
 }
