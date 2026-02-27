@@ -29,8 +29,8 @@ all running natively in your terminal.
 | Feature | Description |
 |---|---|
 | **Blazing Fast TUI** | Sub-millisecond rendering at 1,400+ FPS. No flicker. No lag. Ever. |
-| **Multi-Provider** | Claude, OpenAI, OpenRouter - 200+ models, switch on the fly |
-| **No API Keys Needed** | Works with your Claude Max or ChatGPT Pro subscription via OAuth |
+| **Multi-Provider** | Claude, OpenAI, GitHub Copilot, OpenRouter - 200+ models, switch on the fly |
+| **No API Keys Needed** | Works with your Claude Max, ChatGPT Pro, or GitHub Copilot subscription via OAuth |
 | **Persistent Memory** | Learns about you and your codebase across sessions |
 | **Swarm Mode** | Multiple agents coordinate in the same repo with conflict detection |
 | **30+ Built-in Tools** | File ops, search, web, shell, memory, sub-agents, parallel execution |
@@ -120,6 +120,7 @@ You need at least one of:
 | Provider | Setup |
 |---|---|
 | **Claude** (recommended) | Install [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code), run `claude login` |
+| **GitHub Copilot** | Install [GitHub CLI](https://cli.github.com/), run `gh auth login`, or install [Copilot CLI](https://github.com/github/copilot-cli) |
 | **OpenAI / Codex** | Run `codex login` to authenticate |
 | **OpenRouter** | Set `OPENROUTER_API_KEY=sk-or-v1-...` |
 | **Direct API Key** | Set `ANTHROPIC_API_KEY=sk-ant-...` |
@@ -157,6 +158,7 @@ jcode connect
 
 # Specify provider
 jcode --provider claude
+jcode --provider copilot
 jcode --provider openai
 jcode --provider openrouter
 
@@ -211,7 +213,7 @@ graph TB
     Server --> Agent["Agent<br>agent.rs"]
     TUI <-->|events| Server
 
-    Agent --> Provider["Provider<br>Claude / OpenAI / OpenRouter"]
+    Agent --> Provider["Provider<br>Claude / Copilot / OpenAI / OpenRouter"]
     Agent --> Registry["Tool Registry<br>30+ tools"]
     Agent --> Session["Session<br>Persistence"]
 
@@ -242,16 +244,19 @@ graph TB
     MP["MultiProvider<br><i>Detects credentials, allows runtime switching</i>"]
 
     MP --> Claude["ClaudeProvider<br>provider/claude.rs"]
+    MP --> Copilot["CopilotProvider<br>provider/copilot.rs"]
     MP --> OpenAI["OpenAIProvider<br>provider/openai.rs"]
     MP --> OR["OpenRouterProvider<br>provider/openrouter.rs"]
 
     Claude --> ClaudeCreds["~/.claude/.credentials.json<br><i>OAuth (Claude Max)</i>"]
     Claude --> APIKey["ANTHROPIC_API_KEY<br><i>Direct API</i>"]
+    Copilot --> GHCreds["~/.config/github-copilot/<br><i>OAuth (Copilot Pro/Free)</i>"]
     OpenAI --> CodexCreds["~/.codex/auth.json<br><i>OAuth (ChatGPT Pro)</i>"]
     OR --> ORKey["OPENROUTER_API_KEY<br><i>200+ models</i>"]
 
     style MP fill:#8b5cf6,color:#fff
     style Claude fill:#d97706,color:#fff
+    style Copilot fill:#6366f1,color:#fff
     style OpenAI fill:#10b981,color:#fff
     style OR fill:#3b82f6,color:#fff
 ```
@@ -260,6 +265,7 @@ graph TB
 - `MultiProvider` detects available credentials at startup
 - Seamless runtime switching between providers with `/model` command
 - Claude direct API with OAuth - no API key needed with a subscription
+- GitHub Copilot OAuth - access Claude, GPT, Gemini, and more through your Copilot subscription
 - OpenRouter gives access to 200+ models from all major providers
 
 </details>
@@ -656,13 +662,16 @@ OpenClaw prefers subscription-based providers (OAuth) so ambient cycles never bu
 graph TD
     START[Ambient Mode Start] --> CHECK1{OpenAI OAuth<br/>available?}
     CHECK1 -->|yes| OAI[Use OpenAI<br/>strongest available]
-    CHECK1 -->|no| CHECK2{Anthropic OAuth<br/>available?}
+    CHECK1 -->|no| CHECK1B{Copilot OAuth<br/>available?}
+    CHECK1B -->|yes| COP[Use Copilot<br/>strongest available]
+    CHECK1B -->|no| CHECK2{Anthropic OAuth<br/>available?}
     CHECK2 -->|yes| ANT[Use Anthropic<br/>strongest available]
     CHECK2 -->|no| CHECK3{API key or OpenRouter +<br/>config opt-in?}
     CHECK3 -->|yes| API[Use API/OpenRouter<br/>with budget cap]
     CHECK3 -->|no| DISABLED[Ambient mode disabled<br/>no provider available]
 
     style OAI fill:#e8f5e9
+    style COP fill:#e8eaf6
     style ANT fill:#fff3e0
     style API fill:#ffcdd2
     style DISABLED fill:#f5f5f5
