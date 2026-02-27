@@ -56,6 +56,7 @@ libc = "0.2"             # Unix system calls (flock)
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 urlencoding = "2"        # URL encoding for web search
+uuid = { version = "1", features = ["v4"] }
 
 # Embeddings (local inference) - behind feature flag (163 crates, slow to compile)
 tract-onnx = { version = "0.21", optional = true }

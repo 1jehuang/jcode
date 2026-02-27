@@ -10,6 +10,9 @@ use serde_json::{json, Value};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use uuid::Uuid;
+
+const COPILOT_API_VERSION: &str = "2025-04-01";
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
@@ -54,6 +57,8 @@ pub struct CopilotApiProvider {
     github_token: String,
     bearer_token: Arc<tokio::sync::RwLock<Option<copilot_auth::CopilotApiToken>>>,
     fetched_models: Arc<RwLock<Vec<String>>>,
+    session_id: String,
+    machine_id: String,
 }
 
 impl CopilotApiProvider {
@@ -68,6 +73,8 @@ impl CopilotApiProvider {
             github_token,
             bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
+            session_id: Uuid::new_v4().to_string(),
+            machine_id: Self::get_or_create_machine_id(),
         })
     }
 
@@ -85,7 +92,39 @@ impl CopilotApiProvider {
             github_token,
             bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
+            session_id: Uuid::new_v4().to_string(),
+            machine_id: Self::get_or_create_machine_id(),
         }
+    }
+
+    fn get_or_create_machine_id() -> String {
+        let machine_id_path = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".jcode")
+            .join("machine_id");
+        if let Ok(id) = std::fs::read_to_string(&machine_id_path) {
+            let id = id.trim().to_string();
+            if !id.is_empty() {
+                return id;
+            }
+        }
+        let id = Uuid::new_v4().to_string().replace('-', "");
+        let _ = std::fs::create_dir_all(machine_id_path.parent().unwrap_or(&machine_id_path));
+        let _ = std::fs::write(&machine_id_path, &id);
+        id
+    }
+
+    fn is_user_initiated(messages: &[ChatMessage]) -> bool {
+        let Some(last_msg) = messages.last() else {
+            return true;
+        };
+        if last_msg.role != Role::User {
+            return true;
+        }
+        let has_tool_result = last_msg.content.iter().any(|block| {
+            matches!(block, ContentBlock::ToolResult { .. })
+        });
+        !has_tool_result
     }
 
     /// Detect the user's Copilot tier and set the best default model.
@@ -335,10 +374,17 @@ impl CopilotApiProvider {
         &self,
         messages: Vec<Value>,
         tools: Vec<Value>,
+        is_user_initiated: bool,
         tx: mpsc::Sender<Result<StreamEvent>>,
     ) {
         let model = self.model.read().unwrap().clone();
         let max_tokens: u32 = 16_384;
+        let initiator = if is_user_initiated { "user" } else { "agent" };
+
+        crate::logging::info(&format!(
+            "Copilot request: X-Initiator={} model={}",
+            initiator, model
+        ));
 
         // Try up to 2 times (initial + one retry after token refresh)
         for attempt in 0..2 {
@@ -361,6 +407,8 @@ impl CopilotApiProvider {
                 body["tools"] = json!(tools);
             }
 
+            let request_id = Uuid::new_v4().to_string();
+
             let resp = self
                 .client
                 .post(format!("{}/chat/completions", copilot_auth::COPILOT_API_BASE))
@@ -369,6 +417,13 @@ impl CopilotApiProvider {
                 .header("Editor-Plugin-Version", copilot_auth::EDITOR_PLUGIN_VERSION)
                 .header("Copilot-Integration-Id", copilot_auth::COPILOT_INTEGRATION_ID)
                 .header("Content-Type", "application/json")
+                .header("X-Initiator", initiator)
+                .header("X-Request-Id", &request_id)
+                .header("Openai-Intent", "conversation-panel")
+                .header("Openai-Organization", "github-copilot")
+                .header("X-GitHub-Api-Version", COPILOT_API_VERSION)
+                .header("Vscode-Sessionid", &self.session_id)
+                .header("Vscode-Machineid", &self.machine_id)
                 .json(&body)
                 .send()
                 .await;
@@ -597,6 +652,7 @@ impl Provider for CopilotApiProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        let is_user_initiated = Self::is_user_initiated(messages);
         let built_messages = Self::build_messages(system, messages);
         let built_tools = Self::build_tools(tools);
 
@@ -608,11 +664,13 @@ impl Provider for CopilotApiProvider {
             github_token: self.github_token.clone(),
             bearer_token: self.bearer_token.clone(),
             fetched_models: self.fetched_models.clone(),
+            session_id: self.session_id.clone(),
+            machine_id: self.machine_id.clone(),
         };
 
         tokio::spawn(async move {
             provider
-                .stream_request(built_messages, built_tools, tx)
+                .stream_request(built_messages, built_tools, is_user_initiated, tx)
                 .await;
         });
 
@@ -673,6 +731,8 @@ impl Provider for CopilotApiProvider {
             github_token: self.github_token.clone(),
             bearer_token: self.bearer_token.clone(),
             fetched_models: self.fetched_models.clone(),
+            session_id: self.session_id.clone(),
+            machine_id: self.machine_id.clone(),
         })
     }
 }
@@ -688,6 +748,8 @@ mod tests {
             github_token: "test-token".to_string(),
             bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
             fetched_models: Arc::new(RwLock::new(fetched)),
+            session_id: "test-session".to_string(),
+            machine_id: "test-machine".to_string(),
         }
     }
 
@@ -911,5 +973,74 @@ mod tests {
         assert_eq!(built[0]["role"], "assistant");
         assert_eq!(built[1]["role"], "tool");
         assert_eq!(built[1]["content"], "file content");
+    }
+
+    #[test]
+    fn is_user_initiated_empty_messages() {
+        let messages: Vec<ChatMessage> = vec![];
+        assert!(CopilotApiProvider::is_user_initiated(&messages));
+    }
+
+    #[test]
+    fn is_user_initiated_user_text_message() {
+        let messages = vec![make_msg(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "Hello".into(),
+                cache_control: None,
+            }],
+        )];
+        assert!(CopilotApiProvider::is_user_initiated(&messages));
+    }
+
+    #[test]
+    fn is_user_initiated_tool_result_is_agent() {
+        let messages = vec![
+            make_msg(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "Hello".into(),
+                    cache_control: None,
+                }],
+            ),
+            make_msg(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "file_read".into(),
+                    input: json!({}),
+                }],
+            ),
+            make_msg(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "file content".into(),
+                    is_error: None,
+                }],
+            ),
+        ];
+        assert!(!CopilotApiProvider::is_user_initiated(&messages));
+    }
+
+    #[test]
+    fn is_user_initiated_assistant_last_is_user_initiated() {
+        let messages = vec![
+            make_msg(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "Hello".into(),
+                    cache_control: None,
+                }],
+            ),
+            make_msg(
+                Role::Assistant,
+                vec![ContentBlock::Text {
+                    text: "Hi there".into(),
+                    cache_control: None,
+                }],
+            ),
+        ];
+        assert!(CopilotApiProvider::is_user_initiated(&messages));
     }
 }
