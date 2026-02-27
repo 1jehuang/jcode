@@ -119,9 +119,9 @@ You need at least one of:
 
 | Provider | Setup |
 |---|---|
-| **Claude** (recommended) | Install [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code), run `claude login` |
-| **GitHub Copilot** | Run `gh auth login` or have [Copilot CLI](https://github.com/github/copilot-cli) credentials |
-| **OpenAI / Codex** | Run `codex login` to authenticate |
+| **Claude** (recommended) | Run `/login claude` inside jcode (opens browser for OAuth) |
+| **GitHub Copilot** | Run `/login copilot` inside jcode (GitHub device flow) |
+| **OpenAI** | Run `/login openai` inside jcode (opens browser for OAuth) |
 | **OpenRouter** | Set `OPENROUTER_API_KEY=sk-or-v1-...` |
 | **Direct API Key** | Set `ANTHROPIC_API_KEY=sk-ant-...` |
 
