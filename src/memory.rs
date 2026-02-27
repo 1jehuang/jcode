@@ -1035,27 +1035,42 @@ impl MemoryManager {
         limit: usize,
     ) -> Result<Vec<(MemoryEntry, f32)>> {
         // Collect all memories with embeddings
-        let mut all_memories: Vec<MemoryEntry> = Vec::new();
+        let mut entries_with_emb: Vec<MemoryEntry> = Vec::new();
         if let Ok(project) = self.load_project_graph() {
-            all_memories.extend(project.active_memories().cloned());
+            entries_with_emb.extend(
+                project
+                    .active_memories()
+                    .filter(|m| m.embedding.is_some())
+                    .cloned(),
+            );
         }
         if let Ok(global) = self.load_global_graph() {
-            all_memories.extend(global.active_memories().cloned());
+            entries_with_emb.extend(
+                global
+                    .active_memories()
+                    .filter(|m| m.embedding.is_some())
+                    .cloned(),
+            );
         }
 
-        // Filter to memories with embeddings and compute similarity
-        let mut scored: Vec<(MemoryEntry, f32)> = all_memories
+        if entries_with_emb.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Batch cosine similarity: single vectorized pass over all embeddings
+        let emb_refs: Vec<&[f32]> = entries_with_emb
+            .iter()
+            .map(|e| e.embedding.as_ref().unwrap().as_slice())
+            .collect();
+        let scores = crate::embedding::batch_cosine_similarity(query_embedding, &emb_refs);
+
+        // Filter by threshold and sort
+        let mut scored: Vec<(MemoryEntry, f32)> = entries_with_emb
             .into_iter()
-            .filter_map(|entry| {
-                entry.embedding.as_ref().map(|emb| {
-                    let sim = crate::embedding::cosine_similarity(query_embedding, emb);
-                    (entry.clone(), sim)
-                })
-            })
+            .zip(scores)
             .filter(|(_, sim)| *sim >= threshold)
             .collect();
 
-        // Sort by similarity (highest first)
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(limit);
 

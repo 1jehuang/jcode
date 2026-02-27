@@ -438,6 +438,31 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a * norm_b)
 }
 
+/// Compute cosine similarities between a query and many candidates using a
+/// matrix-vector dot product. All embeddings are L2-normalized at creation
+/// time, so cosine similarity == dot product.
+///
+/// Returns one similarity score per candidate (same order as input).
+pub fn batch_cosine_similarity(query: &[f32], candidates: &[&[f32]]) -> Vec<f32> {
+    let dim = query.len();
+    if dim == 0 || candidates.is_empty() {
+        return vec![0.0; candidates.len()];
+    }
+
+    // Matrix-vector multiply: scores[i] = candidates[i] . query
+    // This is a tight loop that the compiler can auto-vectorize with SIMD.
+    candidates
+        .iter()
+        .map(|c| {
+            if c.len() != dim {
+                0.0
+            } else {
+                c.iter().zip(query.iter()).map(|(a, b)| a * b).sum()
+            }
+        })
+        .collect()
+}
+
 /// Find the top-k most similar embeddings from a list
 /// Returns indices and similarity scores, sorted by similarity (highest first)
 pub fn find_similar(
@@ -446,16 +471,18 @@ pub fn find_similar(
     threshold: f32,
     top_k: usize,
 ) -> Vec<(usize, f32)> {
-    let mut scores: Vec<(usize, f32)> = candidates
-        .iter()
+    let refs: Vec<&[f32]> = candidates.iter().map(|v| v.as_slice()).collect();
+    let scores = batch_cosine_similarity(query, &refs);
+
+    let mut results: Vec<(usize, f32)> = scores
+        .into_iter()
         .enumerate()
-        .map(|(i, emb)| (i, cosine_similarity(query, emb)))
         .filter(|(_, score)| *score >= threshold)
         .collect();
 
-    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scores.truncate(top_k);
-    scores
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    results.truncate(top_k);
+    results
 }
 
 /// Get the models directory path
