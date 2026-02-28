@@ -86,10 +86,16 @@ to native code with `jemalloc` for memory-efficient long-running sessions.
 
 ## Installation
 
-### Quick Install (macOS & Linux)
+### Quick Install (macOS, Linux & Windows)
 
 ```bash
+# macOS & Linux
 curl -fsSL https://raw.githubusercontent.com/1jehuang/jcode/master/scripts/install.sh | bash
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/1jehuang/jcode/master/scripts/install.ps1 | iex
 ```
 
 ### macOS via Homebrew
@@ -131,7 +137,7 @@ You need at least one of:
 |---|---|
 | **Linux** x86_64 / aarch64 | Fully supported |
 | **macOS** Apple Silicon & Intel | Supported |
-| **Windows** (WSL2) | Experimental |
+| **Windows** x86_64 | Supported (native + WSL2) |
 
 </div>
 

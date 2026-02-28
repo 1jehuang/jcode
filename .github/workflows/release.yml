@@ -25,6 +25,9 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: jcode-macos-aarch64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: jcode-windows-x86_64
 
     steps:
       - uses: actions/checkout@v4
@@ -47,6 +50,7 @@ jobs:
           cache-all-crates: "true"
 
       - name: Build release binary
+        shell: bash
         run: |
           mkdir -p .cargo
           echo -e '[build]\nrustc-wrapper = ""' > .cargo/config.toml
@@ -54,12 +58,21 @@ jobs:
         env:
           JCODE_RELEASE_BUILD: "1"
 
-      - name: Package binary
+      - name: Package binary (Unix)
+        if: runner.os != 'Windows'
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/jcode dist/${{ matrix.artifact }}
           chmod +x dist/${{ matrix.artifact }}
           cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
+
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/jcode.exe dist/${{ matrix.artifact }}.exe
+          cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
