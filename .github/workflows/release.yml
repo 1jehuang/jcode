@@ -11,9 +11,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
-  build:
+  build-linux-macos:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -26,15 +27,13 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: jcode-macos-aarch64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: jcode-windows-x86_64
 
     steps:
       - uses: actions/checkout@v4
         with:
           ssh-key: ${{ secrets.DEPLOY_KEY }}
           submodules: recursive
+          fetch-depth: 1
 
       - name: Configure SSH for cargo git dependencies
         uses: webfactory/ssh-agent@v0.9.0
@@ -79,21 +78,12 @@ jobs:
         env:
           JCODE_RELEASE_BUILD: "1"
 
-      - name: Package binary (Unix)
-        if: runner.os != 'Windows'
+      - name: Package binary
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/jcode dist/${{ matrix.artifact }}
           chmod +x dist/${{ matrix.artifact }}
           cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
-
-      - name: Package binary (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/jcode.exe dist/${{ matrix.artifact }}.exe
-          cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -101,12 +91,66 @@ jobs:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}.tar.gz
 
+  build-windows:
+    name: Build (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Configure SSH for cargo git dependencies
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_KEY }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
+        id: sccache
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc
+          cache-all-crates: "true"
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          if command -v sccache &>/dev/null && sccache --start-server 2>/dev/null; then
+            export RUSTC_WRAPPER=sccache
+          fi
+          cargo build --release --target x86_64-pc-windows-msvc
+        env:
+          JCODE_RELEASE_BUILD: "1"
+
+      - name: Package binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/x86_64-pc-windows-msvc/release/jcode.exe dist/jcode-windows-x86_64.exe
+          cd dist && tar czf jcode-windows-x86_64.tar.gz jcode-windows-x86_64.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jcode-windows-x86_64
+          path: dist/jcode-windows-x86_64.tar.gz
+
   release:
     name: Create Release
-    needs: build
+    needs: [build-linux-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - uses: actions/download-artifact@v4
         with:
@@ -241,3 +285,21 @@ jobs:
           git add PKGBUILD .SRCINFO
           git commit -m "Update to ${VERSION}" || echo "No changes"
           git push
+
+  # Windows build runs in parallel but doesn't block the release.
+  # The binary is added to the existing release when it finishes.
+  release-windows:
+    name: Add Windows binary to release
+    needs: [build-windows, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: jcode-windows-x86_64
+          path: artifacts
+
+      - name: Upload Windows binary to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" artifacts/jcode-windows-x86_64.tar.gz --repo "${{ github.repository }}" --clobber
