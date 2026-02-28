@@ -137,17 +137,13 @@ if [ "$IS_WINDOWS" = true ]; then
   if command -v jcode >/dev/null 2>&1; then
     info "Run 'jcode' to get started."
   else
-    echo "  Add jcode to your PATH:"
+    echo "  To start using jcode right now, run:"
+    echo ""
+    printf '    \033[1;32mexport PATH="%s:$PATH" && jcode\033[0m\n' "$INSTALL_DIR"
+    echo ""
+    echo "  To add jcode to PATH permanently (PowerShell):"
     echo ""
     printf '    \033[1;32m[Environment]::SetEnvironmentVariable("Path", "%s;" + [Environment]::GetEnvironmentVariable("Path", "User"), "User")\033[0m\n' "$win_install_dir"
-    echo ""
-    echo "  Or for this Git Bash session:"
-    echo ""
-    printf '    \033[1;32mexport PATH="%s:$PATH"\033[0m\n' "$INSTALL_DIR"
-    echo ""
-    echo "  Then run:"
-    echo ""
-    printf '    \033[1;32mjcode\033[0m\n'
   fi
 else
   PATH_LINE="export PATH=\"$INSTALL_DIR:\$PATH\""
@@ -183,12 +179,10 @@ else
   if command -v jcode >/dev/null 2>&1; then
     info "Run 'jcode' to get started."
   else
-    echo "  To start using jcode, open a new terminal window, or run:"
+    echo "  To start using jcode right now, run:"
     echo ""
-    printf '    \033[1;32msource %s\033[0m\n' "$DEFAULT_RC"
+    printf '    \033[1;32mexport PATH="%s:\$PATH" && jcode\033[0m\n' "$INSTALL_DIR"
     echo ""
-    echo "  Then run:"
-    echo ""
-    printf '    \033[1;32mjcode\033[0m\n'
+    echo "  Future terminal sessions will have jcode on PATH automatically."
   fi
 fi
