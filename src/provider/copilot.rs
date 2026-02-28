@@ -59,6 +59,8 @@ pub struct CopilotApiProvider {
     fetched_models: Arc<RwLock<Vec<String>>>,
     session_id: String,
     machine_id: String,
+    init_ready: Arc<tokio::sync::Notify>,
+    init_done: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl CopilotApiProvider {
@@ -75,6 +77,8 @@ impl CopilotApiProvider {
             fetched_models: Arc::new(RwLock::new(Vec::new())),
             session_id: Uuid::new_v4().to_string(),
             machine_id: Self::get_or_create_machine_id(),
+            init_ready: Arc::new(tokio::sync::Notify::new()),
+            init_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -94,6 +98,8 @@ impl CopilotApiProvider {
             fetched_models: Arc::new(RwLock::new(Vec::new())),
             session_id: Uuid::new_v4().to_string(),
             machine_id: Self::get_or_create_machine_id(),
+            init_ready: Arc::new(tokio::sync::Notify::new()),
+            init_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -136,6 +142,7 @@ impl CopilotApiProvider {
             crate::logging::info(
                 "Copilot model overridden via JCODE_COPILOT_MODEL, skipping tier detection",
             );
+            self.mark_init_done();
             return;
         }
 
@@ -146,6 +153,7 @@ impl CopilotApiProvider {
                     "Copilot tier detection: failed to get bearer token: {}",
                     e
                 ));
+                self.mark_init_done();
                 return;
             }
         };
@@ -174,6 +182,30 @@ impl CopilotApiProvider {
                 ));
             }
         }
+        self.mark_init_done();
+    }
+
+    fn mark_init_done(&self) {
+        self.init_done
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.init_ready.notify_waiters();
+    }
+
+    async fn wait_for_init(&self) {
+        if self
+            .init_done
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        let notified = self.init_ready.notified();
+        if self
+            .init_done
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        notified.await;
     }
 
     /// Get a valid Copilot bearer token, refreshing if expired
@@ -381,6 +413,7 @@ impl CopilotApiProvider {
         is_user_initiated: bool,
         tx: mpsc::Sender<Result<StreamEvent>>,
     ) {
+        self.wait_for_init().await;
         let model = self.model.read().unwrap().clone();
         let max_tokens: u32 = 16_384;
         let initiator = if is_user_initiated { "user" } else { "agent" };
@@ -672,6 +705,8 @@ impl Provider for CopilotApiProvider {
             fetched_models: self.fetched_models.clone(),
             session_id: self.session_id.clone(),
             machine_id: self.machine_id.clone(),
+            init_ready: self.init_ready.clone(),
+            init_done: self.init_done.clone(),
         };
 
         tokio::spawn(async move {
@@ -739,6 +774,8 @@ impl Provider for CopilotApiProvider {
             fetched_models: self.fetched_models.clone(),
             session_id: self.session_id.clone(),
             machine_id: self.machine_id.clone(),
+            init_ready: self.init_ready.clone(),
+            init_done: self.init_done.clone(),
         })
     }
 }
@@ -756,6 +793,8 @@ mod tests {
             fetched_models: Arc::new(RwLock::new(fetched)),
             session_id: "test-session".to_string(),
             machine_id: "test-machine".to_string(),
+            init_ready: Arc::new(tokio::sync::Notify::new()),
+            init_done: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 
