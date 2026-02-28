@@ -1723,6 +1723,10 @@ impl TuiState for ClientApp {
     fn now_millis(&self) -> u64 {
         self.app_started.elapsed().as_millis() as u64
     }
+
+    fn suggestion_prompts(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

@@ -390,6 +390,10 @@ impl TuiState for BenchState {
     fn now_millis(&self) -> u64 {
         self.started_at.elapsed().as_millis() as u64
     }
+
+    fn suggestion_prompts(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 fn make_text(len: usize) -> String {

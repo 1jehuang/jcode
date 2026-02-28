@@ -168,6 +168,9 @@ pub trait TuiState {
     fn working_dir(&self) -> Option<String>;
     /// Monotonic clock for viewport animations
     fn now_millis(&self) -> u64;
+    /// Suggestion prompts for new users (shown in initial empty state).
+    /// Returns (label, prompt_text) pairs. Empty if user is experienced or not authenticated.
+    fn suggestion_prompts(&self) -> Vec<(String, String)>;
 }
 
 /// Unified model/provider picker with three columns
@@ -211,8 +214,6 @@ pub struct RouteOption {
     pub detail: String,
 }
 
-pub(crate) const REDRAW_FAST: Duration = Duration::from_millis(50);
-pub(crate) const REDRAW_IDLE_ANIM: Duration = Duration::from_millis(100);
 pub(crate) const REDRAW_IDLE: Duration = Duration::from_millis(250);
 pub(crate) const REDRAW_DEEP_IDLE: Duration = Duration::from_millis(1000);
 const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
@@ -251,23 +252,32 @@ pub(crate) fn should_animate(state: &dyn TuiState) -> bool {
         || idle_donut_active(state)
 }
 
+fn fps_to_duration(fps: u32) -> Duration {
+    Duration::from_millis((1000 / fps.max(1)) as u64)
+}
+
 pub(crate) fn redraw_interval(state: &dyn TuiState) -> Duration {
     let tier = crate::perf::profile().tier;
+    let cfg = &crate::config::config().display;
+    let animation_interval = fps_to_duration(cfg.animation_fps);
+    let fast_interval = fps_to_duration(cfg.redraw_fps);
+
+    if startup_animation_active(state) || idle_donut_active(state) {
+        return match tier {
+            crate::perf::PerformanceTier::Minimal => fast_interval,
+            _ => animation_interval,
+        };
+    }
 
     if state.is_processing()
         || !state.streaming_text().is_empty()
         || state.status_notice().is_some()
         || state.rate_limit_remaining().is_some()
-        || startup_animation_active(state)
     {
         return match tier {
-            crate::perf::PerformanceTier::Minimal => REDRAW_IDLE_ANIM,
-            _ => REDRAW_FAST,
+            crate::perf::PerformanceTier::Minimal => REDRAW_IDLE,
+            _ => fast_interval,
         };
-    }
-
-    if idle_donut_active(state) {
-        return REDRAW_IDLE_ANIM;
     }
 
     let deep_idle = state

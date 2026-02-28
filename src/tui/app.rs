@@ -5545,9 +5545,23 @@ impl App {
     }
 
     fn handle_remote_char_input(&mut self, c: char) {
+        if self.input.is_empty() && !self.is_processing && self.display_messages.is_empty() {
+            if let Some(digit) = c.to_digit(10) {
+                let suggestions = self.suggestion_prompts();
+                let idx = digit as usize;
+                if idx >= 1 && idx <= suggestions.len() {
+                    let (_label, prompt) = &suggestions[idx - 1];
+                    if !prompt.starts_with('/') {
+                        self.input = prompt.clone();
+                        self.cursor_pos = self.input.len();
+                        self.follow_chat_bottom();
+                        return;
+                    }
+                }
+            }
+        }
         self.input.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
-        // Typing should return to latest content, not absolute top when paused.
         self.follow_chat_bottom();
         self.reset_tab_completion();
         self.sync_model_picker_preview_from_input();
@@ -6602,6 +6616,24 @@ impl App {
                 }
             }
             KeyCode::Char(c) => {
+                if self.input.is_empty()
+                    && !self.is_processing
+                    && self.display_messages.is_empty()
+                {
+                    if let Some(digit) = c.to_digit(10) {
+                        let suggestions = self.suggestion_prompts();
+                        let idx = digit as usize;
+                        if idx >= 1 && idx <= suggestions.len() {
+                            let (_label, prompt) = &suggestions[idx - 1];
+                            if !prompt.starts_with('/') {
+                                self.input = prompt.clone();
+                                self.cursor_pos = self.input.len();
+                                self.follow_chat_bottom();
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
                 self.input.insert(self.cursor_pos, c);
                 self.cursor_pos += c.len_utf8();
                 self.reset_tab_completion();
@@ -13076,6 +13108,65 @@ impl App {
         self.get_suggestions_for(&self.input)
     }
 
+    /// Get suggestion prompts for new users on the initial empty screen.
+    /// Returns (label, prompt_text) pairs. Empty once user is experienced or not authenticated.
+    pub fn suggestion_prompts(&self) -> Vec<(String, String)> {
+        let is_canary = if self.is_remote {
+            self.remote_is_canary.unwrap_or(false)
+        } else {
+            self.session.is_canary
+        };
+        if is_canary {
+            return Vec::new();
+        }
+
+        let auth = crate::auth::AuthStatus::check();
+        if !auth.has_any_available() {
+            return vec![
+                (
+                    "Log in to get started".to_string(),
+                    "/login".to_string(),
+                ),
+            ];
+        }
+
+        if !self.display_messages.is_empty() || self.is_processing {
+            return Vec::new();
+        }
+
+        let is_new_user = crate::storage::jcode_dir()
+            .ok()
+            .and_then(|dir| {
+                let path = dir.join("setup_hints.json");
+                std::fs::read_to_string(&path).ok()
+            })
+            .and_then(|content| {
+                serde_json::from_str::<serde_json::Value>(&content).ok()
+            })
+            .and_then(|v| v.get("launch_count")?.as_u64())
+            .map(|count| count <= 5)
+            .unwrap_or(true);
+
+        if !is_new_user {
+            return Vec::new();
+        }
+
+        vec![
+            (
+                "Find a file on my computer and open it".to_string(),
+                "Find the most recently modified PDF on my computer and open it for me".to_string(),
+            ),
+            (
+                "Write a report and open it".to_string(),
+                "Write a one-page report about what jcode is and how it works, save it as a PDF, and open it".to_string(),
+            ),
+            (
+                "Build a Python snake game".to_string(),
+                "Create a snake game in Python using pygame, save it, and run it".to_string(),
+            ),
+        ]
+    }
+
     /// Autocomplete current input - cycles through suggestions on repeated Tab
     pub fn autocomplete(&mut self) -> bool {
         // Get suggestions for current input
@@ -14636,6 +14727,10 @@ impl super::TuiState for App {
 
     fn now_millis(&self) -> u64 {
         self.app_started.elapsed().as_millis() as u64
+    }
+
+    fn suggestion_prompts(&self) -> Vec<(String, String)> {
+        App::suggestion_prompts(self)
     }
 }
 

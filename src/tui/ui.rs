@@ -2635,6 +2635,47 @@ fn prepare_messages(app: &dyn TuiState, width: u16, height: u16) -> PreparedMess
         wrapped_lines = header_prepared.wrapped_lines;
 
         if is_initial_empty {
+            let suggestions = app.suggestion_prompts();
+            if !suggestions.is_empty() {
+                wrapped_lines.push(Line::from(""));
+                for (i, (label, _prompt)) in suggestions.iter().enumerate() {
+                    let is_login = _prompt.starts_with('/');
+                    let spans = if is_login {
+                        vec![
+                            Span::styled(
+                                format!("  {} ", label),
+                                Style::default()
+                                    .fg(Color::Rgb(138, 180, 248))
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("(type {})", _prompt),
+                                Style::default().fg(DIM_COLOR),
+                            ),
+                        ]
+                    } else {
+                        vec![
+                            Span::styled(
+                                format!("  [{}] ", i + 1),
+                                Style::default().fg(Color::Rgb(138, 180, 248)),
+                            ),
+                            Span::styled(
+                                label.clone(),
+                                Style::default().fg(Color::Rgb(200, 200, 200)),
+                            ),
+                        ]
+                    };
+                    wrapped_lines.push(Line::from(spans));
+                }
+                if suggestions.len() > 1 {
+                    wrapped_lines.push(Line::from(""));
+                    wrapped_lines.push(Line::from(Span::styled(
+                        "  Press 1-3 or type anything to start",
+                        Style::default().fg(DIM_COLOR),
+                    )));
+                }
+            }
+
             let content_height = wrapped_lines.len();
             let input_reserve = 4;
             let available = (height as usize).saturating_sub(input_reserve);

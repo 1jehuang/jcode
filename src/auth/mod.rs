@@ -85,6 +85,16 @@ impl AuthStatus {
         status
     }
 
+    /// Returns true if at least one provider has usable credentials.
+    pub fn has_any_available(&self) -> bool {
+        self.anthropic.state == AuthState::Available
+            || self.openai == AuthState::Available
+            || self.openrouter == AuthState::Available
+            || self.copilot == AuthState::Available
+            || self.cursor == AuthState::Available
+            || self.antigravity == AuthState::Available
+    }
+
     /// Invalidate the cached auth status so the next `check()` does a fresh probe.
     pub fn invalidate_cache() {
         if let Ok(mut cache) = AUTH_STATUS_CACHE.write() {
