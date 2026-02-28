@@ -2,6 +2,10 @@ import Foundation
 import Combine
 import JCodeKit
 
+#if canImport(UIKit)
+import UIKit
+#endif
+
 @MainActor
 final class AppModel: ObservableObject {
     enum ConnectionState: Equatable {
@@ -10,7 +14,7 @@ final class AppModel: ObservableObject {
         case connected
     }
 
-    struct ChatEntry: Identifiable {
+    struct ChatEntry: Identifiable, Equatable {
         let id: UUID
         let role: Role
         var text: String
@@ -27,6 +31,10 @@ final class AppModel: ObservableObject {
             self.role = role
             self.text = text
             self.toolCalls = toolCalls
+        }
+
+        static func == (lhs: ChatEntry, rhs: ChatEntry) -> Bool {
+            lhs.id == rhs.id && lhs.text == rhs.text && lhs.toolCalls.count == rhs.toolCalls.count
         }
     }
 
@@ -52,7 +60,13 @@ final class AppModel: ObservableObject {
     @Published var hostInput: String = ""
     @Published var portInput: String = "7643"
     @Published var pairCodeInput: String = ""
-    @Published var deviceNameInput: String = Host.current().localizedName ?? "iPhone"
+    @Published var deviceNameInput: String = {
+        #if canImport(UIKit)
+        return UIDevice.current.name
+        #else
+        return Host.current().localizedName ?? "Mac"
+        #endif
+    }()
 
     @Published var statusMessage: String?
     @Published var errorMessage: String?
@@ -73,8 +87,11 @@ final class AppModel: ObservableObject {
     private var connectionGeneration: UInt64 = 0
 
     private var lastAssistantMessageId: UUID?
+    private var lastAssistantIndex: Int?
     private var inFlightTools: [String: ToolCallInfo] = [:]
     private var lastToolId: String?
+    private var toolMessageIndex: [String: Int] = [:]
+    private var toolSubIndex: [String: Int] = [:]
 
     private let deviceId: String = {
         if let existing = UserDefaults.standard.string(forKey: "jcode.device.id") {
@@ -262,6 +279,9 @@ final class AppModel: ObservableObject {
         inFlightTools.removeAll()
         lastToolId = nil
         lastAssistantMessageId = nil
+        lastAssistantIndex = nil
+        toolMessageIndex.removeAll()
+        toolSubIndex.removeAll()
         activeSessionId = ""
         sessions = []
         serverName = credential.serverName
@@ -410,13 +430,26 @@ final class AppModel: ObservableObject {
         }
         messages = mapped
         lastAssistantMessageId = messages.last(where: { $0.role == .assistant })?.id
+        if let id = lastAssistantMessageId {
+            lastAssistantIndex = messages.lastIndex(where: { $0.id == id })
+        } else {
+            lastAssistantIndex = nil
+        }
         inFlightTools.removeAll()
         lastToolId = nil
+        toolMessageIndex.removeAll()
+        toolSubIndex.removeAll()
     }
 
     private func appendAssistantChunk(_ delta: String) {
+        if let idx = lastAssistantIndex, idx < messages.count,
+           messages[idx].id == lastAssistantMessageId {
+            messages[idx].text += delta
+            return
+        }
         if let id = lastAssistantMessageId,
            let idx = messages.firstIndex(where: { $0.id == id }) {
+            lastAssistantIndex = idx
             messages[idx].text += delta
             return
         }
@@ -424,11 +457,18 @@ final class AppModel: ObservableObject {
         let entry = ChatEntry(role: .assistant, text: delta)
         messages.append(entry)
         lastAssistantMessageId = entry.id
+        lastAssistantIndex = messages.count - 1
     }
 
     private func replaceAssistantText(_ text: String) {
+        if let idx = lastAssistantIndex, idx < messages.count,
+           messages[idx].id == lastAssistantMessageId {
+            messages[idx].text = text
+            return
+        }
         if let id = lastAssistantMessageId,
            let idx = messages.firstIndex(where: { $0.id == id }) {
+            lastAssistantIndex = idx
             messages[idx].text = text
             return
         }
@@ -436,19 +476,31 @@ final class AppModel: ObservableObject {
         let entry = ChatEntry(role: .assistant, text: text)
         messages.append(entry)
         lastAssistantMessageId = entry.id
+        lastAssistantIndex = messages.count - 1
     }
 
     private func attachTool(_ tool: ToolCallInfo) {
         inFlightTools[tool.id] = tool
         lastToolId = tool.id
 
-        if let id = lastAssistantMessageId,
-           let idx = messages.firstIndex(where: { $0.id == id }) {
+        if let idx = lastAssistantIndex, idx < messages.count,
+           messages[idx].id == lastAssistantMessageId {
             messages[idx].toolCalls.append(tool)
+            toolMessageIndex[tool.id] = idx
+            toolSubIndex[tool.id] = messages[idx].toolCalls.count - 1
+        } else if let id = lastAssistantMessageId,
+                  let idx = messages.firstIndex(where: { $0.id == id }) {
+            lastAssistantIndex = idx
+            messages[idx].toolCalls.append(tool)
+            toolMessageIndex[tool.id] = idx
+            toolSubIndex[tool.id] = messages[idx].toolCalls.count - 1
         } else {
             let entry = ChatEntry(role: .assistant, text: "", toolCalls: [tool])
             messages.append(entry)
             lastAssistantMessageId = entry.id
+            lastAssistantIndex = messages.count - 1
+            toolMessageIndex[tool.id] = messages.count - 1
+            toolSubIndex[tool.id] = 0
         }
     }
 
@@ -460,8 +512,17 @@ final class AppModel: ObservableObject {
         mutate(&tool)
         inFlightTools[toolId] = tool
 
+        if let msgIdx = toolMessageIndex[toolId], msgIdx < messages.count,
+           let tIdx = toolSubIndex[toolId], tIdx < messages[msgIdx].toolCalls.count,
+           messages[msgIdx].toolCalls[tIdx].id == toolId {
+            messages[msgIdx].toolCalls[tIdx] = tool
+            return
+        }
+
         for msgIdx in messages.indices {
             if let toolIdx = messages[msgIdx].toolCalls.firstIndex(where: { $0.id == toolId }) {
+                toolMessageIndex[toolId] = msgIdx
+                toolSubIndex[toolId] = toolIdx
                 messages[msgIdx].toolCalls[toolIdx] = tool
                 break
             }
@@ -486,6 +547,9 @@ final class AppModel: ObservableObject {
         inFlightTools.removeAll()
         lastToolId = nil
         lastAssistantMessageId = nil
+        lastAssistantIndex = nil
+        toolMessageIndex.removeAll()
+        toolSubIndex.removeAll()
 
         if let error, !error.isEmpty {
             errorMessage = error
@@ -564,6 +628,9 @@ final class AppModel: ObservableObject {
         inFlightTools.removeAll()
         lastToolId = nil
         lastAssistantMessageId = nil
+        lastAssistantIndex = nil
+        toolMessageIndex.removeAll()
+        toolSubIndex.removeAll()
     }
 
     fileprivate func onServerError(id _: UInt64, message: String) {

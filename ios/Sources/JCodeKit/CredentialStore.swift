@@ -9,6 +9,16 @@ public struct ServerCredential: Codable, Sendable, Hashable {
     public let deviceId: String
     public let pairedAt: Date
 
+    public init(host: String, port: UInt16, authToken: String, serverName: String, serverVersion: String, deviceId: String, pairedAt: Date) {
+        self.host = host
+        self.port = port
+        self.authToken = authToken
+        self.serverName = serverName
+        self.serverVersion = serverVersion
+        self.deviceId = deviceId
+        self.pairedAt = pairedAt
+    }
+
     enum CodingKeys: String, CodingKey {
         case host, port
         case authToken = "auth_token"

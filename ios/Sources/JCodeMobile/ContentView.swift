@@ -230,12 +230,11 @@ private struct ChatPanelView: View {
                     .padding(16)
                 }
                 .background(Color.jcSubtleSurface)
-                .onChange(of: model.messages.count) { _ in
-                    if let id = model.messages.last?.id {
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            proxy.scrollTo(id, anchor: .bottom)
-                        }
-                    }
+                .onChange(of: model.messages.count) {
+                    scrollToBottom(proxy)
+                }
+                .onChange(of: model.messages.last?.text) {
+                    scrollToBottom(proxy)
                 }
             }
 
@@ -246,6 +245,14 @@ private struct ChatPanelView: View {
                 .background(Color.jcSurface)
         }
         .navigationTitle("Chat")
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        if let id = model.messages.last?.id {
+            withAnimation(.easeOut(duration: 0.15)) {
+                proxy.scrollTo(id, anchor: .bottom)
+            }
+        }
     }
 }
 

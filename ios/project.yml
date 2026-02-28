@@ -3,7 +3,7 @@ options:
   bundleIdPrefix: com.jcode
   deploymentTarget:
     iOS: "17.0"
-  xcodeVersion: "16.0"
+  xcodeVersion: "26.0"
   generateEmptyDirectories: true
 
 settings:

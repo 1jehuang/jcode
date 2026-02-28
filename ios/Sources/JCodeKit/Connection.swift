@@ -20,6 +20,8 @@ public actor JCodeConnection {
     private var eventContinuation: AsyncStream<Event>.Continuation?
     private let authToken: String
     private let serverURL: URL
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
 
     public init(host: String, port: UInt16 = 7643, authToken: String) {
         var components = URLComponents()
@@ -116,7 +118,7 @@ public actor JCodeConnection {
         guard let webSocket else {
             throw ConnectionError.notConnected
         }
-        let data = try JSONEncoder().encode(request)
+        let data = try encoder.encode(request)
         guard let text = String(data: data, encoding: .utf8) else {
             throw ConnectionError.encodingFailed
         }
@@ -138,7 +140,7 @@ public actor JCodeConnection {
             switch message {
             case .string(let text):
                 if let data = text.data(using: .utf8),
-                   let event = try? JSONDecoder().decode(ServerEvent.self, from: data) {
+                   let event = try? self.decoder.decode(ServerEvent.self, from: data) {
                     if case .sessionId(let sid) = event {
                         setState(.connected(sessionId: sid))
                     }
