@@ -9492,9 +9492,19 @@ impl App {
             match Self::openai_login_callback(verifier_clone, state_clone).await {
                 Ok(msg) => {
                     crate::logging::info(&format!("OpenAI login: {}", msg));
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "openai".to_string(),
+                        success: true,
+                        message: msg,
+                    }));
                 }
                 Err(e) => {
                     crate::logging::error(&format!("OpenAI login failed: {}", e));
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "openai".to_string(),
+                        success: false,
+                        message: format!("OpenAI login failed: {}", e),
+                    }));
                 }
             }
         });
@@ -9515,9 +9525,13 @@ impl App {
     ) -> Result<String, String> {
         let port = crate::auth::oauth::openai::DEFAULT_PORT;
         let redirect_uri = crate::auth::oauth::openai::redirect_uri(port);
-        let code = crate::auth::oauth::wait_for_callback_async(port, &expected_state)
-            .await
-            .map_err(|e| format!("Callback failed: {}", e))?;
+        let code = tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            crate::auth::oauth::wait_for_callback_async(port, &expected_state),
+        )
+        .await
+        .map_err(|_| "Login timed out after 5 minutes. Please try again.".to_string())?
+        .map_err(|e| format!("Callback failed: {}", e))?;
 
         let client = reqwest::Client::new();
         let resp = client

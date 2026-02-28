@@ -65,14 +65,18 @@ jobs:
           rustflags = ["-C", "link-arg=-fuse-ld=mold"]
           EOF
           fi
+          if command -v sccache &>/dev/null && sccache --start-server 2>/dev/null; then
+            export RUSTC_WRAPPER=sccache
+          fi
           cargo build --release --target ${{ matrix.target }}
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
 
       - name: Run tests
-        run: cargo test --target ${{ matrix.target }}
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
+        shell: bash
+        run: |
+          if command -v sccache &>/dev/null && sccache --show-stats &>/dev/null; then
+            export RUSTC_WRAPPER=sccache
+          fi
+          cargo test --target ${{ matrix.target }}
 
   fmt:
     name: Format

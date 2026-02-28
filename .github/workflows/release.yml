@@ -72,10 +72,12 @@ jobs:
           rustflags = ["-C", "link-arg=-fuse-ld=mold"]
           EOF
           fi
+          if command -v sccache &>/dev/null && sccache --start-server 2>/dev/null; then
+            export RUSTC_WRAPPER=sccache
+          fi
           cargo build --release --target ${{ matrix.target }}
         env:
           JCODE_RELEASE_BUILD: "1"
-          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
 
       - name: Package binary (Unix)
         if: runner.os != 'Windows'
