@@ -869,6 +869,64 @@ pub fn detect_crashed_sessions() -> Result<Option<CrashedSessionsInfo>> {
     }))
 }
 
+/// Find recent crashed sessions (within the last 24 hours) for showing resume hints.
+/// Unlike `detect_crashed_sessions`, this does NOT apply the 60-second batch window filter.
+pub fn find_recent_crashed_sessions() -> Vec<(String, String)> {
+    let sessions_dir = match storage::jcode_dir() {
+        Ok(d) => d.join("sessions"),
+        Err(_) => return Vec::new(),
+    };
+    if !sessions_dir.exists() {
+        return Vec::new();
+    }
+
+    let cutoff = Utc::now() - Duration::hours(24);
+    let mut recovered_parents: HashSet<String> = HashSet::new();
+    let mut sessions: Vec<Session> = Vec::new();
+
+    let entries = match std::fs::read_dir(&sessions_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e == "json").unwrap_or(false) {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if let Ok(session) = Session::load(stem) {
+                    if session.id.starts_with("session_recovery_") {
+                        if let Some(parent) = session.parent_id.as_ref() {
+                            recovered_parents.insert(parent.clone());
+                        }
+                    }
+                    sessions.push(session);
+                }
+            }
+        }
+    }
+
+    let mut crashed: Vec<Session> = sessions
+        .into_iter()
+        .filter(|s| matches!(s.status, SessionStatus::Crashed { .. }))
+        .filter(|s| !recovered_parents.contains(&s.id))
+        .filter(|s| {
+            let ts = s.last_active_at.unwrap_or(s.updated_at);
+            ts > cutoff
+        })
+        .collect();
+
+    crashed.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+    crashed
+        .into_iter()
+        .map(|s| {
+            let name = s.display_name().to_string();
+            let id = s.id.clone();
+            (id, name)
+        })
+        .collect()
+}
+
 fn is_pid_running(pid: u32) -> bool {
     crate::platform::is_process_running(pid)
 }

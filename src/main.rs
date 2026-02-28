@@ -135,6 +135,38 @@ fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// Show a hint about resuming crashed sessions on fresh boot.
+fn show_crash_resume_hint() {
+    let crashed = session::find_recent_crashed_sessions();
+    if crashed.is_empty() {
+        return;
+    }
+
+    let (id, name) = &crashed[0];
+    let session_label = id::extract_session_name(id).unwrap_or(name.as_str());
+
+    if crashed.len() == 1 {
+        eprintln!(
+            "\x1b[33m💥 Session \x1b[1m{}\x1b[0m\x1b[33m crashed. Resume with:\x1b[0m  jcode --resume {}",
+            session_label, id
+        );
+    } else {
+        eprintln!(
+            "\x1b[33m💥 {} sessions crashed recently. Most recent: \x1b[1m{}\x1b[0m",
+            crashed.len(),
+            session_label
+        );
+        eprintln!(
+            "\x1b[33m   Resume with:\x1b[0m  jcode --resume {}",
+            id
+        );
+        eprintln!(
+            "\x1b[33m   List all:\x1b[0m     jcode --resume"
+        );
+    }
+    eprintln!();
+}
+
 fn init_tui_terminal() -> Result<ratatui::DefaultTerminal> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         anyhow::bail!("jcode TUI requires an interactive terminal (stdin/stdout must be a TTY)");
@@ -774,6 +806,12 @@ async fn run_main(mut args: Args) -> Result<()> {
             // Show platform setup hints every 3rd launch and optionally
             // return a startup message to auto-send in the next TUI session.
             let startup_message = setup_hints::maybe_show_setup_hints();
+
+            // If not resuming a session, check for recently crashed sessions
+            // and show a hint so users know they can resume.
+            if args.resume.is_none() {
+                show_crash_resume_hint();
+            }
 
             // Auto-detect jcode repo and enable self-dev mode
             let cwd = std::env::current_dir()?;
