@@ -2651,6 +2651,41 @@ async fn handle_client(
                 }
             }
 
+            Request::NotifyAuthChanged { id } => {
+                crate::auth::AuthStatus::invalidate_cache();
+                let provider_clone = provider.clone();
+                let client_event_tx_clone = client_event_tx.clone();
+                let agent_clone = agent.clone();
+                tokio::spawn(async move {
+                    provider_clone.on_auth_changed();
+                    let initial_models = {
+                        let agent_guard = agent_clone.lock().await;
+                        agent_guard.available_models_display()
+                    };
+                    for _ in 0..20 {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        let current_models = {
+                            let agent_guard = agent_clone.lock().await;
+                            agent_guard.available_models_display()
+                        };
+                        if current_models != initial_models {
+                            let _ = client_event_tx_clone.send(ServerEvent::AvailableModelsUpdated {
+                                available_models: current_models,
+                            });
+                            return;
+                        }
+                    }
+                    let final_models = {
+                        let agent_guard = agent_clone.lock().await;
+                        agent_guard.available_models_display()
+                    };
+                    let _ = client_event_tx_clone.send(ServerEvent::AvailableModelsUpdated {
+                        available_models: final_models,
+                    });
+                });
+                let _ = client_event_tx.send(ServerEvent::Done { id });
+            }
+
             Request::SetFeature {
                 id,
                 feature,

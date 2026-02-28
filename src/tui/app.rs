@@ -4529,7 +4529,11 @@ impl App {
                                 self.handle_usage_report(results);
                             }
                             Ok(BusEvent::LoginCompleted(login)) => {
+                                let success = login.success && login.provider != "copilot_code";
                                 self.handle_login_completed(login);
+                                if success {
+                                    let _ = remote.notify_auth_changed().await;
+                                }
                             }
                             _ => {}
                         }
@@ -5409,6 +5413,10 @@ impl App {
                     )));
                     self.set_status_notice(format!("Model → {}", model));
                 }
+                false
+            }
+            ServerEvent::AvailableModelsUpdated { available_models } => {
+                self.remote_available_models = available_models;
                 false
             }
             ServerEvent::SoftInterruptInjected {
@@ -9590,6 +9598,14 @@ impl App {
             let user_code = device_resp.user_code.clone();
             let verification_uri = device_resp.verification_uri.clone();
 
+            let clipboard_result = arboard::Clipboard::new()
+                .and_then(|mut cb| cb.set_text(user_code.clone()));
+            let clipboard_msg = if clipboard_result.is_ok() {
+                " (copied to clipboard)"
+            } else {
+                ""
+            };
+
             let _ = open::that(&verification_uri);
 
             Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
@@ -9599,9 +9615,9 @@ impl App {
                     "**GitHub Copilot Login**\n\n\
                      Opening browser for GitHub authorization...\n\n\
                      If the browser didn't open, visit:\n  {}\n\n\
-                     Enter code: **{}**\n\n\
+                     Enter code: **{}**{}\n\n\
                      Waiting for authorization... (type `/cancel` to abort)",
-                    verification_uri, user_code
+                    verification_uri, user_code, clipboard_msg
                 ),
             }));
 

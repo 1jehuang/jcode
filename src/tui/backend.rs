@@ -450,6 +450,13 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Notify the server that auth credentials changed (e.g., after login)
+    pub async fn notify_auth_changed(&mut self) -> Result<()> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::NotifyAuthChanged { id }).await
+    }
+
     /// Send a response for a client debug request
     pub async fn send_client_debug_response(&mut self, id: u64, output: String) -> Result<()> {
         self.send_request(Request::ClientDebugResponse { id, output })

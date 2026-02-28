@@ -994,6 +994,9 @@ impl ClientApp {
                     self.status_notice = Some((format!("Model → {}", model), Instant::now()));
                 }
             }
+            ServerEvent::AvailableModelsUpdated { .. } => {
+                // Client mode doesn't track model lists
+            }
             ServerEvent::Notification {
                 from_session,
                 from_name,

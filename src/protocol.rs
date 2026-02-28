@@ -137,6 +137,10 @@ pub enum Request {
     #[serde(rename = "compact")]
     Compact { id: u64 },
 
+    /// Notify server that auth credentials changed (e.g., after login)
+    #[serde(rename = "notify_auth_changed")]
+    NotifyAuthChanged { id: u64 },
+
     /// Send stdin input to a running command that requested it
     #[serde(rename = "stdin_response")]
     StdinResponse {
@@ -572,6 +576,12 @@ pub enum ServerEvent {
         error: Option<String>,
     },
 
+    /// Available models updated (pushed after auth changes)
+    #[serde(rename = "available_models_updated")]
+    AvailableModelsUpdated {
+        available_models: Vec<String>,
+    },
+
     /// Notification from another agent (file conflict, message, shared context)
     #[serde(rename = "notification")]
     Notification {
@@ -760,6 +770,7 @@ impl Request {
             Request::SetFeature { id, .. } => *id,
             Request::Split { id } => *id,
             Request::Compact { id } => *id,
+            Request::NotifyAuthChanged { id } => *id,
             Request::StdinResponse { id, .. } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,
