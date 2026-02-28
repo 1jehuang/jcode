@@ -264,6 +264,8 @@ pub struct RunResult {
     pub reload_session: Option<String>,
     /// Session ID to rebuild (full git pull + cargo build + tests)
     pub rebuild_session: Option<String>,
+    /// Session ID to update (download from GitHub releases and reload)
+    pub update_session: Option<String>,
     /// Exit code to use (for canary wrapper communication)
     pub exit_code: Option<i32>,
 }
@@ -575,6 +577,8 @@ pub struct App {
     reload_requested: Option<String>,
     // Hot-rebuild: if set, do full git pull + cargo build + tests then exec
     rebuild_requested: Option<String>,
+    // Update: if set, check for and download update from GitHub releases then exec
+    update_requested: Option<String>,
     // Pasted content storage (displayed as placeholders, expanded on submit)
     pasted_contents: Vec<String>,
     // Pending pasted images (media_type, base64_data) attached to next message
@@ -926,6 +930,7 @@ impl App {
             thinking_prefix_emitted: false,
             reload_requested: None,
             rebuild_requested: None,
+            update_requested: None,
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
             debug_tx: None,
@@ -4004,6 +4009,7 @@ impl App {
         Ok(RunResult {
             reload_session: self.reload_requested.take(),
             rebuild_session: self.rebuild_requested.take(),
+            update_session: self.update_requested.take(),
             exit_code: self.requested_exit_code,
         })
     }
@@ -4535,6 +4541,7 @@ impl App {
         Ok(RunResult {
             reload_session: self.reload_requested.take(),
             rebuild_session: self.rebuild_requested.take(),
+            update_session: self.update_requested.take(),
             exit_code: self.requested_exit_code,
         })
     }
@@ -4694,6 +4701,7 @@ impl App {
         Ok(RunResult {
             reload_session: None,
             rebuild_session: None,
+            update_session: None,
             exit_code: None,
         })
     }
@@ -5942,6 +5950,20 @@ impl App {
                             .clone()
                             .unwrap_or_else(|| crate::id::new_id("ses"));
                         self.rebuild_requested = Some(session_id);
+                        self.should_quit = true;
+                        return Ok(());
+                    }
+
+                    // Handle /update - download latest release and reload
+                    if trimmed == "/update" {
+                        self.push_display_message(DisplayMessage::system(
+                            "Checking for updates...".to_string(),
+                        ));
+                        let session_id = self
+                            .remote_session_id
+                            .clone()
+                            .unwrap_or_else(|| crate::id::new_id("ses"));
+                        self.update_requested = Some(session_id);
                         self.should_quit = true;
                         return Ok(());
                     }
@@ -8060,6 +8082,19 @@ impl App {
                 .set_status(crate::session::SessionStatus::Reloaded);
             let _ = self.session.save();
             self.rebuild_requested = Some(self.session.id.clone());
+            self.should_quit = true;
+            return;
+        }
+
+        if trimmed == "/update" {
+            self.push_display_message(DisplayMessage::system(
+                "Checking for updates...".to_string(),
+            ));
+            self.session.provider_session_id = self.provider_session_id.clone();
+            self.session
+                .set_status(crate::session::SessionStatus::Reloaded);
+            let _ = self.session.save();
+            self.update_requested = Some(self.session.id.clone());
             self.should_quit = true;
             return;
         }
@@ -12901,6 +12936,7 @@ impl App {
             ("/usage".into(), "Show subscription usage limits"),
             ("/reload".into(), "Smart reload (if newer binary exists)"),
             ("/rebuild".into(), "Full rebuild (git pull + build + tests)"),
+            ("/update".into(), "Check for and install latest release"),
             ("/split".into(), "Split session into a new window"),
             ("/quit".into(), "Exit jcode"),
             ("/auth".into(), "Show authentication status"),

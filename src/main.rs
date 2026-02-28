@@ -1214,8 +1214,16 @@ async fn run_tui(
         hot_rebuild(rebuild_session_id)?;
     }
 
-    // Print resume command for normal exits (not hot-reload/rebuild)
-    if run_result.reload_session.is_none() && run_result.rebuild_session.is_none() {
+    // Check for update request (download from GitHub releases)
+    if let Some(ref update_session_id) = run_result.update_session {
+        hot_update(update_session_id)?;
+    }
+
+    // Print resume command for normal exits (not hot-reload/rebuild/update)
+    if run_result.reload_session.is_none()
+        && run_result.rebuild_session.is_none()
+        && run_result.update_session.is_none()
+    {
         eprintln!();
         eprintln!(
             "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
@@ -1379,6 +1387,74 @@ fn hot_rebuild(session_id: &str) -> Result<()> {
     let err = crate::platform::replace_process(&mut cmd);
 
     // replace_process() only returns on error
+    Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
+}
+
+/// Hot-update: check for updates from GitHub releases, download, install, and restart
+fn hot_update(session_id: &str) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+
+    eprintln!("Checking for updates...");
+
+    match update::check_for_update_blocking() {
+        Ok(Some(release)) => {
+            let current = env!("JCODE_VERSION");
+            eprintln!(
+                "Update available: {} -> {}",
+                current, release.tag_name
+            );
+            eprintln!("Downloading {}...", release.tag_name);
+
+            match update::download_and_install_blocking(&release) {
+                Ok(path) => {
+                    eprintln!("✓ Installed {} at {:?}", release.tag_name, path);
+
+                    let is_selfdev = std::env::var("JCODE_SELFDEV_MODE").is_ok();
+                    let exe = build::client_update_candidate(is_selfdev)
+                        .map(|(p, _)| p)
+                        .unwrap_or(path);
+
+                    eprintln!("Restarting with session {}...", session_id);
+
+                    let mut cmd = ProcessCommand::new(&exe);
+                    if is_selfdev {
+                        cmd.arg("self-dev");
+                    }
+                    cmd.arg("--resume")
+                        .arg(session_id)
+                        .arg("--no-update")
+                        .current_dir(&cwd);
+                    let err = crate::platform::replace_process(&mut cmd);
+                    return Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err));
+                }
+                Err(e) => {
+                    eprintln!("✗ Download failed: {}", e);
+                    eprintln!("Resuming session with current version...");
+                    // Fall through to restart with current binary
+                }
+            }
+        }
+        Ok(None) => {
+            eprintln!("Already up to date ({})", env!("JCODE_VERSION"));
+        }
+        Err(e) => {
+            eprintln!("✗ Update check failed: {}", e);
+            eprintln!("Resuming session with current version...");
+        }
+    }
+
+    // No update or update failed - restart with current binary to resume session
+    let exe = std::env::current_exe()?;
+    let is_selfdev = std::env::var("JCODE_SELFDEV_MODE").is_ok();
+    let mut cmd = ProcessCommand::new(&exe);
+    if is_selfdev {
+        cmd.arg("self-dev");
+    }
+    cmd.arg("--resume")
+        .arg(session_id)
+        .arg("--no-update")
+        .current_dir(&cwd);
+    let err = crate::platform::replace_process(&mut cmd);
     Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
 }
 
@@ -2600,6 +2676,11 @@ async fn run_tui_client(
         hot_rebuild(rebuild_session_id)?;
     }
 
+    // Check for update request (download from GitHub releases)
+    if let Some(ref update_session_id) = run_result.update_session {
+        hot_update(update_session_id)?;
+    }
+
     Ok(())
 }
 
@@ -3345,6 +3426,11 @@ async fn run_canary_wrapper(
     // Check for hot-rebuild request (full git pull + cargo build + tests)
     if let Some(ref rebuild_session_id) = run_result.rebuild_session {
         hot_rebuild(rebuild_session_id)?;
+    }
+
+    // Check for update request (download from GitHub releases)
+    if let Some(ref update_session_id) = run_result.update_session {
+        hot_update(update_session_id)?;
     }
 
     // Check if reload was requested - exec into new binary
