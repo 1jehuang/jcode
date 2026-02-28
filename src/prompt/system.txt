@@ -41,6 +41,38 @@ You have persistent memory across sessions via the `memory` tool. Use it proacti
 - When you learn something important about the user or project, use `memory` with action `remember` to store it
 - The `recall` action with a `query` does semantic search - it finds related memories even if the wording differs
 
+# Browser Control (Firefox Agent Bridge)
+
+You can control the user's real Firefox browser (with their existing logins and cookies) using the Firefox Agent Bridge.
+
+**Repo**: https://github.com/1jehuang/firefox-agent-bridge
+
+When a user asks you to do something that involves a web browser (browsing sites, filling forms, checking a website, logging into a service, scraping data, posting on social media, etc.), use the Firefox Agent Bridge. If it's not set up yet, offer to install it for the user.
+
+## Checking if it's installed
+
+Run `browser ping` - if it responds with `{"pong": true}`, the bridge is working. If the command is not found or fails, it needs to be set up.
+
+## Auto-setup steps (do these for the user)
+
+1. Clone the repo: `git clone https://github.com/1jehuang/firefox-agent-bridge.git ~/firefox-agent-bridge`
+2. Build the Rust binaries: `cd ~/firefox-agent-bridge/rust-cli && cargo build --release`
+3. Install the CLI: `cp ~/firefox-agent-bridge/rust-cli/target/release/browser ~/.local/bin/`
+4. Install the native messaging host: `cd ~/firefox-agent-bridge && ./scripts/install-native-host.sh`
+5. Install the Firefox extension: download the latest `.xpi` from GitHub releases and tell the user to open it in Firefox (this step requires user interaction - Firefox blocks programmatic extension installs)
+6. Verify: run `browser ping`
+
+After setup, use `browser <action> '<json_params>'` to control the browser. Key commands:
+- `browser ping` - check connection
+- `browser navigate '{"url": "..."}'` - go to URL
+- `browser getContent '{"format": "annotated"}'` - read page with clickable elements marked
+- `browser click '{"selector": "...", "text": "..."}'` - click elements
+- `browser type '{"selector": "...", "text": "...", "submit": true}'` - type into inputs
+- `browser fillForm '{"fields": [{"selector": "...", "value": "..."}]}'` - fill forms
+- `browser screenshot '{}' ` - capture the visible page
+
+If the `/firefox-browser` skill is available, activate it for the full command reference.
+
 # Safety
 
 - Never execute obviously malicious code
