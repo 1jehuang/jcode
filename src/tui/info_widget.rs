@@ -228,6 +228,8 @@ pub enum WidgetKind {
     AmbientMode,
     /// Rotating tips/shortcuts
     Tips,
+    /// Git status
+    GitStatus,
 }
 
 impl WidgetKind {
@@ -245,6 +247,7 @@ impl WidgetKind {
             WidgetKind::UsageLimits => 8,
             WidgetKind::ModelInfo => 9,
             WidgetKind::Tips => 10,
+            WidgetKind::GitStatus => 8, // Lower priority than most, but above tips
         }
     }
 
@@ -262,6 +265,7 @@ impl WidgetKind {
             WidgetKind::UsageLimits => Side::Left,
             WidgetKind::ModelInfo => Side::Left,
             WidgetKind::Tips => Side::Left,
+            WidgetKind::GitStatus => Side::Left,
         }
     }
 
@@ -279,6 +283,7 @@ impl WidgetKind {
             WidgetKind::UsageLimits => 3,
             WidgetKind::ModelInfo => 3, // Model + usage bars
             WidgetKind::Tips => 3,
+            WidgetKind::GitStatus => 3,
         }
     }
 
@@ -296,6 +301,7 @@ impl WidgetKind {
             WidgetKind::UsageLimits,
             WidgetKind::ModelInfo,
             WidgetKind::Tips,
+            WidgetKind::GitStatus,
         ]
     }
 
@@ -312,6 +318,7 @@ impl WidgetKind {
             WidgetKind::UsageLimits => "usage",
             WidgetKind::ModelInfo => "model",
             WidgetKind::Tips => "tips",
+            WidgetKind::GitStatus => "git",
         }
     }
 }
@@ -643,6 +650,28 @@ pub struct DiagramInfo {
     pub label: Option<String>,
 }
 
+/// Git repository status for the info widget
+#[derive(Debug, Clone)]
+pub struct GitInfo {
+    pub branch: String,
+    pub modified: usize,
+    pub staged: usize,
+    pub untracked: usize,
+    pub ahead: usize,
+    pub behind: usize,
+    pub dirty_files: Vec<String>,
+}
+
+impl GitInfo {
+    pub fn is_interesting(&self) -> bool {
+        self.modified > 0
+            || self.staged > 0
+            || self.untracked > 0
+            || self.ahead > 0
+            || self.behind > 0
+    }
+}
+
 /// Ambient mode status data for the info widget
 #[derive(Debug, Clone)]
 pub struct AmbientWidgetData {
@@ -705,6 +734,8 @@ pub struct InfoWidgetData {
     pub observed_context_tokens: Option<u64>,
     /// Whether background compaction is currently in progress
     pub is_compacting: bool,
+    /// Git repository status
+    pub git_info: Option<GitInfo>,
 }
 
 impl InfoWidgetData {
@@ -804,6 +835,11 @@ impl InfoWidgetData {
             WidgetKind::UsageLimits => false, // Combined into ModelInfo
             WidgetKind::ModelInfo => self.model.is_some(),
             WidgetKind::Tips => true, // Always available
+            WidgetKind::GitStatus => self
+                .git_info
+                .as_ref()
+                .map(|g| g.is_interesting())
+                .unwrap_or(false),
         }
     }
 
@@ -1340,6 +1376,26 @@ fn calculate_widget_height(
             let lines = wrap_tip_text(&tip.text, effective_w);
             1 + lines.len() as u16 // header + wrapped text
         }
+        WidgetKind::GitStatus => {
+            let Some(info) = &data.git_info else {
+                return 0;
+            };
+            if !info.is_interesting() {
+                return 0;
+            }
+            let mut h = 1u16; // Branch line
+            if info.ahead > 0 || info.behind > 0 {
+                h += 1;
+            }
+            if info.modified > 0 || info.staged > 0 || info.untracked > 0 {
+                h += 1;
+            }
+            h += info.dirty_files.len().min(5) as u16;
+            if info.dirty_files.len() > 5 {
+                h += 1;
+            }
+            h
+        }
     };
 
     let total = content_height + border_height;
@@ -1764,6 +1820,7 @@ fn render_widget_content(
         WidgetKind::UsageLimits => render_usage_widget(data, inner),
         WidgetKind::ModelInfo => render_model_widget(data, inner),
         WidgetKind::Tips => render_tips_widget(inner),
+        WidgetKind::GitStatus => render_git_widget(data, inner),
     }
 }
 
@@ -3175,6 +3232,15 @@ fn compact_usage_height(data: &InfoWidgetData) -> u16 {
     0
 }
 
+fn compact_git_height(data: &InfoWidgetData) -> u16 {
+    if let Some(info) = &data.git_info {
+        if info.is_interesting() {
+            return 1;
+        }
+    }
+    0
+}
+
 fn compact_overview_height(data: &InfoWidgetData) -> u16 {
     compact_model_height(data)
         + compact_context_height(data)
@@ -3184,6 +3250,7 @@ fn compact_overview_height(data: &InfoWidgetData) -> u16 {
         + compact_swarm_height(data)
         + compact_background_height(data)
         + compact_usage_height(data)
+        + compact_git_height(data)
 }
 
 fn expanded_context_height(data: &InfoWidgetData) -> u16 {
@@ -3345,6 +3412,13 @@ fn render_sections(
     if let Some(info) = &data.usage_info {
         if info.available {
             lines.extend(render_usage_compact(info, inner.width));
+        }
+    }
+
+    // Git info
+    if let Some(info) = &data.git_info {
+        if info.is_interesting() {
+            lines.extend(render_git_compact(info, inner.width));
         }
     }
 
@@ -3623,6 +3697,109 @@ fn wrap_tip_text(text: &str, width: usize) -> Vec<String> {
         lines.push(line.to_string());
         remaining = rest.trim_start();
     }
+    lines
+}
+
+fn render_git_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    let Some(info) = &data.git_info else {
+        return Vec::new();
+    };
+    if !info.is_interesting() {
+        return Vec::new();
+    }
+
+    let w = inner.width as usize;
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Branch header
+    let branch_display = truncate_smart(&info.branch, w.saturating_sub(4));
+    lines.push(Line::from(vec![
+        Span::styled(" ", Style::default().fg(Color::Rgb(240, 160, 60))),
+        Span::styled(
+            branch_display,
+            Style::default()
+                .fg(Color::Rgb(200, 200, 210))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Ahead/behind
+    if info.ahead > 0 || info.behind > 0 {
+        let mut parts: Vec<Span> = vec![Span::raw("  ")];
+        if info.ahead > 0 {
+            parts.push(Span::styled(
+                format!("↑{}", info.ahead),
+                Style::default().fg(Color::Rgb(100, 200, 100)),
+            ));
+        }
+        if info.ahead > 0 && info.behind > 0 {
+            parts.push(Span::styled(
+                " ",
+                Style::default().fg(Color::Rgb(100, 100, 110)),
+            ));
+        }
+        if info.behind > 0 {
+            parts.push(Span::styled(
+                format!("↓{}", info.behind),
+                Style::default().fg(Color::Rgb(255, 140, 100)),
+            ));
+        }
+        lines.push(Line::from(parts));
+    }
+
+    // Changes summary
+    let mut status_parts: Vec<Span> = vec![Span::raw("  ")];
+    let mut any = false;
+    if info.modified > 0 {
+        status_parts.push(Span::styled(
+            format!("~{}", info.modified),
+            Style::default().fg(Color::Rgb(240, 200, 80)),
+        ));
+        any = true;
+    }
+    if info.staged > 0 {
+        if any {
+            status_parts.push(Span::styled(" ", Style::default()));
+        }
+        status_parts.push(Span::styled(
+            format!("+{}", info.staged),
+            Style::default().fg(Color::Rgb(100, 200, 100)),
+        ));
+        any = true;
+    }
+    if info.untracked > 0 {
+        if any {
+            status_parts.push(Span::styled(" ", Style::default()));
+        }
+        status_parts.push(Span::styled(
+            format!("?{}", info.untracked),
+            Style::default().fg(Color::Rgb(140, 140, 150)),
+        ));
+        any = true;
+    }
+    if any {
+        lines.push(Line::from(status_parts));
+    }
+
+    // Dirty file list (up to what fits)
+    let max_files = inner.height.saturating_sub(lines.len() as u16).min(5) as usize;
+    for file in info.dirty_files.iter().take(max_files) {
+        let display = truncate_smart(file, w.saturating_sub(4));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(display, Style::default().fg(Color::Rgb(140, 140, 155))),
+        ]));
+    }
+    if info.dirty_files.len() > max_files {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("+{} more", info.dirty_files.len() - max_files),
+                Style::default().fg(Color::Rgb(100, 100, 115)),
+            ),
+        ]));
+    }
+
     lines
 }
 
@@ -4753,6 +4930,54 @@ fn render_usage_compact(info: &UsageInfo, width: u16) -> Vec<Line<'static>> {
         ));
     }
     lines
+}
+
+fn render_git_compact(info: &GitInfo, width: u16) -> Vec<Line<'static>> {
+    let w = width as usize;
+    let mut parts: Vec<Span> = Vec::new();
+
+    let branch_display = truncate_smart(&info.branch, w.saturating_sub(12).max(6));
+    parts.push(Span::styled(
+        " ",
+        Style::default().fg(Color::Rgb(240, 160, 60)),
+    ));
+    parts.push(Span::styled(
+        branch_display,
+        Style::default().fg(Color::Rgb(160, 160, 170)),
+    ));
+
+    if info.ahead > 0 {
+        parts.push(Span::styled(
+            format!(" ↑{}", info.ahead),
+            Style::default().fg(Color::Rgb(100, 200, 100)),
+        ));
+    }
+    if info.behind > 0 {
+        parts.push(Span::styled(
+            format!(" ↓{}", info.behind),
+            Style::default().fg(Color::Rgb(255, 140, 100)),
+        ));
+    }
+    if info.modified > 0 {
+        parts.push(Span::styled(
+            format!(" ~{}", info.modified),
+            Style::default().fg(Color::Rgb(240, 200, 80)),
+        ));
+    }
+    if info.staged > 0 {
+        parts.push(Span::styled(
+            format!(" +{}", info.staged),
+            Style::default().fg(Color::Rgb(100, 200, 100)),
+        ));
+    }
+    if info.untracked > 0 {
+        parts.push(Span::styled(
+            format!(" ?{}", info.untracked),
+            Style::default().fg(Color::Rgb(140, 140, 150)),
+        ));
+    }
+
+    vec![Line::from(parts)]
 }
 
 /// Render a labeled progress bar with color-coded status

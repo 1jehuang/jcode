@@ -14388,6 +14388,7 @@ impl super::TuiState for App {
             } else {
                 false
             },
+            git_info: gather_git_info(),
         }
     }
 
@@ -14794,6 +14795,126 @@ fn encode_rgba_as_png(width: usize, height: usize, rgba: &[u8]) -> Option<Vec<u8
     img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
         .ok()?;
     Some(buf)
+}
+
+fn gather_git_info() -> Option<super::info_widget::GitInfo> {
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    static CACHE: Mutex<Option<(Instant, Option<super::info_widget::GitInfo>)>> =
+        Mutex::new(None);
+
+    const TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+    if let Ok(guard) = CACHE.lock() {
+        if let Some((ts, ref cached)) = *guard {
+            if ts.elapsed() < TTL {
+                return cached.clone();
+            }
+        }
+    }
+
+    let result = gather_git_info_inner();
+
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some((Instant::now(), result.clone()));
+    }
+
+    result
+}
+
+fn gather_git_info_inner() -> Option<super::info_widget::GitInfo> {
+    use std::process::Command;
+
+    let in_repo = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .ok()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !in_repo {
+        return None;
+    }
+
+    let branch = Command::new("git")
+        .args(["branch", "--show-current"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if b.is_empty() { None } else { Some(b) }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "HEAD".to_string());
+
+    let mut modified = 0;
+    let mut staged = 0;
+    let mut untracked = 0;
+    let mut dirty_files = Vec::new();
+
+    if let Ok(output) = Command::new("git").args(["status", "--porcelain"]).output() {
+        if output.status.success() {
+            let status = String::from_utf8_lossy(&output.stdout);
+            for line in status.lines() {
+                if line.len() < 3 {
+                    continue;
+                }
+                let index_status = line.as_bytes()[0];
+                let worktree_status = line.as_bytes()[1];
+                let file_path = line[3..].to_string();
+
+                if index_status == b'?' {
+                    untracked += 1;
+                } else {
+                    if index_status != b' ' && index_status != b'?' {
+                        staged += 1;
+                    }
+                    if worktree_status != b' ' && worktree_status != b'?' {
+                        modified += 1;
+                    }
+                }
+
+                if dirty_files.len() < 10 {
+                    dirty_files.push(file_path);
+                }
+            }
+        }
+    }
+
+    let (ahead, behind) = Command::new("git")
+        .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                let parts: Vec<&str> = text.split('\t').collect();
+                if parts.len() == 2 {
+                    let a = parts[0].parse::<usize>().unwrap_or(0);
+                    let b = parts[1].parse::<usize>().unwrap_or(0);
+                    Some((a, b))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or((0, 0));
+
+    Some(super::info_widget::GitInfo {
+        branch,
+        modified,
+        staged,
+        untracked,
+        ahead,
+        behind,
+        dirty_files,
+    })
 }
 
 #[cfg(test)]
