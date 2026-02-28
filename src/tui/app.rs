@@ -4360,9 +4360,12 @@ impl App {
                         }
                         // Process queued messages (e.g. reload continuation)
                         if !self.is_processing && !self.queued_messages.is_empty() {
-                            let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
+                            let messages = std::mem::take(&mut self.queued_messages);
+                            let combined = messages.join("\n\n");
                             crate::logging::info(&format!("Sending queued continuation message ({} chars)", combined.len()));
-                            self.push_display_message(DisplayMessage::system(combined.clone()));
+                            for msg in &messages {
+                                self.push_display_message(DisplayMessage::user(msg.clone()));
+                            }
                             if self
                                 .begin_remote_send(&mut remote, combined, vec![], true)
                                 .await
@@ -4496,8 +4499,11 @@ impl App {
                                             }
                                         }
                                     } else if !self.queued_messages.is_empty() {
-                                        let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
-                                        self.push_display_message(DisplayMessage::system(combined.clone()));
+                                        let messages = std::mem::take(&mut self.queued_messages);
+                                        let combined = messages.join("\n\n");
+                                        for msg in &messages {
+                                            self.push_display_message(DisplayMessage::user(msg.clone()));
+                                        }
                                         let _ = self
                                             .begin_remote_send(&mut remote, combined, vec![], true)
                                             .await;
@@ -8263,10 +8269,13 @@ impl App {
     ) {
         while !self.queued_messages.is_empty() {
             // Combine all currently queued messages into one
-            let combined = std::mem::take(&mut self.queued_messages).join("\n\n");
+            let messages = std::mem::take(&mut self.queued_messages);
+            let combined = messages.join("\n\n");
 
-            // Display as system notification (not user input)
-            self.push_display_message(DisplayMessage::system(combined.clone()));
+            // Display each queued message as its own user prompt
+            for msg in &messages {
+                self.push_display_message(DisplayMessage::user(msg.clone()));
+            }
 
             self.add_provider_message(Message::user(&combined));
             self.session.add_message(

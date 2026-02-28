@@ -3883,7 +3883,7 @@ fn wrap_lines(
     width: u16,
 ) -> PreparedMessages {
     // Wrap lines and track which wrapped indices correspond to user lines
-    let full_width = width as usize;
+    let full_width = width.saturating_sub(1) as usize; // Small margin so text doesn't touch right edge
     let user_width = width.saturating_sub(2) as usize; // Leave margin for right bar
     let mut wrapped_user_indices: Vec<usize> = Vec::new();
     let mut wrapped_user_prompt_starts: Vec<usize> = Vec::new();
