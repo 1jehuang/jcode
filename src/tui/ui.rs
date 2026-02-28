@@ -1619,6 +1619,8 @@ fn shorten_model_name(model: &str) -> String {
 /// Calculate the number of visual lines an input string will occupy
 /// when wrapped to a given width, accounting for explicit newlines.
 fn calculate_input_lines(input: &str, line_width: usize) -> usize {
+    use unicode_width::UnicodeWidthChar;
+
     if line_width == 0 {
         return 1;
     }
@@ -1628,12 +1630,11 @@ fn calculate_input_lines(input: &str, line_width: usize) -> usize {
 
     let mut total_lines = 0;
     for line in input.split('\n') {
-        let chars: Vec<char> = line.chars().collect();
-        if chars.is_empty() {
+        if line.is_empty() {
             total_lines += 1;
         } else {
-            // Calculate wrapped lines for this segment
-            total_lines += (chars.len() + line_width - 1) / line_width;
+            let display_width: usize = line.chars().map(|c| c.width().unwrap_or(0)).sum();
+            total_lines += (display_width + line_width - 1) / line_width;
         }
     }
     total_lines.max(1)
@@ -6634,6 +6635,7 @@ fn draw_input(
 
 /// Wrap input text into lines, handling explicit newlines and tracking cursor position.
 /// Returns (lines, cursor_line, cursor_col) where cursor_line/col are in wrapped coordinates.
+/// cursor_col is in display columns (accounts for wide/CJK characters taking 2 columns).
 fn wrap_input_text<'a>(
     input: &str,
     cursor_pos: usize,
@@ -6643,6 +6645,9 @@ fn wrap_input_text<'a>(
     caret_color: Color,
     prompt_len: usize,
 ) -> (Vec<Line<'a>>, usize, usize) {
+    use unicode_width::UnicodeWidthChar;
+
+    let cursor_char_pos = super::core::byte_offset_to_char_index(input, cursor_pos);
     let mut lines: Vec<Line> = Vec::new();
     let mut cursor_line = 0;
     let mut cursor_col = 0;
@@ -6673,19 +6678,37 @@ fn wrap_input_text<'a>(
 
         let segment: Vec<char> = chars[pos..segment_end].to_vec();
 
-        // Wrap this segment
+        // Wrap this segment by display width
         let mut seg_pos = 0;
         loop {
-            let end = (seg_pos + line_width).min(segment.len());
+            let mut display_width = 0;
+            let mut end = seg_pos;
+            while end < segment.len() {
+                let cw = segment[end].width().unwrap_or(0);
+                if display_width + cw > line_width {
+                    break;
+                }
+                display_width += cw;
+                end += 1;
+            }
+            // If no progress (single char wider than line), take at least one char
+            if end == seg_pos && seg_pos < segment.len() {
+                end = seg_pos + 1;
+            }
             let line_text: String = segment[seg_pos..end].iter().collect();
 
             // Track cursor position
             let line_start_char = char_count;
             let line_end_char = char_count + (end - seg_pos);
 
-            if !found_cursor && cursor_pos >= line_start_char && cursor_pos <= line_end_char {
+            if !found_cursor && cursor_char_pos >= line_start_char && cursor_char_pos <= line_end_char {
                 cursor_line = lines.len();
-                cursor_col = cursor_pos - line_start_char;
+                // cursor_col in display columns
+                let chars_before = cursor_char_pos - line_start_char;
+                cursor_col = segment[seg_pos..seg_pos + chars_before]
+                    .iter()
+                    .map(|c| c.width().unwrap_or(0))
+                    .sum();
                 found_cursor = true;
             }
             char_count = line_end_char;
@@ -6714,7 +6737,7 @@ fn wrap_input_text<'a>(
 
         // Account for the newline character itself in cursor tracking
         if newline_pos.is_some() {
-            if !found_cursor && cursor_pos == char_count {
+            if !found_cursor && cursor_char_pos == char_count {
                 cursor_line = lines.len().saturating_sub(1);
                 cursor_col = lines
                     .last()
@@ -6722,7 +6745,12 @@ fn wrap_input_text<'a>(
                         l.spans
                             .iter()
                             .skip(1)
-                            .map(|s| s.content.chars().count())
+                            .map(|s| {
+                                s.content
+                                    .chars()
+                                    .map(|c| c.width().unwrap_or(0))
+                                    .sum::<usize>()
+                            })
                             .sum::<usize>()
                     })
                     .unwrap_or(0);
@@ -6741,11 +6769,16 @@ fn wrap_input_text<'a>(
         cursor_col = lines
             .last()
             .map(|l| {
-                // Skip the prompt spans and count content
+                // Skip the prompt spans and count display width of content
                 l.spans
                     .iter()
                     .skip(if cursor_line == 0 { 2 } else { 1 })
-                    .map(|s| s.content.chars().count())
+                    .map(|s| {
+                        s.content
+                            .chars()
+                            .map(|c| c.width().unwrap_or(0))
+                            .sum::<usize>()
+                    })
                     .sum::<usize>()
             })
             .unwrap_or(0);

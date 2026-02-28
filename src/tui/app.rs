@@ -5524,7 +5524,7 @@ impl App {
 
     fn handle_remote_char_input(&mut self, c: char) {
         self.input.insert(self.cursor_pos, c);
-        self.cursor_pos += 1;
+        self.cursor_pos += c.len_utf8();
         // Typing should return to latest content, not absolute top when paused.
         self.follow_chat_bottom();
         self.reset_tab_completion();
@@ -5807,27 +5807,29 @@ impl App {
             }
             KeyCode::Backspace => {
                 if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
-                    self.input.remove(self.cursor_pos);
+                    let prev = super::core::prev_char_boundary(&self.input, self.cursor_pos);
+                    self.input.drain(prev..self.cursor_pos);
+                    self.cursor_pos = prev;
                     self.reset_tab_completion();
                     self.sync_model_picker_preview_from_input();
                 }
             }
             KeyCode::Delete => {
                 if self.cursor_pos < self.input.len() {
-                    self.input.remove(self.cursor_pos);
+                    let next = super::core::next_char_boundary(&self.input, self.cursor_pos);
+                    self.input.drain(self.cursor_pos..next);
                     self.reset_tab_completion();
                     self.sync_model_picker_preview_from_input();
                 }
             }
             KeyCode::Left => {
                 if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
+                    self.cursor_pos = super::core::prev_char_boundary(&self.input, self.cursor_pos);
                 }
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
-                    self.cursor_pos += 1;
+                    self.cursor_pos = super::core::next_char_boundary(&self.input, self.cursor_pos);
                 }
             }
             KeyCode::Home => {
@@ -6443,14 +6445,14 @@ impl App {
                 KeyCode::Char('b') => {
                     // Ctrl+B: back one char
                     if self.cursor_pos > 0 {
-                        self.cursor_pos -= 1;
+                        self.cursor_pos = super::core::prev_char_boundary(&self.input, self.cursor_pos);
                     }
                     return Ok(());
                 }
                 KeyCode::Char('f') => {
                     // Ctrl+F: forward one char
                     if self.cursor_pos < self.input.len() {
-                        self.cursor_pos += 1;
+                        self.cursor_pos = super::core::next_char_boundary(&self.input, self.cursor_pos);
                     }
                     return Ok(());
                 }
@@ -6547,33 +6549,35 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.input.insert(self.cursor_pos, c);
-                self.cursor_pos += 1;
+                self.cursor_pos += c.len_utf8();
                 self.reset_tab_completion();
                 self.sync_model_picker_preview_from_input();
             }
             KeyCode::Backspace => {
                 if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
-                    self.input.remove(self.cursor_pos);
+                    let prev = super::core::prev_char_boundary(&self.input, self.cursor_pos);
+                    self.input.drain(prev..self.cursor_pos);
+                    self.cursor_pos = prev;
                     self.reset_tab_completion();
                     self.sync_model_picker_preview_from_input();
                 }
             }
             KeyCode::Delete => {
                 if self.cursor_pos < self.input.len() {
-                    self.input.remove(self.cursor_pos);
+                    let next = super::core::next_char_boundary(&self.input, self.cursor_pos);
+                    self.input.drain(self.cursor_pos..next);
                     self.reset_tab_completion();
                     self.sync_model_picker_preview_from_input();
                 }
             }
             KeyCode::Left => {
                 if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
+                    self.cursor_pos = super::core::prev_char_boundary(&self.input, self.cursor_pos);
                 }
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
-                    self.cursor_pos += 1;
+                    self.cursor_pos = super::core::next_char_boundary(&self.input, self.cursor_pos);
                 }
             }
             KeyCode::Home => self.cursor_pos = 0,
@@ -12698,17 +12702,28 @@ impl App {
         if self.cursor_pos == 0 {
             return 0;
         }
-        let bytes = self.input.as_bytes();
-        let mut pos = self.cursor_pos - 1;
+        let mut pos = self.cursor_pos;
+
+        // Move back one char
+        pos = super::core::prev_char_boundary(&self.input, pos);
 
         // Skip trailing whitespace
-        while pos > 0 && bytes[pos].is_ascii_whitespace() {
-            pos -= 1;
+        while pos > 0 {
+            let ch = self.input[pos..].chars().next().unwrap_or(' ');
+            if !ch.is_whitespace() {
+                break;
+            }
+            pos = super::core::prev_char_boundary(&self.input, pos);
         }
 
         // Skip word characters
-        while pos > 0 && !bytes[pos - 1].is_ascii_whitespace() {
-            pos -= 1;
+        while pos > 0 {
+            let prev = super::core::prev_char_boundary(&self.input, pos);
+            let ch = self.input[prev..].chars().next().unwrap_or(' ');
+            if ch.is_whitespace() {
+                break;
+            }
+            pos = prev;
         }
 
         pos
@@ -12720,17 +12735,24 @@ impl App {
         if self.cursor_pos >= len {
             return len;
         }
-        let bytes = self.input.as_bytes();
         let mut pos = self.cursor_pos;
 
         // Skip current word
-        while pos < len && !bytes[pos].is_ascii_whitespace() {
-            pos += 1;
+        while pos < len {
+            let ch = self.input[pos..].chars().next().unwrap_or(' ');
+            if ch.is_whitespace() {
+                break;
+            }
+            pos = super::core::next_char_boundary(&self.input, pos);
         }
 
         // Skip whitespace
-        while pos < len && bytes[pos].is_ascii_whitespace() {
-            pos += 1;
+        while pos < len {
+            let ch = self.input[pos..].chars().next().unwrap_or(' ');
+            if !ch.is_whitespace() {
+                break;
+            }
+            pos = super::core::next_char_boundary(&self.input, pos);
         }
 
         pos

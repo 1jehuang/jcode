@@ -9,6 +9,36 @@ use crate::message::ToolCall;
 use crossterm::event::KeyCode;
 use std::time::Instant;
 
+/// Find the byte offset of the previous character boundary before `pos`.
+/// Returns 0 if `pos` is 0 or at the start.
+pub fn prev_char_boundary(s: &str, pos: usize) -> usize {
+    let mut p = pos;
+    if p == 0 {
+        return 0;
+    }
+    p -= 1;
+    while p > 0 && !s.is_char_boundary(p) {
+        p -= 1;
+    }
+    p
+}
+
+/// Find the byte offset of the next character boundary after `pos`.
+/// Returns `s.len()` if already at or past the end.
+pub fn next_char_boundary(s: &str, pos: usize) -> usize {
+    let mut p = pos + 1;
+    while p < s.len() && !s.is_char_boundary(p) {
+        p += 1;
+    }
+    p.min(s.len())
+}
+
+/// Convert a byte offset in a string to a character (grapheme) index.
+/// Needed when the renderer works in character space but cursor_pos is byte-based.
+pub fn byte_offset_to_char_index(s: &str, byte_offset: usize) -> usize {
+    s[..byte_offset.min(s.len())].chars().count()
+}
+
 /// Shared TUI state for display and input handling
 ///
 /// This struct contains all the fields that are identical between
@@ -80,35 +110,37 @@ impl TuiCore {
     /// Insert a character at cursor position
     pub fn insert_char(&mut self, c: char) {
         self.input.insert(self.cursor_pos, c);
-        self.cursor_pos += 1;
+        self.cursor_pos += c.len_utf8();
     }
 
     /// Delete character before cursor (backspace)
     pub fn backspace(&mut self) {
         if self.cursor_pos > 0 {
-            self.cursor_pos -= 1;
-            self.input.remove(self.cursor_pos);
+            let prev_boundary = prev_char_boundary(&self.input, self.cursor_pos);
+            self.input.drain(prev_boundary..self.cursor_pos);
+            self.cursor_pos = prev_boundary;
         }
     }
 
     /// Delete character at cursor (delete key)
     pub fn delete(&mut self) {
         if self.cursor_pos < self.input.len() {
-            self.input.remove(self.cursor_pos);
+            let next_boundary = next_char_boundary(&self.input, self.cursor_pos);
+            self.input.drain(self.cursor_pos..next_boundary);
         }
     }
 
     /// Move cursor left
     pub fn cursor_left(&mut self) {
         if self.cursor_pos > 0 {
-            self.cursor_pos -= 1;
+            self.cursor_pos = prev_char_boundary(&self.input, self.cursor_pos);
         }
     }
 
     /// Move cursor right
     pub fn cursor_right(&mut self) {
         if self.cursor_pos < self.input.len() {
-            self.cursor_pos += 1;
+            self.cursor_pos = next_char_boundary(&self.input, self.cursor_pos);
         }
     }
 
@@ -553,5 +585,129 @@ mod tests {
 
         core.scroll_to_bottom();
         assert_eq!(core.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_korean_input() {
+        let mut core = TuiCore::new();
+
+        // Insert Korean characters (each is 3 bytes in UTF-8)
+        core.insert_char('한');
+        assert_eq!(core.input, "한");
+        assert_eq!(core.cursor_pos, 3); // 3 bytes
+
+        core.insert_char('글');
+        assert_eq!(core.input, "한글");
+        assert_eq!(core.cursor_pos, 6); // 6 bytes
+
+        // Move cursor left (should skip full character)
+        core.cursor_left();
+        assert_eq!(core.cursor_pos, 3); // at '글' boundary
+
+        // Insert between characters
+        core.insert_char('국');
+        assert_eq!(core.input, "한국글");
+        assert_eq!(core.cursor_pos, 6); // after '국'
+
+        // Backspace should delete '국'
+        core.backspace();
+        assert_eq!(core.input, "한글");
+        assert_eq!(core.cursor_pos, 3);
+
+        // Move to end
+        core.cursor_end();
+        assert_eq!(core.cursor_pos, 6);
+
+        // Delete from beginning
+        core.cursor_home();
+        core.delete();
+        assert_eq!(core.input, "글");
+        assert_eq!(core.cursor_pos, 0);
+    }
+
+    #[test]
+    fn test_mixed_ascii_and_cjk() {
+        let mut core = TuiCore::new();
+
+        // Mix ASCII and CJK
+        core.insert_char('h');
+        core.insert_char('i');
+        core.insert_char('你');
+        core.insert_char('好');
+        assert_eq!(core.input, "hi你好");
+        assert_eq!(core.cursor_pos, 8); // 2 + 3 + 3
+
+        // Navigate back through CJK
+        core.cursor_left(); // from pos 8 to 5
+        assert_eq!(core.cursor_pos, 5);
+        core.cursor_left(); // from pos 5 to 2
+        assert_eq!(core.cursor_pos, 2);
+        core.cursor_left(); // from pos 2 to 1
+        assert_eq!(core.cursor_pos, 1);
+
+        // Navigate forward
+        core.cursor_right(); // from pos 1 to 2
+        assert_eq!(core.cursor_pos, 2);
+        core.cursor_right(); // from pos 2 to 5 (skip 你)
+        assert_eq!(core.cursor_pos, 5);
+    }
+
+    #[test]
+    fn test_emoji_input() {
+        let mut core = TuiCore::new();
+
+        // Emoji are 4 bytes
+        core.insert_char('😀');
+        assert_eq!(core.input, "😀");
+        assert_eq!(core.cursor_pos, 4);
+
+        core.insert_char('a');
+        assert_eq!(core.input, "😀a");
+        assert_eq!(core.cursor_pos, 5);
+
+        core.cursor_left();
+        assert_eq!(core.cursor_pos, 4);
+        core.cursor_left();
+        assert_eq!(core.cursor_pos, 0);
+
+        core.backspace(); // at pos 0, no-op
+        assert_eq!(core.cursor_pos, 0);
+
+        core.delete(); // delete 😀
+        assert_eq!(core.input, "a");
+        assert_eq!(core.cursor_pos, 0);
+    }
+
+    #[test]
+    fn test_byte_offset_to_char_index() {
+        assert_eq!(byte_offset_to_char_index("hello", 0), 0);
+        assert_eq!(byte_offset_to_char_index("hello", 3), 3);
+        assert_eq!(byte_offset_to_char_index("hello", 5), 5);
+
+        // Korean: each char is 3 bytes
+        assert_eq!(byte_offset_to_char_index("한글", 0), 0);
+        assert_eq!(byte_offset_to_char_index("한글", 3), 1);
+        assert_eq!(byte_offset_to_char_index("한글", 6), 2);
+
+        // Mixed
+        assert_eq!(byte_offset_to_char_index("a한b", 0), 0);
+        assert_eq!(byte_offset_to_char_index("a한b", 1), 1);
+        assert_eq!(byte_offset_to_char_index("a한b", 4), 2);
+        assert_eq!(byte_offset_to_char_index("a한b", 5), 3);
+    }
+
+    #[test]
+    fn test_char_boundary_helpers() {
+        let s = "한글test";
+        // "한" is bytes 0..3, "글" is bytes 3..6, "test" is bytes 6..10
+        assert_eq!(prev_char_boundary(s, 3), 0);
+        assert_eq!(prev_char_boundary(s, 6), 3);
+        assert_eq!(prev_char_boundary(s, 7), 6);
+        assert_eq!(prev_char_boundary(s, 0), 0);
+
+        assert_eq!(next_char_boundary(s, 0), 3);
+        assert_eq!(next_char_boundary(s, 3), 6);
+        assert_eq!(next_char_boundary(s, 6), 7);
+        assert_eq!(next_char_boundary(s, 9), 10);
     }
 }

@@ -1081,22 +1081,23 @@ impl ClientApp {
             }
             KeyCode::Char(c) => {
                 self.input.insert(self.cursor_pos, c);
-                self.cursor_pos += 1;
+                self.cursor_pos += c.len_utf8();
             }
             KeyCode::Backspace => {
                 if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
-                    self.input.remove(self.cursor_pos);
+                    let prev = super::core::prev_char_boundary(&self.input, self.cursor_pos);
+                    self.input.drain(prev..self.cursor_pos);
+                    self.cursor_pos = prev;
                 }
             }
             KeyCode::Left => {
                 if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
+                    self.cursor_pos = super::core::prev_char_boundary(&self.input, self.cursor_pos);
                 }
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
-                    self.cursor_pos += 1;
+                    self.cursor_pos = super::core::next_char_boundary(&self.input, self.cursor_pos);
                 }
             }
             KeyCode::Enter => {
