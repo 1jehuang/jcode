@@ -193,6 +193,10 @@ pub struct DisplayConfig {
     pub diff_line_wrap: bool,
     /// Performance tier override: auto/full/reduced/minimal (default: auto)
     pub performance: String,
+    /// FPS for animations (startup, idle donut): 1-120 (default: 60)
+    pub animation_fps: u32,
+    /// FPS for active redraw (processing, streaming): 1-120 (default: 30)
+    pub redraw_fps: u32,
 }
 
 impl Default for DisplayConfig {
@@ -212,6 +216,8 @@ impl Default for DisplayConfig {
             prompt_entry_animation: true,
             diff_line_wrap: true,
             performance: String::new(),
+            animation_fps: 60,
+            redraw_fps: 30,
         }
     }
 }
@@ -572,6 +578,16 @@ impl Config {
                 self.display.performance = trimmed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_ANIMATION_FPS") {
+            if let Ok(fps) = v.trim().parse::<u32>() {
+                self.display.animation_fps = fps.clamp(1, 120);
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_REDRAW_FPS") {
+            if let Ok(fps) = v.trim().parse::<u32>() {
+                self.display.redraw_fps = fps.clamp(1, 120);
+            }
+        }
 
         // Features
         if let Ok(v) = std::env::var("JCODE_MEMORY_ENABLED") {
@@ -841,6 +857,12 @@ prompt_entry_animation = true
 # minimal = disable all animations, slower redraw rate
 # performance = "auto"
 
+# Animation FPS (startup animation, idle donut): 1-120 (default: 60)
+# animation_fps = 60
+
+# Active redraw FPS (processing, streaming, spinners): 1-120 (default: 30)
+# redraw_fps = 30
+
 [features]
 # Memory: retrieval + extraction sidecar features
 memory = true
@@ -973,6 +995,8 @@ desktop_notifications = true
 - Idle animation: {}
 - Prompt entry animation: {}
 - Performance tier: {}
+- Animation FPS: {}
+- Redraw FPS: {}
 
 **Features:**
 - Memory: {}
@@ -1040,6 +1064,8 @@ desktop_notifications = true
             } else {
                 &self.display.performance
             },
+            self.display.animation_fps,
+            self.display.redraw_fps,
             self.features.memory,
             self.features.swarm,
             self.features.update_channel,
