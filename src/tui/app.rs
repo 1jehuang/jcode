@@ -13162,16 +13162,16 @@ impl App {
 
         vec![
             (
-                "Find a file on my computer and open it".to_string(),
-                "Find the most recently modified PDF on my computer and open it for me".to_string(),
+                "Customize my terminal theme".to_string(),
+                "Find what terminal I'm using, then change its background color to pitch black and make it slightly transparent. Apply the changes for me.".to_string(),
             ),
             (
-                "Write a report and open it".to_string(),
-                "Write a one-page report about what jcode is and how it works, save it as a PDF, and open it".to_string(),
+                "Review something I've been working on".to_string(),
+                "Find a recent file or project I've been working on, read through it, and give me concrete suggestions on how I could improve it.".to_string(),
             ),
             (
-                "Build a Python snake game".to_string(),
-                "Create a snake game in Python using pygame, save it, and run it".to_string(),
+                "Find my social media and roast me".to_string(),
+                "Find a social media platform I use, look around at my profile and posts, then give me a brutally honest roast based on what you see.".to_string(),
             ),
         ]
     }
