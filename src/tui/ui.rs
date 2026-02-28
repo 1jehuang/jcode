@@ -193,13 +193,14 @@ fn render_startup_animation(
     height: usize,
     variant: usize,
 ) -> Vec<String> {
-    match variant % 6 {
+    match variant % 7 {
         0 => render_donut(elapsed, width, height),
         1 => render_globe(elapsed, width, height),
         2 => render_cube(elapsed, width, height),
         3 => render_mobius(elapsed, width, height),
         4 => render_octahedron(elapsed, width, height),
-        _ => render_lorenz(elapsed, width, height),
+        5 => render_lorenz(elapsed, width, height),
+        _ => render_rabbit(elapsed, width, height),
     }
 }
 
@@ -503,6 +504,130 @@ fn render_lorenz(elapsed: f32, width: usize, height: usize) -> Vec<String> {
                 }
             }
         }
+    })
+}
+
+fn render_rabbit(elapsed: f32, width: usize, height: usize) -> Vec<String> {
+    with_render_buffers(width, height, |output, zbuffer| {
+        let ax = -0.25;
+        let ay = elapsed * 0.4;
+        let az = 0.0;
+        let cam_dist = 5.0;
+
+        let sample = |output: &mut Vec<Vec<u8>>,
+                      zbuffer: &mut Vec<Vec<f32>>,
+                      cx: f32,
+                      cy: f32,
+                      cz: f32,
+                      rx: f32,
+                      ry: f32,
+                      rz: f32| {
+            let max_r = rx.max(ry).max(rz);
+            let step = (0.05 / max_r).clamp(0.03, 0.12);
+            let mut theta: f32 = 0.0;
+            while theta < std::f32::consts::TAU {
+                let ct = theta.cos();
+                let st = theta.sin();
+                let mut phi: f32 = -std::f32::consts::FRAC_PI_2;
+                while phi < std::f32::consts::FRAC_PI_2 {
+                    let cp = phi.cos();
+                    let sp = phi.sin();
+                    let lx = rx * cp * ct;
+                    let ly = ry * sp;
+                    let lz = rz * cp * st;
+                    let nx = lx / (rx * rx);
+                    let ny = ly / (ry * ry);
+                    let nz = lz / (rz * rz);
+                    let nm = (nx * nx + ny * ny + nz * nz).sqrt();
+                    let px = lx + cx;
+                    let py = ly + cy;
+                    let pz = lz + cz;
+                    let (rpx, rpy, rpz) = rotate_xyz(px, py, pz, ax, ay, az);
+                    let (rnx, rny, rnz) =
+                        rotate_xyz(nx / nm, ny / nm, nz / nm, ax, ay, az);
+                    let lum = rnx * 0.3 + rny * 0.5 + rnz * 0.7;
+                    if lum > -0.2 {
+                        if let Some((xp, yp, depth)) =
+                            project_3d(rpx, rpy, rpz, width, height, cam_dist)
+                        {
+                            if xp >= 0
+                                && (xp as usize) < width
+                                && yp >= 0
+                                && (yp as usize) < height
+                                && depth > zbuffer[yp as usize][xp as usize]
+                            {
+                                zbuffer[yp as usize][xp as usize] = depth;
+                                let li = (lum.max(0.0) * (LUMINANCE.len() - 1) as f32)
+                                    as usize;
+                                output[yp as usize][xp as usize] =
+                                    LUMINANCE[li.min(LUMINANCE.len() - 1)];
+                            }
+                        }
+                    }
+                    phi += step;
+                }
+                theta += step;
+            }
+        };
+
+        let eye = |output: &mut Vec<Vec<u8>>,
+                   zbuffer: &mut Vec<Vec<f32>>,
+                   cx: f32,
+                   cy: f32,
+                   cz: f32,
+                   radius: f32| {
+            let step = 0.12;
+            let mut theta: f32 = 0.0;
+            while theta < std::f32::consts::TAU {
+                let mut phi: f32 = -std::f32::consts::FRAC_PI_2;
+                while phi < std::f32::consts::FRAC_PI_2 {
+                    let cp = phi.cos();
+                    let sp = phi.sin();
+                    let ct = theta.cos();
+                    let px = radius * cp * ct + cx;
+                    let py = radius * sp + cy;
+                    let pz = radius * cp * theta.sin() + cz;
+                    let (rpx, rpy, rpz) = rotate_xyz(px, py, pz, ax, ay, az);
+                    if let Some((xp, yp, depth)) =
+                        project_3d(rpx, rpy, rpz, width, height, cam_dist)
+                    {
+                        if xp >= 0
+                            && (xp as usize) < width
+                            && yp >= 0
+                            && (yp as usize) < height
+                            && depth > zbuffer[yp as usize][xp as usize]
+                        {
+                            zbuffer[yp as usize][xp as usize] = depth;
+                            output[yp as usize][xp as usize] = b'@';
+                        }
+                    }
+                    phi += step;
+                }
+                theta += step;
+            }
+        };
+
+        // Body
+        sample(output, zbuffer, 0.0, -0.2, 0.0, 1.3, 0.85, 0.85);
+        // Head
+        sample(output, zbuffer, 0.0, 0.7, 0.7, 0.55, 0.5, 0.5);
+        // Left ear
+        sample(output, zbuffer, -0.25, 1.85, 0.5, 0.13, 0.7, 0.08);
+        // Right ear
+        sample(output, zbuffer, 0.25, 1.85, 0.5, 0.13, 0.7, 0.08);
+        // Tail
+        sample(output, zbuffer, 0.0, -0.1, -1.2, 0.25, 0.25, 0.25);
+        // Front paws
+        sample(output, zbuffer, -0.45, -0.9, 0.5, 0.2, 0.15, 0.35);
+        sample(output, zbuffer, 0.45, -0.9, 0.5, 0.2, 0.15, 0.35);
+        // Back paws
+        sample(output, zbuffer, -0.55, -0.95, -0.4, 0.25, 0.2, 0.45);
+        sample(output, zbuffer, 0.55, -0.95, -0.4, 0.25, 0.2, 0.45);
+        // Eyes
+        eye(output, zbuffer, -0.2, 0.85, 1.1, 0.08);
+        eye(output, zbuffer, 0.2, 0.85, 1.1, 0.08);
+        // Nose
+        eye(output, zbuffer, 0.0, 0.65, 1.15, 0.06);
     })
 }
 
@@ -2900,7 +3025,7 @@ fn startup_animation_variant() -> usize {
         let mut hasher = DefaultHasher::new();
         std::time::SystemTime::now().hash(&mut hasher);
         std::process::id().hash(&mut hasher);
-        (std::hash::Hasher::finish(&hasher) % 6) as usize
+        (std::hash::Hasher::finish(&hasher) % 7) as usize
     })
 }
 
