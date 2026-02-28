@@ -9,7 +9,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
-  RUSTC_WRAPPER: "sccache"
 
 jobs:
   build:
@@ -42,6 +41,8 @@ jobs:
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
+        id: sccache
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -65,9 +66,13 @@ jobs:
           EOF
           fi
           cargo build --release --target ${{ matrix.target }}
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
 
       - name: Run tests
         run: cargo test --target ${{ matrix.target }}
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
 
   fmt:
     name: Format
