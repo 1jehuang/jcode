@@ -408,8 +408,7 @@ fn extract_openai_response_text(result: &serde_json::Value) -> Result<String> {
             if item_type == "message" {
                 if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
                     for block in content {
-                        let block_type =
-                            block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
                         if block_type == "output_text" || block_type == "text" {
                             if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
                                 text.push_str(t);

@@ -578,9 +578,7 @@ pub enum ServerEvent {
 
     /// Available models updated (pushed after auth changes)
     #[serde(rename = "available_models_updated")]
-    AvailableModelsUpdated {
-        available_models: Vec<String>,
-    },
+    AvailableModelsUpdated { available_models: Vec<String> },
 
     /// Notification from another agent (file conflict, message, shared context)
     #[serde(rename = "notification")]

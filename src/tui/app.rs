@@ -482,9 +482,16 @@ fn parse_area_spec(spec: &str) -> Option<Rect> {
 #[derive(Debug, Clone)]
 enum PendingLogin {
     /// Waiting for user to paste Claude OAuth code (verifier needed for token exchange)
-    Claude { verifier: String, redirect_uri: Option<String> },
+    Claude {
+        verifier: String,
+        redirect_uri: Option<String>,
+    },
     /// Waiting for user to paste Claude OAuth code for a specific named account
-    ClaudeAccount { verifier: String, label: String, redirect_uri: Option<String> },
+    ClaudeAccount {
+        verifier: String,
+        label: String,
+        redirect_uri: Option<String>,
+    },
     /// Waiting for user to paste OpenRouter API key
     OpenRouter,
     /// GitHub Copilot device flow in progress (polling in background)
@@ -1504,11 +1511,7 @@ impl App {
         }
     }
 
-    fn handle_diff_pane_focus_key(
-        &mut self,
-        code: KeyCode,
-        modifiers: KeyModifiers,
-    ) -> bool {
+    fn handle_diff_pane_focus_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         if !self.diff_pane_focus || modifiers.contains(KeyModifiers::CONTROL) {
             return false;
         }
@@ -4847,7 +4850,10 @@ impl App {
                     self.insert_thought_line(thought_line);
                     return false;
                 }
-                if matches!(self.status, ProcessingStatus::Sending | ProcessingStatus::Connecting(_)) {
+                if matches!(
+                    self.status,
+                    ProcessingStatus::Sending | ProcessingStatus::Connecting(_)
+                ) {
                     self.status = ProcessingStatus::Streaming;
                 } else if matches!(self.status, ProcessingStatus::Thinking(_)) {
                     self.status = ProcessingStatus::Streaming;
@@ -5591,7 +5597,11 @@ impl App {
             self.cycle_effort(direction);
             return Ok(());
         }
-        if self.centered_toggle_keys.toggle.matches(code.clone(), modifiers) {
+        if self
+            .centered_toggle_keys
+            .toggle
+            .matches(code.clone(), modifiers)
+        {
             self.toggle_centered_mode();
             return Ok(());
         }
@@ -5666,7 +5676,11 @@ impl App {
         }
 
         // Handle centered mode toggle (default: Alt+C)
-        if self.centered_toggle_keys.toggle.matches(code.clone(), modifiers) {
+        if self
+            .centered_toggle_keys
+            .toggle
+            .matches(code.clone(), modifiers)
+        {
             self.toggle_centered_mode();
             return Ok(());
         }
@@ -5709,7 +5723,9 @@ impl App {
                     self.recover_session_without_tools();
                     return Ok(());
                 }
-                KeyCode::Char('l') if !self.is_processing && !diagram_available && !self.diff_pane_visible() => {
+                KeyCode::Char('l')
+                    if !self.is_processing && !diagram_available && !self.diff_pane_visible() =>
+                {
                     self.clear_display_messages();
                     self.queued_messages.clear();
                     return Ok(());
@@ -6322,7 +6338,11 @@ impl App {
             self.cycle_effort(direction);
             return Ok(());
         }
-        if self.centered_toggle_keys.toggle.matches(code.clone(), modifiers) {
+        if self
+            .centered_toggle_keys
+            .toggle
+            .matches(code.clone(), modifiers)
+        {
             self.toggle_centered_mode();
             return Ok(());
         }
@@ -6442,7 +6462,9 @@ impl App {
                     self.recover_session_without_tools();
                     return Ok(());
                 }
-                KeyCode::Char('l') if !self.is_processing && !diagram_available && !self.diff_pane_visible() => {
+                KeyCode::Char('l')
+                    if !self.is_processing && !diagram_available && !self.diff_pane_visible() =>
+                {
                     self.clear_provider_messages();
                     self.clear_display_messages();
                     self.queued_messages.clear();
@@ -6475,14 +6497,16 @@ impl App {
                 KeyCode::Char('b') => {
                     // Ctrl+B: back one char
                     if self.cursor_pos > 0 {
-                        self.cursor_pos = super::core::prev_char_boundary(&self.input, self.cursor_pos);
+                        self.cursor_pos =
+                            super::core::prev_char_boundary(&self.input, self.cursor_pos);
                     }
                     return Ok(());
                 }
                 KeyCode::Char('f') => {
                     // Ctrl+F: forward one char
                     if self.cursor_pos < self.input.len() {
-                        self.cursor_pos = super::core::next_char_boundary(&self.input, self.cursor_pos);
+                        self.cursor_pos =
+                            super::core::next_char_boundary(&self.input, self.cursor_pos);
                     }
                     return Ok(());
                 }
@@ -9101,13 +9125,9 @@ impl App {
         let account_info = {
             let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
             if accounts.len() > 1 {
-                let active = crate::auth::claude::active_account_label()
-                    .unwrap_or_else(|| "?".to_string());
-                format!(
-                    " ({} accounts, active: `{}`)",
-                    accounts.len(),
-                    active
-                )
+                let active =
+                    crate::auth::claude::active_account_label().unwrap_or_else(|| "?".to_string());
+                format!(" ({} accounts, active: `{}`)", accounts.len(), active)
             } else if accounts.len() == 1 {
                 format!(" (account: `{}`)", accounts[0].label)
             } else {
@@ -9199,14 +9219,24 @@ impl App {
             port, auth_url
         )));
         self.set_status_notice("Login: waiting for browser...");
-        self.pending_login = Some(PendingLogin::Claude { verifier: verifier.clone(), redirect_uri: Some(redirect_uri.clone()) });
+        self.pending_login = Some(PendingLogin::Claude {
+            verifier: verifier.clone(),
+            redirect_uri: Some(redirect_uri.clone()),
+        });
 
         let verifier_clone = verifier;
         let redirect_clone = redirect_uri;
         tokio::spawn(async move {
             match crate::auth::oauth::wait_for_callback_async(port, &verifier_clone).await {
                 Ok(code) => {
-                    match Self::claude_token_exchange(verifier_clone, code, "default", Some(redirect_clone)).await {
+                    match Self::claude_token_exchange(
+                        verifier_clone,
+                        code,
+                        "default",
+                        Some(redirect_clone),
+                    )
+                    .await
+                    {
                         Ok(msg) => {
                             Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
                                 provider: "claude".to_string(),
@@ -9224,7 +9254,10 @@ impl App {
                     }
                 }
                 Err(e) => {
-                    crate::logging::info(&format!("Callback server error (user may paste manually): {}", e));
+                    crate::logging::info(&format!(
+                        "Callback server error (user may paste manually): {}",
+                        e
+                    ));
                 }
             }
         });
@@ -9272,7 +9305,10 @@ impl App {
             auth_url
         )));
         self.set_status_notice("Login: paste code...");
-        self.pending_login = Some(PendingLogin::Claude { verifier, redirect_uri: None });
+        self.pending_login = Some(PendingLogin::Claude {
+            verifier,
+            redirect_uri: None,
+        });
     }
 
     fn start_claude_login_for_account(&mut self, label: &str) {
@@ -9349,10 +9385,7 @@ impl App {
             } else {
                 "⚠ expired"
             };
-            let sub = account
-                .subscription_type
-                .as_deref()
-                .unwrap_or("unknown");
+            let sub = account.subscription_type.as_deref().unwrap_or("unknown");
             let active_mark = if is_active { "◉" } else { "" };
             lines.push(format!(
                 "| {} | {} | {} | {} |",
@@ -9598,8 +9631,8 @@ impl App {
             let user_code = device_resp.user_code.clone();
             let verification_uri = device_resp.verification_uri.clone();
 
-            let clipboard_result = arboard::Clipboard::new()
-                .and_then(|mut cb| cb.set_text(user_code.clone()));
+            let clipboard_result =
+                arboard::Clipboard::new().and_then(|mut cb| cb.set_text(user_code.clone()));
             let clipboard_msg = if clipboard_result.is_ok() {
                 " (copied to clipboard)"
             } else {
@@ -9768,11 +9801,21 @@ impl App {
         }
 
         match pending {
-            PendingLogin::Claude { verifier, redirect_uri } => {
+            PendingLogin::Claude {
+                verifier,
+                redirect_uri,
+            } => {
                 self.set_status_notice("Login: exchanging...");
                 let input_owned = input.clone();
                 tokio::spawn(async move {
-                    match Self::claude_token_exchange(verifier, input_owned, "default", redirect_uri).await {
+                    match Self::claude_token_exchange(
+                        verifier,
+                        input_owned,
+                        "default",
+                        redirect_uri,
+                    )
+                    .await
+                    {
                         Ok(msg) => {
                             crate::logging::info(&format!("Claude login: {}", msg));
                         }
@@ -9785,14 +9828,28 @@ impl App {
                     "Exchanging authorization code for tokens...".to_string(),
                 ));
             }
-            PendingLogin::ClaudeAccount { verifier, label, redirect_uri } => {
+            PendingLogin::ClaudeAccount {
+                verifier,
+                label,
+                redirect_uri,
+            } => {
                 self.set_status_notice(&format!("Login [{}]: exchanging...", label));
                 let input_owned = input.clone();
                 let label_clone = label.clone();
                 tokio::spawn(async move {
-                    match Self::claude_token_exchange(verifier, input_owned, &label_clone, redirect_uri).await {
+                    match Self::claude_token_exchange(
+                        verifier,
+                        input_owned,
+                        &label_clone,
+                        redirect_uri,
+                    )
+                    .await
+                    {
                         Ok(msg) => {
-                            crate::logging::info(&format!("Claude login [{}]: {}", label_clone, msg));
+                            crate::logging::info(&format!(
+                                "Claude login [{}]: {}",
+                                label_clone, msg
+                            ));
                         }
                         Err(e) => {
                             crate::logging::error(&format!(
@@ -9848,7 +9905,12 @@ impl App {
     fn handle_login_completed(&mut self, login: LoginCompleted) {
         if login.provider == "copilot_code" {
             self.push_display_message(DisplayMessage::system(login.message.clone()));
-            if let Some(code) = login.message.split("Enter code: **").nth(1).and_then(|s| s.split("**").next()) {
+            if let Some(code) = login
+                .message
+                .split("Enter code: **")
+                .nth(1)
+                .and_then(|s| s.split("**").next())
+            {
                 self.set_status_notice(&format!("Login: enter {} at GitHub", code));
             }
             return;
@@ -9942,7 +10004,10 @@ impl App {
         crate::auth::oauth::save_claude_tokens_for_account(&oauth_tokens, label)
             .map_err(|e| format!("Failed to save tokens: {}", e))?;
 
-        Ok(format!("Successfully logged in to Claude! (account: {})", label))
+        Ok(format!(
+            "Successfully logged in to Claude! (account: {})",
+            label
+        ))
     }
 
     fn save_openrouter_key(key: &str) -> anyhow::Result<()> {
@@ -10158,11 +10223,12 @@ impl App {
                     });
                 } else {
                     // Copilot or other provider models
-                    let (available, provider_name) = if auth.copilot == crate::auth::AuthState::Available {
-                        (true, "Copilot".to_string())
-                    } else {
-                        (false, "unknown".to_string())
-                    };
+                    let (available, provider_name) =
+                        if auth.copilot == crate::auth::AuthState::Available {
+                            (true, "Copilot".to_string())
+                        } else {
+                            (false, "unknown".to_string())
+                        };
                     routes.push(crate::provider::ModelRoute {
                         model: model.clone(),
                         provider: provider_name,
@@ -10290,9 +10356,12 @@ impl App {
                             && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
                                 || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str())
                                 || COPILOT_OAUTH_MODELS.contains(&name.as_str()))
-                                || entry_routes
-                                    .iter()
-                                    .any(|r| (r.api_method == "claude-oauth" || r.api_method == "openai-oauth" || r.api_method == "copilot") && r.available)),
+                                || entry_routes.iter().any(|r| {
+                                    (r.api_method == "claude-oauth"
+                                        || r.api_method == "openai-oauth"
+                                        || r.api_method == "copilot")
+                                        && r.available
+                                })),
                         old: old_threshold_secs > 0
                             && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
                         created_date: or_created.map(|t| format_created(t)),
@@ -10308,9 +10377,12 @@ impl App {
                     && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
                         || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str())
                         || COPILOT_OAUTH_MODELS.contains(&name.as_str()))
-                        || entry_routes
-                            .iter()
-                            .any(|r| (r.api_method == "claude-oauth" || r.api_method == "openai-oauth" || r.api_method == "copilot") && r.available));
+                        || entry_routes.iter().any(|r| {
+                            (r.api_method == "claude-oauth"
+                                || r.api_method == "openai-oauth"
+                                || r.api_method == "copilot")
+                                && r.available
+                        }));
                 models.push(super::ModelEntry {
                     name: name.clone(),
                     routes: entry_routes,
@@ -10568,7 +10640,12 @@ impl App {
                             bare_name.clone()
                         };
                         let pkey = match r.api_method.as_str() {
-                            "claude-oauth" | "api-key" if crate::provider::ALL_CLAUDE_MODELS.contains(&bare_name.as_str()) => Some("claude"),
+                            "claude-oauth" | "api-key"
+                                if crate::provider::ALL_CLAUDE_MODELS
+                                    .contains(&bare_name.as_str()) =>
+                            {
+                                Some("claude")
+                            }
                             "openai-oauth" => Some("openai"),
                             "copilot" => Some("copilot"),
                             "openrouter" => Some("openrouter"),
@@ -10585,10 +10662,8 @@ impl App {
                         provider_key.unwrap_or("auto")
                     );
 
-                    match crate::config::Config::set_default_model(
-                        Some(&model_spec),
-                        provider_key,
-                    ) {
+                    match crate::config::Config::set_default_model(Some(&model_spec), provider_key)
+                    {
                         Ok(()) => {
                             self.set_status_notice(notice);
                         }
@@ -13435,7 +13510,11 @@ impl App {
 
     fn toggle_centered_mode(&mut self) {
         self.centered = !self.centered;
-        let mode = if self.centered { "Centered" } else { "Left-aligned" };
+        let mode = if self.centered {
+            "Centered"
+        } else {
+            "Left-aligned"
+        };
         self.set_status_notice(format!("Layout: {}", mode));
     }
 
@@ -14875,8 +14954,7 @@ fn gather_git_info() -> Option<super::info_widget::GitInfo> {
     use std::sync::Mutex;
     use std::time::Instant;
 
-    static CACHE: Mutex<Option<(Instant, Option<super::info_widget::GitInfo>)>> =
-        Mutex::new(None);
+    static CACHE: Mutex<Option<(Instant, Option<super::info_widget::GitInfo>)>> = Mutex::new(None);
 
     const TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -14918,7 +14996,11 @@ fn gather_git_info_inner() -> Option<super::info_widget::GitInfo> {
         .and_then(|o| {
             if o.status.success() {
                 let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if b.is_empty() { None } else { Some(b) }
+                if b.is_empty() {
+                    None
+                } else {
+                    Some(b)
+                }
             } else {
                 None
             }
@@ -15433,10 +15515,7 @@ mod tests {
             .expect("grok-code-fast-1 should be in picker");
 
         assert!(
-            grok_entry
-                .routes
-                .iter()
-                .any(|r| r.api_method == "copilot"),
+            grok_entry.routes.iter().any(|r| r.api_method == "copilot"),
             "grok-code-fast-1 should have a copilot route, got: {:?}",
             grok_entry.routes
         );
@@ -16621,8 +16700,7 @@ mod tests {
         render_and_snap(&app, &mut terminal);
 
         let (prompt_up_code, prompt_up_mods) = prompt_up_key(&app);
-        app.handle_key(prompt_up_code, prompt_up_mods)
-            .unwrap();
+        app.handle_key(prompt_up_code, prompt_up_mods).unwrap();
         assert!(app.scroll_offset > 0);
 
         // Ctrl+5 now means "5th most-recent prompt" (clamped to oldest).
@@ -16641,14 +16719,12 @@ mod tests {
         let (up_code, up_mods) = scroll_up_fallback_key(&app);
         let (down_code, down_mods) = scroll_down_fallback_key(&app);
 
-        app.handle_key(up_code, up_mods)
-            .unwrap();
+        app.handle_key(up_code, up_mods).unwrap();
         assert!(app.auto_scroll_paused);
         assert!(app.scroll_offset > 0);
         let after_up = app.scroll_offset;
 
-        app.handle_key(down_code, down_mods)
-            .unwrap();
+        app.handle_key(down_code, down_mods).unwrap();
         assert!(app.scroll_offset <= after_up);
     }
 

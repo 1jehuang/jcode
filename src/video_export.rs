@@ -258,13 +258,21 @@ fn hash_buffer(buf: &Buffer) -> u64 {
             cell.symbol().hash(&mut hasher);
             std::mem::discriminant(&cell.fg).hash(&mut hasher);
             match cell.fg {
-                Color::Rgb(r, g, b) => { r.hash(&mut hasher); g.hash(&mut hasher); b.hash(&mut hasher); }
+                Color::Rgb(r, g, b) => {
+                    r.hash(&mut hasher);
+                    g.hash(&mut hasher);
+                    b.hash(&mut hasher);
+                }
                 Color::Indexed(i) => i.hash(&mut hasher),
                 _ => {}
             }
             std::mem::discriminant(&cell.bg).hash(&mut hasher);
             match cell.bg {
-                Color::Rgb(r, g, b) => { r.hash(&mut hasher); g.hash(&mut hasher); b.hash(&mut hasher); }
+                Color::Rgb(r, g, b) => {
+                    r.hash(&mut hasher);
+                    g.hash(&mut hasher);
+                    b.hash(&mut hasher);
+                }
                 Color::Indexed(i) => i.hash(&mut hasher),
                 _ => {}
             }

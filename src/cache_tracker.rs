@@ -290,7 +290,10 @@ mod tests {
 
         // Turn 1: initial user message (no memory)
         let turn1 = vec![make_message(Role::User, "Q1")];
-        assert!(tracker.record_request(&turn1).is_none(), "Turn 1: no violation");
+        assert!(
+            tracker.record_request(&turn1).is_none(),
+            "Turn 1: no violation"
+        );
 
         // Turn 2: assistant replied, user sent follow-up (base messages without memory)
         let turn2 = vec![
@@ -298,7 +301,10 @@ mod tests {
             make_message(Role::Assistant, "A1"),
             make_message(Role::User, "Q2"),
         ];
-        assert!(tracker.record_request(&turn2).is_none(), "Turn 2: no violation");
+        assert!(
+            tracker.record_request(&turn2).is_none(),
+            "Turn 2: no violation"
+        );
 
         // Turn 3: another exchange appended
         let turn3 = vec![
@@ -308,7 +314,10 @@ mod tests {
             make_message(Role::Assistant, "A2"),
             make_message(Role::User, "Q3"),
         ];
-        assert!(tracker.record_request(&turn3).is_none(), "Turn 3: no violation");
+        assert!(
+            tracker.record_request(&turn3).is_none(),
+            "Turn 3: no violation"
+        );
 
         // Turn 4: another exchange appended
         let turn4 = vec![
@@ -320,7 +329,10 @@ mod tests {
             make_message(Role::Assistant, "A3"),
             make_message(Role::User, "Q4"),
         ];
-        assert!(tracker.record_request(&turn4).is_none(), "Turn 4: no violation");
+        assert!(
+            tracker.record_request(&turn4).is_none(),
+            "Turn 4: no violation"
+        );
     }
 
     /// Verify that memory injection (an ephemeral suffix NOT saved to conversation history)

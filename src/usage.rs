@@ -358,21 +358,21 @@ fn parse_limit_name(entry: &serde_json::Value, fallback: &str) -> String {
 async fn fetch_all_anthropic_usage_reports() -> Vec<ProviderUsage> {
     let accounts = match auth::claude::list_accounts() {
         Ok(a) if !a.is_empty() => a,
-        _ => {
-            match auth::claude::load_credentials() {
-                Ok(creds) if !creds.access_token.is_empty() => {
-                    return vec![fetch_anthropic_usage_for_token(
+        _ => match auth::claude::load_credentials() {
+            Ok(creds) if !creds.access_token.is_empty() => {
+                return vec![
+                    fetch_anthropic_usage_for_token(
                         "Anthropic (Claude)".to_string(),
                         creds.access_token.clone(),
                         creds.refresh_token.clone(),
                         "default".to_string(),
                         creds.expires_at,
                     )
-                    .await];
-                }
-                _ => return Vec::new(),
+                    .await,
+                ];
             }
-        }
+            _ => return Vec::new(),
+        },
     };
 
     let active_label = auth::claude::active_account_label();
@@ -417,11 +417,8 @@ async fn fetch_anthropic_usage_for_token(
 ) -> ProviderUsage {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let access_token = if expires_at < now_ms + 300_000 && !refresh_token.is_empty() {
-        match crate::auth::oauth::refresh_claude_tokens_for_account(
-            &refresh_token,
-            &account_label,
-        )
-        .await
+        match crate::auth::oauth::refresh_claude_tokens_for_account(&refresh_token, &account_label)
+            .await
         {
             Ok(refreshed) => refreshed.access_token,
             Err(_) => {
@@ -621,14 +618,11 @@ async fn fetch_openai_usage_report() -> Option<ProviderUsage> {
     fn parse_wham_window(window: &serde_json::Value, name: &str) -> Option<UsageLimit> {
         let obj = window.as_object()?;
         let used_percent = obj.get("used_percent").and_then(parse_f32_value)?;
-        let resets_at = obj
-            .get("reset_at")
-            .and_then(parse_f32_value)
-            .map(|ts| {
-                chrono::DateTime::from_timestamp(ts as i64, 0)
-                    .map(|dt| dt.to_rfc3339())
-                    .unwrap_or_else(|| format!("{}", ts as i64))
-            });
+        let resets_at = obj.get("reset_at").and_then(parse_f32_value).map(|ts| {
+            chrono::DateTime::from_timestamp(ts as i64, 0)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| format!("{}", ts as i64))
+        });
         Some(UsageLimit {
             name: name.to_string(),
             usage_percent: used_percent,
@@ -636,7 +630,11 @@ async fn fetch_openai_usage_report() -> Option<ProviderUsage> {
         })
     }
 
-    fn parse_wham_rate_limit(rl: &serde_json::Value, primary_name: &str, secondary_name: &str) -> Vec<UsageLimit> {
+    fn parse_wham_rate_limit(
+        rl: &serde_json::Value,
+        primary_name: &str,
+        secondary_name: &str,
+    ) -> Vec<UsageLimit> {
         let mut out = Vec::new();
         if let Some(pw) = rl.get("primary_window") {
             if let Some(limit) = parse_wham_window(pw, primary_name) {
@@ -657,7 +655,10 @@ async fn fetch_openai_usage_report() -> Option<ProviderUsage> {
         limits.extend(parse_wham_rate_limit(rl, "5-hour window", "7-day window"));
     }
 
-    if let Some(additional) = json.get("additional_rate_limits").and_then(|v| v.as_array()) {
+    if let Some(additional) = json
+        .get("additional_rate_limits")
+        .and_then(|v| v.as_array())
+    {
         for entry in additional {
             let limit_name = entry
                 .get("limit_name")
@@ -869,7 +870,10 @@ async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
         .header("Authorization", format!("token {}", github_token))
         .header("User-Agent", auth::copilot::EDITOR_VERSION)
         .header("Editor-Version", auth::copilot::EDITOR_VERSION)
-        .header("Editor-Plugin-Version", auth::copilot::EDITOR_PLUGIN_VERSION)
+        .header(
+            "Editor-Plugin-Version",
+            auth::copilot::EDITOR_PLUGIN_VERSION,
+        )
         .header("Accept", "application/json")
         .send()
         .await;
@@ -933,8 +937,14 @@ async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
         }
     }
 
-    let chat_enabled = json.get("chat_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-    extra_info.push(("Chat".to_string(), if chat_enabled { "enabled" } else { "disabled" }.to_string()));
+    let chat_enabled = json
+        .get("chat_enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    extra_info.push((
+        "Chat".to_string(),
+        if chat_enabled { "enabled" } else { "disabled" }.to_string(),
+    ));
 
     if limits.is_empty() && extra_info.len() <= 1 {
         if extra_info.is_empty() {
@@ -1033,13 +1043,10 @@ async fn fetch_usage() -> Result<UsageData> {
 
     let now = chrono::Utc::now().timestamp_millis();
     let access_token = if creds.expires_at < now + 300_000 && !creds.refresh_token.is_empty() {
-        let active_label = auth::claude::active_account_label()
-            .unwrap_or_else(|| "default".to_string());
-        match auth::oauth::refresh_claude_tokens_for_account(
-            &creds.refresh_token,
-            &active_label,
-        )
-        .await
+        let active_label =
+            auth::claude::active_account_label().unwrap_or_else(|| "default".to_string());
+        match auth::oauth::refresh_claude_tokens_for_account(&creds.refresh_token, &active_label)
+            .await
         {
             Ok(refreshed) => refreshed.access_token,
             Err(_) => creds.access_token,

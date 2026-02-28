@@ -506,7 +506,9 @@ mod tests {
         assert!(is_wsl2_windows_path(std::path::Path::new("/mnt/c")));
         assert!(is_wsl2_windows_path(std::path::Path::new("/mnt/d")));
         assert!(is_wsl2_windows_path(std::path::Path::new("/mnt/z")));
-        assert!(is_wsl2_windows_path(std::path::Path::new("/mnt/c/Windows/System32")));
+        assert!(is_wsl2_windows_path(std::path::Path::new(
+            "/mnt/c/Windows/System32"
+        )));
     }
 
     #[test]

@@ -64,8 +64,8 @@ pub struct CopilotApiProvider {
 impl CopilotApiProvider {
     pub fn new() -> Result<Self> {
         let github_token = copilot_auth::load_github_token()?;
-        let model = std::env::var("JCODE_COPILOT_MODEL")
-            .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let model =
+            std::env::var("JCODE_COPILOT_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
         Ok(Self {
             client: crate::provider::shared_http_client(),
@@ -83,8 +83,8 @@ impl CopilotApiProvider {
     }
 
     pub fn new_with_token(github_token: String) -> Self {
-        let model = std::env::var("JCODE_COPILOT_MODEL")
-            .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let model =
+            std::env::var("JCODE_COPILOT_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
         Self {
             client: crate::provider::shared_http_client(),
@@ -121,9 +121,10 @@ impl CopilotApiProvider {
         if last_msg.role != Role::User {
             return true;
         }
-        let has_tool_result = last_msg.content.iter().any(|block| {
-            matches!(block, ContentBlock::ToolResult { .. })
-        });
+        let has_tool_result = last_msg
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }));
         !has_tool_result
     }
 
@@ -132,14 +133,19 @@ impl CopilotApiProvider {
     /// If JCODE_COPILOT_MODEL is set, this is a no-op (user override).
     pub async fn detect_tier_and_set_default(&self) {
         if std::env::var("JCODE_COPILOT_MODEL").is_ok() {
-            crate::logging::info("Copilot model overridden via JCODE_COPILOT_MODEL, skipping tier detection");
+            crate::logging::info(
+                "Copilot model overridden via JCODE_COPILOT_MODEL, skipping tier detection",
+            );
             return;
         }
 
         let bearer = match self.get_bearer_token().await {
             Ok(t) => t,
             Err(e) => {
-                crate::logging::info(&format!("Copilot tier detection: failed to get bearer token: {}", e));
+                crate::logging::info(&format!(
+                    "Copilot tier detection: failed to get bearer token: {}",
+                    e
+                ));
                 return;
             }
         };
@@ -162,7 +168,10 @@ impl CopilotApiProvider {
                 }
             }
             Err(e) => {
-                crate::logging::info(&format!("Copilot tier detection: failed to fetch models: {}", e));
+                crate::logging::info(&format!(
+                    "Copilot tier detection: failed to fetch models: {}",
+                    e
+                ));
             }
         }
     }
@@ -188,8 +197,7 @@ impl CopilotApiProvider {
 
     /// Check if an error indicates token expiration
     fn is_auth_error(status: reqwest::StatusCode) -> bool {
-        status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
+        status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
     }
 
     /// Build OpenAI-compatible messages array from our message format.
@@ -257,8 +265,7 @@ impl CopilotApiProvider {
                                     }));
                                     used_tool_results.insert(tool_use_id.clone());
                                 } else if !pending_tool_results.contains_key(tool_use_id) {
-                                    pending_tool_results
-                                        .insert(tool_use_id.clone(), output);
+                                    pending_tool_results.insert(tool_use_id.clone(), output);
                                 }
                             }
                             _ => {}
@@ -294,9 +301,7 @@ impl CopilotApiProvider {
                                     }
                                 }));
                                 tool_calls_seen.insert(id.clone());
-                                if let Some(output) =
-                                    pending_tool_results.remove(id)
-                                {
+                                if let Some(output) = pending_tool_results.remove(id) {
                                     post_tool_outputs.push((id.clone(), output));
                                     used_tool_results.insert(id.clone());
                                 } else {
@@ -345,7 +350,6 @@ impl CopilotApiProvider {
                         }
                     }
                 }
-
             }
         }
 
@@ -411,11 +415,17 @@ impl CopilotApiProvider {
 
             let resp = self
                 .client
-                .post(format!("{}/chat/completions", copilot_auth::COPILOT_API_BASE))
+                .post(format!(
+                    "{}/chat/completions",
+                    copilot_auth::COPILOT_API_BASE
+                ))
                 .header("Authorization", format!("Bearer {}", bearer_token))
                 .header("Editor-Version", copilot_auth::EDITOR_VERSION)
                 .header("Editor-Plugin-Version", copilot_auth::EDITOR_PLUGIN_VERSION)
-                .header("Copilot-Integration-Id", copilot_auth::COPILOT_INTEGRATION_ID)
+                .header(
+                    "Copilot-Integration-Id",
+                    copilot_auth::COPILOT_INTEGRATION_ID,
+                )
                 .header("Content-Type", "application/json")
                 .header("X-Initiator", initiator)
                 .header("X-Request-Id", &request_id)
@@ -431,7 +441,9 @@ impl CopilotApiProvider {
             let resp = match resp {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = tx.send(Err(anyhow::anyhow!("Copilot API request failed: {}", e))).await;
+                    let _ = tx
+                        .send(Err(anyhow::anyhow!("Copilot API request failed: {}", e)))
+                        .await;
                     return;
                 }
             };
@@ -489,9 +501,7 @@ impl CopilotApiProvider {
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = tx
-                        .send(Err(anyhow::anyhow!("Stream error: {}", e)))
-                        .await;
+                    let _ = tx.send(Err(anyhow::anyhow!("Stream error: {}", e))).await;
                     return;
                 }
             };
@@ -520,7 +530,9 @@ impl CopilotApiProvider {
                                 }))
                                 .await;
                         }
-                        let _ = tx.send(Ok(StreamEvent::MessageEnd { stop_reason: None })).await;
+                        let _ = tx
+                            .send(Ok(StreamEvent::MessageEnd { stop_reason: None }))
+                            .await;
                         return;
                     }
 
@@ -553,9 +565,7 @@ impl CopilotApiProvider {
                             if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                                 if !content.is_empty() {
                                     let _ = tx
-                                        .send(Ok(StreamEvent::TextDelta(
-                                            content.to_string(),
-                                        )))
+                                        .send(Ok(StreamEvent::TextDelta(content.to_string())))
                                         .await;
                                 }
                             }
@@ -569,9 +579,7 @@ impl CopilotApiProvider {
                                     if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
                                         // Flush previous tool call if any
                                         if !current_tool_id.is_empty() {
-                                            let _ = tx
-                                                .send(Ok(StreamEvent::ToolUseEnd))
-                                                .await;
+                                            let _ = tx.send(Ok(StreamEvent::ToolUseEnd)).await;
                                         }
                                         current_tool_id = id.to_string();
                                         current_tool_name = tc
@@ -598,9 +606,7 @@ impl CopilotApiProvider {
                                     {
                                         current_tool_args.push_str(args);
                                         let _ = tx
-                                            .send(Ok(StreamEvent::ToolInputDelta(
-                                                args.to_string(),
-                                            )))
+                                            .send(Ok(StreamEvent::ToolInputDelta(args.to_string())))
                                             .await;
                                     }
                                 }
@@ -612,9 +618,7 @@ impl CopilotApiProvider {
                             {
                                 // Flush last tool call
                                 if !current_tool_id.is_empty() {
-                                    let _ = tx
-                                        .send(Ok(StreamEvent::ToolUseEnd))
-                                        .await;
+                                    let _ = tx.send(Ok(StreamEvent::ToolUseEnd)).await;
                                     current_tool_id.clear();
                                     current_tool_name.clear();
                                     current_tool_args.clear();
@@ -639,7 +643,9 @@ impl CopilotApiProvider {
         }
 
         // Stream ended without [DONE]
-        let _ = tx.send(Ok(StreamEvent::MessageEnd { stop_reason: None })).await;
+        let _ = tx
+            .send(Ok(StreamEvent::MessageEnd { stop_reason: None }))
+            .await;
     }
 }
 
@@ -776,10 +782,7 @@ mod tests {
 
     #[test]
     fn available_models_static_always_returns_fallback() {
-        let fetched = vec![
-            "claude-opus-4.6".to_string(),
-            "gpt-5.3-codex".to_string(),
-        ];
+        let fetched = vec!["claude-opus-4.6".to_string(), "gpt-5.3-codex".to_string()];
         let provider = make_test_provider(fetched);
         let static_models = provider.available_models();
         let expected: Vec<&str> = FALLBACK_MODELS.to_vec();
@@ -840,20 +843,35 @@ mod tests {
     #[test]
     fn build_messages_pairs_tool_use_with_tool_result() {
         let messages = vec![
-            make_msg(Role::User, vec![ContentBlock::Text { text: "hello".into(), cache_control: None }]),
-            make_msg(Role::Assistant, vec![
-                ContentBlock::Text { text: "let me check".into(), cache_control: None },
-                ContentBlock::ToolUse {
-                    id: "call_1".into(),
-                    name: "bash".into(),
-                    input: serde_json::json!({"command": "echo hi"}),
-                },
-            ]),
-            make_msg(Role::User, vec![ContentBlock::ToolResult {
-                tool_use_id: "call_1".into(),
-                content: "hi\n".into(),
-                is_error: None,
-            }]),
+            make_msg(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "hello".into(),
+                    cache_control: None,
+                }],
+            ),
+            make_msg(
+                Role::Assistant,
+                vec![
+                    ContentBlock::Text {
+                        text: "let me check".into(),
+                        cache_control: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call_1".into(),
+                        name: "bash".into(),
+                        input: serde_json::json!({"command": "echo hi"}),
+                    },
+                ],
+            ),
+            make_msg(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "hi\n".into(),
+                    is_error: None,
+                }],
+            ),
         ];
 
         let built = CopilotApiProvider::build_messages("system prompt", &messages);
@@ -873,14 +891,21 @@ mod tests {
     #[test]
     fn build_messages_injects_missing_tool_output() {
         let messages = vec![
-            make_msg(Role::User, vec![ContentBlock::Text { text: "go".into(), cache_control: None }]),
-            make_msg(Role::Assistant, vec![
-                ContentBlock::ToolUse {
+            make_msg(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "go".into(),
+                    cache_control: None,
+                }],
+            ),
+            make_msg(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
                     id: "call_orphan".into(),
                     name: "bash".into(),
                     input: serde_json::json!({"command": "crash"}),
-                },
-            ]),
+                }],
+            ),
         ];
 
         let built = CopilotApiProvider::build_messages("", &messages);
@@ -895,41 +920,53 @@ mod tests {
     #[test]
     fn build_messages_handles_batch_multiple_tool_calls() {
         let messages = vec![
-            make_msg(Role::User, vec![ContentBlock::Text { text: "do things".into(), cache_control: None }]),
-            make_msg(Role::Assistant, vec![
-                ContentBlock::ToolUse {
-                    id: "call_a".into(),
-                    name: "bash".into(),
-                    input: serde_json::json!({"command": "a"}),
-                },
-                ContentBlock::ToolUse {
-                    id: "call_b".into(),
-                    name: "bash".into(),
-                    input: serde_json::json!({"command": "b"}),
-                },
-                ContentBlock::ToolUse {
-                    id: "call_c".into(),
-                    name: "bash".into(),
-                    input: serde_json::json!({"command": "c"}),
-                },
-            ]),
-            make_msg(Role::User, vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "call_a".into(),
-                    content: "result_a".into(),
-                    is_error: None,
-                },
-                ContentBlock::ToolResult {
-                    tool_use_id: "call_b".into(),
-                    content: "result_b".into(),
-                    is_error: None,
-                },
-                ContentBlock::ToolResult {
-                    tool_use_id: "call_c".into(),
-                    content: "result_c".into(),
-                    is_error: None,
-                },
-            ]),
+            make_msg(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "do things".into(),
+                    cache_control: None,
+                }],
+            ),
+            make_msg(
+                Role::Assistant,
+                vec![
+                    ContentBlock::ToolUse {
+                        id: "call_a".into(),
+                        name: "bash".into(),
+                        input: serde_json::json!({"command": "a"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call_b".into(),
+                        name: "bash".into(),
+                        input: serde_json::json!({"command": "b"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call_c".into(),
+                        name: "bash".into(),
+                        input: serde_json::json!({"command": "c"}),
+                    },
+                ],
+            ),
+            make_msg(
+                Role::User,
+                vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_a".into(),
+                        content: "result_a".into(),
+                        is_error: None,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_b".into(),
+                        content: "result_b".into(),
+                        is_error: None,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_c".into(),
+                        content: "result_c".into(),
+                        is_error: None,
+                    },
+                ],
+            ),
         ];
 
         let built = CopilotApiProvider::build_messages("", &messages);
@@ -953,18 +990,22 @@ mod tests {
     #[test]
     fn build_messages_skips_empty_user_text() {
         let messages = vec![
-            make_msg(Role::Assistant, vec![
-                ContentBlock::ToolUse {
+            make_msg(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
                     id: "call_1".into(),
                     name: "read".into(),
                     input: serde_json::json!({"file": "x"}),
-                },
-            ]),
-            make_msg(Role::User, vec![ContentBlock::ToolResult {
-                tool_use_id: "call_1".into(),
-                content: "file content".into(),
-                is_error: None,
-            }]),
+                }],
+            ),
+            make_msg(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "file content".into(),
+                    is_error: None,
+                }],
+            ),
         ];
 
         let built = CopilotApiProvider::build_messages("", &messages);

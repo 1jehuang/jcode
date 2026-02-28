@@ -142,49 +142,48 @@ fn render_donut(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     let sin_b = b.sin();
 
     with_render_buffers(width, height, |output, zbuffer| {
+        let mut theta: f32 = 0.0;
+        while theta < std::f32::consts::TAU {
+            let cos_theta = theta.cos();
+            let sin_theta = theta.sin();
 
-    let mut theta: f32 = 0.0;
-    while theta < std::f32::consts::TAU {
-        let cos_theta = theta.cos();
-        let sin_theta = theta.sin();
+            let mut phi: f32 = 0.0;
+            while phi < std::f32::consts::TAU {
+                let cos_phi = phi.cos();
+                let sin_phi = phi.sin();
 
-        let mut phi: f32 = 0.0;
-        while phi < std::f32::consts::TAU {
-            let cos_phi = phi.cos();
-            let sin_phi = phi.sin();
+                let circle_x = 2.0 + cos_theta;
+                let circle_y = sin_theta;
 
-            let circle_x = 2.0 + cos_theta;
-            let circle_y = sin_theta;
+                let x = circle_x * (cos_b * cos_phi + sin_a * sin_b * sin_phi)
+                    - circle_y * cos_a * sin_b;
+                let y = circle_x * (sin_b * cos_phi - sin_a * cos_b * sin_phi)
+                    + circle_y * cos_a * cos_b;
+                let z = 5.0 + cos_a * circle_x * sin_phi + circle_y * sin_a;
+                let ooz = 1.0 / z;
 
-            let x =
-                circle_x * (cos_b * cos_phi + sin_a * sin_b * sin_phi) - circle_y * cos_a * sin_b;
-            let y =
-                circle_x * (sin_b * cos_phi - sin_a * cos_b * sin_phi) + circle_y * cos_a * cos_b;
-            let z = 5.0 + cos_a * circle_x * sin_phi + circle_y * sin_a;
-            let ooz = 1.0 / z;
+                let xp = (width as f32 / 2.0 + width as f32 * 0.35 * ooz * x) as isize;
+                let yp = (height as f32 / 2.0 - height as f32 * 0.35 * ooz * y) as isize;
 
-            let xp = (width as f32 / 2.0 + width as f32 * 0.35 * ooz * x) as isize;
-            let yp = (height as f32 / 2.0 - height as f32 * 0.35 * ooz * y) as isize;
+                let lum =
+                    cos_phi * cos_theta * sin_b - cos_a * cos_theta * sin_phi - sin_a * sin_theta
+                        + cos_b * (cos_a * sin_theta - cos_theta * sin_a * sin_phi);
 
-            let lum = cos_phi * cos_theta * sin_b - cos_a * cos_theta * sin_phi - sin_a * sin_theta
-                + cos_b * (cos_a * sin_theta - cos_theta * sin_a * sin_phi);
+                if xp >= 0
+                    && (xp as usize) < width
+                    && yp >= 0
+                    && (yp as usize) < height
+                    && ooz > zbuffer[yp as usize][xp as usize]
+                {
+                    zbuffer[yp as usize][xp as usize] = ooz;
+                    let li = (lum * 8.0).max(0.0).min((LUMINANCE.len() - 1) as f32) as usize;
+                    output[yp as usize][xp as usize] = LUMINANCE[li];
+                }
 
-            if xp >= 0
-                && (xp as usize) < width
-                && yp >= 0
-                && (yp as usize) < height
-                && ooz > zbuffer[yp as usize][xp as usize]
-            {
-                zbuffer[yp as usize][xp as usize] = ooz;
-                let li = (lum * 8.0).max(0.0).min((LUMINANCE.len() - 1) as f32) as usize;
-                output[yp as usize][xp as usize] = LUMINANCE[li];
+                phi += 0.02;
             }
-
-            phi += 0.02;
+            theta += 0.07;
         }
-        theta += 0.07;
-    }
-
     })
 }
 
@@ -206,55 +205,55 @@ fn render_startup_animation(
 
 fn render_globe(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     with_render_buffers(width, height, |output, zbuffer| {
-    let rot = elapsed * 0.8;
-    let cos_r = rot.cos();
-    let sin_r = rot.sin();
-    let radius = (width.min(height * 2) as f32) * 0.35;
-    let cx = width as f32 / 2.0;
-    let cy = height as f32 / 2.0;
+        let rot = elapsed * 0.8;
+        let cos_r = rot.cos();
+        let sin_r = rot.sin();
+        let radius = (width.min(height * 2) as f32) * 0.35;
+        let cx = width as f32 / 2.0;
+        let cy = height as f32 / 2.0;
 
-    let mut lat: f32 = -std::f32::consts::FRAC_PI_2;
-    while lat < std::f32::consts::FRAC_PI_2 {
-        let cos_lat = lat.cos();
-        let sin_lat = lat.sin();
-        let mut lon: f32 = 0.0;
-        while lon < std::f32::consts::TAU {
-            let cos_lon = lon.cos();
-            let sin_lon = lon.sin();
-            let x3 = cos_lat * sin_lon;
-            let y3 = sin_lat;
-            let z3 = cos_lat * cos_lon;
-            let rx = x3 * cos_r + z3 * sin_r;
-            let rz = -x3 * sin_r + z3 * cos_r;
-            if rz < -0.1 {
-                lon += 0.03;
-                continue;
-            }
-            let xp = (cx + rx * radius) as isize;
-            let yp = (cy - y3 * radius * 0.5) as isize;
-            let lum = (rz + 1.0) * 0.5;
-            if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height {
-                let depth = rz + 1.0;
-                if depth > zbuffer[yp as usize][xp as usize] {
-                    zbuffer[yp as usize][xp as usize] = depth;
-                    let is_grid = (lat * 6.0).fract().abs() < 0.15
-                        || ((lon + rot) * 6.0 / std::f32::consts::TAU).fract().abs() < 0.1;
-                    if is_grid {
-                        let li = (lum * (LUMINANCE.len() - 1) as f32)
-                            .max(0.0)
-                            .min((LUMINANCE.len() - 1) as f32)
-                            as usize;
-                        output[yp as usize][xp as usize] = LUMINANCE[li];
-                    } else {
-                        let li = (lum * 3.0).max(0.0).min(2.0) as usize;
-                        output[yp as usize][xp as usize] = b".,:"[li];
+        let mut lat: f32 = -std::f32::consts::FRAC_PI_2;
+        while lat < std::f32::consts::FRAC_PI_2 {
+            let cos_lat = lat.cos();
+            let sin_lat = lat.sin();
+            let mut lon: f32 = 0.0;
+            while lon < std::f32::consts::TAU {
+                let cos_lon = lon.cos();
+                let sin_lon = lon.sin();
+                let x3 = cos_lat * sin_lon;
+                let y3 = sin_lat;
+                let z3 = cos_lat * cos_lon;
+                let rx = x3 * cos_r + z3 * sin_r;
+                let rz = -x3 * sin_r + z3 * cos_r;
+                if rz < -0.1 {
+                    lon += 0.03;
+                    continue;
+                }
+                let xp = (cx + rx * radius) as isize;
+                let yp = (cy - y3 * radius * 0.5) as isize;
+                let lum = (rz + 1.0) * 0.5;
+                if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height {
+                    let depth = rz + 1.0;
+                    if depth > zbuffer[yp as usize][xp as usize] {
+                        zbuffer[yp as usize][xp as usize] = depth;
+                        let is_grid = (lat * 6.0).fract().abs() < 0.15
+                            || ((lon + rot) * 6.0 / std::f32::consts::TAU).fract().abs() < 0.1;
+                        if is_grid {
+                            let li = (lum * (LUMINANCE.len() - 1) as f32)
+                                .max(0.0)
+                                .min((LUMINANCE.len() - 1) as f32)
+                                as usize;
+                            output[yp as usize][xp as usize] = LUMINANCE[li];
+                        } else {
+                            let li = (lum * 3.0).max(0.0).min(2.0) as usize;
+                            output[yp as usize][xp as usize] = b".,:"[li];
+                        }
                     }
                 }
+                lon += 0.03;
             }
-            lon += 0.03;
+            lat += 0.03;
         }
-        lat += 0.03;
-    }
     })
 }
 
@@ -325,254 +324,233 @@ fn draw_line_3d(
 
 fn render_cube(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     with_render_buffers(width, height, |output, zbuffer| {
-    let ax = elapsed * 0.7;
-    let ay = elapsed * 1.1;
-    let az = elapsed * 0.3;
-    let cam_dist = 5.0;
-    let verts: [(f32, f32, f32); 8] = [
-        (-1.0, -1.0, -1.0),
-        (1.0, -1.0, -1.0),
-        (1.0, 1.0, -1.0),
-        (-1.0, 1.0, -1.0),
-        (-1.0, -1.0, 1.0),
-        (1.0, -1.0, 1.0),
-        (1.0, 1.0, 1.0),
-        (-1.0, 1.0, 1.0),
-    ];
-    let edges: [(usize, usize); 12] = [
-        (0, 1),
-        (1, 2),
-        (2, 3),
-        (3, 0),
-        (4, 5),
-        (5, 6),
-        (6, 7),
-        (7, 4),
-        (0, 4),
-        (1, 5),
-        (2, 6),
-        (3, 7),
-    ];
-    let rotated: Vec<(f32, f32, f32)> = verts
-        .iter()
-        .map(|&(x, y, z)| rotate_xyz(x, y, z, ax, ay, az))
-        .collect();
-    for &(a, b) in &edges {
-        let (x0, y0, z0) = rotated[a];
-        let (x1, y1, z1) = rotated[b];
-        draw_line_3d(
-            output,
-            zbuffer,
-            x0,
-            y0,
-            z0,
-            x1,
-            y1,
-            z1,
-            width,
-            height,
-            cam_dist,
-            b'#',
-        );
-    }
-    for &(x, y, z) in &rotated {
-        if let Some((xp, yp, _)) = project_3d(x, y, z, width, height, cam_dist) {
-            if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height {
-                output[yp as usize][xp as usize] = b'@';
+        let ax = elapsed * 0.7;
+        let ay = elapsed * 1.1;
+        let az = elapsed * 0.3;
+        let cam_dist = 5.0;
+        let verts: [(f32, f32, f32); 8] = [
+            (-1.0, -1.0, -1.0),
+            (1.0, -1.0, -1.0),
+            (1.0, 1.0, -1.0),
+            (-1.0, 1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, 1.0),
+            (-1.0, 1.0, 1.0),
+        ];
+        let edges: [(usize, usize); 12] = [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
+        ];
+        let rotated: Vec<(f32, f32, f32)> = verts
+            .iter()
+            .map(|&(x, y, z)| rotate_xyz(x, y, z, ax, ay, az))
+            .collect();
+        for &(a, b) in &edges {
+            let (x0, y0, z0) = rotated[a];
+            let (x1, y1, z1) = rotated[b];
+            draw_line_3d(
+                output, zbuffer, x0, y0, z0, x1, y1, z1, width, height, cam_dist, b'#',
+            );
+        }
+        for &(x, y, z) in &rotated {
+            if let Some((xp, yp, _)) = project_3d(x, y, z, width, height, cam_dist) {
+                if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height {
+                    output[yp as usize][xp as usize] = b'@';
+                }
             }
         }
-    }
     })
 }
 
 fn render_mobius(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     with_render_buffers(width, height, |output, zbuffer| {
-    let rot = elapsed * 0.6;
-    let cam_dist = 6.0;
-    let mut u: f32 = 0.0;
-    while u < std::f32::consts::TAU {
-        let mut v: f32 = -0.4;
-        while v <= 0.4 {
-            let half_u = u / 2.0;
-            let x = (1.0 + v * half_u.cos()) * u.cos();
-            let y = (1.0 + v * half_u.cos()) * u.sin();
-            let z = v * half_u.sin();
-            let (rx, ry, rz) = rotate_xyz(x, y, z, elapsed * 0.3, rot, 0.0);
-            if let Some((xp, yp, depth)) = project_3d(rx, ry, rz, width, height, cam_dist) {
-                if xp >= 0
-                    && (xp as usize) < width
-                    && yp >= 0
-                    && (yp as usize) < height
-                    && depth > zbuffer[yp as usize][xp as usize]
-                {
-                    zbuffer[yp as usize][xp as usize] = depth;
-                    let nx = half_u.cos() * u.cos();
-                    let ny = half_u.cos() * u.sin();
-                    let nz = half_u.sin();
-                    let (rnx, rny, _) = rotate_xyz(nx, ny, nz, elapsed * 0.3, rot, 0.0);
-                    let lum = (rnx * 0.5 + rny * 0.5 + 0.5).clamp(0.0, 1.0);
-                    let li = (lum * (LUMINANCE.len() - 1) as f32) as usize;
-                    output[yp as usize][xp as usize] = LUMINANCE[li.min(LUMINANCE.len() - 1)];
+        let rot = elapsed * 0.6;
+        let cam_dist = 6.0;
+        let mut u: f32 = 0.0;
+        while u < std::f32::consts::TAU {
+            let mut v: f32 = -0.4;
+            while v <= 0.4 {
+                let half_u = u / 2.0;
+                let x = (1.0 + v * half_u.cos()) * u.cos();
+                let y = (1.0 + v * half_u.cos()) * u.sin();
+                let z = v * half_u.sin();
+                let (rx, ry, rz) = rotate_xyz(x, y, z, elapsed * 0.3, rot, 0.0);
+                if let Some((xp, yp, depth)) = project_3d(rx, ry, rz, width, height, cam_dist) {
+                    if xp >= 0
+                        && (xp as usize) < width
+                        && yp >= 0
+                        && (yp as usize) < height
+                        && depth > zbuffer[yp as usize][xp as usize]
+                    {
+                        zbuffer[yp as usize][xp as usize] = depth;
+                        let nx = half_u.cos() * u.cos();
+                        let ny = half_u.cos() * u.sin();
+                        let nz = half_u.sin();
+                        let (rnx, rny, _) = rotate_xyz(nx, ny, nz, elapsed * 0.3, rot, 0.0);
+                        let lum = (rnx * 0.5 + rny * 0.5 + 0.5).clamp(0.0, 1.0);
+                        let li = (lum * (LUMINANCE.len() - 1) as f32) as usize;
+                        output[yp as usize][xp as usize] = LUMINANCE[li.min(LUMINANCE.len() - 1)];
+                    }
                 }
+                v += 0.04;
             }
-            v += 0.04;
+            u += 0.03;
         }
-        u += 0.03;
-    }
     })
 }
 
 fn render_octahedron(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     with_render_buffers(width, height, |output, zbuffer| {
-    let ax = elapsed * 0.9;
-    let ay = elapsed * 0.6;
-    let az = elapsed * 0.4;
-    let cam_dist = 4.5;
-    let s = 1.3;
-    let verts: [(f32, f32, f32); 6] = [
-        (s, 0.0, 0.0),
-        (-s, 0.0, 0.0),
-        (0.0, s, 0.0),
-        (0.0, -s, 0.0),
-        (0.0, 0.0, s),
-        (0.0, 0.0, -s),
-    ];
-    let edges: [(usize, usize); 12] = [
-        (0, 2),
-        (0, 3),
-        (0, 4),
-        (0, 5),
-        (1, 2),
-        (1, 3),
-        (1, 4),
-        (1, 5),
-        (2, 4),
-        (4, 3),
-        (3, 5),
-        (5, 2),
-    ];
-    let rotated: Vec<(f32, f32, f32)> = verts
-        .iter()
-        .map(|&(x, y, z)| rotate_xyz(x, y, z, ax, ay, az))
-        .collect();
-    for &(a, b) in &edges {
-        let (x0, y0, z0) = rotated[a];
-        let (x1, y1, z1) = rotated[b];
-        draw_line_3d(
-            output,
-            zbuffer,
-            x0,
-            y0,
-            z0,
-            x1,
-            y1,
-            z1,
-            width,
-            height,
-            cam_dist,
-            b'=',
-        );
-    }
-    for &(x, y, z) in &rotated {
-        if let Some((xp, yp, _)) = project_3d(x, y, z, width, height, cam_dist) {
-            if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height {
-                output[yp as usize][xp as usize] = b'@';
+        let ax = elapsed * 0.9;
+        let ay = elapsed * 0.6;
+        let az = elapsed * 0.4;
+        let cam_dist = 4.5;
+        let s = 1.3;
+        let verts: [(f32, f32, f32); 6] = [
+            (s, 0.0, 0.0),
+            (-s, 0.0, 0.0),
+            (0.0, s, 0.0),
+            (0.0, -s, 0.0),
+            (0.0, 0.0, s),
+            (0.0, 0.0, -s),
+        ];
+        let edges: [(usize, usize); 12] = [
+            (0, 2),
+            (0, 3),
+            (0, 4),
+            (0, 5),
+            (1, 2),
+            (1, 3),
+            (1, 4),
+            (1, 5),
+            (2, 4),
+            (4, 3),
+            (3, 5),
+            (5, 2),
+        ];
+        let rotated: Vec<(f32, f32, f32)> = verts
+            .iter()
+            .map(|&(x, y, z)| rotate_xyz(x, y, z, ax, ay, az))
+            .collect();
+        for &(a, b) in &edges {
+            let (x0, y0, z0) = rotated[a];
+            let (x1, y1, z1) = rotated[b];
+            draw_line_3d(
+                output, zbuffer, x0, y0, z0, x1, y1, z1, width, height, cam_dist, b'=',
+            );
+        }
+        for &(x, y, z) in &rotated {
+            if let Some((xp, yp, _)) = project_3d(x, y, z, width, height, cam_dist) {
+                if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height {
+                    output[yp as usize][xp as usize] = b'@';
+                }
             }
         }
-    }
     })
 }
 
 fn render_lorenz(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     with_render_buffers(width, height, |output, _zbuffer| {
-    let sigma: f32 = 10.0;
-    let rho: f32 = 28.0;
-    let beta: f32 = 8.0 / 3.0;
-    let dt: f32 = 0.005;
-    let mut x: f32 = 0.1;
-    let mut y: f32 = 0.0;
-    let mut z: f32 = 0.0;
-    let rot = elapsed * 0.3;
-    let cos_r = rot.cos();
-    let sin_r = rot.sin();
-    let scale_x = width as f32 / 55.0;
-    let scale_y = height as f32 / 55.0;
-    let cx = width as f32 / 2.0;
-    let cy = height as f32 * 0.65;
-    let total_steps = (4000 + (elapsed * 500.0) as usize).min(8000);
-    let trail_start = total_steps.saturating_sub(3000);
-    for step in 0..total_steps {
-        let dx = sigma * (y - x);
-        let dy = x * (rho - z) - y;
-        let dz = x * y - beta * z;
-        x += dx * dt;
-        y += dy * dt;
-        z += dz * dt;
-        if step >= trail_start {
-            let rx = x * cos_r - y * sin_r;
-            let ry_unused = x * sin_r + y * cos_r;
-            let _ = ry_unused;
-            let xp = (cx + rx * scale_x) as isize;
-            let yp = (cy - z * scale_y) as isize;
-            if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height {
-                let age = (step - trail_start) as f32 / 3000.0;
-                let li = (age * (LUMINANCE.len() - 1) as f32) as usize;
-                let ch = LUMINANCE[li.min(LUMINANCE.len() - 1)];
-                if ch > output[yp as usize][xp as usize] || output[yp as usize][xp as usize] == b' '
-                {
-                    output[yp as usize][xp as usize] = ch;
+        let sigma: f32 = 10.0;
+        let rho: f32 = 28.0;
+        let beta: f32 = 8.0 / 3.0;
+        let dt: f32 = 0.005;
+        let mut x: f32 = 0.1;
+        let mut y: f32 = 0.0;
+        let mut z: f32 = 0.0;
+        let rot = elapsed * 0.3;
+        let cos_r = rot.cos();
+        let sin_r = rot.sin();
+        let scale_x = width as f32 / 55.0;
+        let scale_y = height as f32 / 55.0;
+        let cx = width as f32 / 2.0;
+        let cy = height as f32 * 0.65;
+        let total_steps = (4000 + (elapsed * 500.0) as usize).min(8000);
+        let trail_start = total_steps.saturating_sub(3000);
+        for step in 0..total_steps {
+            let dx = sigma * (y - x);
+            let dy = x * (rho - z) - y;
+            let dz = x * y - beta * z;
+            x += dx * dt;
+            y += dy * dt;
+            z += dz * dt;
+            if step >= trail_start {
+                let rx = x * cos_r - y * sin_r;
+                let ry_unused = x * sin_r + y * cos_r;
+                let _ = ry_unused;
+                let xp = (cx + rx * scale_x) as isize;
+                let yp = (cy - z * scale_y) as isize;
+                if xp >= 0 && (xp as usize) < width && yp >= 0 && (yp as usize) < height {
+                    let age = (step - trail_start) as f32 / 3000.0;
+                    let li = (age * (LUMINANCE.len() - 1) as f32) as usize;
+                    let ch = LUMINANCE[li.min(LUMINANCE.len() - 1)];
+                    if ch > output[yp as usize][xp as usize]
+                        || output[yp as usize][xp as usize] == b' '
+                    {
+                        output[yp as usize][xp as usize] = ch;
+                    }
                 }
             }
         }
-    }
     })
 }
 
 fn render_dna_helix(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     with_render_buffers(width, height, |output, zbuffer| {
-    let cx = width as f32 / 2.0;
-    let radius = width as f32 * 0.2;
-    let speed = elapsed * 2.0;
-    for row in 0..height {
-        let t = row as f32 / height as f32 * 4.0 * std::f32::consts::PI + speed;
-        let x1 = t.cos();
-        let z1 = t.sin();
-        let x2 = (t + std::f32::consts::PI).cos();
-        let z2 = (t + std::f32::consts::PI).sin();
-        let xp1 = (cx + x1 * radius) as isize;
-        let xp2 = (cx + x2 * radius) as isize;
-        let d1 = z1 * 0.5 + 0.5;
-        let d2 = z2 * 0.5 + 0.5;
-        if xp1 >= 0 && (xp1 as usize) < width && d1 > zbuffer[row][xp1 as usize] {
-            zbuffer[row][xp1 as usize] = d1;
-            let li = (d1 * (LUMINANCE.len() - 1) as f32) as usize;
-            output[row][xp1 as usize] = LUMINANCE[li.min(LUMINANCE.len() - 1)];
-        }
-        if xp2 >= 0 && (xp2 as usize) < width && d2 > zbuffer[row][xp2 as usize] {
-            zbuffer[row][xp2 as usize] = d2;
-            let li = (d2 * (LUMINANCE.len() - 1) as f32) as usize;
-            output[row][xp2 as usize] = LUMINANCE[li.min(LUMINANCE.len() - 1)];
-        }
-        if (row % 3) == 0 {
-            let left = xp1.min(xp2).max(0) as usize;
-            let right = xp1.max(xp2).max(0) as usize;
-            if left < width && right < width {
-                for col in left..=right {
-                    if output[row][col] == b' ' {
-                        let frac = if right > left {
-                            (col - left) as f32 / (right - left) as f32
-                        } else {
-                            0.5
-                        };
-                        let d = d1 + (d2 - d1) * frac;
-                        if d > zbuffer[row][col] * 0.9 {
-                            output[row][col] = b'-';
+        let cx = width as f32 / 2.0;
+        let radius = width as f32 * 0.2;
+        let speed = elapsed * 2.0;
+        for row in 0..height {
+            let t = row as f32 / height as f32 * 4.0 * std::f32::consts::PI + speed;
+            let x1 = t.cos();
+            let z1 = t.sin();
+            let x2 = (t + std::f32::consts::PI).cos();
+            let z2 = (t + std::f32::consts::PI).sin();
+            let xp1 = (cx + x1 * radius) as isize;
+            let xp2 = (cx + x2 * radius) as isize;
+            let d1 = z1 * 0.5 + 0.5;
+            let d2 = z2 * 0.5 + 0.5;
+            if xp1 >= 0 && (xp1 as usize) < width && d1 > zbuffer[row][xp1 as usize] {
+                zbuffer[row][xp1 as usize] = d1;
+                let li = (d1 * (LUMINANCE.len() - 1) as f32) as usize;
+                output[row][xp1 as usize] = LUMINANCE[li.min(LUMINANCE.len() - 1)];
+            }
+            if xp2 >= 0 && (xp2 as usize) < width && d2 > zbuffer[row][xp2 as usize] {
+                zbuffer[row][xp2 as usize] = d2;
+                let li = (d2 * (LUMINANCE.len() - 1) as f32) as usize;
+                output[row][xp2 as usize] = LUMINANCE[li.min(LUMINANCE.len() - 1)];
+            }
+            if (row % 3) == 0 {
+                let left = xp1.min(xp2).max(0) as usize;
+                let right = xp1.max(xp2).max(0) as usize;
+                if left < width && right < width {
+                    for col in left..=right {
+                        if output[row][col] == b' ' {
+                            let frac = if right > left {
+                                (col - left) as f32 / (right - left) as f32
+                            } else {
+                                0.5
+                            };
+                            let d = d1 + (d2 - d1) * frac;
+                            if d > zbuffer[row][col] * 0.9 {
+                                output[row][col] = b'-';
+                            }
                         }
                     }
                 }
             }
         }
-    }
     })
 }
 
@@ -1901,7 +1879,11 @@ fn last_layout_state() -> &'static Mutex<Option<LayoutSnapshot>> {
     LAST_LAYOUT.get_or_init(|| Mutex::new(None))
 }
 
-pub fn record_layout_snapshot(messages_area: Rect, diagram_area: Option<Rect>, diff_pane_area: Option<Rect>) {
+pub fn record_layout_snapshot(
+    messages_area: Rect,
+    diagram_area: Option<Rect>,
+    diff_pane_area: Option<Rect>,
+) {
     if let Ok(mut snapshot) = last_layout_state().lock() {
         *snapshot = Some(LayoutSnapshot {
             messages_area,
@@ -2421,7 +2403,14 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             if let Some(ref mut capture) = debug_capture {
                 capture.render_order.push("draw_pinned_content".to_string());
             }
-            draw_pinned_content(frame, diff_area, &pinned_content, app.diff_pane_scroll(), app.diff_line_wrap(), app.diff_pane_focus());
+            draw_pinned_content(
+                frame,
+                diff_area,
+                &pinned_content,
+                app.diff_pane_scroll(),
+                app.diff_line_wrap(),
+                app.diff_pane_focus(),
+            );
         }
     }
 
@@ -3652,16 +3641,14 @@ pub(crate) fn render_tool_message(
                     ("✓", Color::Rgb(100, 180, 100))
                 };
 
-                lines.push(
-                    Line::from(vec![
-                        Span::styled(
-                            format!("    {} ", sub_icon),
-                            Style::default().fg(sub_icon_color),
-                        ),
-                        Span::styled(display_name.to_string(), Style::default().fg(TOOL_COLOR)),
-                        Span::styled(format!(" {}", sub_summary), Style::default().fg(DIM_COLOR)),
-                    ])
-                );
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("    {} ", sub_icon),
+                        Style::default().fg(sub_icon_color),
+                    ),
+                    Span::styled(display_name.to_string(), Style::default().fg(TOOL_COLOR)),
+                    Span::styled(format!(" {}", sub_summary), Style::default().fg(DIM_COLOR)),
+                ]));
             }
         }
     }
@@ -3736,7 +3723,7 @@ pub(crate) fn render_tool_message(
                 format!("{}┌─ diff", pad_str),
                 Style::default().fg(DIM_COLOR),
             ))
-            .alignment(ratatui::layout::Alignment::Left)
+            .alignment(ratatui::layout::Alignment::Left),
         );
 
         let mut shown_truncation = false;
@@ -3755,7 +3742,7 @@ pub(crate) fn render_tool_message(
                         format!("{}│ ... {} more changes ...", pad_str, skipped),
                         Style::default().fg(DIM_COLOR),
                     ))
-                    .alignment(ratatui::layout::Alignment::Left)
+                    .alignment(ratatui::layout::Alignment::Left),
                 );
                 shown_truncation = true;
             }
@@ -3817,7 +3804,10 @@ pub(crate) fn render_tool_message(
         } else {
             format!("{}└─", pad_str)
         };
-        lines.push(Line::from(Span::styled(footer, Style::default().fg(DIM_COLOR))).alignment(ratatui::layout::Alignment::Left));
+        lines.push(
+            Line::from(Span::styled(footer, Style::default().fg(DIM_COLOR)))
+                .alignment(ratatui::layout::Alignment::Left),
+        );
     }
 
     // In centered mode, find the widest line and compute padding to center
@@ -4496,8 +4486,7 @@ fn draw_messages(
 
     // Render text first
     if let Some(anim) = active_prompt_anim {
-        let t = (now_ms.saturating_sub(anim.start_ms) as f32
-            / PROMPT_ENTRY_ANIMATION_MS as f32)
+        let t = (now_ms.saturating_sub(anim.start_ms) as f32 / PROMPT_ENTRY_ANIMATION_MS as f32)
             .clamp(0.0, 1.0);
 
         // Find the end of this prompt: next prompt start or end of user indices
@@ -5372,17 +5361,17 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
                     Some(format!("{} sidecar…", spinner))
                 }
             }
-            MemoryState::FoundRelevant { count } => {
-                Some(format!("✓ {} relevant", count))
-            }
+            MemoryState::FoundRelevant { count } => Some(format!("✓ {} relevant", count)),
             MemoryState::Extracting { .. } => Some(format!("{} extracting…", spinner)),
             MemoryState::Maintaining { .. } => Some(format!("{} maintaining…", spinner)),
         };
         if let Some(label) = label {
             if !line.spans.is_empty() {
-                line.spans.push(Span::styled(" · ", Style::default().fg(DIM_COLOR)));
+                line.spans
+                    .push(Span::styled(" · ", Style::default().fg(DIM_COLOR)));
             }
-            line.spans.push(Span::styled(label, Style::default().fg(sidecar_color)));
+            line.spans
+                .push(Span::styled(label, Style::default().fg(sidecar_color)));
         }
     }
 
@@ -5674,7 +5663,12 @@ struct IdleBuffers {
 
 impl IdleBuffers {
     fn new() -> Self {
-        Self { hit: Vec::new(), lum_map: Vec::new(), z_buf: Vec::new(), size: 0 }
+        Self {
+            hit: Vec::new(),
+            lum_map: Vec::new(),
+            z_buf: Vec::new(),
+            size: 0,
+        }
     }
 
     fn resize_and_clear(&mut self, len: usize) {
@@ -5709,72 +5703,93 @@ fn draw_idle_animation(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let sh = ch * SUB_Y;
 
     IDLE_BUF.with(|cell| {
-    let mut bufs = cell.borrow_mut();
-    bufs.resize_and_clear(sw * sh);
-    let bufs = &mut *bufs;
+        let mut bufs = cell.borrow_mut();
+        bufs.resize_and_clear(sw * sh);
+        let bufs = &mut *bufs;
 
-    let variant = idle_animation_variant();
-    match variant % 3 {
-        0 => sample_donut(elapsed, sw, sh, &mut bufs.hit, &mut bufs.lum_map, &mut bufs.z_buf),
-        1 => sample_knot(elapsed, sw, sh, &mut bufs.hit, &mut bufs.lum_map, &mut bufs.z_buf),
-        _ => sample_gyroscope(elapsed, sw, sh, &mut bufs.hit, &mut bufs.lum_map, &mut bufs.z_buf),
-    }
+        let variant = idle_animation_variant();
+        match variant % 3 {
+            0 => sample_donut(
+                elapsed,
+                sw,
+                sh,
+                &mut bufs.hit,
+                &mut bufs.lum_map,
+                &mut bufs.z_buf,
+            ),
+            1 => sample_knot(
+                elapsed,
+                sw,
+                sh,
+                &mut bufs.hit,
+                &mut bufs.lum_map,
+                &mut bufs.z_buf,
+            ),
+            _ => sample_gyroscope(
+                elapsed,
+                sw,
+                sh,
+                &mut bufs.hit,
+                &mut bufs.lum_map,
+                &mut bufs.z_buf,
+            ),
+        }
 
-    let hit = &bufs.hit;
-    let lum_map = &bufs.lum_map;
+        let hit = &bufs.hit;
+        let lum_map = &bufs.lum_map;
 
-    let time_hue = elapsed * 40.0;
-    let centered = app.centered_mode();
-    let align = if centered {
-        ratatui::layout::Alignment::Center
-    } else {
-        ratatui::layout::Alignment::Left
-    };
+        let time_hue = elapsed * 40.0;
+        let centered = app.centered_mode();
+        let align = if centered {
+            ratatui::layout::Alignment::Center
+        } else {
+            ratatui::layout::Alignment::Left
+        };
 
-    let lines: Vec<Line<'static>> = (0..ch)
-        .map(|row| {
-            let spans: Vec<Span<'static>> = (0..cw)
-                .map(|col| {
-                    let mut pattern = 0u16;
-                    let mut total_lum = 0.0f32;
-                    let mut hit_count = 0u32;
+        let lines: Vec<Line<'static>> = (0..ch)
+            .map(|row| {
+                let spans: Vec<Span<'static>> = (0..cw)
+                    .map(|col| {
+                        let mut pattern = 0u16;
+                        let mut total_lum = 0.0f32;
+                        let mut hit_count = 0u32;
 
-                    for sy in 0..SUB_Y {
-                        for sx in 0..SUB_X {
-                            let px = col * SUB_X + sx;
-                            let py = row * SUB_Y + sy;
-                            let idx = py * sw + px;
-                            if hit[idx] {
-                                pattern |= 1 << (sy * SUB_X + sx);
-                                total_lum += lum_map[idx];
-                                hit_count += 1;
+                        for sy in 0..SUB_Y {
+                            for sx in 0..SUB_X {
+                                let px = col * SUB_X + sx;
+                                let py = row * SUB_Y + sy;
+                                let idx = py * sw + px;
+                                if hit[idx] {
+                                    pattern |= 1 << (sy * SUB_X + sx);
+                                    total_lum += lum_map[idx];
+                                    hit_count += 1;
+                                }
                             }
                         }
-                    }
 
-                    if hit_count == 0 {
-                        Span::raw(" ")
-                    } else {
-                        let avg_lum = total_lum / hit_count as f32;
-                        let coverage = hit_count as f32 / (SUB_X * SUB_Y) as f32;
-                        let t = (avg_lum + 1.0) * 0.5;
-                        let ch = shape_char_3x3(pattern, t);
+                        if hit_count == 0 {
+                            Span::raw(" ")
+                        } else {
+                            let avg_lum = total_lum / hit_count as f32;
+                            let coverage = hit_count as f32 / (SUB_X * SUB_Y) as f32;
+                            let t = (avg_lum + 1.0) * 0.5;
+                            let ch = shape_char_3x3(pattern, t);
 
-                        let hue = (time_hue + t * 160.0) % 360.0;
-                        let hue = if hue < 0.0 { hue + 360.0 } else { hue };
+                            let hue = (time_hue + t * 160.0) % 360.0;
+                            let hue = if hue < 0.0 { hue + 360.0 } else { hue };
 
-                        let sat = 0.5 + t * 0.4;
-                        let val = (0.10 + t * t * 0.90) * (0.55 + coverage * 0.45);
-                        let (r, g, b) = hsv_to_rgb(hue, sat, val);
-                        Span::styled(String::from(ch), Style::default().fg(Color::Rgb(r, g, b)))
-                    }
-                })
-                .collect();
-            Line::from(spans).alignment(align)
-        })
-        .collect();
+                            let sat = 0.5 + t * 0.4;
+                            let val = (0.10 + t * t * 0.90) * (0.55 + coverage * 0.45);
+                            let (r, g, b) = hsv_to_rgb(hue, sat, val);
+                            Span::styled(String::from(ch), Style::default().fg(Color::Rgb(r, g, b)))
+                        }
+                    })
+                    .collect();
+                Line::from(spans).alignment(align)
+            })
+            .collect();
 
-    frame.render_widget(Paragraph::new(lines), area);
+        frame.render_widget(Paragraph::new(lines), area);
     }); // IDLE_BUF
 }
 
@@ -6488,10 +6503,7 @@ fn draw_input(
                     cmd.to_string(),
                     Style::default().fg(Color::Rgb(138, 180, 248)),
                 ),
-                Span::styled(
-                    format!(" - {}", desc),
-                    Style::default().fg(DIM_COLOR),
-                ),
+                Span::styled(format!(" - {}", desc), Style::default().fg(DIM_COLOR)),
             ];
             if suggestions.len() > 1 {
                 spans.push(Span::styled(
@@ -6701,7 +6713,10 @@ fn wrap_input_text<'a>(
             let line_start_char = char_count;
             let line_end_char = char_count + (end - seg_pos);
 
-            if !found_cursor && cursor_char_pos >= line_start_char && cursor_char_pos <= line_end_char {
+            if !found_cursor
+                && cursor_char_pos >= line_start_char
+                && cursor_char_pos <= line_end_char
+            {
                 cursor_line = lines.len();
                 // cursor_col in display columns
                 let chars_before = cursor_char_pos - line_start_char;
@@ -8533,15 +8548,25 @@ mod tests {
         crate::tui::markdown::set_center_code_blocks(false);
         let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
         for line in &lines {
-            assert_eq!(line.alignment, None, "non-centered tool lines should have no alignment set");
+            assert_eq!(
+                line.alignment, None,
+                "non-centered tool lines should have no alignment set"
+            );
         }
 
         // In centered mode, lines are left-aligned with padding prepended
         crate::tui::markdown::set_center_code_blocks(true);
         let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
         for line in &lines {
-            assert_eq!(line.alignment, Some(Alignment::Left), "centered tool lines should be left-aligned with padding");
-            assert!(line.spans[0].content.starts_with(' '), "first span should be padding spaces");
+            assert_eq!(
+                line.alignment,
+                Some(Alignment::Left),
+                "centered tool lines should be left-aligned with padding"
+            );
+            assert!(
+                line.spans[0].content.starts_with(' '),
+                "first span should be padding spaces"
+            );
         }
         crate::tui::markdown::set_center_code_blocks(false);
     }

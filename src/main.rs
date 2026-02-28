@@ -1399,10 +1399,7 @@ fn hot_update(session_id: &str) -> Result<()> {
     match update::check_for_update_blocking() {
         Ok(Some(release)) => {
             let current = env!("JCODE_VERSION");
-            eprintln!(
-                "Update available: {} -> {}",
-                current, release.tag_name
-            );
+            eprintln!("Update available: {} -> {}", current, release.tag_name);
             eprintln!("Downloading {}...", release.tag_name);
 
             match update::download_and_install_blocking(&release) {
@@ -1944,7 +1941,8 @@ async fn debug_list_servers() -> Result<()> {
         let alive = match crate::transport::Stream::connect(&socket_path).await {
             Ok(_) => true,
             Err(err)
-                if err.kind() == std::io::ErrorKind::ConnectionRefused && crate::transport::is_socket_path(&socket_path) =>
+                if err.kind() == std::io::ErrorKind::ConnectionRefused
+                    && crate::transport::is_socket_path(&socket_path) =>
             {
                 server::cleanup_socket_pair(&socket_path);
                 stale_main_removed = true;
@@ -2749,8 +2747,17 @@ async fn run_replay_command(
             session_name,
             timeline.len()
         );
-        video_export::export_video(&session, &timeline, speed, &output_path, cols, rows, fps, centered_override)
-            .await?;
+        video_export::export_video(
+            &session,
+            &timeline,
+            speed,
+            &output_path,
+            cols,
+            rows,
+            fps,
+            centered_override,
+        )
+        .await?;
         return Ok(());
     }
 

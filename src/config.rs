@@ -1035,7 +1035,11 @@ desktop_notifications = true
             self.display.startup_animation,
             self.display.idle_animation,
             self.display.prompt_entry_animation,
-            if self.display.performance.is_empty() { "auto" } else { &self.display.performance },
+            if self.display.performance.is_empty() {
+                "auto"
+            } else {
+                &self.display.performance
+            },
             self.features.memory,
             self.features.swarm,
             self.features.update_channel,

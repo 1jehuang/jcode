@@ -638,16 +638,13 @@ mod tests {
         drop(listener);
 
         let state_clone = state.to_string();
-        let handle = tokio::spawn(async move {
-            wait_for_callback_async(port, &state_clone).await
-        });
+        let handle = tokio::spawn(async move { wait_for_callback_async(port, &state_clone).await });
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let mut stream =
-            tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
-                .await
-                .unwrap();
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
         use tokio::io::AsyncWriteExt;
         stream
             .write_all(
@@ -671,28 +668,25 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let handle = tokio::spawn(async move {
-            wait_for_callback_async(port, "expected_state").await
-        });
+        let handle =
+            tokio::spawn(async move { wait_for_callback_async(port, "expected_state").await });
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let mut stream =
-            tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
-                .await
-                .unwrap();
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
         use tokio::io::AsyncWriteExt;
         stream
-            .write_all(b"GET /callback?code=code123&state=wrong_state HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .write_all(
+                b"GET /callback?code=code123&state=wrong_state HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
             .await
             .unwrap();
 
         let result = handle.await.unwrap();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("State mismatch"));
+        assert!(result.unwrap_err().to_string().contains("State mismatch"));
     }
 
     #[tokio::test]
@@ -701,16 +695,13 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let handle = tokio::spawn(async move {
-            wait_for_callback_async(port, "state123").await
-        });
+        let handle = tokio::spawn(async move { wait_for_callback_async(port, "state123").await });
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let mut stream =
-            tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
-                .await
-                .unwrap();
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
         use tokio::io::AsyncWriteExt;
         stream
             .write_all(b"GET /callback?state=state123 HTTP/1.1\r\nHost: localhost\r\n\r\n")

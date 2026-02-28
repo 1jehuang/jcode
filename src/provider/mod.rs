@@ -1334,10 +1334,7 @@ impl MultiProvider {
                     model, e
                 ));
             } else {
-                crate::logging::info(&format!(
-                    "Applied default model '{}' from config",
-                    model
-                ));
+                crate::logging::info(&format!("Applied default model '{}' from config", model));
             }
         }
 
@@ -1575,7 +1572,7 @@ impl Provider for MultiProvider {
             if let Some(ref copilot) = *copilot_guard {
                 copilot.set_model(copilot_model)?;
             }
-            
+
             return Ok(());
         }
 

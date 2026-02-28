@@ -319,7 +319,10 @@ pub fn is_socket_path(path: &Path) -> bool {
 pub fn remove_socket(path: &Path) {
     let pipe_name = path_to_pipe_name(path);
     if ClientOptions::new().open(&pipe_name).is_ok() {
-        eprintln!("[windows] Named pipe {} still open, will be replaced by new server", pipe_name);
+        eprintln!(
+            "[windows] Named pipe {} still open, will be replaced by new server",
+            pipe_name
+        );
     }
 }
 

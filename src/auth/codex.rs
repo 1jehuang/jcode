@@ -104,7 +104,10 @@ mod tests {
         let tokens = file.tokens.unwrap();
         assert_eq!(tokens.access_token, "at_openai_123");
         assert_eq!(tokens.refresh_token, "rt_openai_456");
-        assert_eq!(tokens.id_token, Some("header.payload.signature".to_string()));
+        assert_eq!(
+            tokens.id_token,
+            Some("header.payload.signature".to_string())
+        );
         assert_eq!(tokens.account_id, Some("acct_789".to_string()));
         assert_eq!(tokens.expires_at, Some(9999999999999));
     }

@@ -59,10 +59,7 @@ pub fn set_active_account_override(label: Option<String>) {
 }
 
 pub fn get_active_account_override() -> Option<String> {
-    ACTIVE_ACCOUNT_OVERRIDE
-        .read()
-        .ok()
-        .and_then(|g| g.clone())
+    ACTIVE_ACCOUNT_OVERRIDE.read().ok().and_then(|g| g.clone())
 }
 
 // -- Claude Code credentials file format --
@@ -205,7 +202,11 @@ pub fn upsert_account(account: AnthropicAccount) -> Result<String> {
     let mut auth = load_auth_file()?;
     let label = account.label.clone();
 
-    if let Some(existing) = auth.anthropic_accounts.iter_mut().find(|a| a.label == label) {
+    if let Some(existing) = auth
+        .anthropic_accounts
+        .iter_mut()
+        .find(|a| a.label == label)
+    {
         *existing = account;
     } else {
         auth.anthropic_accounts.push(account);
@@ -242,14 +243,13 @@ pub fn remove_account(label: &str) -> Result<()> {
 }
 
 /// Update tokens for a specific account (called after token refresh).
-pub fn update_account_tokens(
-    label: &str,
-    access: &str,
-    refresh: &str,
-    expires: i64,
-) -> Result<()> {
+pub fn update_account_tokens(label: &str, access: &str, refresh: &str, expires: i64) -> Result<()> {
     let mut auth = load_auth_file()?;
-    if let Some(account) = auth.anthropic_accounts.iter_mut().find(|a| a.label == label) {
+    if let Some(account) = auth
+        .anthropic_accounts
+        .iter_mut()
+        .find(|a| a.label == label)
+    {
         account.access = access.to_string();
         account.refresh = refresh.to_string();
         account.expires = expires;

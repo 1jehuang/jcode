@@ -69,9 +69,7 @@ impl SystemProfile {
 
     pub fn memory_pressure(&self) -> Option<f64> {
         match (self.available_memory_mb, self.total_memory_mb) {
-            (Some(avail), Some(total)) if total > 0 => {
-                Some(1.0 - (avail as f64 / total as f64))
-            }
+            (Some(avail), Some(total)) if total > 0 => Some(1.0 - (avail as f64 / total as f64)),
             _ => None,
         }
     }
@@ -92,10 +90,18 @@ pub fn init_background() {
             p.terminal,
             p.is_ssh,
             p.is_wsl,
-            p.load_avg_1m.map(|v| format!("{:.1}", v)).unwrap_or_else(|| "?".into()),
-            p.cpu_count.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
-            p.available_memory_mb.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
-            p.total_memory_mb.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+            p.load_avg_1m
+                .map(|v| format!("{:.1}", v))
+                .unwrap_or_else(|| "?".into()),
+            p.cpu_count
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "?".into()),
+            p.available_memory_mb
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "?".into()),
+            p.total_memory_mb
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "?".into()),
         ));
     });
 }
@@ -228,9 +234,11 @@ fn detect_terminal() -> String {
 
 #[cfg(target_os = "linux")]
 fn detect_load() -> (Option<f64>, Option<usize>) {
-    let load = std::fs::read_to_string("/proc/loadavg")
-        .ok()
-        .and_then(|s| s.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()));
+    let load = std::fs::read_to_string("/proc/loadavg").ok().and_then(|s| {
+        s.split_whitespace()
+            .next()
+            .and_then(|v| v.parse::<f64>().ok())
+    });
 
     let cpus = std::fs::read_to_string("/proc/cpuinfo")
         .ok()
@@ -347,7 +355,11 @@ fn detect_memory() -> (Option<u64>, Option<u64>) {
                 0,
             )
         };
-        if ret == 0 { Some(size / (1024 * 1024)) } else { None }
+        if ret == 0 {
+            Some(size / (1024 * 1024))
+        } else {
+            None
+        }
     };
 
     // macOS doesn't have a simple "available" metric like Linux's MemAvailable.
@@ -367,39 +379,109 @@ mod tests {
 
     #[test]
     fn test_ssh_is_minimal() {
-        let tier = compute_tier(Some(0.1), Some(8), Some(8000), Some(16000), true, false, "kitty");
+        let tier = compute_tier(
+            Some(0.1),
+            Some(8),
+            Some(8000),
+            Some(16000),
+            true,
+            false,
+            "kitty",
+        );
         assert_eq!(tier, PerformanceTier::Minimal);
     }
 
     #[test]
     fn test_healthy_system_is_full() {
-        let tier = compute_tier(Some(0.5), Some(8), Some(8000), Some(16000), false, false, "kitty");
+        let tier = compute_tier(
+            Some(0.5),
+            Some(8),
+            Some(8000),
+            Some(16000),
+            false,
+            false,
+            "kitty",
+        );
         assert_eq!(tier, PerformanceTier::Full);
     }
 
     #[test]
     fn test_high_load_reduces() {
-        let tier = compute_tier(Some(12.0), Some(4), Some(8000), Some(16000), false, false, "kitty");
-        assert!(matches!(tier, PerformanceTier::Reduced | PerformanceTier::Minimal));
+        let tier = compute_tier(
+            Some(12.0),
+            Some(4),
+            Some(8000),
+            Some(16000),
+            false,
+            false,
+            "kitty",
+        );
+        assert!(matches!(
+            tier,
+            PerformanceTier::Reduced | PerformanceTier::Minimal
+        ));
     }
 
     #[test]
     fn test_low_memory_reduces() {
-        let tier = compute_tier(Some(0.5), Some(8), Some(400), Some(16000), false, false, "kitty");
-        assert!(matches!(tier, PerformanceTier::Reduced | PerformanceTier::Minimal));
+        let tier = compute_tier(
+            Some(0.5),
+            Some(8),
+            Some(400),
+            Some(16000),
+            false,
+            false,
+            "kitty",
+        );
+        assert!(matches!(
+            tier,
+            PerformanceTier::Reduced | PerformanceTier::Minimal
+        ));
     }
 
     #[test]
     fn test_wsl_penalty() {
-        let tier_no_wsl = compute_tier(Some(0.5), Some(4), Some(3000), Some(8000), false, false, "wezterm");
-        let tier_wsl = compute_tier(Some(0.5), Some(4), Some(3000), Some(8000), false, true, "wezterm");
+        let tier_no_wsl = compute_tier(
+            Some(0.5),
+            Some(4),
+            Some(3000),
+            Some(8000),
+            false,
+            false,
+            "wezterm",
+        );
+        let tier_wsl = compute_tier(
+            Some(0.5),
+            Some(4),
+            Some(3000),
+            Some(8000),
+            false,
+            true,
+            "wezterm",
+        );
         assert!(tier_wsl as i32 >= tier_no_wsl as i32);
     }
 
     #[test]
     fn test_windows_terminal_penalty() {
-        let tier_kitty = compute_tier(Some(0.7), Some(4), Some(2500), Some(8000), false, false, "kitty");
-        let tier_wt = compute_tier(Some(0.7), Some(4), Some(2500), Some(8000), false, false, "windows-terminal");
+        let tier_kitty = compute_tier(
+            Some(0.7),
+            Some(4),
+            Some(2500),
+            Some(8000),
+            false,
+            false,
+            "kitty",
+        );
+        let tier_wt = compute_tier(
+            Some(0.7),
+            Some(4),
+            Some(2500),
+            Some(8000),
+            false,
+            false,
+            "windows-terminal",
+        );
         assert!(tier_wt as i32 >= tier_kitty as i32);
     }
 

@@ -5,7 +5,7 @@ use std::process::Command;
 fn main() {
     let pkg_version = env!("CARGO_PKG_VERSION");
     let parts: Vec<&str> = pkg_version.split('.').collect();
-    let major = parts.get(0).unwrap_or(&"0");
+    let major = parts.first().unwrap_or(&"0");
     let minor = parts.get(1).unwrap_or(&"0");
 
     let build_number = increment_build_number(major, minor);

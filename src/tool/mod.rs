@@ -206,35 +206,71 @@ impl Registry {
         static BASE: OnceLock<HashMap<String, Arc<dyn Tool>>> = OnceLock::new();
         let base = BASE.get_or_init(|| {
             let mut m = HashMap::new();
-            m.insert("read".into(), Arc::new(read::ReadTool::new()) as Arc<dyn Tool>);
+            m.insert(
+                "read".into(),
+                Arc::new(read::ReadTool::new()) as Arc<dyn Tool>,
+            );
             m.insert("write".into(), Arc::new(write::WriteTool::new()) as _);
             m.insert("edit".into(), Arc::new(edit::EditTool::new()) as _);
-            m.insert("multiedit".into(), Arc::new(multiedit::MultiEditTool::new()) as _);
+            m.insert(
+                "multiedit".into(),
+                Arc::new(multiedit::MultiEditTool::new()) as _,
+            );
             m.insert("patch".into(), Arc::new(patch::PatchTool::new()) as _);
-            m.insert("apply_patch".into(), Arc::new(apply_patch::ApplyPatchTool::new()) as _);
+            m.insert(
+                "apply_patch".into(),
+                Arc::new(apply_patch::ApplyPatchTool::new()) as _,
+            );
             m.insert("glob".into(), Arc::new(glob::GlobTool::new()) as _);
             m.insert("grep".into(), Arc::new(grep::GrepTool::new()) as _);
             m.insert("ls".into(), Arc::new(ls::LsTool::new()) as _);
             m.insert("bash".into(), Arc::new(bash::BashTool::new()) as _);
-            m.insert("webfetch".into(), Arc::new(webfetch::WebFetchTool::new()) as _);
-            m.insert("websearch".into(), Arc::new(websearch::WebSearchTool::new()) as _);
-            m.insert("codesearch".into(), Arc::new(codesearch::CodeSearchTool::new()) as _);
+            m.insert(
+                "webfetch".into(),
+                Arc::new(webfetch::WebFetchTool::new()) as _,
+            );
+            m.insert(
+                "websearch".into(),
+                Arc::new(websearch::WebSearchTool::new()) as _,
+            );
+            m.insert(
+                "codesearch".into(),
+                Arc::new(codesearch::CodeSearchTool::new()) as _,
+            );
             m.insert("invalid".into(), Arc::new(invalid::InvalidTool::new()) as _);
             m.insert("lsp".into(), Arc::new(lsp::LspTool::new()) as _);
-            m.insert("todowrite".into(), Arc::new(todo::TodoWriteTool::new()) as _);
+            m.insert(
+                "todowrite".into(),
+                Arc::new(todo::TodoWriteTool::new()) as _,
+            );
             m.insert("todoread".into(), Arc::new(todo::TodoReadTool::new()) as _);
             m.insert("bg".into(), Arc::new(bg::BgTool::new()) as _);
-            m.insert("communicate".into(), Arc::new(communicate::CommunicateTool::new()) as _);
-            m.insert("session_search".into(), Arc::new(session_search::SessionSearchTool::new()) as _);
-            m.insert("remember".into(), Arc::new(remember::RememberTool::new()) as _);
+            m.insert(
+                "communicate".into(),
+                Arc::new(communicate::CommunicateTool::new()) as _,
+            );
+            m.insert(
+                "session_search".into(),
+                Arc::new(session_search::SessionSearchTool::new()) as _,
+            );
+            m.insert(
+                "remember".into(),
+                Arc::new(remember::RememberTool::new()) as _,
+            );
             m.insert("memory".into(), Arc::new(memory::MemoryTool::new()) as _);
-            m.insert("schedule".into(), Arc::new(ambient::ScheduleTool::new()) as _);
+            m.insert(
+                "schedule".into(),
+                Arc::new(ambient::ScheduleTool::new()) as _,
+            );
             m
         });
         // Clone the Arc entries (cheap refcount bumps, not deep copies)
         let mut tools = base.clone();
         // SkillTool needs the skills registry reference (shared across sessions)
-        tools.insert("skill_manage".into(), Arc::new(skill::SkillTool::new(skills.clone())) as _);
+        tools.insert(
+            "skill_manage".into(),
+            Arc::new(skill::SkillTool::new(skills.clone())) as _,
+        );
         tools
     }
 

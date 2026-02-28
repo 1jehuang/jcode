@@ -1864,10 +1864,9 @@ async fn handle_client(
                     // Signal graceful shutdown so the agent checkpoints partial content
                     // before exiting, then wait briefly for it to finish.
                     cancel_signal.store(true, std::sync::atomic::Ordering::SeqCst);
-                    match tokio::time::timeout(
-                        std::time::Duration::from_millis(500),
-                        &mut handle,
-                    ).await {
+                    match tokio::time::timeout(std::time::Duration::from_millis(500), &mut handle)
+                        .await
+                    {
                         Ok(_) => {
                             // Task exited gracefully within timeout
                         }
@@ -2669,9 +2668,10 @@ async fn handle_client(
                             agent_guard.available_models_display()
                         };
                         if current_models != initial_models {
-                            let _ = client_event_tx_clone.send(ServerEvent::AvailableModelsUpdated {
-                                available_models: current_models,
-                            });
+                            let _ =
+                                client_event_tx_clone.send(ServerEvent::AvailableModelsUpdated {
+                                    available_models: current_models,
+                                });
                             return;
                         }
                     }
@@ -2965,7 +2965,9 @@ async fn handle_client(
                             Some(&event_counter),
                         )
                         .await;
-                        let retry_after_secs = e.downcast_ref::<StreamError>().and_then(|se| se.retry_after_secs);
+                        let retry_after_secs = e
+                            .downcast_ref::<StreamError>()
+                            .and_then(|se| se.retry_after_secs);
                         let _ = client_event_tx.send(ServerEvent::Error {
                             id,
                             message: e.to_string(),
@@ -9147,11 +9149,18 @@ async fn monitor_selfdev_signals(
                 crate::logging::info("Server: reload signal received");
 
                 // Parse signal: "hash:session_id" or just "hash"
-                let triggering_session = signal_content.split_once(':').map(|(_, sid)| sid.to_string());
+                let triggering_session = signal_content
+                    .split_once(':')
+                    .map(|(_, sid)| sid.to_string());
 
                 // Gracefully stop all active generations except the triggering session
                 // (it's just sleeping in the selfdev tool, no point waiting for it)
-                graceful_shutdown_sessions(&sessions, &swarm_members, triggering_session.as_deref()).await;
+                graceful_shutdown_sessions(
+                    &sessions,
+                    &swarm_members,
+                    triggering_session.as_deref(),
+                )
+                .await;
 
                 // Get canary binary path
                 if let Ok(binary) = crate::build::canary_binary_path() {
@@ -9177,7 +9186,6 @@ async fn monitor_selfdev_signals(
                 std::process::exit(42);
             }
         }
-
     }
 }
 
@@ -9204,7 +9212,9 @@ async fn graceful_shutdown_sessions(
 
     if running_sessions.is_empty() {
         if skip_session.is_some() {
-            crate::logging::info("Server: no other active generations, proceeding with reload immediately");
+            crate::logging::info(
+                "Server: no other active generations, proceeding with reload immediately",
+            );
         } else {
             crate::logging::info("Server: no active generations, proceeding with reload");
         }

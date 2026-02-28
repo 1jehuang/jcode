@@ -200,7 +200,10 @@ fn create_hotkey_shortcut(use_wezterm: bool) -> Result<()> {
     let (launch_exe, launch_args) = if use_wezterm {
         ("wezterm".to_string(), format!("start -- \"{}\"", exe_path))
     } else {
-        ("wt.exe".to_string(), format!("-p \"Command Prompt\" \"{}\"", exe_path))
+        (
+            "wt.exe".to_string(),
+            format!("-p \"Command Prompt\" \"{}\"", exe_path),
+        )
     };
 
     let hotkey_dir = storage::jcode_dir()?.join("hotkey");
@@ -328,7 +331,10 @@ Write-Output "OK"
         .output();
 
     if let Err(e) = start_output {
-        eprintln!("  \x1b[33m⚠\x1b[0m  Could not start hotkey listener now: {}", e);
+        eprintln!(
+            "  \x1b[33m⚠\x1b[0m  Could not start hotkey listener now: {}",
+            e
+        );
         eprintln!("    It will start automatically on next login.");
     }
 

@@ -189,8 +189,8 @@ impl AnthropicProvider {
         if fresh_creds.expires_at < now + 300_000 && !fresh_creds.refresh_token.is_empty() {
             crate::logging::info("OAuth token expired or expiring soon, attempting refresh...");
 
-            let active_label = auth::claude::active_account_label()
-                .unwrap_or_else(|| "default".to_string());
+            let active_label =
+                auth::claude::active_account_label().unwrap_or_else(|| "default".to_string());
             match oauth::refresh_claude_tokens_for_account(
                 &fresh_creds.refresh_token,
                 &active_label,
@@ -790,8 +790,8 @@ async fn force_refresh_oauth_token(
         loaded.refresh_token
     };
 
-    let active_label = auth::claude::active_account_label()
-        .unwrap_or_else(|| "default".to_string());
+    let active_label =
+        auth::claude::active_account_label().unwrap_or_else(|| "default".to_string());
     let refreshed = oauth::refresh_claude_tokens_for_account(&refresh_token, &active_label)
         .await
         .context("OAuth refresh endpoint rejected the refresh token")?;
@@ -1307,7 +1307,11 @@ fn add_message_cache_breakpoint(messages: &mut [ApiMessage]) {
     // Place cache_control on both (newest = WRITE for next turn, older = READ from prev turn)
     let total = assistant_indices.len();
     for (slot, &idx) in assistant_indices.iter().enumerate() {
-        let label = if slot == 0 { "WRITE (newest)" } else { "READ (prev-turn)" };
+        let label = if slot == 0 {
+            "WRITE (newest)"
+        } else {
+            "READ (prev-turn)"
+        };
         let mut added = false;
         if let Some(msg) = messages.get_mut(idx) {
             for block in msg.content.iter_mut().rev() {
@@ -1829,25 +1833,44 @@ mod tests {
     // to READ from the previous turn's conversation cache.
 
     fn count_message_cache_breakpoints(messages: &[ApiMessage]) -> usize {
-        messages.iter().flat_map(|m| &m.content).filter(|b| {
-            matches!(
-                b,
-                ApiContentBlock::Text { cache_control: Some(_), .. }
-                    | ApiContentBlock::ToolUse { cache_control: Some(_), .. }
-            )
-        }).count()
+        messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| {
+                matches!(
+                    b,
+                    ApiContentBlock::Text {
+                        cache_control: Some(_),
+                        ..
+                    } | ApiContentBlock::ToolUse {
+                        cache_control: Some(_),
+                        ..
+                    }
+                )
+            })
+            .count()
     }
 
     fn cached_message_indices(messages: &[ApiMessage]) -> Vec<usize> {
-        messages.iter().enumerate().filter(|(_, m)| {
-            m.content.iter().any(|b| {
-                matches!(
-                    b,
-                    ApiContentBlock::Text { cache_control: Some(_), .. }
-                        | ApiContentBlock::ToolUse { cache_control: Some(_), .. }
-                )
+        messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                m.content.iter().any(|b| {
+                    matches!(
+                        b,
+                        ApiContentBlock::Text {
+                            cache_control: Some(_),
+                            ..
+                        } | ApiContentBlock::ToolUse {
+                            cache_control: Some(_),
+                            ..
+                        }
+                    )
+                })
             })
-        }).map(|(i, _)| i).collect()
+            .map(|(i, _)| i)
+            .collect()
     }
 
     /// Helper to build a minimal conversation with N exchanges (user→assistant pairs).
@@ -1907,9 +1930,19 @@ mod tests {
         add_message_cache_breakpoint(&mut messages);
 
         let indices = cached_message_indices(&messages);
-        assert_eq!(indices.len(), 2, "Two assistant messages → two cache markers");
-        assert!(indices.contains(&2), "Second-to-last assistant (READ marker) at index 2");
-        assert!(indices.contains(&4), "Last assistant (WRITE marker) at index 4");
+        assert_eq!(
+            indices.len(),
+            2,
+            "Two assistant messages → two cache markers"
+        );
+        assert!(
+            indices.contains(&2),
+            "Second-to-last assistant (READ marker) at index 2"
+        );
+        assert!(
+            indices.contains(&4),
+            "Last assistant (WRITE marker) at index 4"
+        );
     }
 
     #[test]
@@ -1919,7 +1952,10 @@ mod tests {
         add_message_cache_breakpoint(&mut messages);
 
         let count = count_message_cache_breakpoints(&messages);
-        assert_eq!(count, 2, "Should always place exactly 2 markers regardless of conversation length");
+        assert_eq!(
+            count, 2,
+            "Should always place exactly 2 markers regardless of conversation length"
+        );
     }
 
     #[test]
@@ -1933,7 +1969,11 @@ mod tests {
         // identity=0, user=1, assistant=2, user=3
         add_message_cache_breakpoint(&mut turn2);
         let turn2_cached = cached_message_indices(&turn2);
-        assert_eq!(turn2_cached, vec![2], "Turn 2: cache marker at assistant index 2");
+        assert_eq!(
+            turn2_cached,
+            vec![2],
+            "Turn 2: cache marker at assistant index 2"
+        );
 
         // The content of the assistant message from turn 2 (what gets written to cache)
         let cached_text = match &turn2[2].content[0] {
@@ -1963,7 +2003,10 @@ mod tests {
 
         // Verify it's actually the same content (same assistant message, not a different one)
         match &turn3[2].content[0] {
-            ApiContentBlock::Text { text, cache_control } => {
+            ApiContentBlock::Text {
+                text,
+                cache_control,
+            } => {
                 assert_eq!(text, &cached_text);
                 assert!(cache_control.is_some(), "Must have cache_control set");
             }

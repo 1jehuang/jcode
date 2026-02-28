@@ -2709,8 +2709,7 @@ async fn stream_response_websocket_persistent(
                     // Extract response_id from response.created event
                     if response_id.is_none() {
                         if let Ok(val) = serde_json::from_str::<Value>(&text) {
-                            if val.get("type").and_then(|t| t.as_str())
-                                == Some("response.created")
+                            if val.get("type").and_then(|t| t.as_str()) == Some("response.created")
                             {
                                 if let Some(id) = val
                                     .get("response")

@@ -107,11 +107,10 @@ fn copilot_config_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         PathBuf::from(xdg).join("github-copilot")
     } else if cfg!(windows) {
-        let local_app_data =
-            std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_default();
-                format!("{}/AppData/Local", home)
-            });
+        let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            format!("{}/AppData/Local", home)
+        });
         PathBuf::from(local_app_data).join("github-copilot")
     } else {
         let home = std::env::var("HOME").unwrap_or_default();
@@ -158,11 +157,7 @@ pub async fn exchange_github_token(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "Copilot token exchange failed (HTTP {}): {}",
-            status,
-            body
-        );
+        anyhow::bail!("Copilot token exchange failed (HTTP {}): {}", status, body);
     }
 
     let token_resp: CopilotTokenResponse = resp
@@ -377,10 +372,7 @@ pub async fn fetch_available_models(
 /// - If claude-opus-4.6 is available -> paid tier -> use claude-opus-4.6
 /// - Otherwise -> free/basic tier -> use claude-sonnet-4.6 or claude-sonnet-4
 pub fn choose_default_model(available_models: &[CopilotModelInfo]) -> String {
-    let model_ids: Vec<&str> = available_models
-        .iter()
-        .map(|m| m.id.as_str())
-        .collect();
+    let model_ids: Vec<&str> = available_models.iter().map(|m| m.id.as_str()).collect();
 
     if model_ids.contains(&"claude-opus-4.6") {
         "claude-opus-4.6".to_string()
