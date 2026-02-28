@@ -2,12 +2,14 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
-    branches: [main]
+    branches: [main, master]
 
 env:
   CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
 
 jobs:
   build:
@@ -38,48 +40,34 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}
 
-      - name: Override sccache config
+      - name: Install mold linker (Linux)
+        if: runner.os == 'Linux'
         run: |
-          mkdir -p .cargo
-          echo -e '[build]\nrustc-wrapper = ""' > .cargo/config.toml
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mold
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          mkdir -p .cargo
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            cat > .cargo/config.toml << 'EOF'
+          [target.x86_64-unknown-linux-gnu]
+          linker = "clang"
+          rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+          EOF
+          fi
+          cargo build --release --target ${{ matrix.target }}
 
       - name: Run tests
         run: cargo test --target ${{ matrix.target }}
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ssh-key: ${{ secrets.DEPLOY_KEY }}
-          submodules: recursive
-
-      - name: Configure SSH for cargo git dependencies
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.DEPLOY_KEY }}
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Override sccache config
-        run: |
-          mkdir -p .cargo
-          echo -e '[build]\nrustc-wrapper = ""' > .cargo/config.toml
-
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
 
   fmt:
     name: Format

@@ -10,6 +10,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
 
 jobs:
   build:
@@ -44,16 +46,31 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
           cache-all-crates: "true"
 
+      - name: Install mold linker (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mold
+
       - name: Build release binary
         shell: bash
         run: |
           mkdir -p .cargo
-          echo -e '[build]\nrustc-wrapper = ""' > .cargo/config.toml
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            cat > .cargo/config.toml << 'EOF'
+          [target.x86_64-unknown-linux-gnu]
+          linker = "clang"
+          rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+          EOF
+          fi
           cargo build --release --target ${{ matrix.target }}
         env:
           JCODE_RELEASE_BUILD: "1"
