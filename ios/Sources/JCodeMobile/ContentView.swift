@@ -54,6 +54,7 @@ struct RootView: View {
 
 private struct ServerPanelView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var showQRScanner = false
 
     var body: some View {
         List {
@@ -73,6 +74,16 @@ private struct ServerPanelView: View {
                         Task { await model.pairAndSave() }
                     }
                     .buttonStyle(.borderedProminent)
+
+                    Spacer()
+
+                    Button {
+                        showQRScanner = true
+                    } label: {
+                        Image(systemName: "qrcode.viewfinder")
+                            .font(.title2)
+                    }
+                    .buttonStyle(.bordered)
                 }
             }
 
@@ -196,6 +207,17 @@ private struct ServerPanelView: View {
         .navigationTitle("Servers")
         .task {
             await model.loadSavedServers()
+            if model.selectedServer != nil && model.connectionState == .disconnected {
+                await model.connectSelected()
+            }
+        }
+        .sheet(isPresented: $showQRScanner) {
+            QRScannerView(isPresented: $showQRScanner) { host, port, code in
+                model.hostInput = host
+                model.portInput = String(port)
+                model.pairCodeInput = code
+                Task { await model.pairAndSave() }
+            }
         }
     }
 }

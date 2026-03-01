@@ -44,5 +44,7 @@
         <string>UIInterfaceOrientationLandscapeLeft</string>
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
+    <key>NSCameraUsageDescription</key>
+    <string>jcode uses the camera to scan QR codes for quick server pairing.</string>
 </dict>
 </plist>
