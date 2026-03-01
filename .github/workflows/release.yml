@@ -33,8 +33,7 @@ jobs:
         with:
           ssh-key: ${{ secrets.DEPLOY_KEY }}
           submodules: recursive
-          fetch-depth: 150
-          fetch-tags: true
+          fetch-depth: 0
 
       - name: Configure SSH for cargo git dependencies
         uses: webfactory/ssh-agent@v0.9.0
@@ -100,8 +99,7 @@ jobs:
         with:
           ssh-key: ${{ secrets.DEPLOY_KEY }}
           submodules: recursive
-          fetch-depth: 150
-          fetch-tags: true
+          fetch-depth: 0
 
       - name: Configure SSH for cargo git dependencies
         uses: webfactory/ssh-agent@v0.9.0
