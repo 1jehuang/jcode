@@ -5551,6 +5551,17 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
             .push(Span::styled(notice, Style::default().fg(ACCENT_COLOR)));
     }
 
+    if app.has_stashed_input() {
+        if !line.spans.is_empty() {
+            line.spans
+                .push(Span::styled(" · ", Style::default().fg(DIM_COLOR)));
+        }
+        line.spans.push(Span::styled(
+            "📋 stash",
+            Style::default().fg(Color::Rgb(255, 193, 7)),
+        ));
+    }
+
     // Check for stale memory state on each render
     crate::memory::check_staleness();
 

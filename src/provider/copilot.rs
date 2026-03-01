@@ -822,6 +822,9 @@ impl Provider for CopilotApiProvider {
         if trimmed.is_empty() {
             anyhow::bail!("Copilot model cannot be empty");
         }
+        if trimmed.contains("[1m]") {
+            anyhow::bail!("1M context window models are not supported via Copilot. Use the Anthropic API directly.");
+        }
         if let Ok(mut current) = self.model.try_write() {
             *current = trimmed.to_string();
             Ok(())

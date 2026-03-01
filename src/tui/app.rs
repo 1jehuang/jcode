@@ -1068,6 +1068,10 @@ impl App {
             if let Ok(session) = Session::load(session_id) {
                 app.session = session;
             }
+            if let Some((input, cursor)) = Self::restore_input_from_reload(session_id) {
+                app.input = input;
+                app.cursor_pos = cursor;
+            }
         }
 
         app.resume_session_id = resume_session;
@@ -1261,6 +1265,10 @@ impl App {
 
     /// Restore a previous session (for hot-reload)
     pub fn restore_session(&mut self, session_id: &str) {
+        if let Some((input, cursor)) = Self::restore_input_from_reload(session_id) {
+            self.input = input;
+            self.cursor_pos = cursor;
+        }
         if let Ok(session) = Session::load(session_id) {
             // Count stats before restoring
             let mut user_turns = 0;
@@ -3296,6 +3304,7 @@ impl App {
             }
 
             // Request reload to stable version
+            self.save_input_for_reload(&self.session.id.clone());
             self.reload_requested = Some(self.session.id.clone());
 
             // The actual exec happens in main.rs when run() returns
@@ -4300,6 +4309,7 @@ impl App {
                             ));
                         }
                     }
+                    self.save_input_for_reload(&session_id);
                     self.reload_requested = Some(session_id);
                     self.should_quit = true;
                     break 'outer;
@@ -6032,6 +6042,7 @@ impl App {
                                 .remote_session_id
                                 .clone()
                                 .unwrap_or_else(|| crate::id::new_id("ses"));
+                            self.save_input_for_reload(&session_id);
                             self.reload_requested = Some(session_id);
                             self.should_quit = true;
                         }
@@ -6047,6 +6058,7 @@ impl App {
                             .remote_session_id
                             .clone()
                             .unwrap_or_else(|| crate::id::new_id("ses"));
+                        self.save_input_for_reload(&session_id);
                         self.reload_requested = Some(session_id);
                         self.should_quit = true;
                         return Ok(());
@@ -7092,7 +7104,7 @@ impl App {
                 "`/config`\nShow active configuration.\n\n`/config init`\nCreate default config file.\n\n`/config edit`\nOpen config in `$EDITOR`."
             }
             "auth" | "login" => {
-                "`/auth`\nShow authentication status for all providers.\n\n`/login`\nInteractive provider selection - pick a provider to log into.\n\n`/login <provider>`\nStart login flow directly (anthropic/claude, openai, openrouter, cursor, copilot, antigravity)."
+                "`/auth`\nShow authentication status for all providers.\n\n`/login`\nInteractive provider selection - pick a provider to log into.\n\n`/login <provider>`\nStart login flow directly (anthropic/claude, openai, openrouter, copilot, antigravity, cursor)."
             }
             "account" | "accounts" => {
                 "`/account`\nList all Anthropic OAuth accounts.\n\n`/account add <label>`\nAdd a new account via OAuth login.\n\n`/account switch <label>`\nSwitch the active account.\n\n`/account remove <label>`\nRemove an account."
@@ -7214,6 +7226,7 @@ impl App {
                      • `Ctrl+1..9` - Jump by recency (1 = most recent)\n\
                      • `Ctrl+Tab` / `Ctrl+T` - Toggle queue mode (wait vs immediate send)\n\
                      • `Ctrl+Up` - Retrieve pending message for editing\n\
+                     • `Ctrl+S` - Stash/pop input (save input for later)\n\
                      • `Ctrl+U` - Clear input line\n\
                      {}\n\
                      {}",
@@ -8063,12 +8076,12 @@ impl App {
                 "claude" | "anthropic" => self.start_claude_login(),
                 "openai" => self.start_openai_login(),
                 "openrouter" => self.start_openrouter_login(),
-                "cursor" => self.start_cursor_login(),
                 "copilot" => self.start_copilot_login(),
                 "antigravity" => self.start_antigravity_login(),
+                "cursor" => self.start_cursor_login(),
                 other => {
                     self.push_display_message(DisplayMessage::error(format!(
-                        "Unknown provider '{}'. Use: anthropic/claude, openai, openrouter, cursor, copilot, or antigravity",
+                        "Unknown provider '{}'. Use: anthropic/claude, openai, openrouter, copilot, antigravity, or cursor",
                         other
                     )));
                 }
@@ -8242,6 +8255,7 @@ impl App {
             self.session
                 .set_status(crate::session::SessionStatus::Reloaded);
             let _ = self.session.save();
+            self.save_input_for_reload(&self.session.id.clone());
             self.reload_requested = Some(self.session.id.clone());
             self.should_quit = true;
             return;
@@ -9336,9 +9350,9 @@ impl App {
              | Anthropic | {} | {}{} |\n\
              | OpenAI | {} | {} |\n\
              | OpenRouter | {} | API key |\n\
-             | Cursor | {} | CLI login |\n\
              | Copilot | {} | CLI login |\n\
-             | Antigravity | {} | CLI login |\n\n\
+             | Antigravity | {} | CLI login |\n\
+             | Cursor | {} | API key / CLI |\n\n\
              Use `/login <provider>` to authenticate, `/account` to manage Anthropic accounts.",
             icon(status.anthropic.state),
             claude_detail,
@@ -9346,9 +9360,9 @@ impl App {
             icon(status.openai),
             openai_detail,
             icon(status.openrouter),
-            icon(status.cursor),
             icon(status.copilot),
             icon(status.antigravity),
+            icon(status.cursor),
         )));
     }
 
@@ -9367,16 +9381,16 @@ impl App {
              | 1 | Anthropic/Claude | {} |\n\
              | 2 | OpenAI | {} |\n\
              | 3 | OpenRouter | {} |\n\
-             | 4 | Cursor | {} |\n\
-             | 5 | Copilot | {} |\n\
-             | 6 | Antigravity | {} |\n\n\
+             | 4 | Copilot | {} |\n\
+             | 5 | Antigravity | {} |\n\
+             | 6 | Cursor | {} |\n\n\
              Type a number (1-6) or provider name, or `/cancel` to cancel.",
             icon(status.anthropic.state),
             icon(status.openai),
             icon(status.openrouter),
-            icon(status.cursor),
             icon(status.copilot),
             icon(status.antigravity),
+            icon(status.cursor),
         )));
         self.pending_login = Some(PendingLogin::ProviderSelection);
     }
@@ -10180,9 +10194,9 @@ impl App {
                     "1" | "claude" | "anthropic" => self.start_claude_login(),
                     "2" | "openai" => self.start_openai_login(),
                     "3" | "openrouter" => self.start_openrouter_login(),
-                    "4" | "cursor" => self.start_cursor_login(),
-                    "5" | "copilot" => self.start_copilot_login(),
-                    "6" | "antigravity" => self.start_antigravity_login(),
+                    "4" | "copilot" => self.start_copilot_login(),
+                    "5" | "antigravity" => self.start_antigravity_login(),
+                    "6" | "cursor" => self.start_cursor_login(),
                     _ => {
                         self.push_display_message(DisplayMessage::error(format!(
                             "Unknown selection '{}'. Type 1-6 or a provider name.",
@@ -10525,7 +10539,9 @@ impl App {
                     added_any = true;
                 }
 
-                if auth.copilot == crate::auth::AuthState::Available {
+                if auth.copilot == crate::auth::AuthState::Available
+                    && !model.contains("[1m]")
+                {
                     routes.push(crate::provider::ModelRoute {
                         model: model.clone(),
                         provider: "Copilot".to_string(),
@@ -13283,9 +13299,9 @@ impl App {
                 ("/login claude".into(), "Alias for Anthropic login"),
                 ("/login openai".into(), "Login to OpenAI (OAuth)"),
                 ("/login openrouter".into(), "Login to OpenRouter (API key)"),
-                ("/login cursor".into(), "Login to Cursor CLI"),
                 ("/login copilot".into(), "Login to GitHub Copilot CLI"),
                 ("/login antigravity".into(), "Login to Antigravity CLI"),
+                ("/login cursor".into(), "Login to Cursor (API key / CLI)"),
             ];
         }
 
@@ -13341,7 +13357,7 @@ impl App {
             ("/auth".into(), "Show authentication status"),
             (
                 "/login".into(),
-                "Login to a provider (anthropic/openai/openrouter/cursor/copilot/antigravity)",
+                "Login to a provider (anthropic/openai/openrouter/copilot/antigravity/cursor)",
             ),
             (
                 "/account".into(),
@@ -13879,6 +13895,31 @@ impl App {
             self.stashed_input = Some((input, cursor));
             self.set_status_notice("📋 Input stashed");
         }
+    }
+
+    fn save_input_for_reload(&self, session_id: &str) {
+        if self.input.is_empty() {
+            return;
+        }
+        if let Ok(jcode_dir) = crate::storage::jcode_dir() {
+            let path = jcode_dir.join(format!("client-input-{}", session_id));
+            let data = format!("{}\n{}", self.cursor_pos, self.input);
+            let _ = std::fs::write(&path, &data);
+        }
+    }
+
+    fn restore_input_from_reload(session_id: &str) -> Option<(String, usize)> {
+        let jcode_dir = crate::storage::jcode_dir().ok()?;
+        let path = jcode_dir.join(format!("client-input-{}", session_id));
+        if !path.exists() {
+            return None;
+        }
+        let data = std::fs::read_to_string(&path).ok()?;
+        let _ = std::fs::remove_file(&path);
+        let (cursor_str, input) = data.split_once('\n')?;
+        let cursor = cursor_str.parse::<usize>().unwrap_or(0);
+        let cursor = cursor.min(input.len());
+        Some((input.to_string(), cursor))
     }
 
     /// Toggle scroll bookmark: stash current position and jump to bottom,

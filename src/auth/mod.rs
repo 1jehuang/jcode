@@ -32,14 +32,14 @@ pub struct AuthStatus {
     pub openai_has_oauth: bool,
     /// OpenAI has API key available
     pub openai_has_api_key: bool,
-    /// Cursor CLI available (via `cursor-agent` binary)
-    pub cursor: AuthState,
     /// Copilot API available (GitHub OAuth token found)
     pub copilot: AuthState,
     /// Copilot has API token (from hosts.json/apps.json/GITHUB_TOKEN)
     pub copilot_has_api_token: bool,
     /// Antigravity CLI available
     pub antigravity: AuthState,
+    /// Cursor CLI available (via `cursor-agent` binary or API key)
+    pub cursor: AuthState,
 }
 
 /// Auth state for Anthropic which has multiple auth methods
@@ -92,8 +92,8 @@ impl AuthStatus {
             || self.openai == AuthState::Available
             || self.openrouter == AuthState::Available
             || self.copilot == AuthState::Available
-            || self.cursor == AuthState::Available
             || self.antigravity == AuthState::Available
+            || self.cursor == AuthState::Available
     }
 
     /// Invalidate the cached auth status so the next `check()` does a fresh probe.
@@ -187,12 +187,6 @@ impl AuthStatus {
         }
 
         // Check external/CLI auth providers (presence of installed CLI tooling)
-        status.cursor = if cursor::has_cursor_api_key() || cursor::has_cursor_agent_cli() {
-            AuthState::Available
-        } else {
-            AuthState::NotConfigured
-        };
-
         status.copilot = if copilot::has_copilot_credentials() {
             status.copilot_has_api_token = true;
             AuthState::Available
@@ -206,6 +200,12 @@ impl AuthStatus {
             } else {
                 AuthState::NotConfigured
             };
+
+        status.cursor = if cursor::has_cursor_api_key() || cursor::has_cursor_agent_cli() {
+            AuthState::Available
+        } else {
+            AuthState::NotConfigured
+        };
 
         status
     }
