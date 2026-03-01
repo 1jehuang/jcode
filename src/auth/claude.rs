@@ -21,6 +21,8 @@ pub struct AnthropicAccount {
     pub refresh: String,
     pub expires: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription_type: Option<String>,
 }
 
@@ -139,6 +141,7 @@ pub fn load_auth_file() -> Result<JcodeAuthFile> {
                     access: legacy.access,
                     refresh: legacy.refresh,
                     expires: legacy.expires,
+                    email: None,
                     subscription_type: Some("max".to_string()),
                 });
                 auth.active_anthropic_account = Some("default".to_string());
@@ -257,6 +260,22 @@ pub fn update_account_tokens(label: &str, access: &str, refresh: &str, expires: 
         Ok(())
     } else {
         anyhow::bail!("No account with label '{}' found for token update", label);
+    }
+}
+
+/// Update profile metadata for a specific account.
+pub fn update_account_profile(label: &str, email: Option<String>) -> Result<()> {
+    let mut auth = load_auth_file()?;
+    if let Some(account) = auth
+        .anthropic_accounts
+        .iter_mut()
+        .find(|a| a.label == label)
+    {
+        account.email = email;
+        save_auth_file(&auth)?;
+        Ok(())
+    } else {
+        anyhow::bail!("No account with label '{}' found for profile update", label);
     }
 }
 
@@ -431,6 +450,7 @@ mod tests {
                 access: "acc_123".to_string(),
                 refresh: "ref_456".to_string(),
                 expires: 9999999999999,
+                email: None,
                 subscription_type: Some("max".to_string()),
             }],
             active_anthropic_account: Some("work".to_string()),
@@ -456,12 +476,14 @@ mod tests {
                     refresh: "ref_personal".to_string(),
                     expires: 1000,
                     subscription_type: Some("pro".to_string()),
+                    email: None,
                 },
                 AnthropicAccount {
                     label: "work".to_string(),
                     access: "acc_work".to_string(),
                     refresh: "ref_work".to_string(),
                     expires: 2000,
+                    email: None,
                     subscription_type: Some("max".to_string()),
                 },
             ],
@@ -500,6 +522,36 @@ mod tests {
         let account: AnthropicAccount = serde_json::from_str(json).unwrap();
         assert_eq!(account.label, "test");
         assert!(account.subscription_type.is_none());
+        assert!(account.email.is_none());
+    }
+
+    #[test]
+    fn anthropic_account_email_serialized_when_present() {
+        let account = AnthropicAccount {
+            label: "test".to_string(),
+            access: "acc".to_string(),
+            refresh: "ref".to_string(),
+            expires: 0,
+            email: Some("user@example.com".to_string()),
+            subscription_type: Some("max".to_string()),
+        };
+        let json = serde_json::to_string(&account).unwrap();
+        assert!(json.contains("email"));
+        assert!(json.contains("user@example.com"));
+    }
+
+    #[test]
+    fn anthropic_account_email_omitted_when_none() {
+        let account = AnthropicAccount {
+            label: "test".to_string(),
+            access: "acc".to_string(),
+            refresh: "ref".to_string(),
+            expires: 0,
+            email: None,
+            subscription_type: Some("max".to_string()),
+        };
+        let json = serde_json::to_string(&account).unwrap();
+        assert!(!json.contains("\"email\""));
     }
 
     #[test]
@@ -509,6 +561,7 @@ mod tests {
             access: "acc".to_string(),
             refresh: "ref".to_string(),
             expires: 0,
+            email: None,
             subscription_type: Some("max".to_string()),
         };
         let json = serde_json::to_string(&account).unwrap();
@@ -524,9 +577,32 @@ mod tests {
             refresh: "ref".to_string(),
             expires: 0,
             subscription_type: None,
+            email: None,
         };
         let json = serde_json::to_string(&account).unwrap();
         assert!(!json.contains("subscription_type"));
+    }
+
+    #[test]
+    fn update_account_profile_sets_email() {
+        let mut auth = JcodeAuthFile::default();
+        auth.anthropic_accounts.push(AnthropicAccount {
+            label: "test".to_string(),
+            access: "acc".to_string(),
+            refresh: "ref".to_string(),
+            expires: 1,
+            email: None,
+            subscription_type: None,
+        });
+
+        if let Some(account) = auth.anthropic_accounts.iter_mut().find(|a| a.label == "test") {
+            account.email = Some("user@example.com".to_string());
+        }
+
+        assert_eq!(
+            auth.anthropic_accounts[0].email.as_deref(),
+            Some("user@example.com")
+        );
     }
 
     #[test]

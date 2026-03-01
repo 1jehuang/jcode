@@ -15,6 +15,7 @@ pub mod claude {
     pub const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
     pub const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
     pub const REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
+    pub const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
     pub const SCOPES: &str = "org:create_api_key user:profile user:inference";
 }
 
@@ -370,10 +371,53 @@ pub fn save_claude_tokens_for_account(tokens: &OAuthTokens, label: &str) -> Resu
         access: tokens.access_token.clone(),
         refresh: tokens.refresh_token.clone(),
         expires: tokens.expires_at,
+        email: None,
         subscription_type: None,
     };
     claude_auth::upsert_account(account)?;
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct ClaudeProfileResponse {
+    #[serde(default)]
+    account: ClaudeProfileAccount,
+}
+
+#[derive(Deserialize, Default)]
+struct ClaudeProfileAccount {
+    email: Option<String>,
+}
+
+async fn fetch_claude_profile_email_at_url(access_token: &str, profile_url: &str) -> Result<Option<String>> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(profile_url)
+        .header("Accept", "application/json")
+        .header("User-Agent", "claude-cli/1.0.0")
+        .header(
+            "anthropic-beta",
+            "oauth-2025-04-20,claude-code-20250219",
+        )
+        .bearer_auth(access_token)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("Profile fetch failed ({}): {}", status, body);
+    }
+
+    let profile: ClaudeProfileResponse = resp.json().await?;
+    Ok(profile.account.email)
+}
+
+/// Fetch profile metadata for a Claude account and persist any discovered fields.
+pub async fn update_claude_account_profile(label: &str, access_token: &str) -> Result<Option<String>> {
+    let email = fetch_claude_profile_email_at_url(access_token, claude::PROFILE_URL).await?;
+    claude_auth::update_account_profile(label, email.clone())?;
+    Ok(email)
 }
 
 /// Load Claude tokens from jcode's credentials file (active account).
@@ -830,8 +874,56 @@ mod tests {
         assert!(!claude::CLIENT_ID.is_empty());
         assert!(claude::AUTHORIZE_URL.starts_with("https://"));
         assert!(claude::TOKEN_URL.starts_with("https://"));
+        assert!(claude::PROFILE_URL.starts_with("https://"));
         assert!(claude::REDIRECT_URI.starts_with("https://"));
         assert!(!claude::SCOPES.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_claude_profile_email_reads_account_email() {
+        let body = serde_json::json!({
+            "account": {
+                "email": "user@example.com"
+            }
+        })
+        .to_string();
+        let (port, _handle) = mock_token_server(200, &body).await;
+
+        let url = format!("http://127.0.0.1:{}/api/oauth/profile", port);
+        let email = fetch_claude_profile_email_at_url("token", &url).await.unwrap();
+
+        assert_eq!(email, Some("user@example.com".to_string()));
+    }
+
+    #[tokio::test]
+    async fn fetch_claude_profile_email_handles_missing_email() {
+        let body = serde_json::json!({
+            "account": {}
+        })
+        .to_string();
+        let (port, _handle) = mock_token_server(200, &body).await;
+
+        let url = format!("http://127.0.0.1:{}/api/oauth/profile", port);
+        let email = fetch_claude_profile_email_at_url("token", &url).await.unwrap();
+
+        assert!(email.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_claude_profile_email_propagates_http_error() {
+        let body = serde_json::json!({
+            "error": "bad_token"
+        })
+        .to_string();
+        let (port, _handle) = mock_token_server(401, &body).await;
+
+        let url = format!("http://127.0.0.1:{}/api/oauth/profile", port);
+        let err = fetch_claude_profile_email_at_url("token", &url)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("Profile fetch failed"));
     }
 
     #[test]

@@ -478,6 +478,29 @@ fn parse_area_spec(spec: &str) -> Option<Rect> {
     })
 }
 
+fn mask_email(email: &str) -> String {
+    let trimmed = email.trim();
+    let Some((local, domain)) = trimmed.split_once('@') else {
+        return trimmed.to_string();
+    };
+
+    if local.is_empty() {
+        return format!("***@{}", domain);
+    }
+
+    let mut chars = local.chars();
+    let first = chars.next().unwrap_or('*');
+    let last = chars.last().unwrap_or(first);
+
+    let masked_local = if local.chars().count() <= 2 {
+        format!("{}*", first)
+    } else {
+        format!("{}***{}", first, last)
+    };
+
+    format!("{}@{}", masked_local, domain)
+}
+
 /// State for an in-progress OAuth/API-key login flow triggered by `/login`.
 #[derive(Debug, Clone)]
 enum PendingLogin {
@@ -9641,8 +9664,8 @@ impl App {
         }
 
         let mut lines = vec!["**Anthropic Accounts:**\n".to_string()];
-        lines.push("| Account | Status | Subscription | Active |".to_string());
-        lines.push("|---------|--------|-------------|--------|".to_string());
+        lines.push("| Account | Email | Status | Subscription | Active |".to_string());
+        lines.push("|---------|-------|--------|-------------|--------|".to_string());
 
         for account in &accounts {
             let is_active = active_label.as_deref() == Some(&account.label);
@@ -9651,11 +9674,16 @@ impl App {
             } else {
                 "⚠ expired"
             };
+            let email = account
+                .email
+                .as_deref()
+                .map(mask_email)
+                .unwrap_or_else(|| "unknown".to_string());
             let sub = account.subscription_type.as_deref().unwrap_or("unknown");
             let active_mark = if is_active { "◉" } else { "" };
             lines.push(format!(
-                "| {} | {} | {} | {} |",
-                account.label, status, sub, active_mark
+                "| {} | {} | {} | {} | {} |",
+                account.label, email, status, sub, active_mark
             ));
         }
 
@@ -10308,9 +10336,26 @@ impl App {
         crate::auth::oauth::save_claude_tokens_for_account(&oauth_tokens, label)
             .map_err(|e| format!("Failed to save tokens: {}", e))?;
 
+        let profile_suffix = match crate::auth::oauth::update_claude_account_profile(
+            label,
+            &oauth_tokens.access_token,
+        )
+        .await
+        {
+            Ok(Some(email)) => format!(" (email: {})", mask_email(&email)),
+            Ok(None) => String::new(),
+            Err(e) => {
+                crate::logging::warn(&format!(
+                    "Claude login [{}] profile fetch failed: {}",
+                    label, e
+                ));
+                String::new()
+            }
+        };
+
         Ok(format!(
-            "Successfully logged in to Claude! (account: {})",
-            label
+            "Successfully logged in to Claude! (account: {}){}",
+            label, profile_suffix
         ))
     }
 
@@ -12936,10 +12981,8 @@ impl App {
         }
         let prompt_chars = display_prompt.chars().count();
         crate::memory::record_injected_prompt(&display_prompt, count, age_ms);
-        self.push_display_message(DisplayMessage::system(format!(
-            "🧠 Injected {} {} into context ({} chars, computed {}ms ago)\n\n---\n\n{}",
-            count, plural, prompt_chars, age_ms, display_prompt
-        )));
+        let summary = format!("{} {} · {} chars", count, plural, prompt_chars);
+        self.push_display_message(DisplayMessage::memory(summary));
         self.set_status_notice(format!("🧠 {} {} injected", count, plural));
     }
 
@@ -15627,6 +15670,50 @@ mod tests {
             .expect("missing help response");
         assert_eq!(msg.role, "system");
         assert!(msg.content.contains("`/fix`"));
+    }
+
+    #[test]
+    fn test_mask_email_censors_local_part() {
+        assert_eq!(mask_email("jeremyh1@uw.edu"), "j***1@uw.edu");
+    }
+
+    #[test]
+    fn test_show_accounts_includes_masked_email_column() {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let accounts = vec![crate::auth::claude::AnthropicAccount {
+            label: "work".to_string(),
+            access: "acc".to_string(),
+            refresh: "ref".to_string(),
+            expires: now_ms + 60000,
+            email: Some("user@example.com".to_string()),
+            subscription_type: Some("max".to_string()),
+        }];
+
+        let mut lines = vec!["**Anthropic Accounts:**\n".to_string()];
+        lines.push("| Account | Email | Status | Subscription | Active |".to_string());
+        lines.push("|---------|-------|--------|-------------|--------|".to_string());
+
+        for account in &accounts {
+            let status = if account.expires > now_ms {
+                "✓ valid"
+            } else {
+                "⚠ expired"
+            };
+            let email = account
+                .email
+                .as_deref()
+                .map(mask_email)
+                .unwrap_or_else(|| "unknown".to_string());
+            let sub = account.subscription_type.as_deref().unwrap_or("unknown");
+            lines.push(format!(
+                "| {} | {} | {} | {} | {} |",
+                account.label, email, status, sub, "◉"
+            ));
+        }
+
+        let output = lines.join("\n");
+        assert!(output.contains("| Account | Email | Status | Subscription | Active |"));
+        assert!(output.contains("u***r@example.com"));
     }
 
     #[test]

@@ -155,17 +155,36 @@ impl CopilotApiProvider {
     }
 
     fn is_user_initiated_raw(messages: &[ChatMessage]) -> bool {
-        let Some(last_msg) = messages.last() else {
-            return true;
-        };
-        if last_msg.role != Role::User {
+        for msg in messages.iter().rev() {
+            if msg.role != Role::User {
+                return true;
+            }
+            let has_tool_result = msg
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }));
+            if has_tool_result {
+                return false;
+            }
+            let is_text_only = msg.content.iter().all(|block| {
+                matches!(block, ContentBlock::Text { .. })
+            });
+            if !is_text_only || msg.content.is_empty() {
+                return true;
+            }
+            let is_system_reminder = msg.content.iter().any(|block| {
+                if let ContentBlock::Text { text, .. } = block {
+                    text.contains("<system-reminder>")
+                } else {
+                    false
+                }
+            });
+            if is_system_reminder {
+                continue;
+            }
             return true;
         }
-        let has_tool_result = last_msg
-            .content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::ToolResult { .. }));
-        !has_tool_result
+        true
     }
 
     fn is_user_initiated(&self, messages: &[ChatMessage]) -> bool {
@@ -1225,5 +1244,116 @@ mod tests {
             ),
         ];
         assert!(CopilotApiProvider::is_user_initiated_raw(&messages));
+    }
+
+    #[test]
+    fn is_user_initiated_tool_result_with_memory_injection() {
+        let messages = vec![
+            make_msg(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "Hello".into(),
+                    cache_control: None,
+                }],
+            ),
+            make_msg(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                    input: json!({}),
+                }],
+            ),
+            make_msg(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "output".into(),
+                    is_error: None,
+                }],
+            ),
+            make_msg(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "<system-reminder>\nSome memory context\n</system-reminder>".into(),
+                    cache_control: None,
+                }],
+            ),
+        ];
+        assert!(!CopilotApiProvider::is_user_initiated_raw(&messages));
+    }
+
+    #[test]
+    fn is_user_initiated_user_text_after_tool_result_without_system_reminder() {
+        let messages = vec![
+            make_msg(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "Hello".into(),
+                    cache_control: None,
+                }],
+            ),
+            make_msg(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                    input: json!({}),
+                }],
+            ),
+            make_msg(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "output".into(),
+                    is_error: None,
+                }],
+            ),
+            make_msg(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "Now do something else".into(),
+                    cache_control: None,
+                }],
+            ),
+        ];
+        assert!(CopilotApiProvider::is_user_initiated_raw(&messages));
+    }
+
+    #[test]
+    fn is_user_initiated_multiple_memory_injections_after_tool_result() {
+        let messages = vec![
+            make_msg(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                    input: json!({}),
+                }],
+            ),
+            make_msg(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "output".into(),
+                    is_error: None,
+                }],
+            ),
+            make_msg(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "<system-reminder>\nMemory 1\n</system-reminder>".into(),
+                    cache_control: None,
+                }],
+            ),
+            make_msg(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "<system-reminder>\nMemory 2\n</system-reminder>".into(),
+                    cache_control: None,
+                }],
+            ),
+        ];
+        assert!(!CopilotApiProvider::is_user_initiated_raw(&messages));
     }
 }

@@ -3629,6 +3629,21 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                     );
                 }
             }
+            "memory" => {
+                lines.push(
+                    Line::from(vec![
+                        Span::styled(
+                            if centered { "🧠 " } else { "  🧠 " },
+                            Style::default(),
+                        ),
+                        Span::styled(
+                            msg.content.clone(),
+                            Style::default().fg(Color::Rgb(140, 210, 255)),
+                        ),
+                    ])
+                    .alignment(align),
+                );
+            }
             "usage" => {
                 lines.push(
                     Line::from(vec![

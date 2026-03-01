@@ -409,6 +409,18 @@ impl DisplayMessage {
         }
     }
 
+    /// Create a memory injection message (compact one-liner display)
+    pub fn memory(summary: impl Into<String>) -> Self {
+        Self {
+            role: "memory".to_string(),
+            content: summary.into(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        }
+    }
+
     /// Create a user message
     pub fn user(content: impl Into<String>) -> Self {
         Self {

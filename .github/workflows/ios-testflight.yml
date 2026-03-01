@@ -1,0 +1,125 @@
+name: iOS TestFlight
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'ios/**'
+      - '.github/workflows/ios-testflight.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ios-testflight-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUNDLE_ID: com.jcode.mobile
+  SCHEME: JCodeMobile
+  PROJECT_DIR: ios
+  XCODE_VERSION: '16.2'
+
+jobs:
+  build-and-deploy:
+    name: Build & Upload to TestFlight
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ env.XCODE_VERSION }}
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: xcodegen generate
+
+      - name: Write App Store Connect API key
+        run: |
+          mkdir -p ${{ runner.temp }}/private_keys
+          echo -n "${{ secrets.APPSTORE_API_KEY_P8 }}" > ${{ runner.temp }}/private_keys/AuthKey_${{ secrets.APPSTORE_API_KEY_ID }}.p8
+
+      - name: Set build number
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          # Use GitHub run number as build number for unique TestFlight builds
+          BUILD_NUMBER=${{ github.run_number }}
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> $GITHUB_ENV
+          echo "Build number: $BUILD_NUMBER"
+
+      - name: Resolve Swift packages
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project JCodeMobile.xcodeproj \
+            -scheme ${{ env.SCHEME }} \
+            -clonedSourcePackagesDirPath ${{ runner.temp }}/spm
+
+      - name: Archive
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          xcodebuild archive \
+            -project JCodeMobile.xcodeproj \
+            -scheme ${{ env.SCHEME }} \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath ${{ runner.temp }}/JCodeMobile.xcarchive \
+            -clonedSourcePackagesDirPath ${{ runner.temp }}/spm \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ${{ runner.temp }}/private_keys/AuthKey_${{ secrets.APPSTORE_API_KEY_ID }}.p8 \
+            -authenticationKeyID ${{ secrets.APPSTORE_API_KEY_ID }} \
+            -authenticationKeyIssuerID ${{ secrets.APPSTORE_ISSUER_ID }} \
+            CURRENT_PROJECT_VERSION=${{ env.BUILD_NUMBER }} \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM=TAS6ARKDN7 \
+            | tee ${{ runner.temp }}/archive.log | tail -20
+
+      - name: Export IPA
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath ${{ runner.temp }}/JCodeMobile.xcarchive \
+            -exportOptionsPlist ExportOptions.plist \
+            -exportPath ${{ runner.temp }}/export \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ${{ runner.temp }}/private_keys/AuthKey_${{ secrets.APPSTORE_API_KEY_ID }}.p8 \
+            -authenticationKeyID ${{ secrets.APPSTORE_API_KEY_ID }} \
+            -authenticationKeyIssuerID ${{ secrets.APPSTORE_ISSUER_ID }} \
+            | tee ${{ runner.temp }}/export.log | tail -20
+
+      - name: Upload to TestFlight
+        run: |
+          xcrun altool --upload-app \
+            -f ${{ runner.temp }}/export/JCodeMobile.ipa \
+            -t ios \
+            --apiKey ${{ secrets.APPSTORE_API_KEY_ID }} \
+            --apiIssuer ${{ secrets.APPSTORE_ISSUER_ID }} \
+            --show-progress
+
+      - name: Summary
+        if: success()
+        run: |
+          echo "## iOS Build Deployed to TestFlight :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build Number:** ${{ env.BUILD_NUMBER }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Bundle ID:** ${{ env.BUNDLE_ID }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The build should appear in TestFlight within 15-30 minutes." >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-logs
+          path: |
+            ${{ runner.temp }}/archive.log
+            ${{ runner.temp }}/export.log
+          retention-days: 7

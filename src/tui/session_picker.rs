@@ -1525,6 +1525,19 @@ impl SessionPicker {
                         rendered_messages += 1;
                     }
                 }
+                "memory" => {
+                    lines.push(
+                        Line::from(vec![
+                            Span::styled("🧠 ", Style::default()),
+                            Span::styled(
+                                msg.content.clone(),
+                                Style::default().fg(Color::Rgb(140, 210, 255)),
+                            ),
+                        ])
+                        .alignment(align),
+                    );
+                    rendered_messages += 1;
+                }
                 "usage" => {
                     lines.push(
                         Line::from(vec![Span::styled(

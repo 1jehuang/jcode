@@ -2368,8 +2368,18 @@ async fn login_claude_flow(label: &str) -> Result<()> {
     eprintln!("Logging in to Claude (account: {})...", label);
     let tokens = auth::oauth::login_claude().await?;
     auth::oauth::save_claude_tokens_for_account(&tokens, label)?;
+    let profile_email = match auth::oauth::update_claude_account_profile(label, &tokens.access_token).await {
+        Ok(email) => email,
+        Err(e) => {
+            eprintln!("Warning: logged in but failed to fetch profile metadata: {}", e);
+            None
+        }
+    };
     eprintln!("Successfully logged in to Claude!");
     eprintln!("Account '{}' stored at ~/.jcode/auth.json", label);
+    if let Some(email) = profile_email {
+        eprintln!("Profile email: {}", email);
+    }
     Ok(())
 }
 

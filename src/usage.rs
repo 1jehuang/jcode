@@ -23,6 +23,29 @@ const CACHE_DURATION: Duration = Duration::from_secs(60);
 /// Error backoff duration (wait 5 minutes before retrying after auth/credential errors)
 const ERROR_BACKOFF: Duration = Duration::from_secs(300);
 
+fn mask_email(email: &str) -> String {
+    let trimmed = email.trim();
+    let Some((local, domain)) = trimmed.split_once('@') else {
+        return trimmed.to_string();
+    };
+
+    if local.is_empty() {
+        return format!("***@{}", domain);
+    }
+
+    let mut chars = local.chars();
+    let first = chars.next().unwrap_or('*');
+    let last = chars.last().unwrap_or(first);
+
+    let masked_local = if local.chars().count() <= 2 {
+        format!("{}*", first)
+    } else {
+        format!("{}***{}", first, last)
+    };
+
+    format!("{}@{}", masked_local, domain)
+}
+
 /// Usage data from the API
 #[derive(Debug, Clone, Default)]
 pub struct UsageData {
@@ -383,9 +406,24 @@ async fn fetch_all_anthropic_usage_reports() -> Vec<ProviderUsage> {
             } else {
                 ""
             };
-            format!("Anthropic - {}{}", account.label, active_marker)
+            let email_suffix = account
+                .email
+                .as_deref()
+                .map(mask_email)
+                .map(|m| format!(" ({})", m))
+                .unwrap_or_default();
+            format!(
+                "Anthropic - {}{}{}",
+                account.label, email_suffix, active_marker
+            )
         } else {
-            "Anthropic (Claude)".to_string()
+            let email_suffix = account
+                .email
+                .as_deref()
+                .map(mask_email)
+                .map(|m| format!(" ({})", m))
+                .unwrap_or_default();
+            format!("Anthropic (Claude){}", email_suffix)
         };
         let access = account.access.clone();
         let refresh = account.refresh.clone();
@@ -1323,6 +1361,12 @@ mod tests {
         assert_eq!(humanize_key("five_hour"), "Five Hour");
         assert_eq!(humanize_key("seven_day_opus"), "Seven Day Opus");
         assert_eq!(humanize_key("plan"), "Plan");
+    }
+
+    #[test]
+    fn test_mask_email_censors_local_part() {
+        assert_eq!(mask_email("jeremyh1@uw.edu"), "j***1@uw.edu");
+        assert_eq!(mask_email("ab@example.com"), "a*@example.com");
     }
 
     #[test]
