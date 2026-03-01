@@ -638,6 +638,8 @@ pub struct App {
     remote_server_version: Option<String>,
     // Whether the remote server has a newer binary available
     remote_server_has_update: Option<bool>,
+    // Auto-reload server when stale (set on first connect if server_has_update)
+    pending_server_reload: bool,
     // Remote server short name (e.g., "running", "blazing")
     remote_server_short_name: Option<String>,
     // Remote server icon (e.g., "🔥", "🌫️")
@@ -985,6 +987,7 @@ impl App {
             remote_is_canary: None,
             remote_server_version: None,
             remote_server_has_update: None,
+            pending_server_reload: false,
             remote_server_short_name: None,
             remote_server_icon: None,
             current_message_id: None,
@@ -4550,6 +4553,13 @@ impl App {
                                     let _ = self.handle_server_event(server_event, &mut remote);
                                 }
 
+                                // Auto-reload server if stale binary detected
+                                if self.pending_server_reload && !self.is_processing {
+                                    self.pending_server_reload = false;
+                                    self.append_reload_message("Reloading server with newer binary...");
+                                    let _ = remote.reload().await;
+                                }
+
                                 // Process pending interleave or queued messages
                                 // If processing: send any buffered interleave immediately as soft interrupt
                                 // If not processing: send interleave or queued messages directly
@@ -5400,6 +5410,12 @@ impl App {
                 self.remote_is_canary = is_canary;
                 self.remote_server_version = server_version;
                 self.remote_server_has_update = server_has_update;
+
+                // Auto-reload server if it's running a stale binary
+                if server_has_update == Some(true) && !self.pending_server_reload {
+                    self.pending_server_reload = true;
+                    self.set_status_notice("Server update available, reloading...");
+                }
                 self.remote_server_short_name = server_name;
                 if let Some(icon) = server_icon {
                     self.remote_server_icon = Some(icon);
