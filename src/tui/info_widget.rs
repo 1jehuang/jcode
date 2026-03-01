@@ -408,6 +408,8 @@ pub enum UsageProvider {
     OpenAI,
     /// OpenRouter/API-key providers (shows token costs)
     CostBased,
+    /// GitHub Copilot (shows session token counts, no cost)
+    Copilot,
 }
 
 impl UsageProvider {
@@ -417,6 +419,7 @@ impl UsageProvider {
             UsageProvider::Anthropic => "Anthropic",
             UsageProvider::OpenAI => "OpenAI",
             UsageProvider::CostBased => "",
+            UsageProvider::Copilot => "Copilot",
         }
     }
 }
@@ -1391,8 +1394,8 @@ fn calculate_widget_height(
             if let Some(info) = &data.usage_info {
                 if info.available {
                     match info.provider {
-                        UsageProvider::CostBased => {
-                            h += 1; // Cost + tokens
+                        UsageProvider::CostBased | UsageProvider::Copilot => {
+                            h += 1; // Cost/tokens line
                             if info.cache_read_tokens.is_some() || info.cache_write_tokens.is_some()
                             {
                                 h += 1; // Cache line
@@ -2659,6 +2662,18 @@ fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
     }
 
     match info.provider {
+        UsageProvider::Copilot => {
+            vec![
+                Line::from(vec![Span::styled(
+                    format!(
+                        "{} in + {} out",
+                        format_tokens(info.input_tokens),
+                        format_tokens(info.output_tokens)
+                    ),
+                    Style::default().fg(Color::Rgb(140, 140, 150)),
+                )]),
+            ]
+        }
         UsageProvider::CostBased => {
             // Show token costs for API-key providers (OpenRouter, direct API)
             vec![
@@ -2903,6 +2918,29 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
     if let Some(info) = &data.usage_info {
         if info.available {
             match info.provider {
+                UsageProvider::Copilot => {
+                    lines.push(Line::from(vec![
+                        Span::styled("📊 ", Style::default().fg(Color::Rgb(110, 200, 140))),
+                        Span::styled(
+                            format!(
+                                "{}↑ {}↓",
+                                format_tokens(info.input_tokens),
+                                format_tokens(info.output_tokens)
+                            ),
+                            Style::default().fg(Color::Rgb(140, 140, 150)),
+                        ),
+                    ]));
+
+                    if let Some(tps) = info.output_tps {
+                        lines.push(Line::from(vec![
+                            Span::styled("⏱ ", Style::default().fg(Color::Rgb(120, 170, 220))),
+                            Span::styled(
+                                format!("{:.1} tps", tps),
+                                Style::default().fg(Color::Rgb(140, 140, 150)),
+                            ),
+                        ]));
+                    }
+                }
                 UsageProvider::CostBased => {
                     // Cost + tokens for API-key providers
                     lines.push(Line::from(vec![
@@ -3255,7 +3293,7 @@ fn compact_usage_height(data: &InfoWidgetData) -> u16 {
     if let Some(info) = &data.usage_info {
         if info.available {
             match info.provider {
-                UsageProvider::CostBased => return 2,
+                UsageProvider::CostBased | UsageProvider::Copilot => return 2,
                 _ => {
                     let label = info.provider.label();
                     let label_line = if label.is_empty() { 0 } else { 1 };

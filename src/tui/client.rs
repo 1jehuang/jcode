@@ -1447,6 +1447,7 @@ impl TuiState for ClientApp {
                 && has_openai_creds
                 && !has_anthropic_creds);
         let is_api_key_provider = provider_name.contains("openrouter");
+        let is_copilot_provider = provider_name.contains("copilot");
 
         let output_tps = if self.is_processing {
             self.compute_streaming_tps()
@@ -1527,6 +1528,23 @@ impl TuiState for ClientApp {
                     available: true,
                 })
             }
+        } else if is_copilot_provider {
+            Some(super::info_widget::UsageInfo {
+                provider: super::info_widget::UsageProvider::Copilot,
+                five_hour: 0.0,
+                five_hour_resets_at: None,
+                seven_day: 0.0,
+                seven_day_resets_at: None,
+                spark: None,
+                spark_resets_at: None,
+                total_cost: 0.0,
+                input_tokens: self.total_input_tokens,
+                output_tokens: self.total_output_tokens,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                output_tps,
+                available: self.total_input_tokens > 0 || self.total_output_tokens > 0,
+            })
         } else if is_api_key_provider || self.total_input_tokens > 0 || self.total_output_tokens > 0
         {
             // API-key providers, or fallback if we have token counts

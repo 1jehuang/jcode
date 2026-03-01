@@ -5563,6 +5563,17 @@ fn build_idle_usage_line(app: &dyn TuiState) -> Line<'static> {
     }
 
     match usage.provider {
+        UsageProvider::Copilot => {
+            let tokens_str = format!(
+                "{}↑ {}↓",
+                format_tokens_compact(usage.input_tokens),
+                format_tokens_compact(usage.output_tokens)
+            );
+            Line::from(vec![
+                Span::styled("📊 ", Style::default().fg(DIM_COLOR)),
+                Span::styled(tokens_str, Style::default().fg(Color::Rgb(110, 200, 140))),
+            ])
+        }
         UsageProvider::CostBased => {
             // Show cost for API-key providers
             let cost_str = format!("${:.4}", usage.total_cost);

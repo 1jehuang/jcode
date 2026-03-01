@@ -8874,6 +8874,18 @@ impl App {
             output.push('\n');
         }
 
+        if self.total_input_tokens > 0 || self.total_output_tokens > 0 {
+            output.push_str("---\n\n### Session Usage\n\n");
+            output.push_str(&format!(
+                "- **Input tokens:** {}\n- **Output tokens:** {}\n",
+                self.total_input_tokens, self.total_output_tokens
+            ));
+            if self.total_cost > 0.0 {
+                output.push_str(&format!("- **Cost:** ${:.4}\n", self.total_cost));
+            }
+            output.push('\n');
+        }
+
         self.push_display_message(DisplayMessage::system(output));
     }
 
@@ -14497,6 +14509,7 @@ impl super::TuiState for App {
                     && has_openai_oauth
                     && !has_anthropic_oauth);
             let is_api_key_provider = provider_name.contains("openrouter");
+            let is_copilot_provider = provider_name.contains("copilot");
 
             let output_tps = if self.is_processing {
                 self.compute_streaming_tps()
@@ -14593,6 +14606,23 @@ impl super::TuiState for App {
                     cache_write_tokens: self.streaming_cache_creation_tokens,
                     output_tps,
                     available: true,
+                })
+            } else if is_copilot_provider {
+                Some(super::info_widget::UsageInfo {
+                    provider: super::info_widget::UsageProvider::Copilot,
+                    five_hour: 0.0,
+                    five_hour_resets_at: None,
+                    seven_day: 0.0,
+                    seven_day_resets_at: None,
+                    spark: None,
+                    spark_resets_at: None,
+                    total_cost: 0.0,
+                    input_tokens: self.total_input_tokens,
+                    output_tokens: self.total_output_tokens,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    output_tps,
+                    available: self.total_input_tokens > 0 || self.total_output_tokens > 0,
                 })
             } else {
                 None
