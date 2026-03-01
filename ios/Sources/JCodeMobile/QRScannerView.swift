@@ -102,7 +102,7 @@ struct QRCameraView: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: QRScannerController, context: Context) {}
 }
 
-final class QRScannerController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+final class QRScannerController: UIViewController, @preconcurrency AVCaptureMetadataOutputObjectsDelegate {
     var onCodeScanned: ((String) -> Void)?
     private let captureSession = AVCaptureSession()
     private var hasScanned = false
@@ -127,33 +127,38 @@ final class QRScannerController: UIViewController, AVCaptureMetadataOutputObject
         previewLayer.videoGravity = .resizeAspectFill
         view.layer.addSublayer(previewLayer)
 
-        Task.detached { [captureSession] in
-            captureSession.startRunning()
+        let session = captureSession
+        Task.detached {
+            session.startRunning()
         }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        captureSession.stopRunning()
+        let session = captureSession
+        Task.detached {
+            session.stopRunning()
+        }
     }
 
-    func metadataOutput(
+    nonisolated func metadataOutput(
         _ output: AVCaptureMetadataOutput,
         didOutput metadataObjects: [AVMetadataObject],
         from connection: AVCaptureConnection
     ) {
-        guard !hasScanned,
-              let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
+        guard let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
               let value = object.stringValue,
               value.hasPrefix("jcode://") else {
             return
         }
 
-        hasScanned = true
-        captureSession.stopRunning()
-
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        onCodeScanned?(value)
+        let callback = onCodeScanned
+        let session = captureSession
+        Task { @MainActor in
+            session.stopRunning()
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            callback?(value)
+        }
     }
 }
 #endif
