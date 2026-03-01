@@ -585,6 +585,9 @@ pub struct Server {
     ambient_runner: Option<AmbientRunnerHandle>,
     /// Shared MCP server pool (processes shared across sessions)
     mcp_pool: Arc<crate::mcp::SharedMcpPool>,
+    /// Graceful shutdown signals by session_id (stored outside agent mutex so they
+    /// can be signaled without locking the agent during active tool execution)
+    shutdown_signals: Arc<RwLock<HashMap<String, crate::agent::GracefulShutdownSignal>>>,
 }
 
 impl Server {
@@ -638,6 +641,7 @@ impl Server {
             event_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             ambient_runner,
             mcp_pool: Arc::new(crate::mcp::SharedMcpPool::from_default_config()),
+            shutdown_signals: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -969,8 +973,14 @@ impl Server {
         if is_selfdev_env() {
             let signal_sessions = Arc::clone(&self.sessions);
             let signal_swarm_members = Arc::clone(&self.swarm_members);
+            let signal_shutdown_signals = Arc::clone(&self.shutdown_signals);
             tokio::spawn(async move {
-                monitor_selfdev_signals(signal_sessions, signal_swarm_members).await;
+                monitor_selfdev_signals(
+                    signal_sessions,
+                    signal_swarm_members,
+                    signal_shutdown_signals,
+                )
+                .await;
             });
         }
 
@@ -1128,6 +1138,7 @@ impl Server {
         let main_server_icon = self.identity.icon.clone();
         let main_ambient_runner = self.ambient_runner.clone();
         let main_mcp_pool = Arc::clone(&self.mcp_pool);
+        let main_shutdown_signals = Arc::clone(&self.shutdown_signals);
 
         let main_handle = tokio::spawn(async move {
             loop {
@@ -1155,6 +1166,7 @@ impl Server {
                         let server_icon = main_server_icon.clone();
                         let ambient_runner = main_ambient_runner.clone();
                         let mcp_pool = Arc::clone(&main_mcp_pool);
+                        let shutdown_signals = Arc::clone(&main_shutdown_signals);
 
                         // Increment client count
                         *client_count.write().await += 1;
@@ -1183,6 +1195,7 @@ impl Server {
                                 server_name,
                                 server_icon,
                                 mcp_pool,
+                                shutdown_signals,
                             )
                             .await;
 
@@ -1343,6 +1356,7 @@ impl Server {
         let gw_server_icon = self.identity.icon.clone();
         let gw_ambient_runner = self.ambient_runner.clone();
         let gw_mcp_pool = Arc::clone(&self.mcp_pool);
+        let gw_shutdown_signals = Arc::clone(&self.shutdown_signals);
 
         let handle = tokio::spawn(async move {
             while let Some(gw_client) = client_rx.recv().await {
@@ -1368,6 +1382,7 @@ impl Server {
                 let server_icon = gw_server_icon.clone();
                 let ambient_runner = gw_ambient_runner.clone();
                 let mcp_pool = Arc::clone(&gw_mcp_pool);
+                let shutdown_signals = Arc::clone(&gw_shutdown_signals);
 
                 *client_count.write().await += 1;
 
@@ -1400,6 +1415,7 @@ impl Server {
                         server_name,
                         server_icon,
                         mcp_pool,
+                        shutdown_signals,
                     )
                     .await;
 
@@ -1439,6 +1455,7 @@ async fn handle_client(
     server_name: String,
     server_icon: String,
     mcp_pool: Arc<crate::mcp::SharedMcpPool>,
+    shutdown_signals: Arc<RwLock<HashMap<String, crate::agent::GracefulShutdownSignal>>>,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -1498,6 +1515,13 @@ async fn handle_client(
     // Get a handle to the graceful shutdown signal BEFORE wrapping in Mutex
     // This allows signaling cancel (checkpoint partial response) without needing the lock
     let cancel_signal = new_agent.graceful_shutdown_signal();
+
+    // Register the shutdown signal in the server-level map so
+    // graceful_shutdown_sessions can signal it without locking the agent mutex
+    {
+        let mut signals = shutdown_signals.write().await;
+        signals.insert(client_session_id.clone(), cancel_signal.clone());
+    }
 
     let agent = Arc::new(Mutex::new(new_agent));
     {
@@ -4846,6 +4870,11 @@ async fn handle_client(
     {
         let mut connections = client_connections.write().await;
         connections.remove(&client_connection_id);
+    }
+    // Clean up shutdown signal for this session
+    {
+        let mut signals = shutdown_signals.write().await;
+        signals.remove(&client_session_id);
     }
 
     if let Some(handle) = processing_task.take() {
@@ -9122,6 +9151,7 @@ fn normalize_model_arg(model: String) -> Option<String> {
 async fn monitor_selfdev_signals(
     sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    shutdown_signals: Arc<RwLock<HashMap<String, crate::agent::GracefulShutdownSignal>>>,
 ) {
     use std::process::Command as ProcessCommand;
     use tokio::time::{interval, Duration};
@@ -9158,6 +9188,7 @@ async fn monitor_selfdev_signals(
                 graceful_shutdown_sessions(
                     &sessions,
                     &swarm_members,
+                    &shutdown_signals,
                     triggering_session.as_deref(),
                 )
                 .await;
@@ -9194,8 +9225,9 @@ async fn monitor_selfdev_signals(
 /// `skip_session` is the session that triggered the reload (selfdev tool) -
 /// it's just sleeping in an infinite loop and will never finish on its own.
 async fn graceful_shutdown_sessions(
-    sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    _sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    shutdown_signals: &Arc<RwLock<HashMap<String, crate::agent::GracefulShutdownSignal>>>,
     skip_session: Option<&str>,
 ) {
     // Find which sessions are actively processing (excluding the triggering session)
@@ -9227,21 +9259,23 @@ async fn graceful_shutdown_sessions(
         running_sessions
     ));
 
-    // Signal graceful shutdown on all active sessions
-    // Use try_lock to avoid deadlock: the agent that triggered the reload
-    // holds its Mutex while the selfdev tool loops, so lock().await would hang.
+    // Signal graceful shutdown using the server-level signal map.
+    // This avoids needing to lock the agent mutex (which is held by the
+    // processing task during tool execution).
     {
-        let sessions_guard = sessions.read().await;
+        let signals = shutdown_signals.read().await;
         for session_id in &running_sessions {
-            if let Some(agent_arc) = sessions_guard.get(session_id) {
-                if let Ok(agent) = agent_arc.try_lock() {
-                    agent.request_graceful_shutdown();
-                } else {
-                    crate::logging::warn(&format!(
-                        "Server: session {} mutex held (likely running selfdev reload), skipping graceful signal",
-                        session_id
-                    ));
-                }
+            if let Some(signal) = signals.get(session_id) {
+                signal.store(true, std::sync::atomic::Ordering::SeqCst);
+                crate::logging::info(&format!(
+                    "Server: sent graceful shutdown signal to session {}",
+                    session_id
+                ));
+            } else {
+                crate::logging::warn(&format!(
+                    "Server: no shutdown signal registered for session {} (may have already disconnected)",
+                    session_id
+                ));
             }
         }
     }
