@@ -2967,6 +2967,63 @@ fn spawn_resume_in_new_terminal(
     Ok(false)
 }
 
+/// Find wezterm-gui.exe on Windows, falling back to wezterm.exe.
+///
+/// `wezterm.exe` is a console app that creates a visible cmd window when
+/// launched.  `wezterm-gui.exe` is the native GUI binary shipped in the same
+/// directory.  We strongly prefer the GUI variant.
+#[cfg(not(unix))]
+fn find_wezterm_gui_binary() -> Option<String> {
+    use std::process::{Command, Stdio};
+
+    if let Ok(exe) = std::env::var("WEZTERM_EXECUTABLE") {
+        let p = std::path::Path::new(&exe);
+        let gui = p.with_file_name("wezterm-gui.exe");
+        if gui.exists() {
+            return Some(gui.to_string_lossy().into_owned());
+        }
+        return Some(exe);
+    }
+
+    let candidates = [
+        r"C:\Program Files\WezTerm\wezterm-gui.exe",
+        r"C:\Program Files (x86)\WezTerm\wezterm-gui.exe",
+    ];
+    for c in &candidates {
+        if std::path::Path::new(c).exists() {
+            return Some(c.to_string());
+        }
+    }
+
+    for bin in &["wezterm-gui", "wezterm"] {
+        if let Ok(output) = Command::new("where")
+            .arg(bin)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Some(line) = stdout.lines().next() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        if *bin == "wezterm" {
+                            let p = std::path::Path::new(trimmed);
+                            let gui = p.with_file_name("wezterm-gui.exe");
+                            if gui.exists() {
+                                return Some(gui.to_string_lossy().into_owned());
+                            }
+                        }
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(not(unix))]
 fn spawn_resume_in_new_terminal(
     exe: &std::path::Path,
@@ -2975,18 +3032,11 @@ fn spawn_resume_in_new_terminal(
 ) -> Result<bool> {
     use std::process::{Command, Stdio};
 
-    // Try WezTerm first, then Windows Terminal
-    let wezterm_available = std::env::var("WEZTERM_EXECUTABLE").is_ok()
-        || Command::new("where")
-            .arg("wezterm")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+    // Try WezTerm first (prefer wezterm-gui to avoid console window), then Windows Terminal
+    let wezterm_gui = find_wezterm_gui_binary();
 
-    if wezterm_available {
-        let status = Command::new("wezterm")
+    if let Some(ref wezterm_bin) = wezterm_gui {
+        let status = Command::new(wezterm_bin)
             .args([
                 "start",
                 "--always-new-process",

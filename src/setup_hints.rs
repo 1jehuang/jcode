@@ -184,22 +184,60 @@ fn is_winget_available() -> bool {
     false
 }
 
-/// Find the full path to WezTerm on Windows (checks common install locations).
+/// Find the full path to WezTerm GUI binary on Windows.
+///
+/// Uses `wezterm-gui.exe` instead of `wezterm.exe` because the latter is a
+/// console application that creates a visible cmd window when launched via
+/// `Start-Process` or `CreateProcess`.  `wezterm-gui.exe` is a native GUI
+/// binary that opens cleanly without a console flash.
 #[cfg(windows)]
 fn find_wezterm_path() -> Option<String> {
-    let candidates = [
+    let gui_candidates = [
+        r"C:\Program Files\WezTerm\wezterm-gui.exe",
+        r"C:\Program Files (x86)\WezTerm\wezterm-gui.exe",
+    ];
+    for c in &gui_candidates {
+        if std::path::Path::new(c).exists() {
+            return Some(c.to_string());
+        }
+    }
+    let console_candidates = [
         r"C:\Program Files\WezTerm\wezterm.exe",
         r"C:\Program Files (x86)\WezTerm\wezterm.exe",
     ];
-    for c in &candidates {
-        if std::path::Path::new(c).exists() {
+    for c in &console_candidates {
+        let p = std::path::Path::new(c);
+        if p.exists() {
+            let gui = p.with_file_name("wezterm-gui.exe");
+            if gui.exists() {
+                return Some(gui.to_string_lossy().into_owned());
+            }
             return Some(c.to_string());
         }
     }
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
         let p = format!(r"{}\Microsoft\WinGet\Links\wezterm.exe", local);
         if std::path::Path::new(&p).exists() {
+            let gui = std::path::Path::new(&p).with_file_name("wezterm-gui.exe");
+            if gui.exists() {
+                return Some(gui.to_string_lossy().into_owned());
+            }
             return Some(p);
+        }
+    }
+    let output = std::process::Command::new("where")
+        .arg("wezterm-gui")
+        .output()
+        .ok();
+    if let Some(ref o) = output {
+        if o.status.success() {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if let Some(line) = stdout.lines().next() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
         }
     }
     let output = std::process::Command::new("where")
@@ -211,6 +249,11 @@ fn find_wezterm_path() -> Option<String> {
         if let Some(line) = stdout.lines().next() {
             let trimmed = line.trim();
             if !trimmed.is_empty() {
+                let p = std::path::Path::new(trimmed);
+                let gui = p.with_file_name("wezterm-gui.exe");
+                if gui.exists() {
+                    return Some(gui.to_string_lossy().into_owned());
+                }
                 return Some(trimmed.to_string());
             }
         }
@@ -237,7 +280,7 @@ fn create_hotkey_shortcut(use_wezterm: bool) -> Result<()> {
     let exe_path = exe.to_string_lossy();
 
     let (launch_exe, launch_args) = if use_wezterm {
-        let wezterm_path = find_wezterm_path().unwrap_or_else(|| "wezterm".to_string());
+        let wezterm_path = find_wezterm_path().unwrap_or_else(|| "wezterm-gui".to_string());
         (wezterm_path, format!("start -- \"{}\"", exe_path))
     } else {
         (
