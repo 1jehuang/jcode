@@ -4096,6 +4096,9 @@ impl App {
                             Ok(BusEvent::LoginCompleted(login)) => {
                                 self.handle_login_completed(login);
                             }
+                            Ok(BusEvent::UpdateStatus(status)) => {
+                                self.handle_update_status(status);
+                            }
                             _ => {}
                         }
                     }
@@ -4103,7 +4106,6 @@ impl App {
             }
         }
 
-        // Extract memories from session before exiting (don't block on failure)
         self.extract_session_memories().await;
 
         Ok(RunResult {
@@ -4641,6 +4643,9 @@ impl App {
                                 if success {
                                     let _ = remote.notify_auth_changed().await;
                                 }
+                            }
+                            Ok(BusEvent::UpdateStatus(status)) => {
+                                self.handle_update_status(status);
                             }
                             _ => {}
                         }
@@ -10314,6 +10319,28 @@ impl App {
         }
         if self.pending_login.is_some() {
             self.pending_login = None;
+        }
+    }
+
+    fn handle_update_status(&mut self, status: crate::bus::UpdateStatus) {
+        use crate::bus::UpdateStatus;
+        match status {
+            UpdateStatus::Checking => {
+                self.set_status_notice("Checking for updates...");
+            }
+            UpdateStatus::Available { current, latest } => {
+                self.set_status_notice(&format!("Update available: {} → {}", current, latest));
+            }
+            UpdateStatus::Downloading { version } => {
+                self.set_status_notice(&format!("⬇️  Downloading {}...", version));
+            }
+            UpdateStatus::Installed { version } => {
+                self.set_status_notice(&format!("✅ Updated to {} — restarting", version));
+            }
+            UpdateStatus::UpToDate => {}
+            UpdateStatus::Error(e) => {
+                self.set_status_notice(&format!("Update failed: {}", e));
+            }
         }
     }
 

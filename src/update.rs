@@ -613,6 +613,8 @@ pub enum UpdateCheckResult {
 }
 
 pub fn check_and_maybe_update(auto_install: bool) -> UpdateCheckResult {
+    use crate::bus::{Bus, BusEvent, UpdateStatus};
+
     if !should_auto_update() {
         return UpdateCheckResult::NoUpdate;
     }
@@ -622,19 +624,37 @@ pub fn check_and_maybe_update(auto_install: bool) -> UpdateCheckResult {
         return UpdateCheckResult::NoUpdate;
     }
 
+    Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Checking));
+
     match check_for_update_blocking() {
         Ok(Some(release)) => {
             let current = env!("JCODE_VERSION").to_string();
             let latest = release.tag_name.clone();
 
+            Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Available {
+                current: current.clone(),
+                latest: latest.clone(),
+            }));
+
             if auto_install {
-                print_centered(&format!("⬇️  Downloading jcode {}...", latest));
+                Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Downloading {
+                    version: latest.clone(),
+                }));
                 match download_and_install_blocking(&release) {
-                    Ok(path) => UpdateCheckResult::UpdateInstalled {
-                        version: latest,
-                        path,
-                    },
-                    Err(e) => UpdateCheckResult::Error(format!("Failed to install: {}", e)),
+                    Ok(path) => {
+                        Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Installed {
+                            version: latest.clone(),
+                        }));
+                        UpdateCheckResult::UpdateInstalled {
+                            version: latest,
+                            path,
+                        }
+                    }
+                    Err(e) => {
+                        let msg = format!("Failed to install: {}", e);
+                        Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Error(msg.clone())));
+                        UpdateCheckResult::Error(msg)
+                    }
                 }
             } else {
                 let mut metadata = UpdateMetadata::load().unwrap_or_default();
