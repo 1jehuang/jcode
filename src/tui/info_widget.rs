@@ -2099,28 +2099,40 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
     ]));
 
     if info.total_count > 0 {
-        let summary = format!(
-            "{}p/{}g · {}n {}e",
-            info.project_count,
-            info.global_count,
-            info.graph_nodes.len(),
-            info.graph_edges.len()
-        );
+        let mut stats_parts = Vec::new();
+        if info.project_count > 0 {
+            stats_parts.push(format!("{} project", info.project_count));
+        }
+        if info.global_count > 0 {
+            stats_parts.push(format!("{} global", info.global_count));
+        }
+        let nodes_edges = format!("{}n {}e", info.graph_nodes.len(), info.graph_edges.len());
+        if !stats_parts.is_empty() {
+            stats_parts.push(nodes_edges);
+        } else {
+            stats_parts = vec![nodes_edges];
+        }
         lines.push(Line::from(vec![Span::styled(
-            summary,
+            truncate_smart(&stats_parts.join(" · "), inner.width.saturating_sub(2) as usize),
             Style::default().fg(Color::Rgb(130, 130, 140)),
         )]));
 
         if !info.by_category.is_empty() {
             let mut categories: Vec<(&String, &usize)> = info.by_category.iter().collect();
-            categories.sort_by(|(name_a, count_a), (name_b, count_b)| {
-                count_b.cmp(count_a).then_with(|| name_a.cmp(name_b))
-            });
-
+            categories.sort_by(|a, b| b.1.cmp(a.1));
             let cat_text = categories
                 .into_iter()
                 .take(4)
-                .map(|(name, count)| format!("{}:{}", truncate_chars(name, 3), count))
+                .map(|(name, count)| {
+                    let label = match name.as_str() {
+                        "fact" => "facts",
+                        "preference" => "prefs",
+                        "entity" => "entities",
+                        "correction" => "corrections",
+                        other => other,
+                    };
+                    format!("{}:{}", label, count)
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
             let cat_text = truncate_smart(&cat_text, inner.width.saturating_sub(2) as usize);
@@ -2142,226 +2154,92 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
 
     // Activity state if active
     if let Some(activity) = &info.activity {
-        let state_line = match &activity.state {
-            MemoryState::Idle => Line::from(vec![
-                Span::styled("○ ", Style::default().fg(Color::Rgb(100, 100, 110))),
-                Span::styled("Idle", Style::default().fg(Color::Rgb(120, 120, 130))),
-            ]),
-            MemoryState::Embedding => Line::from(vec![
-                Span::styled("🔍 ", Style::default().fg(Color::Rgb(255, 200, 100))),
-                Span::styled(
-                    "Searching...",
-                    Style::default().fg(Color::Rgb(180, 180, 190)),
-                ),
-            ]),
-            MemoryState::SidecarChecking { count } => Line::from(vec![
-                Span::styled("⚡ ", Style::default().fg(Color::Rgb(255, 200, 100))),
-                Span::styled(
-                    format!("Checking {}", count),
-                    Style::default().fg(Color::Rgb(180, 180, 190)),
-                ),
-            ]),
-            MemoryState::FoundRelevant { count } => Line::from(vec![
-                Span::styled("✓ ", Style::default().fg(Color::Rgb(100, 200, 100))),
-                Span::styled(
-                    format!("{} relevant", count),
-                    Style::default().fg(Color::Rgb(180, 180, 190)),
-                ),
-            ]),
-            MemoryState::Extracting { reason } => Line::from(vec![
-                Span::styled("🧠 ", Style::default().fg(Color::Rgb(200, 150, 255))),
-                Span::styled(
-                    format!("Extracting ({})", reason),
-                    Style::default().fg(Color::Rgb(180, 180, 190)),
-                ),
-            ]),
-            MemoryState::Maintaining { phase } => Line::from(vec![
-                Span::styled("🌿 ", Style::default().fg(Color::Rgb(120, 220, 180))),
-                Span::styled(
-                    truncate_smart(
-                        &format!("Maintaining ({})", phase),
-                        inner.width.saturating_sub(4) as usize,
-                    ),
-                    Style::default().fg(Color::Rgb(180, 180, 190)),
-                ),
-            ]),
-            MemoryState::ToolAction { action, detail } => {
-                let icon = match action.as_str() {
-                    "remember" | "store" => "💾",
-                    "recall" | "search" => "🔍",
-                    "forget" => "🗑\u{fe0f}",
-                    "tag" => "🏷\u{fe0f}",
-                    "link" => "🔗",
-                    "list" | "related" => "📋",
-                    _ => "🧠",
-                };
-                let text = if detail.is_empty() {
-                    action.clone()
-                } else {
-                    format!("{}: {}", action, detail)
-                };
-                Line::from(vec![
-                    Span::styled(
-                        format!("{} ", icon),
-                        Style::default().fg(Color::Rgb(200, 150, 255)),
-                    ),
-                    Span::styled(
-                        truncate_smart(&text, inner.width.saturating_sub(4) as usize),
-                        Style::default().fg(Color::Rgb(200, 200, 210)),
-                    ),
-                ])
-            }
-        };
-        lines.push(state_line);
+        let max_width = inner.width.saturating_sub(4) as usize;
+        let dim = Color::Rgb(100, 100, 110);
+        let text_color = Color::Rgb(160, 160, 170);
+        let label_color = Color::Rgb(140, 140, 150);
 
-        // Recent events (limit to 3)
-        let max_events = (inner.height.saturating_sub(2) as usize).min(3);
-        for event in activity.recent_events.iter().take(max_events) {
-            let (icon, text, color) =
-                format_memory_event(event, inner.width.saturating_sub(4) as usize);
+        if let Some(pipeline) = &activity.pipeline {
+            let steps: Vec<(&str, &StepStatus, Option<&StepResult>, Option<(usize, usize)>)> = vec![
+                ("search", &pipeline.search, pipeline.search_result.as_ref(), None),
+                ("verify", &pipeline.verify, pipeline.verify_result.as_ref(), pipeline.verify_progress),
+                ("inject", &pipeline.inject, pipeline.inject_result.as_ref(), None),
+                ("maintain", &pipeline.maintain, pipeline.maintain_result.as_ref(), None),
+            ];
+
+            for (name, status, result, progress) in steps {
+                if matches!(status, StepStatus::Skipped | StepStatus::Pending) {
+                    continue;
+                }
+                let (icon, icon_color) = match status {
+                    StepStatus::Running => ("⠋", Color::Rgb(255, 200, 100)),
+                    StepStatus::Done => ("✓", Color::Rgb(100, 200, 100)),
+                    StepStatus::Error => ("!", Color::Rgb(255, 100, 100)),
+                    _ => ("○", Color::Rgb(80, 80, 90)),
+                };
+                let mut spans: Vec<Span> = vec![
+                    Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
+                    Span::styled(format!("{} ", name), Style::default().fg(label_color)),
+                ];
+                if let Some(res) = result {
+                    spans.push(Span::styled(
+                        truncate_smart(&res.summary, max_width.saturating_sub(12)),
+                        Style::default().fg(text_color),
+                    ));
+                } else if matches!(status, StepStatus::Running) {
+                    if let Some((done, total)) = progress {
+                        spans.push(Span::styled(
+                            format!("{}/{}...", done, total),
+                            Style::default().fg(Color::Rgb(255, 200, 100)),
+                        ));
+                    }
+                }
+                lines.push(Line::from(spans));
+            }
+        } else {
+            match &activity.state {
+                MemoryState::Extracting { reason } => {
+                    let elapsed = format_age(activity.state_since.elapsed());
+                    lines.push(Line::from(vec![
+                        Span::styled("🧠 ", Style::default().fg(Color::Rgb(200, 150, 255))),
+                        Span::styled(
+                            truncate_smart(&format!("extracting ({}) {}", reason, elapsed), max_width),
+                            Style::default().fg(text_color),
+                        ),
+                    ]));
+                }
+                MemoryState::Idle => {}
+                _ => {}
+            }
+        }
+
+        let max_events = (inner.height.saturating_sub(lines.len() as u16) as usize).min(3);
+        let interesting: Vec<&MemoryEvent> = activity
+            .recent_events
+            .iter()
+            .filter(|e| {
+                !matches!(
+                    e.kind,
+                    MemoryEventKind::EmbeddingStarted
+                        | MemoryEventKind::SidecarStarted
+                        | MemoryEventKind::SidecarNotRelevant
+                        | MemoryEventKind::SidecarComplete { .. }
+                )
+            })
+            .take(max_events)
+            .collect();
+        for event in interesting {
+            let age = format_age(event.timestamp.elapsed());
+            let (icon, text, color) = format_event_for_expanded(event, max_width.saturating_sub(8));
             lines.push(Line::from(vec![
                 Span::styled(format!("  {} ", icon), Style::default().fg(color)),
-                Span::styled(text, Style::default().fg(Color::Rgb(140, 140, 150))),
+                Span::styled(text, Style::default().fg(label_color)),
+                Span::styled(format!(" {}", age), Style::default().fg(dim)),
             ]));
         }
     }
 
     lines
-}
-
-fn format_memory_event(event: &MemoryEvent, max_width: usize) -> (&'static str, String, Color) {
-    match &event.kind {
-        MemoryEventKind::EmbeddingStarted => {
-            ("🔍", "Embedding...".to_string(), Color::Rgb(140, 180, 255))
-        }
-        MemoryEventKind::EmbeddingComplete { latency_ms, hits } => (
-            "→",
-            format!("{} hits ({}ms)", hits, latency_ms),
-            Color::Rgb(140, 180, 255),
-        ),
-        MemoryEventKind::SidecarStarted => {
-            ("⚡", "Verifying".to_string(), Color::Rgb(255, 200, 100))
-        }
-        MemoryEventKind::SidecarRelevant { memory_preview } => {
-            let preview = truncate_smart(memory_preview, max_width.saturating_sub(2));
-            ("✓", preview, Color::Rgb(100, 200, 100))
-        }
-        MemoryEventKind::SidecarNotRelevant => {
-            ("✗", "Not relevant".to_string(), Color::Rgb(150, 150, 160))
-        }
-        MemoryEventKind::SidecarComplete { latency_ms } => {
-            ("⏱", format!("{}ms", latency_ms), Color::Rgb(140, 140, 150))
-        }
-        MemoryEventKind::MemorySurfaced { memory_preview } => {
-            let preview = truncate_smart(memory_preview, max_width.saturating_sub(2));
-            ("★", preview, Color::Rgb(255, 220, 100))
-        }
-        MemoryEventKind::MemoryInjected {
-            count,
-            prompt_chars,
-            age_ms,
-            preview,
-            items,
-        } => {
-            let snippet = items
-                .first()
-                .map(|item| format!("[{}] {}", item.section, item.content))
-                .unwrap_or_else(|| preview.clone());
-            let msg = truncate_smart(
-                &format!(
-                    "{} mem ({}c, {}ms) {}",
-                    count, prompt_chars, age_ms, snippet
-                ),
-                max_width.saturating_sub(2),
-            );
-            ("↳", msg, Color::Rgb(140, 210, 255))
-        }
-        MemoryEventKind::MaintenanceStarted { verified, rejected } => (
-            "🌿",
-            format!("maintain v{} r{}", verified, rejected),
-            Color::Rgb(120, 220, 180),
-        ),
-        MemoryEventKind::MaintenanceLinked { links } => {
-            ("⇄", format!("{} links", links), Color::Rgb(120, 220, 180))
-        }
-        MemoryEventKind::MaintenanceConfidence { boosted, decayed } => (
-            "±",
-            format!("conf +{} -{}", boosted, decayed),
-            Color::Rgb(120, 220, 180),
-        ),
-        MemoryEventKind::MaintenanceCluster { clusters, members } => (
-            "◈",
-            format!("clusters {} ({} mem)", clusters, members),
-            Color::Rgb(120, 220, 180),
-        ),
-        MemoryEventKind::MaintenanceTagInferred { tag, applied } => (
-            "#",
-            format!("tag {} (+{})", truncate_smart(tag, 20), applied),
-            Color::Rgb(120, 220, 180),
-        ),
-        MemoryEventKind::MaintenanceGap { candidates } => (
-            "?",
-            format!("gap after {} candidates", candidates),
-            Color::Rgb(220, 180, 120),
-        ),
-        MemoryEventKind::MaintenanceComplete { latency_ms } => (
-            "✓",
-            format!("maint {}ms", latency_ms),
-            Color::Rgb(120, 220, 180),
-        ),
-        MemoryEventKind::ExtractionStarted { reason } => {
-            let msg = truncate_smart(reason, max_width.saturating_sub(2));
-            (
-                "🧠",
-                format!("Extracting: {}", msg),
-                Color::Rgb(200, 150, 255),
-            )
-        }
-        MemoryEventKind::ExtractionComplete { count } => (
-            "✓",
-            format!("Saved {} memories", count),
-            Color::Rgb(100, 200, 100),
-        ),
-        MemoryEventKind::Error { message } => {
-            let msg = truncate_smart(message, max_width.saturating_sub(2));
-            ("!", msg, Color::Rgb(255, 100, 100))
-        }
-        MemoryEventKind::ToolRemembered {
-            content,
-            scope,
-            category,
-        } => {
-            let msg = truncate_smart(
-                &format!("[{}] {} ({})", category, content, scope),
-                max_width.saturating_sub(2),
-            );
-            ("💾", msg, Color::Rgb(100, 200, 100))
-        }
-        MemoryEventKind::ToolRecalled { query, count } => {
-            let msg = truncate_smart(
-                &format!("{} found for '{}'", count, query),
-                max_width.saturating_sub(2),
-            );
-            ("🔍", msg, Color::Rgb(140, 180, 255))
-        }
-        MemoryEventKind::ToolForgot { id } => {
-            let msg = truncate_smart(id, max_width.saturating_sub(2));
-            ("🗑\u{fe0f}", msg, Color::Rgb(255, 170, 100))
-        }
-        MemoryEventKind::ToolTagged { id, tags } => {
-            let msg = truncate_smart(&format!("{} +{}", id, tags), max_width.saturating_sub(2));
-            ("🏷\u{fe0f}", msg, Color::Rgb(140, 200, 255))
-        }
-        MemoryEventKind::ToolLinked { from, to } => {
-            let msg = truncate_smart(&format!("{} → {}", from, to), max_width.saturating_sub(2));
-            ("🔗", msg, Color::Rgb(200, 180, 255))
-        }
-        MemoryEventKind::ToolListed { count } => (
-            "📋",
-            format!("{} memories", count),
-            Color::Rgb(140, 140, 150),
-        ),
-    }
 }
 
 fn render_memory_topology_lines(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> {
@@ -4376,6 +4254,10 @@ fn render_memory_compact(info: &MemoryInfo) -> Vec<Line<'static>> {
 
 fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
+    let max_width = inner.width.saturating_sub(2) as usize;
+    let dim = Color::Rgb(100, 100, 110);
+    let text_color = Color::Rgb(160, 160, 170);
+    let label_color = Color::Rgb(140, 140, 150);
 
     // Title
     lines.push(Line::from(vec![Span::styled(
@@ -4383,314 +4265,300 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
         Style::default().fg(Color::Rgb(180, 180, 190)).bold(),
     )]));
 
-    // Stats line
-    let mut stats_spans = vec![Span::styled(
-        format!("{} total", info.total_count),
-        Style::default().fg(Color::Rgb(160, 160, 170)),
-    )];
-    if info.project_count > 0 || info.global_count > 0 {
-        stats_spans.push(Span::styled(
-            format!(" ({}p/{}g)", info.project_count, info.global_count),
-            Style::default().fg(Color::Rgb(120, 120, 130)),
-        ));
+    // Stats line - readable breakdown
+    let mut stats_parts = vec![format!("{} total", info.total_count)];
+    if info.project_count > 0 {
+        stats_parts.push(format!("{} project", info.project_count));
     }
-    lines.push(Line::from(stats_spans));
+    if info.global_count > 0 {
+        stats_parts.push(format!("{} global", info.global_count));
+    }
+    lines.push(Line::from(vec![Span::styled(
+        truncate_with_ellipsis(&stats_parts.join(", "), max_width),
+        Style::default().fg(text_color),
+    )]));
 
-    // Category breakdown
+    // Category breakdown - readable names
     if !info.by_category.is_empty() {
-        let max_width = inner.width.saturating_sub(2) as usize;
-        let mut cat_parts: Vec<String> = info
-            .by_category
+        let mut cats: Vec<(&String, &usize)> = info.by_category.iter().collect();
+        cats.sort_by(|a, b| b.1.cmp(a.1));
+        let cat_str = cats
             .iter()
-            .map(|(cat, count)| format!("{}:{}", truncate_chars(cat, 3), count))
-            .collect();
-        cat_parts.sort();
-        let cat_str = cat_parts.join(" ");
-        let cat_display = truncate_with_ellipsis(&cat_str, max_width);
+            .take(4)
+            .map(|(name, count)| {
+                let label = match name.as_str() {
+                    "fact" => "facts",
+                    "preference" => "prefs",
+                    "entity" => "entities",
+                    "correction" => "corrections",
+                    other => other,
+                };
+                format!("{}:{}", label, count)
+            })
+            .collect::<Vec<_>>()
+            .join("  ");
         lines.push(Line::from(vec![Span::styled(
-            cat_display,
-            Style::default().fg(Color::Rgb(100, 100, 110)),
+            truncate_with_ellipsis(&cat_str, max_width),
+            Style::default().fg(dim),
         )]));
     }
 
-    // Activity section
+    // Pipeline section - live checklist
     if let Some(activity) = &info.activity {
-        // Current state
-        let state_line = match &activity.state {
-            MemoryState::Idle => Line::from(vec![
-                Span::styled("○ ", Style::default().fg(Color::Rgb(100, 100, 110))),
-                Span::styled("Idle", Style::default().fg(Color::Rgb(120, 120, 130))),
-            ]),
-            MemoryState::Embedding => Line::from(vec![
-                Span::styled("🔍 ", Style::default().fg(Color::Rgb(255, 200, 100))),
-                Span::styled(
-                    "Searching...",
-                    Style::default().fg(Color::Rgb(180, 180, 190)),
-                ),
-            ]),
-            MemoryState::SidecarChecking { count } => Line::from(vec![
-                Span::styled("⚡ ", Style::default().fg(Color::Rgb(255, 200, 100))),
-                Span::styled(
-                    format!("Checking {} memories", count),
-                    Style::default().fg(Color::Rgb(180, 180, 190)),
-                ),
-            ]),
-            MemoryState::FoundRelevant { count } => Line::from(vec![
-                Span::styled("✓ ", Style::default().fg(Color::Rgb(100, 200, 100))),
-                Span::styled(
-                    format!("{} relevant", count),
-                    Style::default().fg(Color::Rgb(180, 180, 190)),
-                ),
-            ]),
-            MemoryState::Extracting { reason } => Line::from(vec![
-                Span::styled("🧠 ", Style::default().fg(Color::Rgb(200, 150, 255))),
-                Span::styled(
-                    format!("Extracting ({})", reason),
-                    Style::default().fg(Color::Rgb(180, 180, 190)),
-                ),
-            ]),
-            MemoryState::Maintaining { phase } => Line::from(vec![
-                Span::styled("🌿 ", Style::default().fg(Color::Rgb(120, 220, 180))),
-                Span::styled(
-                    truncate_smart(
-                        &format!("Maintaining ({})", phase),
-                        inner.width.saturating_sub(4) as usize,
-                    ),
-                    Style::default().fg(Color::Rgb(180, 180, 190)),
-                ),
-            ]),
-            MemoryState::ToolAction { action, detail } => {
-                let icon = match action.as_str() {
-                    "remember" | "store" => "💾",
-                    "recall" | "search" => "🔍",
-                    "forget" => "🗑\u{fe0f}",
-                    "tag" => "🏷\u{fe0f}",
-                    "link" => "🔗",
-                    "list" | "related" => "📋",
-                    _ => "🧠",
+        if let Some(pipeline) = &activity.pipeline {
+            lines.push(Line::from(vec![Span::styled(
+                "Activity",
+                Style::default().fg(label_color).bold(),
+            )]));
+
+            let steps: Vec<(&str, &StepStatus, Option<&StepResult>, Option<(usize, usize)>)> = vec![
+                ("search", &pipeline.search, pipeline.search_result.as_ref(), None),
+                ("verify", &pipeline.verify, pipeline.verify_result.as_ref(), pipeline.verify_progress),
+                ("inject", &pipeline.inject, pipeline.inject_result.as_ref(), None),
+                ("maintain", &pipeline.maintain, pipeline.maintain_result.as_ref(), None),
+            ];
+
+            for (name, status, result, progress) in steps {
+                if matches!(status, StepStatus::Skipped) {
+                    continue;
+                }
+
+                let (icon, icon_color) = match status {
+                    StepStatus::Pending => ("○", Color::Rgb(80, 80, 90)),
+                    StepStatus::Running => ("⠋", Color::Rgb(255, 200, 100)),
+                    StepStatus::Done => ("✓", Color::Rgb(100, 200, 100)),
+                    StepStatus::Error => ("!", Color::Rgb(255, 100, 100)),
+                    StepStatus::Skipped => ("─", Color::Rgb(80, 80, 90)),
                 };
-                let text = if detail.is_empty() {
-                    action.clone()
-                } else {
-                    format!("{}: {}", action, detail)
-                };
-                Line::from(vec![
+
+                let mut spans: Vec<Span> = vec![
+                    Span::styled(format!("  {} ", icon), Style::default().fg(icon_color)),
                     Span::styled(
-                        format!("{} ", icon),
-                        Style::default().fg(Color::Rgb(200, 150, 255)),
+                        format!("{:<8}", name),
+                        Style::default().fg(if matches!(status, StepStatus::Running) {
+                            Color::Rgb(200, 200, 210)
+                        } else {
+                            label_color
+                        }),
                     ),
-                    Span::styled(
-                        truncate_smart(&text, inner.width.saturating_sub(4) as usize),
-                        Style::default().fg(Color::Rgb(200, 200, 210)),
-                    ),
-                ])
+                ];
+
+                if let Some(res) = result {
+                    spans.push(Span::styled(
+                        truncate_with_ellipsis(&res.summary, max_width.saturating_sub(14)),
+                        Style::default().fg(text_color),
+                    ));
+                    if res.latency_ms > 0 {
+                        spans.push(Span::styled(
+                            format!(" {}ms", res.latency_ms),
+                            Style::default().fg(dim),
+                        ));
+                    }
+                } else if matches!(status, StepStatus::Running) {
+                    if let Some((done, total)) = progress {
+                        spans.push(Span::styled(
+                            format!("{}/{}...", done, total),
+                            Style::default().fg(Color::Rgb(255, 200, 100)),
+                        ));
+                    } else {
+                        spans.push(Span::styled(
+                            "...",
+                            Style::default().fg(Color::Rgb(255, 200, 100)),
+                        ));
+                    }
+                }
+
+                lines.push(Line::from(spans));
             }
-        };
-        lines.push(state_line);
-
-        // Recent events
-        let max_width = inner.width.saturating_sub(4) as usize;
-        for event in activity.recent_events.iter().take(MAX_MEMORY_EVENTS) {
-            if let MemoryEventKind::MemoryInjected {
-                count,
-                prompt_chars,
-                age_ms,
-                preview,
-                items,
-            } = &event.kind
-            {
-                let plural = if *count == 1 { "memory" } else { "memories" };
-                let summary = truncate_with_ellipsis(
-                    &format!(
-                        "Injected {} {} ({}c, {}ms)",
-                        count, plural, prompt_chars, age_ms
-                    ),
-                    max_width,
-                );
-                lines.push(Line::from(vec![
-                    Span::styled("  ↳ ", Style::default().fg(Color::Rgb(140, 210, 255))),
-                    Span::styled(summary, Style::default().fg(Color::Rgb(140, 140, 150))),
-                ]));
-
-                if items.is_empty() {
-                    let fallback = truncate_with_ellipsis(preview, max_width.saturating_sub(4));
+        } else {
+            // No pipeline - show state directly (extraction, tool action, etc.)
+            match &activity.state {
+                MemoryState::Extracting { reason } => {
+                    let elapsed = format_age(activity.state_since.elapsed());
                     lines.push(Line::from(vec![
-                        Span::styled("    • ", Style::default().fg(Color::Rgb(170, 170, 180))),
-                        Span::styled(fallback, Style::default().fg(Color::Rgb(140, 140, 150))),
-                    ]));
-                } else {
-                    let max_items = 5usize;
-                    for item in items.iter().take(max_items) {
-                        let label = truncate_with_ellipsis(&item.section, 16);
-                        let text = truncate_with_ellipsis(
-                            &format!("[{}] {}", label, item.content),
-                            max_width.saturating_sub(4),
-                        );
-                        lines.push(Line::from(vec![
-                            Span::styled("    • ", Style::default().fg(Color::Rgb(170, 170, 180))),
-                            Span::styled(text, Style::default().fg(Color::Rgb(140, 140, 150))),
-                        ]));
-                    }
-                    if items.len() > max_items {
-                        lines.push(Line::from(vec![
-                            Span::styled("    … ", Style::default().fg(Color::Rgb(120, 120, 130))),
-                            Span::styled(
-                                format!("+{} more", items.len() - max_items),
-                                Style::default().fg(Color::Rgb(120, 120, 130)),
+                        Span::styled("🧠 ", Style::default().fg(Color::Rgb(200, 150, 255))),
+                        Span::styled(
+                            truncate_with_ellipsis(
+                                &format!("extracting ({})  {}", reason, elapsed),
+                                max_width.saturating_sub(3),
                             ),
-                        ]));
-                    }
-                }
-                continue;
-            }
-
-            let (icon, text, color) = match &event.kind {
-                MemoryEventKind::EmbeddingStarted => {
-                    ("🔍", "Embedding...".to_string(), Color::Rgb(140, 180, 255))
-                }
-                MemoryEventKind::EmbeddingComplete { latency_ms, hits } => (
-                    "→",
-                    format!("{} hits ({}ms)", hits, latency_ms),
-                    Color::Rgb(140, 180, 255),
-                ),
-                MemoryEventKind::SidecarStarted => (
-                    "⚡",
-                    "Sidecar verifying".to_string(),
-                    Color::Rgb(255, 200, 100),
-                ),
-                MemoryEventKind::SidecarRelevant { memory_preview } => {
-                    let preview =
-                        truncate_with_ellipsis(memory_preview, max_width.saturating_sub(4));
-                    ("✓", preview, Color::Rgb(100, 200, 100))
-                }
-                MemoryEventKind::SidecarNotRelevant => {
-                    ("✗", "Not relevant".to_string(), Color::Rgb(150, 150, 160))
-                }
-                MemoryEventKind::SidecarComplete { latency_ms } => {
-                    ("⏱", format!("{}ms", latency_ms), Color::Rgb(140, 140, 150))
-                }
-                MemoryEventKind::MemorySurfaced { memory_preview } => {
-                    let preview =
-                        truncate_with_ellipsis(memory_preview, max_width.saturating_sub(4));
-                    ("★", preview, Color::Rgb(255, 220, 100))
-                }
-                MemoryEventKind::MemoryInjected {
-                    count,
-                    prompt_chars,
-                    age_ms,
-                    preview,
-                    items: _,
-                } => {
-                    let msg = truncate_with_ellipsis(
-                        &format!(
-                            "{} mem ({}c, {}ms) {}",
-                            count, prompt_chars, age_ms, preview
+                            Style::default().fg(text_color),
                         ),
-                        max_width.saturating_sub(4),
-                    );
-                    ("↳", msg, Color::Rgb(140, 210, 255))
+                    ]));
                 }
-                MemoryEventKind::MaintenanceStarted { verified, rejected } => (
-                    "🌿",
-                    format!("maintain v{} r{}", verified, rejected),
-                    Color::Rgb(120, 220, 180),
-                ),
-                MemoryEventKind::MaintenanceLinked { links } => {
-                    ("⇄", format!("{} links", links), Color::Rgb(120, 220, 180))
+                MemoryState::ToolAction { action, detail } => {
+                    let icon = match action.as_str() {
+                        "remember" | "store" => "💾",
+                        "recall" | "search" => "🔍",
+                        "forget" => "🗑\u{fe0f}",
+                        "tag" => "🏷\u{fe0f}",
+                        "link" => "🔗",
+                        "list" | "related" => "📋",
+                        _ => "🧠",
+                    };
+                    let text = if detail.is_empty() {
+                        action.clone()
+                    } else {
+                        format!("{}: {}", action, detail)
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{} ", icon), Style::default().fg(Color::Rgb(200, 150, 255))),
+                        Span::styled(
+                            truncate_with_ellipsis(&text, max_width.saturating_sub(3)),
+                            Style::default().fg(text_color),
+                        ),
+                    ]));
                 }
-                MemoryEventKind::MaintenanceConfidence { boosted, decayed } => (
-                    "±",
-                    format!("conf +{} -{}", boosted, decayed),
-                    Color::Rgb(120, 220, 180),
-                ),
-                MemoryEventKind::MaintenanceCluster { clusters, members } => (
-                    "◈",
-                    format!("clusters {} ({} mem)", clusters, members),
-                    Color::Rgb(120, 220, 180),
-                ),
-                MemoryEventKind::MaintenanceTagInferred { tag, applied } => (
-                    "#",
-                    format!("tag {} (+{})", truncate_with_ellipsis(tag, 20), applied),
-                    Color::Rgb(120, 220, 180),
-                ),
-                MemoryEventKind::MaintenanceGap { candidates } => (
-                    "?",
-                    format!("gap after {} candidates", candidates),
-                    Color::Rgb(220, 180, 120),
-                ),
-                MemoryEventKind::MaintenanceComplete { latency_ms } => (
-                    "✓",
-                    format!("maint {}ms", latency_ms),
-                    Color::Rgb(120, 220, 180),
-                ),
-                MemoryEventKind::ExtractionStarted { reason } => {
-                    let msg = truncate_with_ellipsis(reason, max_width.saturating_sub(4));
-                    (
-                        "🧠",
-                        format!("Extracting: {}", msg),
-                        Color::Rgb(200, 150, 255),
-                    )
-                }
-                MemoryEventKind::ExtractionComplete { count } => (
-                    "✓",
-                    format!("Saved {} memories", count),
-                    Color::Rgb(100, 200, 100),
-                ),
-                MemoryEventKind::Error { message } => {
-                    let msg = truncate_with_ellipsis(message, max_width.saturating_sub(4));
-                    ("!", msg, Color::Rgb(255, 100, 100))
-                }
-                MemoryEventKind::ToolRemembered {
-                    content,
-                    scope,
-                    category,
-                } => {
-                    let msg = truncate_with_ellipsis(
-                        &format!("[{}] {} ({})", category, content, scope),
-                        max_width.saturating_sub(4),
-                    );
-                    ("💾", msg, Color::Rgb(100, 200, 100))
-                }
-                MemoryEventKind::ToolRecalled { query, count } => {
-                    let msg = truncate_with_ellipsis(
-                        &format!("{} found for '{}'", count, query),
-                        max_width.saturating_sub(4),
-                    );
-                    ("🔍", msg, Color::Rgb(140, 180, 255))
-                }
-                MemoryEventKind::ToolForgot { id } => {
-                    let msg = truncate_with_ellipsis(id, max_width.saturating_sub(4));
-                    ("🗑\u{fe0f}", msg, Color::Rgb(255, 170, 100))
-                }
-                MemoryEventKind::ToolTagged { id, tags } => {
-                    let msg = truncate_with_ellipsis(
-                        &format!("{} +{}", id, tags),
-                        max_width.saturating_sub(4),
-                    );
-                    ("🏷\u{fe0f}", msg, Color::Rgb(140, 200, 255))
-                }
-                MemoryEventKind::ToolLinked { from, to } => {
-                    let msg = truncate_with_ellipsis(
-                        &format!("{} → {}", from, to),
-                        max_width.saturating_sub(4),
-                    );
-                    ("🔗", msg, Color::Rgb(200, 180, 255))
-                }
-                MemoryEventKind::ToolListed { count } => (
-                    "📋",
-                    format!("{} memories", count),
-                    Color::Rgb(140, 140, 150),
-                ),
-            };
+                MemoryState::Idle => {}
+                _ => {}
+            }
+        }
 
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {} ", icon), Style::default().fg(color)),
-                Span::styled(text, Style::default().fg(Color::Rgb(140, 140, 150))),
-            ]));
+        // Recent events with ages
+        let interesting_events: Vec<&MemoryEvent> = activity
+            .recent_events
+            .iter()
+            .filter(|e| {
+                !matches!(
+                    e.kind,
+                    MemoryEventKind::EmbeddingStarted
+                        | MemoryEventKind::SidecarStarted
+                        | MemoryEventKind::SidecarNotRelevant
+                        | MemoryEventKind::SidecarComplete { .. }
+                )
+            })
+            .take(4)
+            .collect();
+
+        if !interesting_events.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                "Recent",
+                Style::default().fg(label_color).bold(),
+            )]));
+
+            for event in interesting_events {
+                let age = format_age(event.timestamp.elapsed());
+                let (icon, text, color) = format_event_for_expanded(event, max_width.saturating_sub(10));
+
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {} ", icon), Style::default().fg(color)),
+                    Span::styled(text, Style::default().fg(label_color)),
+                    Span::styled(format!("  {}", age), Style::default().fg(dim)),
+                ]));
+            }
         }
     }
 
     lines
+}
+
+fn format_age(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    if secs < 2 {
+        "now".to_string()
+    } else if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h", secs / 3600)
+    }
+}
+
+fn format_event_for_expanded(
+    event: &MemoryEvent,
+    max_width: usize,
+) -> (&'static str, String, Color) {
+    match &event.kind {
+        MemoryEventKind::EmbeddingComplete { latency_ms, hits } => (
+            "→",
+            truncate_with_ellipsis(&format!("{} hits ({}ms)", hits, latency_ms), max_width),
+            Color::Rgb(140, 180, 255),
+        ),
+        MemoryEventKind::SidecarRelevant { memory_preview } => (
+            "✓",
+            truncate_with_ellipsis(memory_preview, max_width),
+            Color::Rgb(100, 200, 100),
+        ),
+        MemoryEventKind::MemorySurfaced { memory_preview } => (
+            "★",
+            truncate_with_ellipsis(memory_preview, max_width),
+            Color::Rgb(255, 220, 100),
+        ),
+        MemoryEventKind::MemoryInjected {
+            count,
+            prompt_chars,
+            items,
+            ..
+        } => {
+            let plural = if *count == 1 { "memory" } else { "memories" };
+            let detail = items
+                .first()
+                .map(|item| format!(" [{}]", item.section))
+                .unwrap_or_default();
+            (
+                "↳",
+                truncate_with_ellipsis(
+                    &format!("{} {} ({}c){}", count, plural, prompt_chars, detail),
+                    max_width,
+                ),
+                Color::Rgb(140, 210, 255),
+            )
+        }
+        MemoryEventKind::MaintenanceComplete { latency_ms } => (
+            "🌿",
+            truncate_with_ellipsis(&format!("maintained ({}ms)", latency_ms), max_width),
+            Color::Rgb(120, 220, 180),
+        ),
+        MemoryEventKind::ExtractionStarted { reason } => (
+            "🧠",
+            truncate_with_ellipsis(&format!("extracting: {}", reason), max_width),
+            Color::Rgb(200, 150, 255),
+        ),
+        MemoryEventKind::ExtractionComplete { count } => (
+            "✓",
+            truncate_with_ellipsis(&format!("saved {} memories", count), max_width),
+            Color::Rgb(100, 200, 100),
+        ),
+        MemoryEventKind::Error { message } => (
+            "!",
+            truncate_with_ellipsis(message, max_width),
+            Color::Rgb(255, 100, 100),
+        ),
+        MemoryEventKind::ToolRemembered {
+            content, category, ..
+        } => (
+            "💾",
+            truncate_with_ellipsis(&format!("[{}] {}", category, content), max_width),
+            Color::Rgb(100, 200, 100),
+        ),
+        MemoryEventKind::ToolRecalled { query, count } => (
+            "🔍",
+            truncate_with_ellipsis(&format!("{} found for '{}'", count, query), max_width),
+            Color::Rgb(140, 180, 255),
+        ),
+        MemoryEventKind::ToolForgot { id } => (
+            "🗑\u{fe0f}",
+            truncate_with_ellipsis(id, max_width),
+            Color::Rgb(255, 170, 100),
+        ),
+        MemoryEventKind::ToolTagged { id, tags } => (
+            "🏷\u{fe0f}",
+            truncate_with_ellipsis(&format!("{} +{}", id, tags), max_width),
+            Color::Rgb(140, 200, 255),
+        ),
+        MemoryEventKind::ToolLinked { from, to } => (
+            "🔗",
+            truncate_with_ellipsis(&format!("{} → {}", from, to), max_width),
+            Color::Rgb(200, 180, 255),
+        ),
+        MemoryEventKind::ToolListed { count } => (
+            "📋",
+            format!("{} memories", count),
+            Color::Rgb(140, 140, 150),
+        ),
+        _ => ("·", String::new(), Color::Rgb(100, 100, 110)),
+    }
 }
 
 fn render_swarm_compact(info: &SwarmInfo) -> Vec<Line<'static>> {

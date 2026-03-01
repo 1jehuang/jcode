@@ -6046,7 +6046,7 @@ impl App {
                         return Ok(());
                     }
 
-                    if trimmed == "/memory" || trimmed == "/memory status" {
+                    if trimmed == "/memory status" {
                         let default_enabled = crate::config::config().features.memory;
                         self.push_display_message(DisplayMessage::system(format!(
                             "Memory feature: **{}** (config default: {})",
@@ -6060,6 +6060,21 @@ impl App {
                             } else {
                                 "disabled"
                             }
+                        )));
+                        return Ok(());
+                    }
+
+                    if trimmed == "/memory" {
+                        let new_state = !self.memory_enabled;
+                        remote
+                            .set_feature(crate::protocol::FeatureToggle::Memory, new_state)
+                            .await?;
+                        self.set_memory_feature_enabled(new_state);
+                        let label = if new_state { "ON" } else { "OFF" };
+                        self.set_status_notice(&format!("Memory: {}", label));
+                        self.push_display_message(DisplayMessage::system(format!(
+                            "Memory feature {} for this session.",
+                            if new_state { "enabled" } else { "disabled" }
                         )));
                         return Ok(());
                     }
@@ -7361,7 +7376,7 @@ impl App {
             return;
         }
 
-        if trimmed == "/memory" || trimmed == "/memory status" {
+        if trimmed == "/memory status" {
             let default_enabled = crate::config::config().features.memory;
             self.push_display_message(DisplayMessage::system(format!(
                 "Memory feature: **{}** (config default: {})",
@@ -7375,6 +7390,18 @@ impl App {
                 } else {
                     "disabled"
                 }
+            )));
+            return;
+        }
+
+        if trimmed == "/memory" {
+            let new_state = !self.memory_enabled;
+            self.set_memory_feature_enabled(new_state);
+            let label = if new_state { "ON" } else { "OFF" };
+            self.set_status_notice(&format!("Memory: {}", label));
+            self.push_display_message(DisplayMessage::system(format!(
+                "Memory feature {} for this session.",
+                if new_state { "enabled" } else { "disabled" }
             )));
             return;
         }

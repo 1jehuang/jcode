@@ -865,8 +865,73 @@ async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
         return None;
     }
 
-    let usage = crate::copilot_usage::get_usage();
+    let github_token = auth::copilot::load_github_token().ok()?;
+
+    let mut limits = Vec::new();
     let mut extra_info = Vec::new();
+
+    // Fetch plan/quota info from the token endpoint
+    let client = crate::provider::shared_http_client();
+    let api_result = client
+        .get(auth::copilot::COPILOT_TOKEN_URL)
+        .header("Authorization", format!("token {}", github_token))
+        .header("User-Agent", auth::copilot::EDITOR_VERSION)
+        .header("Editor-Version", auth::copilot::EDITOR_VERSION)
+        .header(
+            "Editor-Plugin-Version",
+            auth::copilot::EDITOR_PLUGIN_VERSION,
+        )
+        .header("Accept", "application/json")
+        .send()
+        .await;
+
+    if let Ok(resp) = api_result {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(sku) = json.get("sku").and_then(|v| v.as_str()) {
+                    extra_info.push(("Plan".to_string(), sku.to_string()));
+                }
+
+                let reset_date = json
+                    .get("limited_user_reset_date")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                if let Some(quotas) =
+                    json.get("limited_user_quotas").and_then(|v| v.as_object())
+                {
+                    for (name, value) in quotas {
+                        if let Some(obj) = value.as_object() {
+                            let used =
+                                obj.get("used").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let limit =
+                                obj.get("limit").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            if limit > 0.0 {
+                                let pct = (used / limit * 100.0) as f32;
+                                limits.push(UsageLimit {
+                                    name: format!("{} (remote)", humanize_key(name)),
+                                    usage_percent: pct,
+                                    resets_at: reset_date.clone(),
+                                });
+                                extra_info.push((
+                                    humanize_key(name),
+                                    format!("{} / {} used", used as u64, limit as u64),
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                if let Some(ref rd) = reset_date {
+                    let relative = crate::usage::format_reset_time(rd);
+                    extra_info.push(("Resets in".to_string(), relative));
+                }
+            }
+        }
+    }
+
+    // Local usage tracking
+    let usage = crate::copilot_usage::get_usage();
 
     extra_info.push((
         "Today".to_string(),
@@ -898,7 +963,7 @@ async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
 
     Some(ProviderUsage {
         provider_name: "GitHub Copilot".to_string(),
-        limits: Vec::new(),
+        limits,
         extra_info,
         error: None,
     })
