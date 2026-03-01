@@ -11,15 +11,15 @@ const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(60); // minimum gap 
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub fn eprint_centered(msg: &str) {
+pub fn print_centered(msg: &str) {
     let width = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
     for line in msg.lines() {
         let visible_len = unicode_display_width(line);
         if visible_len >= width {
-            eprintln!("{}", line);
+            println!("{}", line);
         } else {
             let pad = (width - visible_len) / 2;
-            eprintln!("{:>pad$}{}", "", line, pad = pad);
+            println!("{:>pad$}{}", "", line, pad = pad);
         }
     }
 }
@@ -628,7 +628,7 @@ pub fn check_and_maybe_update(auto_install: bool) -> UpdateCheckResult {
             let latest = release.tag_name.clone();
 
             if auto_install {
-                eprint_centered(&format!("⬇️  Downloading jcode {}...", latest));
+                print_centered(&format!("⬇️  Downloading jcode {}...", latest));
                 match download_and_install_blocking(&release) {
                     Ok(path) => UpdateCheckResult::UpdateInstalled {
                         version: latest,
