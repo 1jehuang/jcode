@@ -27,6 +27,7 @@ mod cache_tracker;
 mod channel;
 mod compaction;
 mod config;
+mod copilot_usage;
 mod embedding;
 mod gateway;
 mod id;

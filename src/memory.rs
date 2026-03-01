@@ -10,7 +10,8 @@ use crate::memory_graph::{EdgeKind, MemoryGraph, GRAPH_VERSION};
 use crate::sidecar::Sidecar;
 use crate::storage;
 use crate::tui::info_widget::{
-    InjectedMemoryItem, MemoryActivity, MemoryEvent, MemoryEventKind, MemoryState,
+    InjectedMemoryItem, MemoryActivity, MemoryEvent, MemoryEventKind, MemoryState, StepResult,
+    StepStatus,
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -186,14 +187,20 @@ pub fn get_activity() -> Option<MemoryActivity> {
     MEMORY_ACTIVITY.lock().ok().and_then(|guard| guard.clone())
 }
 
+/// Staleness timeout: auto-reset to Idle if state has been non-Idle for this long
+const STALENESS_TIMEOUT_SECS: u64 = 10;
+
 /// Update the memory activity state
 pub fn set_state(state: MemoryState) {
     if let Ok(mut guard) = MEMORY_ACTIVITY.lock() {
         if let Some(activity) = guard.as_mut() {
             activity.state = state;
+            activity.state_since = Instant::now();
         } else {
             *guard = Some(MemoryActivity {
                 state,
+                state_since: Instant::now(),
+                pipeline: None,
                 recent_events: Vec::new(),
             });
         }
@@ -215,10 +222,62 @@ pub fn add_event(kind: MemoryEventKind) {
         } else {
             *guard = Some(MemoryActivity {
                 state: MemoryState::Idle,
+                state_since: Instant::now(),
+                pipeline: None,
                 recent_events: vec![event],
             });
         }
     }
+}
+
+/// Start a new pipeline run (called at the beginning of each memory check)
+pub fn pipeline_start() {
+    use crate::tui::info_widget::PipelineState;
+    if let Ok(mut guard) = MEMORY_ACTIVITY.lock() {
+        if let Some(activity) = guard.as_mut() {
+            activity.pipeline = Some(PipelineState::new());
+        } else {
+            *guard = Some(MemoryActivity {
+                state: MemoryState::Idle,
+                state_since: Instant::now(),
+                pipeline: Some(PipelineState::new()),
+                recent_events: Vec::new(),
+            });
+        }
+    }
+}
+
+/// Update pipeline step status
+pub fn pipeline_update(f: impl FnOnce(&mut crate::tui::info_widget::PipelineState)) {
+    if let Ok(mut guard) = MEMORY_ACTIVITY.lock() {
+        if let Some(activity) = guard.as_mut() {
+            if let Some(pipeline) = activity.pipeline.as_mut() {
+                f(pipeline);
+            }
+        }
+    }
+}
+
+/// Check for staleness and auto-reset if needed.
+/// Returns true if state was reset due to staleness.
+pub fn check_staleness() -> bool {
+    if let Ok(mut guard) = MEMORY_ACTIVITY.lock() {
+        if let Some(activity) = guard.as_mut() {
+            if !matches!(activity.state, MemoryState::Idle)
+                && activity.state_since.elapsed().as_secs() >= STALENESS_TIMEOUT_SECS
+            {
+                crate::logging::info(&format!(
+                    "Memory state stale ({:?} for {}s), auto-resetting to Idle",
+                    activity.state,
+                    activity.state_since.elapsed().as_secs()
+                ));
+                activity.state = MemoryState::Idle;
+                activity.state_since = Instant::now();
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Clear activity (reset to idle with no events)
@@ -1484,9 +1543,13 @@ impl MemoryManager {
             return Ok(None);
         }
 
+        // Start pipeline tracking
+        pipeline_start();
+
         // Step 1: Embedding search (fast, local)
         set_state(MemoryState::Embedding);
         add_event(MemoryEventKind::EmbeddingStarted);
+        pipeline_update(|p| p.search = StepStatus::Running);
 
         let embedding_start = Instant::now();
         let candidates =
@@ -1498,9 +1561,26 @@ impl MemoryManager {
                             latency_ms,
                             hits: 0,
                         });
+                        pipeline_update(|p| {
+                            p.search = StepStatus::Done;
+                            p.search_result = Some(StepResult {
+                                summary: "0 hits".to_string(),
+                                latency_ms,
+                            });
+                            p.verify = StepStatus::Skipped;
+                            p.inject = StepStatus::Skipped;
+                            p.maintain = StepStatus::Skipped;
+                        });
                         set_state(MemoryState::Idle);
                         return Ok(None);
                     }
+                    pipeline_update(|p| {
+                        p.search = StepStatus::Done;
+                        p.search_result = Some(StepResult {
+                            summary: format!("{} hits", hits.len()),
+                            latency_ms,
+                        });
+                    });
                     add_event(MemoryEventKind::EmbeddingComplete {
                         latency_ms,
                         hits: hits.len(),
@@ -1508,13 +1588,18 @@ impl MemoryManager {
                     hits
                 }
                 Err(e) => {
-                    // Embedding failed - fall back to score-based selection
                     crate::logging::info(&format!("Embedding search failed, falling back: {}", e));
                     add_event(MemoryEventKind::Error {
                         message: e.to_string(),
                     });
+                    pipeline_update(|p| {
+                        p.search = StepStatus::Error;
+                        p.search_result = Some(StepResult {
+                            summary: "fallback".to_string(),
+                            latency_ms: embedding_start.elapsed().as_millis() as u64,
+                        });
+                    });
 
-                    // Fallback: use score-based selection (old behavior)
                     let mut all: Vec<_> =
                         self.list_all()?.into_iter().filter(|e| e.active).collect();
                     all.sort_by(|a, b| {
@@ -1528,15 +1613,25 @@ impl MemoryManager {
             };
 
         if candidates.is_empty() {
+            pipeline_update(|p| {
+                p.verify = StepStatus::Skipped;
+                p.inject = StepStatus::Skipped;
+                p.maintain = StepStatus::Skipped;
+            });
             set_state(MemoryState::Idle);
             return Ok(None);
         }
 
         // Step 2: Sidecar verification (only for embedding hits - much fewer calls!)
+        let total_candidates = candidates.len();
         set_state(MemoryState::SidecarChecking {
-            count: candidates.len(),
+            count: total_candidates,
         });
         add_event(MemoryEventKind::SidecarStarted);
+        pipeline_update(|p| {
+            p.verify = StepStatus::Running;
+            p.verify_progress = Some((0, total_candidates));
+        });
 
         let sidecar = Sidecar::new();
         let mut relevant = Vec::new();
@@ -1595,24 +1690,64 @@ impl MemoryManager {
                         crate::logging::info(&format!("Sidecar check failed: {}", e));
                     }
                 }
+                // Update verify progress
+                let checked = relevant.len()
+                    + batch.len().saturating_sub(
+                        batch.len(), // approximate
+                    );
+                let _ = checked; // Progress updated below per-batch
             }
+            // Update pipeline verify progress after each batch
+            pipeline_update(|p| {
+                p.verify_progress = Some((relevant_ids.len() + (total_candidates - candidates.len().min(total_candidates)), total_candidates));
+            });
         }
 
+        let verify_latency_ms = embedding_start.elapsed().as_millis() as u64;
         let _ = self.touch_entries(&relevant_ids);
 
         if relevant.is_empty() {
+            pipeline_update(|p| {
+                p.verify = StepStatus::Done;
+                p.verify_result = Some(StepResult {
+                    summary: "0 relevant".to_string(),
+                    latency_ms: verify_latency_ms,
+                });
+                p.inject = StepStatus::Skipped;
+                p.maintain = StepStatus::Skipped;
+            });
             set_state(MemoryState::Idle);
             return Ok(None);
         }
+
+        pipeline_update(|p| {
+            p.verify = StepStatus::Done;
+            p.verify_result = Some(StepResult {
+                summary: format!("{} relevant", relevant.len()),
+                latency_ms: verify_latency_ms,
+            });
+            p.inject = StepStatus::Running;
+        });
 
         set_state(MemoryState::FoundRelevant {
             count: relevant.len(),
         });
 
-        Ok(format_relevant_prompt(
+        let prompt = format_relevant_prompt(
             &relevant,
             MEMORY_RELEVANCE_MAX_RESULTS,
-        ))
+        );
+
+        // Mark inject as done - the prompt is ready for injection
+        pipeline_update(|p| {
+            p.inject = StepStatus::Done;
+            p.inject_result = Some(StepResult {
+                summary: format!("{} memories", relevant.len()),
+                latency_ms: 0,
+            });
+        });
+
+        Ok(prompt)
     }
 
     // ==================== Graph-Based Operations ====================

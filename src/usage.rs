@@ -861,120 +861,57 @@ async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
 }
 
 async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
-    let github_token = auth::copilot::load_github_token().ok()?;
-
-    let client = crate::provider::shared_http_client();
-    let resp = client
-        .get(auth::copilot::COPILOT_TOKEN_URL)
-        .header("Authorization", format!("token {}", github_token))
-        .header("User-Agent", auth::copilot::EDITOR_VERSION)
-        .header("Editor-Version", auth::copilot::EDITOR_VERSION)
-        .header(
-            "Editor-Plugin-Version",
-            auth::copilot::EDITOR_PLUGIN_VERSION,
-        )
-        .header("Accept", "application/json")
-        .send()
-        .await;
-
-    let resp = match resp {
-        Ok(r) => r,
-        Err(e) => {
-            return Some(ProviderUsage {
-                provider_name: "GitHub Copilot".to_string(),
-                error: Some(format!("Failed to fetch: {}", e)),
-                ..Default::default()
-            });
-        }
-    };
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Some(ProviderUsage {
-            provider_name: "GitHub Copilot".to_string(),
-            error: Some(format!("API error ({}): {}", status, body)),
-            ..Default::default()
-        });
+    if !auth::copilot::has_copilot_credentials() {
+        return None;
     }
 
-    let json: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(e) => {
-            return Some(ProviderUsage {
-                provider_name: "GitHub Copilot".to_string(),
-                error: Some(format!("Failed to parse response: {}", e)),
-                ..Default::default()
-            });
-        }
-    };
-
-    let mut limits = Vec::new();
+    let usage = crate::copilot_usage::get_usage();
     let mut extra_info = Vec::new();
 
-    if let Some(sku) = json.get("sku").and_then(|v| v.as_str()) {
-        extra_info.push(("Plan".to_string(), sku.to_string()));
-    }
-
-    let reset_date = json
-        .get("limited_user_reset_date")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    if let Some(quotas) = json.get("limited_user_quotas").and_then(|v| v.as_object()) {
-        for (name, value) in quotas {
-            if let Some(obj) = value.as_object() {
-                let used = obj.get("used").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let limit = obj.get("limit").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let used_i = used as u64;
-                let limit_i = limit as u64;
-                if limit > 0.0 {
-                    let pct = (used / limit * 100.0) as f32;
-                    limits.push(UsageLimit {
-                        name: humanize_key(name),
-                        usage_percent: pct,
-                        resets_at: reset_date.clone(),
-                    });
-                    extra_info.push((
-                        humanize_key(name),
-                        format!("{} / {} requests", used_i, limit_i),
-                    ));
-                } else {
-                    extra_info.push((
-                        humanize_key(name),
-                        format!("{} requests used (unlimited)", used_i),
-                    ));
-                }
-            }
-        }
-    }
-
-    if let Some(ref rd) = reset_date {
-        let relative = crate::usage::format_reset_time(rd);
-        extra_info.push(("Resets in".to_string(), relative));
-    }
-
-    let chat_enabled = json
-        .get("chat_enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
     extra_info.push((
-        "Chat".to_string(),
-        if chat_enabled { "enabled" } else { "disabled" }.to_string(),
+        "Today".to_string(),
+        format!(
+            "{} requests ({} in + {} out)",
+            usage.today.requests,
+            format_token_count(usage.today.input_tokens),
+            format_token_count(usage.today.output_tokens),
+        ),
     ));
-
-    if limits.is_empty() && extra_info.len() <= 1 {
-        if extra_info.is_empty() {
-            return None;
-        }
-    }
+    extra_info.push((
+        "This month".to_string(),
+        format!(
+            "{} requests ({} in + {} out)",
+            usage.month.requests,
+            format_token_count(usage.month.input_tokens),
+            format_token_count(usage.month.output_tokens),
+        ),
+    ));
+    extra_info.push((
+        "All time".to_string(),
+        format!(
+            "{} requests ({} in + {} out)",
+            usage.all_time.requests,
+            format_token_count(usage.all_time.input_tokens),
+            format_token_count(usage.all_time.output_tokens),
+        ),
+    ));
 
     Some(ProviderUsage {
         provider_name: "GitHub Copilot".to_string(),
-        limits,
+        limits: Vec::new(),
         extra_info,
         error: None,
     })
+}
+
+fn format_token_count(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        format!("{}", tokens)
+    }
 }
 
 fn humanize_key(key: &str) -> String {

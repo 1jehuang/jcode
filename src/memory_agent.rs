@@ -661,6 +661,10 @@ impl MemoryAgent {
             verified: ctx.verified_ids.len(),
             rejected: ctx.rejected_ids.len(),
         });
+        memory::pipeline_update(|p| {
+            use crate::tui::info_widget::StepStatus;
+            p.maintain = StepStatus::Running;
+        });
 
         // Run maintenance in background - don't block retrieval flow
         let memory_manager = self.memory_manager.clone();
@@ -755,6 +759,14 @@ impl MemoryAgent {
             let latency_ms = started.elapsed().as_millis() as u64;
             record_maintenance_stat(latency_ms);
             memory::add_event(MemoryEventKind::MaintenanceComplete { latency_ms });
+            memory::pipeline_update(|p| {
+                use crate::tui::info_widget::{StepResult, StepStatus};
+                p.maintain = StepStatus::Done;
+                p.maintain_result = Some(StepResult {
+                    summary: format!("{}L {}↑ {}↓", links, boosted, decayed),
+                    latency_ms,
+                });
+            });
             memory::set_state(MemoryState::Idle);
             crate::logging::info(&format!(
                 "Memory maintenance complete: links={}, boosted={}, decayed={}, {}ms",

@@ -10,6 +10,7 @@ pub mod cache_tracker;
 pub mod channel;
 pub mod compaction;
 pub mod config;
+pub mod copilot_usage;
 pub mod embedding;
 pub mod gateway;
 pub mod id;

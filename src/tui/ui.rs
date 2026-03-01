@@ -5511,35 +5511,8 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
             .push(Span::styled(notice, Style::default().fg(ACCENT_COLOR)));
     }
 
-    // Append memory sidecar status when active
-    if let Some(activity) = crate::memory::get_activity() {
-        use info_widget::MemoryState;
-        let sidecar_color = Color::Rgb(100, 180, 255);
-        let spinner_idx = (elapsed * 8.0) as usize % SPINNER_FRAMES.len();
-        let spinner = SPINNER_FRAMES[spinner_idx];
-        let label: Option<String> = match &activity.state {
-            MemoryState::Idle | MemoryState::ToolAction { .. } => None,
-            MemoryState::Embedding => Some(format!("{} embedding…", spinner)),
-            MemoryState::SidecarChecking { count } => {
-                if *count > 0 {
-                    Some(format!("{} sidecar: {}…", spinner, count))
-                } else {
-                    Some(format!("{} sidecar…", spinner))
-                }
-            }
-            MemoryState::FoundRelevant { count } => Some(format!("✓ {} relevant", count)),
-            MemoryState::Extracting { .. } => Some(format!("{} extracting…", spinner)),
-            MemoryState::Maintaining { .. } => Some(format!("{} maintaining…", spinner)),
-        };
-        if let Some(label) = label {
-            if !line.spans.is_empty() {
-                line.spans
-                    .push(Span::styled(" · ", Style::default().fg(DIM_COLOR)));
-            }
-            line.spans
-                .push(Span::styled(label, Style::default().fg(sidecar_color)));
-        }
-    }
+    // Check for stale memory state on each render
+    crate::memory::check_staleness();
 
     let aligned_line = if app.centered_mode() {
         line.alignment(ratatui::layout::Alignment::Center)

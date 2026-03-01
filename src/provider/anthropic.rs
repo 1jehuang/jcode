@@ -408,10 +408,10 @@ impl AnthropicProvider {
                         } else {
                             name.clone()
                         },
-                        input: if input.is_null() {
-                            serde_json::json!({})
-                        } else {
+                        input: if input.is_object() {
                             input.clone()
+                        } else {
+                            serde_json::json!({})
                         },
                         cache_control: None,
                     });

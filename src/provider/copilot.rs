@@ -324,12 +324,17 @@ impl CopilotApiProvider {
                                 content_text.push_str(text);
                             }
                             ContentBlock::ToolUse { id, name, input } => {
+                                let args = if input.is_object() {
+                                    input.to_string()
+                                } else {
+                                    "{}".to_string()
+                                };
                                 tool_calls.push(json!({
                                     "id": id,
                                     "type": "function",
                                     "function": {
                                         "name": name,
-                                        "arguments": input.to_string(),
+                                        "arguments": args,
                                     }
                                 }));
                                 tool_calls_seen.insert(id.clone());
@@ -563,6 +568,7 @@ impl CopilotApiProvider {
                                 }))
                                 .await;
                         }
+                        crate::copilot_usage::record_request(input_tokens, output_tokens);
                         let _ = tx
                             .send(Ok(StreamEvent::MessageEnd { stop_reason: None }))
                             .await;

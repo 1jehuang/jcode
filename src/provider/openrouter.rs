@@ -1438,12 +1438,17 @@ impl Provider for OpenRouterProvider {
                                 text_content.push_str(text);
                             }
                             ContentBlock::ToolUse { id, name, input } => {
+                                let args = if input.is_object() {
+                                    serde_json::to_string(input).unwrap_or_default()
+                                } else {
+                                    "{}".to_string()
+                                };
                                 tool_calls.push(serde_json::json!({
                                     "id": id,
                                     "type": "function",
                                     "function": {
                                         "name": name,
-                                        "arguments": serde_json::to_string(input).unwrap_or_default()
+                                        "arguments": args
                                     }
                                 }));
                                 tool_calls_seen.insert(id.clone());

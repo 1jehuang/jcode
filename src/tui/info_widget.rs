@@ -545,8 +545,73 @@ pub struct GraphEdge {
 pub struct MemoryActivity {
     /// Current state of the memory system
     pub state: MemoryState,
+    /// When the current state was entered (for elapsed time display + staleness detection)
+    pub state_since: Instant,
+    /// Pipeline progress for the per-turn search/verify/inject/maintain flow
+    pub pipeline: Option<PipelineState>,
     /// Recent events (most recent first)
     pub recent_events: Vec<MemoryEvent>,
+}
+
+/// Status of a single pipeline step
+#[derive(Debug, Clone, PartialEq)]
+pub enum StepStatus {
+    Pending,
+    Running,
+    Done,
+    Error,
+    Skipped,
+}
+
+/// Result data for a completed pipeline step
+#[derive(Debug, Clone)]
+pub struct StepResult {
+    pub summary: String,
+    pub latency_ms: u64,
+}
+
+/// Tracks the 4-step per-turn memory pipeline: search -> verify -> inject -> maintain
+#[derive(Debug, Clone)]
+pub struct PipelineState {
+    pub search: StepStatus,
+    pub search_result: Option<StepResult>,
+    pub verify: StepStatus,
+    pub verify_result: Option<StepResult>,
+    pub verify_progress: Option<(usize, usize)>,
+    pub inject: StepStatus,
+    pub inject_result: Option<StepResult>,
+    pub maintain: StepStatus,
+    pub maintain_result: Option<StepResult>,
+    pub started_at: Instant,
+}
+
+impl PipelineState {
+    pub fn new() -> Self {
+        Self {
+            search: StepStatus::Pending,
+            search_result: None,
+            verify: StepStatus::Pending,
+            verify_result: None,
+            verify_progress: None,
+            inject: StepStatus::Pending,
+            inject_result: None,
+            maintain: StepStatus::Pending,
+            maintain_result: None,
+            started_at: Instant::now(),
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        matches!(
+            (&self.search, &self.verify, &self.inject, &self.maintain),
+            (
+                StepStatus::Done | StepStatus::Error | StepStatus::Skipped,
+                StepStatus::Done | StepStatus::Error | StepStatus::Skipped,
+                StepStatus::Done | StepStatus::Error | StepStatus::Skipped,
+                StepStatus::Done | StepStatus::Error | StepStatus::Skipped,
+            )
+        )
+    }
 }
 
 /// State of the memory sidecar
@@ -4279,89 +4344,30 @@ fn render_memory_compact(info: &MemoryInfo) -> Vec<Line<'static>> {
             format!("{}", info.total_count),
             Style::default().fg(Color::Rgb(180, 180, 190)),
         ),
-        Span::styled(" mem", Style::default().fg(Color::Rgb(140, 140, 150))),
+        Span::styled(
+            if info.total_count == 1 {
+                " memory"
+            } else {
+                " memories"
+            },
+            Style::default().fg(Color::Rgb(140, 140, 150)),
+        ),
     ];
 
-    // Show project/global breakdown if both exist
-    if info.project_count > 0 && info.global_count > 0 {
-        spans.push(Span::styled(
-            format!(" ({}p/{}g)", info.project_count, info.global_count),
-            Style::default().fg(Color::Rgb(100, 100, 110)),
-        ));
-    }
-
-    // Show activity indicator if active
     if let Some(activity) = &info.activity {
-        match &activity.state {
-            MemoryState::Embedding => {
-                spans.push(Span::styled(
-                    " · ",
-                    Style::default().fg(Color::Rgb(100, 100, 110)),
-                ));
-                spans.push(Span::styled(
-                    "🔍",
-                    Style::default().fg(Color::Rgb(255, 200, 100)),
-                ));
+        let icon = match &activity.state {
+            MemoryState::Embedding | MemoryState::SidecarChecking { .. } => Some(("🔍", Color::Rgb(255, 200, 100))),
+            MemoryState::FoundRelevant { count } => Some((if *count > 0 { "✓" } else { "" }, Color::Rgb(100, 200, 100))),
+            MemoryState::Extracting { .. } => Some(("🧠", Color::Rgb(200, 150, 255))),
+            MemoryState::Maintaining { .. } => Some(("🌿", Color::Rgb(120, 220, 180))),
+            MemoryState::ToolAction { .. } => Some(("💾", Color::Rgb(200, 150, 255))),
+            MemoryState::Idle => None,
+        };
+        if let Some((icon_str, color)) = icon {
+            if !icon_str.is_empty() {
+                spans.push(Span::styled(" · ", Style::default().fg(Color::Rgb(100, 100, 110))));
+                spans.push(Span::styled(icon_str, Style::default().fg(color)));
             }
-            MemoryState::SidecarChecking { count } => {
-                spans.push(Span::styled(
-                    " · ",
-                    Style::default().fg(Color::Rgb(100, 100, 110)),
-                ));
-                spans.push(Span::styled(
-                    format!("⚡{}", count),
-                    Style::default().fg(Color::Rgb(255, 200, 100)),
-                ));
-            }
-            MemoryState::FoundRelevant { count } => {
-                spans.push(Span::styled(
-                    " · ",
-                    Style::default().fg(Color::Rgb(100, 100, 110)),
-                ));
-                spans.push(Span::styled(
-                    format!("✓{}", count),
-                    Style::default().fg(Color::Rgb(100, 200, 100)),
-                ));
-            }
-            MemoryState::Extracting { .. } => {
-                spans.push(Span::styled(
-                    " · ",
-                    Style::default().fg(Color::Rgb(100, 100, 110)),
-                ));
-                spans.push(Span::styled(
-                    "🧠",
-                    Style::default().fg(Color::Rgb(200, 150, 255)),
-                ));
-            }
-            MemoryState::Maintaining { .. } => {
-                spans.push(Span::styled(
-                    " · ",
-                    Style::default().fg(Color::Rgb(100, 100, 110)),
-                ));
-                spans.push(Span::styled(
-                    "🌿",
-                    Style::default().fg(Color::Rgb(120, 220, 180)),
-                ));
-            }
-            MemoryState::ToolAction { action, .. } => {
-                let icon = match action.as_str() {
-                    "remember" | "store" => "💾",
-                    "recall" | "search" => "🔍",
-                    "forget" => "🗑\u{fe0f}",
-                    "tag" => "🏷\u{fe0f}",
-                    "link" => "🔗",
-                    _ => "🧠",
-                };
-                spans.push(Span::styled(
-                    " · ",
-                    Style::default().fg(Color::Rgb(100, 100, 110)),
-                ));
-                spans.push(Span::styled(
-                    icon,
-                    Style::default().fg(Color::Rgb(200, 150, 255)),
-                ));
-            }
-            MemoryState::Idle => {}
         }
     }
 
