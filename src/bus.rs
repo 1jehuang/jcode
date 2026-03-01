@@ -119,6 +119,16 @@ pub struct LoginCompleted {
 }
 
 #[derive(Clone, Debug)]
+pub enum UpdateStatus {
+    Checking,
+    Available { current: String, latest: String },
+    Downloading { version: String },
+    Installed { version: String },
+    UpToDate,
+    Error(String),
+}
+
+#[derive(Clone, Debug)]
 pub enum BusEvent {
     ToolUpdated(ToolEvent),
     TodoUpdated(TodoEvent),
@@ -131,6 +141,8 @@ pub enum BusEvent {
     UsageReport(Vec<crate::usage::ProviderUsage>),
     /// OAuth/login flow completed in the background
     LoginCompleted(LoginCompleted),
+    /// Update check status from background thread
+    UpdateStatus(UpdateStatus),
 }
 
 pub struct Bus {

@@ -1169,7 +1169,7 @@ impl App {
             .unwrap_or_else(|| session_id.to_string());
         let session_icon = crate::id::session_icon(&session_name);
         let is_canary = if self.is_remote {
-            self.remote_is_canary.unwrap_or(false)
+            self.remote_is_canary.unwrap_or(self.session.is_canary)
         } else {
             self.session.is_canary
         };
@@ -1207,7 +1207,7 @@ impl App {
         };
 
         let is_selfdev_session = if self.is_remote {
-            self.remote_is_canary.unwrap_or(false)
+            self.remote_is_canary.unwrap_or(self.session.is_canary)
         } else {
             self.session.is_canary
         };
@@ -13434,7 +13434,7 @@ impl App {
     /// Returns (label, prompt_text) pairs. Empty once user is experienced or not authenticated.
     pub fn suggestion_prompts(&self) -> Vec<(String, String)> {
         let is_canary = if self.is_remote {
-            self.remote_is_canary.unwrap_or(false)
+            self.remote_is_canary.unwrap_or(self.session.is_canary)
         } else {
             self.session.is_canary
         };
@@ -14349,7 +14349,7 @@ impl super::TuiState for App {
 
     fn is_canary(&self) -> bool {
         if self.is_remote {
-            self.remote_is_canary.unwrap_or(false)
+            self.remote_is_canary.unwrap_or(self.session.is_canary)
         } else {
             self.session.is_canary
         }
