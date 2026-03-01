@@ -147,24 +147,9 @@ impl OpenAIUsageData {
     }
 }
 
-/// Cached results from fetch_all_provider_usage
-static PROVIDER_USAGE_CACHE: std::sync::Mutex<Option<(Instant, Vec<ProviderUsage>)>> =
-    std::sync::Mutex::new(None);
-
-/// Cache TTL for /usage results
-const PROVIDER_USAGE_CACHE_TTL: Duration = Duration::from_secs(30);
-
 /// Fetch usage from all connected providers with OAuth credentials.
-/// Returns cached results if fresh (< 30s old), otherwise fetches fresh data.
+/// Returns a list of ProviderUsage, one per provider that has credentials.
 pub async fn fetch_all_provider_usage() -> Vec<ProviderUsage> {
-    if let Ok(guard) = PROVIDER_USAGE_CACHE.lock() {
-        if let Some((fetched_at, ref cached)) = *guard {
-            if fetched_at.elapsed() < PROVIDER_USAGE_CACHE_TTL {
-                return cached.clone();
-            }
-        }
-    }
-
     let mut results = Vec::new();
 
     let (anthropic_results, openai, openrouter, copilot) = tokio::join!(
@@ -183,10 +168,6 @@ pub async fn fetch_all_provider_usage() -> Vec<ProviderUsage> {
     }
     if let Some(r) = copilot {
         results.push(r);
-    }
-
-    if let Ok(mut guard) = PROVIDER_USAGE_CACHE.lock() {
-        *guard = Some((Instant::now(), results.clone()));
     }
 
     results
