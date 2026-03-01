@@ -184,6 +184,45 @@ fn is_winget_available() -> bool {
     false
 }
 
+/// Find the full path to WezTerm on Windows (checks common install locations).
+#[cfg(windows)]
+fn find_wezterm_path() -> Option<String> {
+    let candidates = [
+        r"C:\Program Files\WezTerm\wezterm.exe",
+        r"C:\Program Files (x86)\WezTerm\wezterm.exe",
+    ];
+    for c in &candidates {
+        if std::path::Path::new(c).exists() {
+            return Some(c.to_string());
+        }
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let p = format!(r"{}\Microsoft\WinGet\Links\wezterm.exe", local);
+        if std::path::Path::new(&p).exists() {
+            return Some(p);
+        }
+    }
+    let output = std::process::Command::new("where")
+        .arg("wezterm")
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(line) = stdout.lines().next() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn find_wezterm_path() -> Option<String> {
+    None
+}
+
 /// Create a global Alt+; hotkey using a background PowerShell listener.
 ///
 /// Windows .lnk shortcut hotkeys only support Ctrl+Alt+<letter/number/Fkey>,
@@ -198,7 +237,8 @@ fn create_hotkey_shortcut(use_wezterm: bool) -> Result<()> {
     let exe_path = exe.to_string_lossy();
 
     let (launch_exe, launch_args) = if use_wezterm {
-        ("wezterm".to_string(), format!("start -- \"{}\"", exe_path))
+        let wezterm_path = find_wezterm_path().unwrap_or_else(|| "wezterm".to_string());
+        (wezterm_path, format!("start -- \"{}\"", exe_path))
     } else {
         (
             "wt.exe".to_string(),

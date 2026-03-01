@@ -124,5 +124,4 @@ The vast majority of the codebase is platform-agnostic:
 1. **Windows CI** - Add GitHub Actions Windows runner, test compilation and basic IPC
 2. **Shell tool** - Detect platform and use `cmd.exe` or `pwsh.exe` on Windows
 3. **Self-update** - Handle Windows exe replacement (can't overwrite running binary)
-4. **Process liveness** - Implement real `is_process_running` on Windows via `OpenProcess`
-5. **Testing** - Run full test suite on Windows
+4. **Testing** - Run full test suite on Windows

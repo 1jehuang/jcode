@@ -67,7 +67,8 @@ fn home_dir() -> Result<PathBuf> {
 
 /// Directory for the single launcher path users execute from PATH.
 ///
-/// Defaults to `~/.local/bin`, overridable with `JCODE_INSTALL_DIR`.
+/// Defaults to `~/.local/bin` on Unix, `%LOCALAPPDATA%\jcode\bin` on Windows.
+/// Overridable with `JCODE_INSTALL_DIR`.
 pub fn launcher_dir() -> Result<PathBuf> {
     if let Ok(custom) = std::env::var("JCODE_INSTALL_DIR") {
         let trimmed = custom.trim();
@@ -76,7 +77,17 @@ pub fn launcher_dir() -> Result<PathBuf> {
         }
     }
 
-    Ok(home_dir()?.join(".local").join("bin"))
+    #[cfg(windows)]
+    {
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            return Ok(PathBuf::from(local).join("jcode").join("bin"));
+        }
+        Ok(home_dir()?.join("AppData").join("Local").join("jcode").join("bin"))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(home_dir()?.join(".local").join("bin"))
+    }
 }
 
 /// Path to the launcher binary (`~/.local/bin/jcode` by default).

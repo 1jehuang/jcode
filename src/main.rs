@@ -2960,10 +2960,71 @@ fn spawn_resume_in_new_terminal(
 
 #[cfg(not(unix))]
 fn spawn_resume_in_new_terminal(
-    _exe: &std::path::Path,
-    _session_id: &str,
-    _cwd: &std::path::Path,
+    exe: &std::path::Path,
+    session_id: &str,
+    cwd: &std::path::Path,
 ) -> Result<bool> {
+    use std::process::{Command, Stdio};
+
+    // Try WezTerm first, then Windows Terminal
+    let wezterm_available = std::env::var("WEZTERM_EXECUTABLE").is_ok()
+        || Command::new("where")
+            .arg("wezterm")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+    if wezterm_available {
+        let status = Command::new("wezterm")
+            .args([
+                "start",
+                "--always-new-process",
+                "--",
+                &exe.to_string_lossy(),
+                "--resume",
+                session_id,
+            ])
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if status.is_ok() {
+            return Ok(true);
+        }
+    }
+
+    // Fallback: Windows Terminal
+    let wt_available = std::env::var("WT_SESSION").is_ok()
+        || Command::new("where")
+            .arg("wt")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+    if wt_available {
+        let status = Command::new("wt.exe")
+            .args([
+                "-p",
+                "Command Prompt",
+                &exe.to_string_lossy(),
+                "--resume",
+                session_id,
+            ])
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if status.is_ok() {
+            return Ok(true);
+        }
+    }
+
     Ok(false)
 }
 

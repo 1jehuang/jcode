@@ -119,13 +119,42 @@ impl Stream {
         static PAIR_COUNTER: AtomicU64 = AtomicU64::new(0);
         let counter = PAIR_COUNTER.fetch_add(1, Ordering::Relaxed);
         let pipe_name = format!(r"\\.\pipe\jcode-pair-{}-{}", std::process::id(), counter);
-        let server = ServerOptions::new()
+        let mut server = ServerOptions::new()
             .first_pipe_instance(true)
             .create(&pipe_name)?;
         let client = ClientOptions::new().open(&pipe_name)?;
 
-        // We need to accept the connection on the server side
-        // For pair(), the client is already connected since the pipe exists
+        // The client connected when we opened it above, but the server must
+        // call connect() to transition into the connected state.  For an
+        // already-connected client this returns immediately.
+        //
+        // We use a short-lived runtime-free poll: since the client already
+        // connected synchronously, the server's connect future will resolve
+        // on the first poll.
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+        fn dummy_raw_waker() -> RawWaker {
+            fn no_op(_: *const ()) {}
+            fn clone(p: *const ()) -> RawWaker {
+                RawWaker::new(p, &VTABLE)
+            }
+            const VTABLE: RawWakerVTable =
+                RawWakerVTable::new(clone, no_op, no_op, no_op);
+            RawWaker::new(std::ptr::null(), &VTABLE)
+        }
+        let waker = unsafe { Waker::from_raw(dummy_raw_waker()) };
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = server.connect();
+        let pinned = unsafe { std::pin::Pin::new_unchecked(&mut fut) };
+        match pinned.poll(&mut cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(e)) => return Err(e),
+            Poll::Pending => {
+                // Should not happen since the client already connected.
+                // Drop the future and proceed - the pipe is still usable.
+            }
+        }
+        drop(fut);
+
         Ok((Stream::Server(server), Stream::Client(client)))
     }
 }

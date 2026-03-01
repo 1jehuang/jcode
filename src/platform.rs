@@ -84,8 +84,16 @@ pub fn is_process_running(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        let _ = pid;
-        true
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle == 0 || handle == -1_isize as _ {
+                return false;
+            }
+            CloseHandle(handle);
+            true
+        }
     }
 }
 
