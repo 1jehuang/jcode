@@ -936,7 +936,9 @@ async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
     extra_info.push((
         "Today".to_string(),
         format!(
-            "{} requests ({} in + {} out)",
+            "{} premium + {} agent = {} total ({} in + {} out)",
+            usage.today.premium_requests,
+            usage.today.requests.saturating_sub(usage.today.premium_requests),
             usage.today.requests,
             format_token_count(usage.today.input_tokens),
             format_token_count(usage.today.output_tokens),
@@ -945,7 +947,9 @@ async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
     extra_info.push((
         "This month".to_string(),
         format!(
-            "{} requests ({} in + {} out)",
+            "{} premium + {} agent = {} total ({} in + {} out)",
+            usage.month.premium_requests,
+            usage.month.requests.saturating_sub(usage.month.premium_requests),
             usage.month.requests,
             format_token_count(usage.month.input_tokens),
             format_token_count(usage.month.output_tokens),
@@ -954,7 +958,9 @@ async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
     extra_info.push((
         "All time".to_string(),
         format!(
-            "{} requests ({} in + {} out)",
+            "{} premium + {} agent = {} total ({} in + {} out)",
+            usage.all_time.premium_requests,
+            usage.all_time.requests.saturating_sub(usage.all_time.premium_requests),
             usage.all_time.requests,
             format_token_count(usage.all_time.input_tokens),
             format_token_count(usage.all_time.output_tokens),

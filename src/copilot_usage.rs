@@ -28,6 +28,7 @@ pub struct CopilotUsageTracker {
 pub struct DayUsage {
     pub date: String,
     pub requests: u64,
+    pub premium_requests: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
 }
@@ -36,6 +37,7 @@ pub struct DayUsage {
 pub struct MonthUsage {
     pub month: String,
     pub requests: u64,
+    pub premium_requests: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
 }
@@ -43,6 +45,7 @@ pub struct MonthUsage {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AllTimeUsage {
     pub requests: u64,
+    pub premium_requests: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
 }
@@ -85,30 +88,39 @@ impl CopilotUsageTracker {
         }
     }
 
-    fn record(&mut self, input_tokens: u64, output_tokens: u64) {
+    fn record(&mut self, input_tokens: u64, output_tokens: u64, is_premium: bool) {
         self.roll_if_needed();
 
         self.today.requests += 1;
         self.today.input_tokens += input_tokens;
         self.today.output_tokens += output_tokens;
+        if is_premium {
+            self.today.premium_requests += 1;
+        }
 
         self.month.requests += 1;
         self.month.input_tokens += input_tokens;
         self.month.output_tokens += output_tokens;
+        if is_premium {
+            self.month.premium_requests += 1;
+        }
 
         self.all_time.requests += 1;
         self.all_time.input_tokens += input_tokens;
         self.all_time.output_tokens += output_tokens;
+        if is_premium {
+            self.all_time.premium_requests += 1;
+        }
 
         self.save();
     }
 }
 
 /// Record a completed Copilot request.
-pub fn record_request(input_tokens: u64, output_tokens: u64) {
+pub fn record_request(input_tokens: u64, output_tokens: u64, is_premium: bool) {
     let mut guard = TRACKER.lock().unwrap();
     let tracker = guard.get_or_insert_with(CopilotUsageTracker::load);
-    tracker.record(input_tokens, output_tokens);
+    tracker.record(input_tokens, output_tokens, is_premium);
 }
 
 /// Get current usage snapshot.

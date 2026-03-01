@@ -162,6 +162,16 @@ pub trait Provider: Send + Sync {
         // Default: no-op
     }
 
+    /// Set Copilot premium request conservation mode.
+    fn set_premium_mode(&self, _mode: copilot::PremiumMode) {
+        // Default: no-op (non-Copilot providers ignore this)
+    }
+
+    /// Get the current Copilot premium mode.
+    fn premium_mode(&self) -> copilot::PremiumMode {
+        copilot::PremiumMode::Normal
+    }
+
     /// Returns true if jcode should use its own compaction for this provider.
     fn supports_compaction(&self) -> bool {
         false
@@ -2026,7 +2036,6 @@ impl Provider for MultiProvider {
     fn supports_compaction(&self) -> bool {
         match self.active_provider() {
             ActiveProvider::Claude => {
-                // Direct API supports compaction
                 if self.anthropic.is_some() {
                     true
                 } else {
@@ -2053,6 +2062,20 @@ impl Provider for MultiProvider {
                 .as_ref()
                 .map(|o| o.supports_compaction())
                 .unwrap_or(false),
+        }
+    }
+
+    fn set_premium_mode(&self, mode: copilot::PremiumMode) {
+        if let Some(ref copilot) = *self.copilot_api.read().unwrap() {
+            copilot.set_premium_mode(mode);
+        }
+    }
+
+    fn premium_mode(&self) -> copilot::PremiumMode {
+        if let Some(ref copilot) = *self.copilot_api.read().unwrap() {
+            copilot.get_premium_mode()
+        } else {
+            copilot::PremiumMode::Normal
         }
     }
 
