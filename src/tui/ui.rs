@@ -3325,7 +3325,7 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
         if has_more {
             content.push(
                 Line::from(Span::styled(
-                    format!("  …{} more", new_entries.len() - MAX_LINES),
+                    format!("  …{} more · /changelog to see all", new_entries.len() - MAX_LINES),
                     Style::default().fg(DIM_COLOR),
                 ))
                 .alignment(align),

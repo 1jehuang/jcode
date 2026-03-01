@@ -5586,6 +5586,10 @@ impl App {
         let mut modifiers = modifiers;
         ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
+        if self.changelog_scroll.is_some() {
+            return self.handle_changelog_key(code);
+        }
+
         // If picker is active and not in preview mode, handle picker keys first
         if let Some(ref picker) = self.picker_state {
             if !picker.preview {

@@ -240,14 +240,14 @@ impl WidgetKind {
             WidgetKind::Overview => 1,
             WidgetKind::Todos => 2,
             WidgetKind::ContextUsage => 3,
-            WidgetKind::MemoryActivity => 4,
-            WidgetKind::SwarmStatus => 5,
-            WidgetKind::BackgroundTasks => 6,
-            WidgetKind::AmbientMode => 7,
-            WidgetKind::UsageLimits => 8,
-            WidgetKind::ModelInfo => 9,
-            WidgetKind::Tips => 10,
-            WidgetKind::GitStatus => 8, // Lower priority than most, but above tips
+            WidgetKind::UsageLimits => 4, // Bumped up - important when near limits
+            WidgetKind::MemoryActivity => 5,
+            WidgetKind::ModelInfo => 6,
+            WidgetKind::BackgroundTasks => 7,
+            WidgetKind::GitStatus => 8,
+            WidgetKind::SwarmStatus => 9, // Session list - lower priority
+            WidgetKind::AmbientMode => 10, // Scheduled agent - lower priority
+            WidgetKind::Tips => 11, // Did you know - lowest
         }
     }
 
@@ -294,14 +294,14 @@ impl WidgetKind {
             WidgetKind::Overview,
             WidgetKind::Todos,
             WidgetKind::ContextUsage,
-            WidgetKind::MemoryActivity,
-            WidgetKind::SwarmStatus,
-            WidgetKind::BackgroundTasks,
-            WidgetKind::AmbientMode,
             WidgetKind::UsageLimits,
+            WidgetKind::MemoryActivity,
             WidgetKind::ModelInfo,
-            WidgetKind::Tips,
+            WidgetKind::BackgroundTasks,
             WidgetKind::GitStatus,
+            WidgetKind::SwarmStatus,
+            WidgetKind::AmbientMode,
+            WidgetKind::Tips,
         ]
     }
 
@@ -471,6 +471,19 @@ pub struct UsageInfo {
     pub output_tps: Option<f32>,
     /// Whether data was successfully fetched / available to show
     pub available: bool,
+}
+
+impl UsageInfo {
+    /// Return the highest usage percentage across all limit windows (0-100).
+    pub fn max_usage_pct(&self) -> u8 {
+        let five_hr = (self.five_hour * 100.0).round().clamp(0.0, 100.0) as u8;
+        let seven_day = (self.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
+        let spark = self
+            .spark
+            .map(|v| (v * 100.0).round().clamp(0.0, 100.0) as u8)
+            .unwrap_or(0);
+        five_hr.max(seven_day).max(spark)
+    }
 }
 
 /// Memory statistics for the info widget
@@ -832,7 +845,12 @@ impl InfoWidgetData {
                 .map(|b| b.running_count > 0 || b.memory_agent_active)
                 .unwrap_or(false),
             WidgetKind::AmbientMode => self.ambient_info.is_some(),
-            WidgetKind::UsageLimits => false, // Combined into ModelInfo
+            WidgetKind::UsageLimits => {
+                self.usage_info
+                    .as_ref()
+                    .map(|u| u.available)
+                    .unwrap_or(false)
+            }
             WidgetKind::ModelInfo => self.model.is_some(),
             WidgetKind::Tips => true, // Always available
             WidgetKind::GitStatus => self
@@ -844,12 +862,36 @@ impl InfoWidgetData {
     }
 
     /// Get list of widget kinds that have data, in priority order
+    /// Get effective priority for a widget, accounting for dynamic state.
+    /// UsageLimits gets bumped up when usage is high.
+    pub fn effective_priority(&self, kind: WidgetKind) -> u8 {
+        match kind {
+            WidgetKind::UsageLimits => {
+                let max_pct = self
+                    .usage_info
+                    .as_ref()
+                    .map(|u| u.max_usage_pct())
+                    .unwrap_or(0);
+                if max_pct >= 80 {
+                    1 // Very high - right after diagrams
+                } else if max_pct >= 50 {
+                    3 // Elevated - after overview and todos
+                } else {
+                    kind.priority()
+                }
+            }
+            _ => kind.priority(),
+        }
+    }
+
     pub fn available_widgets(&self) -> Vec<WidgetKind> {
-        WidgetKind::all_by_priority()
+        let mut widgets: Vec<WidgetKind> = WidgetKind::all_by_priority()
             .iter()
             .copied()
             .filter(|&kind| self.has_data_for(kind))
-            .collect()
+            .collect();
+        widgets.sort_by_key(|&kind| self.effective_priority(kind));
+        widgets
     }
 }
 
@@ -1383,13 +1425,7 @@ fn calculate_widget_height(
             if !info.is_interesting() {
                 return 0;
             }
-            let mut h = 1u16; // Branch line
-            if info.ahead > 0 || info.behind > 0 {
-                h += 1;
-            }
-            if info.modified > 0 || info.staged > 0 || info.untracked > 0 {
-                h += 1;
-            }
+            let mut h = 1u16; // Branch + stats on one line
             h += info.dirty_files.len().min(5) as u16;
             if info.dirty_files.len() > 5 {
                 h += 1;
@@ -3711,75 +3747,72 @@ fn render_git_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
     let w = inner.width as usize;
     let mut lines: Vec<Line> = Vec::new();
 
-    // Branch header
-    let branch_display = truncate_smart(&info.branch, w.saturating_sub(4));
-    lines.push(Line::from(vec![
-        Span::styled(" ", Style::default().fg(Color::Rgb(240, 160, 60))),
-        Span::styled(
-            branch_display,
-            Style::default()
-                .fg(Color::Rgb(200, 200, 210))
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
+    // Branch + stats all on one line:  master ~2 +1 ?3 ↑1 ↓2
+    let mut parts: Vec<Span> = Vec::new();
+    parts.push(Span::styled(
+        " ",
+        Style::default().fg(Color::Rgb(240, 160, 60)),
+    ));
 
-    // Ahead/behind
-    if info.ahead > 0 || info.behind > 0 {
-        let mut parts: Vec<Span> = vec![Span::raw("  ")];
-        if info.ahead > 0 {
-            parts.push(Span::styled(
-                format!("↑{}", info.ahead),
-                Style::default().fg(Color::Rgb(100, 200, 100)),
-            ));
-        }
-        if info.ahead > 0 && info.behind > 0 {
-            parts.push(Span::styled(
-                " ",
-                Style::default().fg(Color::Rgb(100, 100, 110)),
-            ));
-        }
-        if info.behind > 0 {
-            parts.push(Span::styled(
-                format!("↓{}", info.behind),
-                Style::default().fg(Color::Rgb(255, 140, 100)),
-            ));
-        }
-        lines.push(Line::from(parts));
+    // Calculate how much space stats need so we can truncate branch name
+    let mut stats_len = 0usize;
+    if info.ahead > 0 {
+        stats_len += format!(" ↑{}", info.ahead).chars().count();
     }
-
-    // Changes summary
-    let mut status_parts: Vec<Span> = vec![Span::raw("  ")];
-    let mut any = false;
+    if info.behind > 0 {
+        stats_len += format!(" ↓{}", info.behind).chars().count();
+    }
     if info.modified > 0 {
-        status_parts.push(Span::styled(
-            format!("~{}", info.modified),
-            Style::default().fg(Color::Rgb(240, 200, 80)),
-        ));
-        any = true;
+        stats_len += format!(" ~{}", info.modified).chars().count();
     }
     if info.staged > 0 {
-        if any {
-            status_parts.push(Span::styled(" ", Style::default()));
-        }
-        status_parts.push(Span::styled(
-            format!("+{}", info.staged),
-            Style::default().fg(Color::Rgb(100, 200, 100)),
-        ));
-        any = true;
+        stats_len += format!(" +{}", info.staged).chars().count();
     }
     if info.untracked > 0 {
-        if any {
-            status_parts.push(Span::styled(" ", Style::default()));
-        }
-        status_parts.push(Span::styled(
-            format!("?{}", info.untracked),
+        stats_len += format!(" ?{}", info.untracked).chars().count();
+    }
+
+    let branch_max = w.saturating_sub(2 + stats_len).max(4);
+    let branch_display = truncate_smart(&info.branch, branch_max);
+    parts.push(Span::styled(
+        branch_display,
+        Style::default()
+            .fg(Color::Rgb(200, 200, 210))
+            .add_modifier(Modifier::BOLD),
+    ));
+
+    if info.modified > 0 {
+        parts.push(Span::styled(
+            format!(" ~{}", info.modified),
+            Style::default().fg(Color::Rgb(240, 200, 80)),
+        ));
+    }
+    if info.staged > 0 {
+        parts.push(Span::styled(
+            format!(" +{}", info.staged),
+            Style::default().fg(Color::Rgb(100, 200, 100)),
+        ));
+    }
+    if info.untracked > 0 {
+        parts.push(Span::styled(
+            format!(" ?{}", info.untracked),
             Style::default().fg(Color::Rgb(140, 140, 150)),
         ));
-        any = true;
     }
-    if any {
-        lines.push(Line::from(status_parts));
+    if info.ahead > 0 {
+        parts.push(Span::styled(
+            format!(" ↑{}", info.ahead),
+            Style::default().fg(Color::Rgb(100, 200, 100)),
+        ));
     }
+    if info.behind > 0 {
+        parts.push(Span::styled(
+            format!(" ↓{}", info.behind),
+            Style::default().fg(Color::Rgb(255, 140, 100)),
+        ));
+    }
+
+    lines.push(Line::from(parts));
 
     // Dirty file list (up to what fits)
     let max_files = inner.height.saturating_sub(lines.len() as u16).min(5) as usize;
