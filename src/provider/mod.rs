@@ -789,7 +789,7 @@ fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIModelCatalog {
 pub async fn fetch_openai_model_catalog(access_token: &str) -> Result<OpenAIModelCatalog> {
     note_openai_model_catalog_refresh_attempt();
 
-    let client = reqwest::Client::new();
+    let client = shared_http_client();
     let resp = client
         .get("https://chatgpt.com/backend-api/codex/models?client_version=1.0.0")
         .header("Authorization", format!("Bearer {}", access_token))

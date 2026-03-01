@@ -116,7 +116,7 @@ impl TelegramChannel {
             token,
             chat_id,
             reply_enabled,
-            client: reqwest::Client::new(),
+            client: crate::provider::shared_http_client(),
         }
     }
 }
@@ -238,7 +238,7 @@ impl DiscordChannel {
             channel_id,
             reply_enabled,
             bot_user_id,
-            client: reqwest::Client::new(),
+            client: crate::provider::shared_http_client(),
         }
     }
 
