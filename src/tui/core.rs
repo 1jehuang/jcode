@@ -409,14 +409,14 @@ impl DisplayMessage {
         }
     }
 
-    /// Create a memory injection message (compact one-liner display)
-    pub fn memory(summary: impl Into<String>) -> Self {
+    /// Create a memory injection message (bordered box display)
+    pub fn memory(title: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: "memory".to_string(),
-            content: summary.into(),
+            content: content.into(),
             tool_calls: Vec::new(),
             duration_secs: None,
-            title: None,
+            title: Some(title.into()),
             tool_data: None,
         }
     }

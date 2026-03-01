@@ -3630,19 +3630,61 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 }
             }
             "memory" => {
-                lines.push(
-                    Line::from(vec![
-                        Span::styled(
-                            if centered { "🧠 " } else { "  🧠 " },
-                            Style::default(),
-                        ),
-                        Span::styled(
-                            msg.content.clone(),
-                            Style::default().fg(Color::Rgb(140, 210, 255)),
-                        ),
-                    ])
-                    .alignment(align),
+                let title = msg.title.as_deref().unwrap_or("🧠 memories");
+                let content_width = width.saturating_sub(8) as usize;
+                let border_style = Style::default().fg(Color::Rgb(140, 210, 255));
+                let text_style = Style::default().fg(DIM_COLOR);
+
+                let mut box_content: Vec<Line<'static>> = Vec::new();
+                for text_line in msg.content.lines() {
+                    if text_line.starts_with("# ") {
+                        continue;
+                    }
+                    if text_line.starts_with("## ") {
+                        let section = text_line.trim_start_matches("## ");
+                        box_content.push(Line::from(Span::styled(
+                            section.to_string(),
+                            Style::default()
+                                .fg(Color::Rgb(140, 210, 255))
+                                .bold(),
+                        )));
+                        continue;
+                    }
+                    if text_line.trim().is_empty() {
+                        continue;
+                    }
+                    let chars: Vec<char> = text_line.chars().collect();
+                    if chars.len() <= content_width {
+                        box_content.push(Line::from(Span::styled(
+                            text_line.to_string(),
+                            text_style,
+                        )));
+                    } else {
+                        let mut pos = 0;
+                        let mut first = true;
+                        while pos < chars.len() {
+                            let indent = if first { "" } else { "   " };
+                            let avail = content_width.saturating_sub(indent.len());
+                            let end = (pos + avail).min(chars.len());
+                            let chunk: String =
+                                format!("{}{}", indent, chars[pos..end].iter().collect::<String>());
+                            box_content
+                                .push(Line::from(Span::styled(chunk, text_style)));
+                            pos = end;
+                            first = false;
+                        }
+                    }
+                }
+
+                let box_lines = render_rounded_box(
+                    title,
+                    box_content,
+                    width.saturating_sub(2) as usize,
+                    border_style,
                 );
+                for line in box_lines {
+                    lines.push(align_if_unset(line, align));
+                }
             }
             "usage" => {
                 lines.push(
@@ -3749,6 +3791,50 @@ pub(crate) fn render_tool_message(
     };
 
     let centered = markdown::center_code_blocks();
+
+    // Special rendering for memory store/remember actions
+    if is_memory_store_tool(tc) && !msg.content.starts_with("Error:") {
+        let content = tc
+            .input
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let category = tc
+            .input
+            .get("category")
+            .and_then(|v| v.as_str())
+            .or_else(|| tc.input.get("tag").and_then(|v| v.as_str()))
+            .unwrap_or("fact");
+        let title = format!("🧠 remembered ({})", category);
+        let border_style = Style::default().fg(Color::Rgb(255, 200, 100));
+        let text_style = Style::default().fg(DIM_COLOR);
+        let content_width = width.saturating_sub(8) as usize;
+
+        let mut box_content: Vec<Line<'static>> = Vec::new();
+        let chars: Vec<char> = content.chars().collect();
+        if chars.len() <= content_width {
+            box_content.push(Line::from(Span::styled(content.to_string(), text_style)));
+        } else {
+            let mut pos = 0;
+            while pos < chars.len() {
+                let end = (pos + content_width).min(chars.len());
+                let chunk: String = chars[pos..end].iter().collect();
+                box_content.push(Line::from(Span::styled(chunk, text_style)));
+                pos = end;
+            }
+        }
+
+        let box_lines = render_rounded_box(
+            &title,
+            box_content,
+            width.saturating_sub(2) as usize,
+            border_style,
+        );
+        for line in box_lines {
+            lines.push(line);
+        }
+        return lines;
+    }
 
     let summary = get_tool_summary(tc);
 
@@ -7529,6 +7615,22 @@ fn extract_unified_patch_primary_file(patch_text: &str) -> Option<String> {
     }
 
     None
+}
+
+fn is_memory_store_tool(tc: &ToolCall) -> bool {
+    match tc.name.as_str() {
+        "memory" => tc
+            .input
+            .get("action")
+            .and_then(|v| v.as_str())
+            .is_some_and(|a| a == "remember"),
+        "remember" => tc
+            .input
+            .get("action")
+            .and_then(|v| v.as_str())
+            .map_or(true, |a| a == "store"),
+        _ => false,
+    }
 }
 
 /// Extract a brief summary from a tool call input (file path, command, etc.)

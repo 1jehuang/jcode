@@ -12981,8 +12981,12 @@ impl App {
         }
         let prompt_chars = display_prompt.chars().count();
         crate::memory::record_injected_prompt(&display_prompt, count, age_ms);
-        let summary = format!("{} {} · {} chars", count, plural, prompt_chars);
-        self.push_display_message(DisplayMessage::memory(summary));
+        let summary = if count == 1 {
+            "🧠 remembered 1 thing".to_string()
+        } else {
+            format!("🧠 remembered {} things", count)
+        };
+        self.push_display_message(DisplayMessage::memory(summary, display_prompt));
         self.set_status_notice(format!("🧠 {} {} injected", count, plural));
     }
 
