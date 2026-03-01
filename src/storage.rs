@@ -48,28 +48,41 @@ pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
         ensure_dir(parent)?;
     }
 
-    let tmp_path = path.with_extension("tmp");
-    let file = std::fs::File::create(&tmp_path)?;
-    let mut writer = std::io::BufWriter::new(file);
-    serde_json::to_writer(&mut writer, value)?;
-    let file = writer.into_inner().map_err(|e| anyhow::anyhow!("flush failed: {}", e))?;
-    file.sync_all()?;
+    let pid = std::process::id();
+    let nonce: u64 = rand::random();
+    let tmp_path = path.with_extension(format!("tmp.{}.{}", pid, nonce));
 
-    if path.exists() {
-        let bak_path = path.with_extension("bak");
-        let _ = std::fs::rename(path, &bak_path);
-    }
+    let result = (|| -> Result<()> {
+        let file = std::fs::File::create(&tmp_path)?;
+        let mut writer = std::io::BufWriter::new(file);
+        serde_json::to_writer(&mut writer, value)?;
+        let file = writer
+            .into_inner()
+            .map_err(|e| anyhow::anyhow!("flush failed: {}", e))?;
+        file.sync_all()?;
 
-    std::fs::rename(&tmp_path, path)?;
-
-    #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
+        if path.exists() {
+            let bak_path = path.with_extension("bak");
+            let _ = std::fs::rename(path, &bak_path);
         }
+
+        std::fs::rename(&tmp_path, path)?;
+
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
     }
 
-    Ok(())
+    result
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
