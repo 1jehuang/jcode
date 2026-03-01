@@ -8294,14 +8294,43 @@ impl App {
             return;
         }
 
-        if trimmed == "/zz" || trimmed == "/zzz" {
+        if trimmed == "/z" || trimmed == "/zz" || trimmed == "/zzz" || trimmed == "/zstatus" {
             use crate::provider::copilot::PremiumMode;
+            let current = self.provider.premium_mode();
+
+            if trimmed == "/zstatus" {
+                let label = match current {
+                    PremiumMode::Normal => "normal",
+                    PremiumMode::OnePerSession => "one premium per session",
+                    PremiumMode::Zero => "zero premium requests",
+                };
+                let env = std::env::var("JCODE_COPILOT_PREMIUM").ok();
+                let env_label = match env.as_deref() {
+                    Some("0") => "0 (zero)",
+                    Some("1") => "1 (one per session)",
+                    _ => "unset (normal)",
+                };
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Premium mode: **{}**\nEnv JCODE_COPILOT_PREMIUM: {}",
+                    label, env_label,
+                )));
+                return;
+            }
+
+            if trimmed == "/z" {
+                self.provider.set_premium_mode(PremiumMode::Normal);
+                self.set_status_notice("Premium: normal");
+                self.push_display_message(DisplayMessage::system(
+                    "Premium request mode reset to normal.".to_string(),
+                ));
+                return;
+            }
+
             let mode = if trimmed == "/zzz" {
                 PremiumMode::Zero
             } else {
                 PremiumMode::OnePerSession
             };
-            let current = self.provider.premium_mode();
             if current == mode {
                 self.provider.set_premium_mode(PremiumMode::Normal);
                 self.set_status_notice("Premium: normal");
@@ -8317,8 +8346,8 @@ impl App {
                 };
                 self.set_status_notice(&format!("Premium: {}", label));
                 self.push_display_message(DisplayMessage::system(format!(
-                    "Premium mode: **{}**. Toggle off with `{}`.",
-                    label, trimmed,
+                    "Premium mode: **{}**. Toggle off with `/z`.",
+                    label,
                 )));
             }
             return;
