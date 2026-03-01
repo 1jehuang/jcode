@@ -3788,7 +3788,10 @@ pub(crate) fn render_tool_message(
             let sub_results = parse_batch_sub_results(&msg.content);
 
             for (i, call) in calls.iter().enumerate() {
-                let raw_name = call.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
+                let raw_name = call.get("tool")
+                    .or_else(|| call.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
                 let display_name = resolve_display_tool_name(raw_name);
                 let params = batch_subcall_params(call);
 
@@ -7395,7 +7398,7 @@ fn batch_subcall_params(call: &serde_json::Value) -> serde_json::Value {
     if let Some(obj) = call.as_object() {
         let mut flat = serde_json::Map::new();
         for (k, v) in obj {
-            if k != "tool" {
+            if k != "tool" && k != "name" {
                 flat.insert(k.clone(), v.clone());
             }
         }
@@ -8525,6 +8528,21 @@ mod tests {
         assert_eq!(nested_params["file_path"], "src/main.rs");
         assert_eq!(nested_params["offset"], 2320);
         assert_eq!(nested_params["limit"], 220);
+    }
+
+    #[test]
+    fn test_batch_subcall_params_excludes_name_key() {
+        let with_name = serde_json::json!({
+            "name": "read",
+            "file_path": "src/lib.rs",
+            "offset": 0,
+            "limit": 100
+        });
+        let params = batch_subcall_params(&with_name);
+        assert_eq!(params["file_path"], "src/lib.rs");
+        assert_eq!(params["offset"], 0);
+        assert!(params.get("name").is_none());
+        assert!(params.get("tool").is_none());
     }
 
     #[test]

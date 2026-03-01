@@ -10295,71 +10295,15 @@ impl App {
         label: &str,
         redirect_uri: Option<String>,
     ) -> Result<String, String> {
-        let raw_code = if input.contains("code=") {
-            let url = url::Url::parse(&input)
-                .or_else(|_| url::Url::parse(&format!("https://example.com?{}", input)))
-                .map_err(|e| format!("Failed to parse URL: {}", e))?;
-            url.query_pairs()
-                .find(|(k, _)| k == "code")
-                .map(|(_, v)| v.to_string())
-                .ok_or_else(|| "No code found in URL".to_string())?
-        } else {
-            input.trim().to_string()
-        };
-
-        let (code, state_from_callback) = if raw_code.contains('#') {
-            let parts: Vec<&str> = raw_code.splitn(2, '#').collect();
-            (parts[0].to_string(), Some(parts[1].to_string()))
-        } else {
-            (raw_code, None)
-        };
-
-        let client = reqwest::Client::new();
-        let mut params = vec![
-            ("grant_type", "authorization_code".to_string()),
-            ("client_id", crate::auth::oauth::claude::CLIENT_ID.to_string()),
-            ("code", code),
-            ("code_verifier", verifier),
-            ("redirect_uri", redirect_uri.unwrap_or_else(|| crate::auth::oauth::claude::REDIRECT_URI.to_string())),
-        ];
-
-        if let Some(state) = state_from_callback {
-            params.push(("state", state));
-        }
-
-        let resp = client
-            .post(crate::auth::oauth::claude::TOKEN_URL)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .form(&params)
-            .send()
-            .await
-            .map_err(|e| format!("Token exchange request failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("Token exchange failed: {}", text));
-        }
-
-        #[derive(serde::Deserialize)]
-        struct TokenResponse {
-            access_token: String,
-            refresh_token: String,
-            expires_in: i64,
-            id_token: Option<String>,
-        }
-
-        let tokens: TokenResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse token response: {}", e))?;
-        let expires_at = chrono::Utc::now().timestamp_millis() + (tokens.expires_in * 1000);
-
-        let oauth_tokens = crate::auth::oauth::OAuthTokens {
-            access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token,
-            expires_at,
-            id_token: tokens.id_token,
-        };
+        let redirect_uri =
+            redirect_uri.unwrap_or_else(|| crate::auth::oauth::claude::REDIRECT_URI.to_string());
+        let oauth_tokens = crate::auth::oauth::exchange_claude_code(
+            &verifier,
+            input.trim(),
+            &redirect_uri,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
 
         crate::auth::oauth::save_claude_tokens_for_account(&oauth_tokens, label)
             .map_err(|e| format!("Failed to save tokens: {}", e))?;

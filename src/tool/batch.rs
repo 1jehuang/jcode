@@ -23,6 +23,7 @@ struct BatchInput {
 
 #[derive(Deserialize, Clone)]
 struct ToolCallInput {
+    #[serde(alias = "name")]
     tool: String,
     #[serde(default)]
     parameters: Option<Value>,
@@ -39,10 +40,18 @@ impl ToolCallInput {
 
 /// Try to fix common LLM mistakes in batch tool_calls:
 /// - Parameters placed at the same level as "tool" instead of nested under "parameters"
+/// - "name" used instead of "tool" for the tool name key
 fn normalize_batch_input(mut input: Value) -> Value {
     if let Some(calls) = input.get_mut("tool_calls").and_then(|v| v.as_array_mut()) {
         for call in calls.iter_mut() {
             if let Some(obj) = call.as_object_mut() {
+                // Normalize "name" -> "tool" if the model used the wrong key
+                if !obj.contains_key("tool") {
+                    if let Some(name_val) = obj.remove("name") {
+                        obj.insert("tool".to_string(), name_val);
+                    }
+                }
+
                 if !obj.contains_key("parameters") && obj.contains_key("tool") {
                     let tool_name = obj.get("tool").cloned();
                     let mut params = serde_json::Map::new();
@@ -216,5 +225,43 @@ mod tests {
         assert_eq!(parsed.tool_calls.len(), 1);
         let params = parsed.tool_calls[0].parameters.as_ref().unwrap();
         assert_eq!(params["file_path"], "file1.txt");
+    }
+
+    #[test]
+    fn test_normalize_name_key_to_tool() {
+        let input = json!({
+            "tool_calls": [
+                {"name": "read", "parameters": {"file_path": "file1.txt"}},
+                {"name": "grep", "pattern": "foo", "path": "src/"}
+            ]
+        });
+
+        let normalized = normalize_batch_input(input);
+        let parsed: BatchInput = serde_json::from_value(normalized).unwrap();
+        assert_eq!(parsed.tool_calls.len(), 2);
+        assert_eq!(parsed.tool_calls[0].tool, "read");
+        let params0 = parsed.tool_calls[0].parameters.as_ref().unwrap();
+        assert_eq!(params0["file_path"], "file1.txt");
+        assert_eq!(parsed.tool_calls[1].tool, "grep");
+        let params1 = parsed.tool_calls[1].parameters.as_ref().unwrap();
+        assert_eq!(params1["pattern"], "foo");
+    }
+
+    #[test]
+    fn test_normalize_mixed_tool_and_name_keys() {
+        let input = json!({
+            "tool_calls": [
+                {"tool": "read", "parameters": {"file_path": "a.rs"}},
+                {"name": "read", "parameters": {"file_path": "b.rs"}},
+                {"tool": "grep", "pattern": "test"}
+            ]
+        });
+
+        let normalized = normalize_batch_input(input);
+        let parsed: BatchInput = serde_json::from_value(normalized).unwrap();
+        assert_eq!(parsed.tool_calls.len(), 3);
+        assert_eq!(parsed.tool_calls[0].tool, "read");
+        assert_eq!(parsed.tool_calls[1].tool, "read");
+        assert_eq!(parsed.tool_calls[2].tool, "grep");
     }
 }

@@ -186,44 +186,72 @@ pub async fn login_claude() -> Result<OAuthTokens> {
     std::io::stdin().read_line(&mut input)?;
     let input = input.trim();
 
-    // Parse the code - OpenCode format is "code#state" where state=verifier
-    // The code might be pasted directly or as part of a URL
-    let raw_code = if input.contains("code=") {
-        let url = url::Url::parse(input)
-            .or_else(|_| url::Url::parse(&format!("https://example.com?{}", input)))?;
-        url.query_pairs()
+    eprintln!("Exchanging code for tokens...");
+
+    exchange_claude_code(&verifier, input, claude::REDIRECT_URI).await
+}
+
+/// Parse Claude auth input.
+///
+/// Accepted formats:
+/// - plain code (`abc123`)
+/// - URL/query with `code=`
+/// - `code#state` (OpenCode-style)
+fn parse_claude_code_input(input: &str) -> Result<(String, Option<String>)> {
+    let trimmed = input.trim();
+
+    let (raw_code, state_from_query) = if trimmed.contains("code=") {
+        let url = url::Url::parse(trimmed)
+            .or_else(|_| url::Url::parse(&format!("https://example.com?{}", trimmed)))?;
+        let code = url
+            .query_pairs()
             .find(|(k, _)| k == "code")
             .map(|(_, v)| v.to_string())
-            .ok_or_else(|| anyhow::anyhow!("No code found in URL"))?
+            .ok_or_else(|| anyhow::anyhow!("No code found in URL"))?;
+        let state = url
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.to_string());
+        (code, state)
     } else {
-        input.to_string()
+        (trimmed.to_string(), None)
     };
 
-    // Split code#state format
-    let (code, state_from_callback) = if raw_code.contains('#') {
+    if raw_code.contains('#') {
         let parts: Vec<&str> = raw_code.splitn(2, '#').collect();
-        (parts[0].to_string(), Some(parts[1].to_string()))
+        Ok((parts[0].to_string(), Some(parts[1].to_string())))
     } else {
-        (raw_code, None)
-    };
+        Ok((raw_code, state_from_query))
+    }
+}
+
+async fn exchange_claude_code_at_url(
+    token_url: &str,
+    verifier: &str,
+    input: &str,
+    redirect_uri: &str,
+) -> Result<OAuthTokens> {
+    let (code, state_from_callback) = parse_claude_code_input(input)?;
+    // Anthropic's token endpoint expects `state`; callback mode gives it via query,
+    // manual mode can omit it, so we fall back to the verifier value used in auth URL.
+    let state = state_from_callback
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(verifier)
+        .to_string();
 
     let client = reqwest::Client::new();
-    let mut params = vec![
+    let params = vec![
         ("grant_type", "authorization_code".to_string()),
         ("client_id", claude::CLIENT_ID.to_string()),
         ("code", code),
-        ("code_verifier", verifier),
-        ("redirect_uri", claude::REDIRECT_URI.to_string()),
+        ("code_verifier", verifier.to_string()),
+        ("redirect_uri", redirect_uri.to_string()),
+        ("state", state),
     ];
 
-    if let Some(state) = state_from_callback {
-        params.push(("state", state));
-    }
-
-    eprintln!("Exchanging code for tokens...");
-
     let resp = client
-        .post(claude::TOKEN_URL)
+        .post(token_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .form(&params)
         .send()
@@ -251,6 +279,17 @@ pub async fn login_claude() -> Result<OAuthTokens> {
         expires_at,
         id_token: tokens.id_token,
     })
+}
+
+/// Exchange a Claude authorization code for OAuth tokens.
+///
+/// `input` can be a plain code, a URL/query containing `code=`, or `code#state`.
+pub async fn exchange_claude_code(
+    verifier: &str,
+    input: &str,
+    redirect_uri: &str,
+) -> Result<OAuthTokens> {
+    exchange_claude_code_at_url(claude::TOKEN_URL, verifier, input, redirect_uri).await
 }
 
 /// Perform OAuth login for OpenAI/Codex
@@ -538,16 +577,15 @@ fn build_claude_exchange_request(
     redirect_uri: &str,
     state: Option<&str>,
 ) -> (String, String, Vec<u8>) {
-    let mut params = vec![
+    let effective_state = state.unwrap_or(verifier);
+    let params = vec![
         ("grant_type", "authorization_code".to_string()),
         ("client_id", claude::CLIENT_ID.to_string()),
         ("code", code.to_string()),
         ("code_verifier", verifier.to_string()),
         ("redirect_uri", redirect_uri.to_string()),
+        ("state", effective_state.to_string()),
     ];
-    if let Some(s) = state {
-        params.push(("state", s.to_string()));
-    }
     let body = url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(params.iter())
         .finish();
@@ -622,16 +660,15 @@ async fn exchange_code_at_url(
     redirect_uri: &str,
     state: Option<&str>,
 ) -> Result<OAuthTokens> {
-    let mut params = vec![
+    let effective_state = state.unwrap_or(verifier);
+    let params = vec![
         ("grant_type", "authorization_code".to_string()),
         ("client_id", claude::CLIENT_ID.to_string()),
         ("code", code.to_string()),
         ("code_verifier", verifier.to_string()),
         ("redirect_uri", redirect_uri.to_string()),
+        ("state", effective_state.to_string()),
     ];
-    if let Some(s) = state {
-        params.push(("state", s.to_string()));
-    }
 
     let client = reqwest::Client::new();
     let resp = client
@@ -1023,7 +1060,7 @@ mod tests {
             pairs.get("redirect_uri").unwrap(),
             "https://example.com/callback"
         );
-        assert!(!pairs.contains_key("state"));
+        assert_eq!(pairs.get("state").unwrap(), "verifier_abc");
     }
 
     #[test]
@@ -1216,54 +1253,31 @@ mod tests {
     #[test]
     fn parse_plain_auth_code() {
         let input = "abc123def456";
-        let raw_code = if input.contains("code=") {
-            unreachable!()
-        } else {
-            input.trim().to_string()
-        };
+        let (raw_code, state) = parse_claude_code_input(input).unwrap();
         assert_eq!(raw_code, "abc123def456");
+        assert!(state.is_none());
     }
 
     #[test]
     fn parse_code_from_url() {
         let input = "https://example.com/callback?code=mycode123&state=mystate";
-        let raw_code = if input.contains("code=") {
-            let url = url::Url::parse(input).unwrap();
-            url.query_pairs()
-                .find(|(k, _)| k == "code")
-                .map(|(_, v)| v.to_string())
-                .unwrap()
-        } else {
-            unreachable!()
-        };
+        let (raw_code, state) = parse_claude_code_input(input).unwrap();
         assert_eq!(raw_code, "mycode123");
+        assert_eq!(state, Some("mystate".to_string()));
     }
 
     #[test]
     fn parse_code_from_query_string() {
         let input = "code=mycode456&state=s";
-        let raw_code = if input.contains("code=") {
-            let url =
-                url::Url::parse(&format!("https://example.com?{}", input)).unwrap();
-            url.query_pairs()
-                .find(|(k, _)| k == "code")
-                .map(|(_, v)| v.to_string())
-                .unwrap()
-        } else {
-            unreachable!()
-        };
+        let (raw_code, state) = parse_claude_code_input(input).unwrap();
         assert_eq!(raw_code, "mycode456");
+        assert_eq!(state, Some("s".to_string()));
     }
 
     #[test]
     fn parse_code_hash_state_format() {
         let raw_code = "authcode789#statevalue";
-        let (code, state) = if raw_code.contains('#') {
-            let parts: Vec<&str> = raw_code.splitn(2, '#').collect();
-            (parts[0].to_string(), Some(parts[1].to_string()))
-        } else {
-            (raw_code.to_string(), None)
-        };
+        let (code, state) = parse_claude_code_input(raw_code).unwrap();
         assert_eq!(code, "authcode789");
         assert_eq!(state, Some("statevalue".to_string()));
     }
@@ -1271,13 +1285,25 @@ mod tests {
     #[test]
     fn parse_code_without_hash() {
         let raw_code = "authcode_no_hash";
-        let (code, state): (String, Option<String>) = if raw_code.contains('#') {
-            unreachable!()
-        } else {
-            (raw_code.to_string(), None)
-        };
+        let (code, state) = parse_claude_code_input(raw_code).unwrap();
         assert_eq!(code, "authcode_no_hash");
         assert!(state.is_none());
+    }
+
+    #[test]
+    fn parse_code_trims_input_whitespace() {
+        let input = "   authcode_trim   ";
+        let (code, state) = parse_claude_code_input(input).unwrap();
+        assert_eq!(code, "authcode_trim");
+        assert!(state.is_none());
+    }
+
+    #[test]
+    fn parse_code_url_with_whitespace_extracts_state() {
+        let input = "   https://example.com/callback?code=mycode&state=mystate   ";
+        let (code, state) = parse_claude_code_input(input).unwrap();
+        assert_eq!(code, "mycode");
+        assert_eq!(state, Some("mystate".to_string()));
     }
 
     // ========================
@@ -1321,6 +1347,7 @@ mod tests {
         assert_eq!(pairs.get("grant_type").unwrap(), "authorization_code");
         assert_eq!(pairs.get("code").unwrap(), "code123");
         assert_eq!(pairs.get("code_verifier").unwrap(), "verifier456");
+        assert_eq!(pairs.get("state").unwrap(), "verifier456");
     }
 
     #[tokio::test]
@@ -1344,6 +1371,82 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect();
         assert_eq!(pairs.get("state").unwrap(), "my_state");
+    }
+
+    #[tokio::test]
+    async fn claude_exchange_uses_state_from_url_query_when_present() {
+        let success_body = serde_json::json!({
+            "access_token": "at",
+            "refresh_token": "rt",
+            "expires_in": 3600
+        })
+        .to_string();
+        let (port, handle) = mock_token_server(200, &success_body).await;
+
+        let url = format!("http://127.0.0.1:{}/v1/oauth/token", port);
+        let _ = exchange_claude_code_at_url(
+            &url,
+            "verifier_fallback",
+            "https://example.com/callback?code=test_code&state=query_state",
+            "https://r",
+        )
+        .await
+        .unwrap();
+
+        let (_method, _path, _headers, body) = handle.await.unwrap();
+        let pairs: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(body.as_bytes())
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+        assert_eq!(pairs.get("state").unwrap(), "query_state");
+        assert_eq!(pairs.get("code").unwrap(), "test_code");
+    }
+
+    #[tokio::test]
+    async fn claude_exchange_falls_back_to_verifier_when_input_has_no_state() {
+        let success_body = serde_json::json!({
+            "access_token": "at",
+            "refresh_token": "rt",
+            "expires_in": 3600
+        })
+        .to_string();
+        let (port, handle) = mock_token_server(200, &success_body).await;
+
+        let url = format!("http://127.0.0.1:{}/v1/oauth/token", port);
+        let _ = exchange_claude_code_at_url(&url, "verifier_only", "plain_code", "https://r")
+            .await
+            .unwrap();
+
+        let (_method, _path, _headers, body) = handle.await.unwrap();
+        let pairs: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(body.as_bytes())
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+        assert_eq!(pairs.get("state").unwrap(), "verifier_only");
+        assert_eq!(pairs.get("code").unwrap(), "plain_code");
+    }
+
+    #[tokio::test]
+    async fn claude_exchange_uses_verifier_when_input_state_is_empty() {
+        let success_body = serde_json::json!({
+            "access_token": "at",
+            "refresh_token": "rt",
+            "expires_in": 3600
+        })
+        .to_string();
+        let (port, handle) = mock_token_server(200, &success_body).await;
+
+        let url = format!("http://127.0.0.1:{}/v1/oauth/token", port);
+        let _ = exchange_claude_code_at_url(&url, "verifier_only", "plain_code#", "https://r")
+            .await
+            .unwrap();
+
+        let (_method, _path, _headers, body) = handle.await.unwrap();
+        let pairs: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(body.as_bytes())
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+        assert_eq!(pairs.get("state").unwrap(), "verifier_only");
     }
 
     #[tokio::test]
