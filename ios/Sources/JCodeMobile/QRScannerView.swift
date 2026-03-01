@@ -102,9 +102,17 @@ struct QRCameraView: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: QRScannerController, context: Context) {}
 }
 
-final class QRScannerController: UIViewController, @preconcurrency AVCaptureMetadataOutputObjectsDelegate {
+private final class CaptureSessionWrapper: @unchecked Sendable {
+    let session = AVCaptureSession()
+
+    func start() { session.startRunning() }
+    func stop() { session.stopRunning() }
+}
+
+final class QRScannerController: UIViewController {
     var onCodeScanned: ((String) -> Void)?
-    nonisolated(unsafe) let captureSession = AVCaptureSession()
+    private let wrapper = CaptureSessionWrapper()
+    private let delegateHandler = MetadataDelegate()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -114,49 +122,61 @@ final class QRScannerController: UIViewController, @preconcurrency AVCaptureMeta
             return
         }
 
-        captureSession.addInput(input)
+        let session = wrapper.session
+        session.addInput(input)
 
         let output = AVCaptureMetadataOutput()
-        captureSession.addOutput(output)
-        output.setMetadataObjectsDelegate(self, queue: .main)
+        session.addOutput(output)
+
+        delegateHandler.onDetected = { [weak self] value in
+            self?.handleDetection(value)
+        }
+        output.setMetadataObjectsDelegate(delegateHandler, queue: .main)
         output.metadataObjectTypes = [.qr]
 
-        let previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
+        let previewLayer = AVCaptureVideoPreviewLayer(session: session)
         previewLayer.frame = view.layer.bounds
         previewLayer.videoGravity = .resizeAspectFill
         view.layer.addSublayer(previewLayer)
 
-        Task.detached { [captureSession] in
-            captureSession.startRunning()
+        Task.detached { [wrapper] in
+            wrapper.start()
         }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        Task.detached { [captureSession] in
-            captureSession.stopRunning()
+        Task.detached { [wrapper] in
+            wrapper.stop()
         }
     }
 
-    nonisolated func metadataOutput(
+    private func handleDetection(_ value: String) {
+        Task.detached { [wrapper] in
+            wrapper.stop()
+        }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        onCodeScanned?(value)
+    }
+}
+
+private final class MetadataDelegate: NSObject, AVCaptureMetadataOutputObjectsDelegate {
+    var onDetected: ((String) -> Void)?
+    private var fired = false
+
+    func metadataOutput(
         _ output: AVCaptureMetadataOutput,
         didOutput metadataObjects: [AVMetadataObject],
         from connection: AVCaptureConnection
     ) {
-        guard let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
+        guard !fired,
+              let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
               let value = object.stringValue,
               value.hasPrefix("jcode://") else {
             return
         }
-
-        Task.detached { [captureSession] in
-            captureSession.stopRunning()
-        }
-
-        Task { @MainActor [weak self] in
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            self?.onCodeScanned?(value)
-        }
+        fired = true
+        onDetected?(value)
     }
 }
 #endif
