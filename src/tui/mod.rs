@@ -115,6 +115,8 @@ pub trait TuiState {
     fn rate_limit_remaining(&self) -> Option<Duration>;
     /// Whether queue mode is enabled (true = wait, false = immediate)
     fn queue_mode(&self) -> bool;
+    /// Whether there is a stashed input (saved via Ctrl+S)
+    fn has_stashed_input(&self) -> bool;
     /// Context info (what's loaded in context window - static + dynamic)
     fn context_info(&self) -> crate::prompt::ContextInfo;
     /// Context window limit in tokens (if known)

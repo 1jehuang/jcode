@@ -291,6 +291,10 @@ impl TuiState for BenchState {
         self.queue_mode
     }
 
+    fn has_stashed_input(&self) -> bool {
+        false
+    }
+
     fn context_info(&self) -> ContextInfo {
         self.context_info.clone()
     }

@@ -704,6 +704,8 @@ pub struct App {
     centered_toggle_keys: CenteredToggleKeys,
     // Scroll bookmark: stashed scroll position for quick teleport back
     scroll_bookmark: Option<usize>,
+    // Stashed input: saved via Ctrl+S for later retrieval
+    stashed_input: Option<(String, usize)>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
     status_notice: Option<(String, Instant)>,
     // Message to interleave during processing (set via Shift+Enter)
@@ -1008,6 +1010,7 @@ impl App {
             centered_toggle_keys: super::keybind::load_centered_toggle_key(),
             scroll_keys: super::keybind::load_scroll_keys(),
             scroll_bookmark: None,
+            stashed_input: None,
             status_notice: None,
             interleave_message: None,
             pending_soft_interrupts: Vec::new(),
@@ -5841,6 +5844,10 @@ impl App {
                     self.cursor_pos = start;
                     return Ok(());
                 }
+                KeyCode::Char('s') => {
+                    self.toggle_input_stash();
+                    return Ok(());
+                }
                 KeyCode::Char('v') => {
                     // Ctrl+V: paste from clipboard (try image first, then text)
                     self.paste_image_from_clipboard();
@@ -6619,6 +6626,10 @@ impl App {
                     self.input.drain(start..self.cursor_pos);
                     self.cursor_pos = start;
                     self.sync_model_picker_preview_from_input();
+                    return Ok(());
+                }
+                KeyCode::Char('s') => {
+                    self.toggle_input_stash();
                     return Ok(());
                 }
                 KeyCode::Char('v') => {
@@ -13852,6 +13863,24 @@ impl App {
         self.auto_scroll_paused = true;
     }
 
+    fn toggle_input_stash(&mut self) {
+        if let Some((stashed, stashed_cursor)) = self.stashed_input.take() {
+            let current_input = std::mem::replace(&mut self.input, stashed);
+            let current_cursor = std::mem::replace(&mut self.cursor_pos, stashed_cursor);
+            if current_input.is_empty() {
+                self.set_status_notice("📋 Input restored from stash");
+            } else {
+                self.stashed_input = Some((current_input, current_cursor));
+                self.set_status_notice("📋 Swapped input with stash");
+            }
+        } else if !self.input.is_empty() {
+            let input = std::mem::take(&mut self.input);
+            let cursor = std::mem::replace(&mut self.cursor_pos, 0);
+            self.stashed_input = Some((input, cursor));
+            self.set_status_notice("📋 Input stashed");
+        }
+    }
+
     /// Toggle scroll bookmark: stash current position and jump to bottom,
     /// or restore stashed position if already at bottom.
     fn toggle_scroll_bookmark(&mut self) {
@@ -14311,6 +14340,10 @@ impl super::TuiState for App {
 
     fn queue_mode(&self) -> bool {
         self.queue_mode
+    }
+
+    fn has_stashed_input(&self) -> bool {
+        self.stashed_input.is_some()
     }
 
     fn context_info(&self) -> crate::prompt::ContextInfo {

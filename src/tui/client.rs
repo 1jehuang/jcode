@@ -1426,6 +1426,10 @@ impl TuiState for ClientApp {
         true // Deprecated client doesn't support immediate mode
     }
 
+    fn has_stashed_input(&self) -> bool {
+        false // Deprecated client doesn't support input stash
+    }
+
     fn context_info(&self) -> crate::prompt::ContextInfo {
         self.context_info.clone()
     }
