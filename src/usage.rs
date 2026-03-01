@@ -5,7 +5,6 @@
 
 use crate::auth;
 use anyhow::{Context, Result};
-use reqwest::Client;
 use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -148,9 +147,24 @@ impl OpenAIUsageData {
     }
 }
 
+/// Cached results from fetch_all_provider_usage
+static PROVIDER_USAGE_CACHE: std::sync::Mutex<Option<(Instant, Vec<ProviderUsage>)>> =
+    std::sync::Mutex::new(None);
+
+/// Cache TTL for /usage results
+const PROVIDER_USAGE_CACHE_TTL: Duration = Duration::from_secs(30);
+
 /// Fetch usage from all connected providers with OAuth credentials.
-/// Returns a list of ProviderUsage, one per provider that has credentials.
+/// Returns cached results if fresh (< 30s old), otherwise fetches fresh data.
 pub async fn fetch_all_provider_usage() -> Vec<ProviderUsage> {
+    if let Ok(guard) = PROVIDER_USAGE_CACHE.lock() {
+        if let Some((fetched_at, ref cached)) = *guard {
+            if fetched_at.elapsed() < PROVIDER_USAGE_CACHE_TTL {
+                return cached.clone();
+            }
+        }
+    }
+
     let mut results = Vec::new();
 
     let (anthropic_results, openai, openrouter, copilot) = tokio::join!(
@@ -169,6 +183,10 @@ pub async fn fetch_all_provider_usage() -> Vec<ProviderUsage> {
     }
     if let Some(r) = copilot {
         results.push(r);
+    }
+
+    if let Ok(mut guard) = PROVIDER_USAGE_CACHE.lock() {
+        *guard = Some((Instant::now(), results.clone()));
     }
 
     results
@@ -439,7 +457,7 @@ async fn fetch_anthropic_usage_for_token(
         access_token
     };
 
-    let client = Client::new();
+    let client = crate::provider::shared_http_client();
     let response = client
         .get(USAGE_URL)
         .header("Accept", "application/json")
@@ -559,7 +577,7 @@ async fn fetch_openai_usage_report() -> Option<ProviderUsage> {
         creds.access_token.clone()
     };
 
-    let client = Client::new();
+    let client = crate::provider::shared_http_client();
     let mut builder = client
         .get(OPENAI_USAGE_URL)
         .header("Accept", "application/json")
@@ -754,7 +772,7 @@ async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
         })
         .filter(|k| !k.is_empty())?;
 
-    let client = Client::new();
+    let client = crate::provider::shared_http_client();
 
     let (key_resp, credits_resp) = tokio::join!(
         client
@@ -864,7 +882,7 @@ async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
 async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
     let github_token = auth::copilot::load_github_token().ok()?;
 
-    let client = Client::new();
+    let client = crate::provider::shared_http_client();
     let resp = client
         .get(auth::copilot::COPILOT_TOKEN_URL)
         .header("Authorization", format!("token {}", github_token))
@@ -917,24 +935,42 @@ async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
         extra_info.push(("Plan".to_string(), sku.to_string()));
     }
 
+    let reset_date = json
+        .get("limited_user_reset_date")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     if let Some(quotas) = json.get("limited_user_quotas").and_then(|v| v.as_object()) {
         for (name, value) in quotas {
             if let Some(obj) = value.as_object() {
                 let used = obj.get("used").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let limit = obj.get("limit").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let used_i = used as u64;
+                let limit_i = limit as u64;
                 if limit > 0.0 {
                     let pct = (used / limit * 100.0) as f32;
                     limits.push(UsageLimit {
                         name: humanize_key(name),
                         usage_percent: pct,
-                        resets_at: json
-                            .get("limited_user_reset_date")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string()),
+                        resets_at: reset_date.clone(),
                     });
+                    extra_info.push((
+                        humanize_key(name),
+                        format!("{} / {} requests", used_i, limit_i),
+                    ));
+                } else {
+                    extra_info.push((
+                        humanize_key(name),
+                        format!("{} requests used (unlimited)", used_i),
+                    ));
                 }
             }
         }
+    }
+
+    if let Some(ref rd) = reset_date {
+        let relative = crate::usage::format_reset_time(rd);
+        extra_info.push(("Resets in".to_string(), relative));
     }
 
     let chat_enabled = json
@@ -1055,7 +1091,7 @@ async fn fetch_usage() -> Result<UsageData> {
         creds.access_token
     };
 
-    let client = Client::new();
+    let client = crate::provider::shared_http_client();
     let response = client
         .get(USAGE_URL)
         .header("Accept", "application/json")
