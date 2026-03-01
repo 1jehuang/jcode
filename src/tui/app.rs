@@ -496,6 +496,8 @@ enum PendingLogin {
     OpenRouter,
     /// GitHub Copilot device flow in progress (polling in background)
     Copilot,
+    /// Interactive provider selection (user picks a number)
+    ProviderSelection,
 }
 
 /// TUI Application state
@@ -6998,7 +7000,7 @@ impl App {
                 "`/config`\nShow active configuration.\n\n`/config init`\nCreate default config file.\n\n`/config edit`\nOpen config in `$EDITOR`."
             }
             "auth" | "login" => {
-                "`/auth` / `/login`\nShow authentication status for all providers.\n\n`/login <provider>`\nStart login flow for a provider (anthropic/claude, openai, openrouter, cursor, copilot, antigravity)."
+                "`/auth`\nShow authentication status for all providers.\n\n`/login`\nInteractive provider selection - pick a provider to log into.\n\n`/login <provider>`\nStart login flow directly (anthropic/claude, openai, openrouter, cursor, copilot, antigravity)."
             }
             "account" | "accounts" => {
                 "`/account`\nList all Anthropic OAuth accounts.\n\n`/account add <label>`\nAdd a new account via OAuth login.\n\n`/account switch <label>`\nSwitch the active account.\n\n`/account remove <label>`\nRemove an account."
@@ -7095,7 +7097,7 @@ impl App {
                      • `/rewind` - Show history with numbers, `/rewind N` to rewind\n\
                      • `/compact` - Manually compact context (summarize old messages)\n\
                      • `/fix` - Attempt session recovery (context/tool/session issues)\n\
-                     • `/auth` / `/login` - Show auth status, `/login <provider>` to authenticate (anthropic/openai/openrouter/cursor/copilot/antigravity)\n\
+                     • `/auth` - Show auth status, `/login` for interactive login, `/login <provider>` for direct login\n\
                      • `/account` - Manage Anthropic accounts (list/add/switch/remove)\n\
                      • `/debug-visual` - Enable visual debugging for TUI issues\n\
                      • `/<skill>` - Activate a skill\n\n\
@@ -7939,8 +7941,13 @@ impl App {
             return;
         }
 
-        if trimmed == "/auth" || trimmed == "/login" {
+        if trimmed == "/auth" {
             self.show_auth_status();
+            return;
+        }
+
+        if trimmed == "/login" {
+            self.show_interactive_login();
             return;
         }
 
@@ -9199,6 +9206,35 @@ impl App {
         )));
     }
 
+    fn show_interactive_login(&mut self) {
+        let status = crate::auth::AuthStatus::check();
+        let icon = |state: crate::auth::AuthState| match state {
+            crate::auth::AuthState::Available => "✓",
+            crate::auth::AuthState::Expired => "⚠",
+            crate::auth::AuthState::NotConfigured => "✗",
+        };
+
+        self.push_display_message(DisplayMessage::system(format!(
+            "**Login** - select a provider:\n\n\
+             | # | Provider | Status |\n\
+             |---|----------|--------|\n\
+             | 1 | Anthropic/Claude | {} |\n\
+             | 2 | OpenAI | {} |\n\
+             | 3 | OpenRouter | {} |\n\
+             | 4 | Cursor | {} |\n\
+             | 5 | Copilot | {} |\n\
+             | 6 | Antigravity | {} |\n\n\
+             Type a number (1-6) or provider name, or `/cancel` to cancel.",
+            icon(status.anthropic.state),
+            icon(status.openai),
+            icon(status.openrouter),
+            icon(status.cursor),
+            icon(status.copilot),
+            icon(status.antigravity),
+        )));
+        self.pending_login = Some(PendingLogin::ProviderSelection);
+    }
+
     fn start_claude_login(&mut self) {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
         use sha2::{Digest, Sha256};
@@ -9686,28 +9722,28 @@ impl App {
             let user_code = device_resp.user_code.clone();
             let verification_uri = device_resp.verification_uri.clone();
 
-            let clipboard_result =
-                arboard::Clipboard::new().and_then(|mut cb| cb.set_text(user_code.clone()));
-            let clipboard_msg = if clipboard_result.is_ok() {
-                " (copied to clipboard)"
+            let clipboard_ok = copy_to_clipboard(&user_code);
+            let clipboard_msg = if clipboard_ok {
+                " (copied to clipboard - just paste it!)"
             } else {
                 ""
             };
-
-            let _ = open::that(&verification_uri);
 
             Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
                 provider: "copilot_code".to_string(),
                 success: true,
                 message: format!(
                     "**GitHub Copilot Login**\n\n\
-                     Opening browser for GitHub authorization...\n\n\
-                     If the browser didn't open, visit:\n  {}\n\n\
-                     Enter code: **{}**{}\n\n\
+                     Your code: **{}**{}\n\n\
+                     Opening browser to {} ...\n\
+                     Paste the code there and authorize.\n\n\
                      Waiting for authorization... (type `/cancel` to abort)",
-                    verification_uri, user_code, clipboard_msg
+                    user_code, clipboard_msg, verification_uri
                 ),
             }));
+
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let _ = open::that_detached(&verification_uri);
 
             let token = match crate::auth::copilot::poll_for_access_token(
                 &client,
@@ -9953,6 +9989,24 @@ impl App {
                         .to_string(),
                 ));
                 self.pending_login = Some(PendingLogin::Copilot);
+            }
+            PendingLogin::ProviderSelection => {
+                let choice = input.trim().to_lowercase();
+                match choice.as_str() {
+                    "1" | "claude" | "anthropic" => self.start_claude_login(),
+                    "2" | "openai" => self.start_openai_login(),
+                    "3" | "openrouter" => self.start_openrouter_login(),
+                    "4" | "cursor" => self.start_cursor_login(),
+                    "5" | "copilot" => self.start_copilot_login(),
+                    "6" | "antigravity" => self.start_antigravity_login(),
+                    _ => {
+                        self.push_display_message(DisplayMessage::error(format!(
+                            "Unknown selection '{}'. Type 1-6 or a provider name.",
+                            input.trim()
+                        )));
+                        self.pending_login = Some(PendingLogin::ProviderSelection);
+                    }
+                }
             }
         }
     }
@@ -14741,6 +14795,27 @@ impl super::TuiState for App {
     fn suggestion_prompts(&self) -> Vec<(String, String)> {
         App::suggestion_prompts(self)
     }
+}
+
+/// Copy text to clipboard, trying wl-copy first (Wayland), then arboard as fallback.
+fn copy_to_clipboard(text: &str) -> bool {
+    if let Ok(mut child) = std::process::Command::new("wl-copy")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        use std::io::Write;
+        if let Some(stdin) = child.stdin.as_mut() {
+            if stdin.write_all(text.as_bytes()).is_ok() {
+                drop(child.stdin.take());
+                return child.wait().map(|s| s.success()).unwrap_or(false);
+            }
+        }
+    }
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.set_text(text.to_string()))
+        .is_ok()
 }
 
 fn effort_display_label(effort: &str) -> &str {
