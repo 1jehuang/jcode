@@ -2621,6 +2621,24 @@ async fn handle_client(
                 }
             }
 
+            Request::SetPremiumMode { id, mode } => {
+                use crate::provider::copilot::PremiumMode;
+                let pm = match mode {
+                    2 => PremiumMode::Zero,
+                    1 => PremiumMode::OnePerSession,
+                    _ => PremiumMode::Normal,
+                };
+                let agent_guard = agent.lock().await;
+                agent_guard.set_premium_mode(pm);
+                let label = match pm {
+                    PremiumMode::Zero => "zero premium requests",
+                    PremiumMode::OnePerSession => "one premium per session",
+                    PremiumMode::Normal => "normal",
+                };
+                crate::logging::info(&format!("Server: premium mode set to {} ({})", mode, label));
+                let _ = client_event_tx.send(ServerEvent::Ack { id });
+            }
+
             Request::SetModel { id, model } => {
                 let models = {
                     let agent_guard = agent.lock().await;
@@ -2720,7 +2738,7 @@ async fn handle_client(
                     agent_guard.set_memory_enabled(enabled);
                     drop(agent_guard);
                     if !enabled {
-                        crate::memory::clear_pending_memory();
+                        crate::memory::clear_pending_memory(&client_session_id);
                     }
                     let _ = client_event_tx.send(ServerEvent::Done { id });
                 }

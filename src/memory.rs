@@ -82,21 +82,29 @@ fn cache_graph(path: PathBuf, graph: &MemoryGraph) {
     }
 }
 
-// === Async Memory Buffer ===
+// === Per-Session Async Memory Buffer ===
+//
+// All memory injection state is keyed by session ID to prevent cross-session
+// contamination. Previously these were process-global singletons, which meant
+// Session B could consume a pending memory that was computed for Session A.
 
-/// Pending memory prompt from background check - ready to inject on next turn
-static PENDING_MEMORY: Mutex<Option<PendingMemory>> = Mutex::new(None);
+/// Pending memory prompt from background check - ready to inject on next turn.
+/// Keyed by session ID so each session gets its own pending memory.
+static PENDING_MEMORY: Mutex<Option<HashMap<String, PendingMemory>>> = Mutex::new(None);
 
 /// Signature of the last injected prompt to suppress near-immediate duplicates.
-static LAST_INJECTED_PROMPT_SIGNATURE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+/// Keyed by session ID.
+static LAST_INJECTED_PROMPT_SIGNATURE: Mutex<Option<HashMap<String, (String, Instant)>>> =
+    Mutex::new(None);
 
 /// Memory IDs that have already been injected into the conversation.
 /// Used to prevent the same memory from being re-injected on subsequent turns.
-static INJECTED_MEMORY_IDS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+/// Keyed by session ID.
+static INJECTED_MEMORY_IDS: Mutex<Option<HashMap<String, HashSet<String>>>> = Mutex::new(None);
 
-/// Guard to ensure only one memory check runs at a time
-static MEMORY_CHECK_IN_PROGRESS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// Guard to ensure only one memory check runs at a time, per session.
+/// Keyed by session ID.
+static MEMORY_CHECK_IN_PROGRESS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 /// Suppress repeated identical memory payloads within this many seconds.
 const MEMORY_REPEAT_SUPPRESSION_SECS: u64 = 90;
@@ -132,29 +140,30 @@ fn prompt_signature(prompt: &str) -> String {
         .to_lowercase()
 }
 
-/// Take pending memory if available and fresh
-pub fn take_pending_memory() -> Option<PendingMemory> {
+/// Take pending memory if available and fresh for the given session.
+pub fn take_pending_memory(session_id: &str) -> Option<PendingMemory> {
     if let Ok(mut guard) = PENDING_MEMORY.lock() {
-        if let Some(pending) = guard.take() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        if let Some(pending) = map.remove(session_id) {
             if !pending.is_fresh() {
                 return None;
             }
 
             let sig = prompt_signature(&pending.prompt);
             if let Ok(mut last_guard) = LAST_INJECTED_PROMPT_SIGNATURE.lock() {
-                if let Some((last_sig, last_at)) = last_guard.as_ref() {
+                let sig_map = last_guard.get_or_insert_with(HashMap::new);
+                if let Some((last_sig, last_at)) = sig_map.get(session_id) {
                     if *last_sig == sig
                         && last_at.elapsed().as_secs() < MEMORY_REPEAT_SUPPRESSION_SECS
                     {
                         return None;
                     }
                 }
-                *last_guard = Some((sig, Instant::now()));
+                sig_map.insert(session_id.to_string(), (sig, Instant::now()));
             }
 
-            // Track injected memory IDs to prevent re-injection on future turns
             if !pending.memory_ids.is_empty() {
-                mark_memories_injected(&pending.memory_ids);
+                mark_memories_injected(session_id, &pending.memory_ids);
             }
 
             return Some(pending);
@@ -163,77 +172,149 @@ pub fn take_pending_memory() -> Option<PendingMemory> {
     None
 }
 
-/// Store a pending memory result
-pub fn set_pending_memory(prompt: String, count: usize) {
-    set_pending_memory_with_ids(prompt, count, Vec::new());
+/// Store a pending memory result for the given session.
+pub fn set_pending_memory(session_id: &str, prompt: String, count: usize) {
+    set_pending_memory_with_ids(session_id, prompt, count, Vec::new());
 }
 
-/// Store a pending memory result with associated memory IDs for dedup tracking
-pub fn set_pending_memory_with_ids(prompt: String, count: usize, memory_ids: Vec<String>) {
+/// Store a pending memory result with associated memory IDs for dedup tracking.
+pub fn set_pending_memory_with_ids(
+    session_id: &str,
+    prompt: String,
+    count: usize,
+    memory_ids: Vec<String>,
+) {
     if let Ok(mut guard) = PENDING_MEMORY.lock() {
-        *guard = Some(PendingMemory {
-            prompt,
-            computed_at: Instant::now(),
-            count,
-            memory_ids,
-        });
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.insert(
+            session_id.to_string(),
+            PendingMemory {
+                prompt,
+                computed_at: Instant::now(),
+                count,
+                memory_ids,
+            },
+        );
     }
 }
 
-/// Mark memory IDs as already injected (prevents re-injection on future turns)
-pub fn mark_memories_injected(ids: &[String]) {
+/// Mark memory IDs as already injected for a session (prevents re-injection on future turns)
+pub fn mark_memories_injected(session_id: &str, ids: &[String]) {
     if let Ok(mut guard) = INJECTED_MEMORY_IDS.lock() {
-        let set = guard.get_or_insert_with(HashSet::new);
+        let outer = guard.get_or_insert_with(HashMap::new);
+        let set = outer
+            .entry(session_id.to_string())
+            .or_insert_with(HashSet::new);
         for id in ids {
             set.insert(id.clone());
         }
         crate::logging::info(&format!(
-            "Marked {} memory IDs as injected (total tracked: {})",
+            "[{}] Marked {} memory IDs as injected (total tracked: {})",
+            session_id,
             ids.len(),
             set.len()
         ));
     }
 }
 
-/// Check if a memory ID has already been injected
-pub fn is_memory_injected(id: &str) -> bool {
+/// Check if a memory ID has already been injected for a session
+pub fn is_memory_injected(session_id: &str, id: &str) -> bool {
     if let Ok(guard) = INJECTED_MEMORY_IDS.lock() {
-        if let Some(set) = guard.as_ref() {
-            return set.contains(id);
+        if let Some(outer) = guard.as_ref() {
+            if let Some(set) = outer.get(session_id) {
+                return set.contains(id);
+            }
         }
     }
     false
 }
 
-/// Clear injected memory tracking (call on session reset or topic change)
-pub fn clear_injected_memories() {
+/// Check if a memory ID has already been injected in ANY session.
+/// Used by the singleton memory agent which doesn't track per-session state.
+pub fn is_memory_injected_any(id: &str) -> bool {
+    if let Ok(guard) = INJECTED_MEMORY_IDS.lock() {
+        if let Some(outer) = guard.as_ref() {
+            return outer.values().any(|set| set.contains(id));
+        }
+    }
+    false
+}
+
+/// Clear injected memory tracking for a session (call on session reset or topic change)
+pub fn clear_injected_memories(session_id: &str) {
     if let Ok(mut guard) = INJECTED_MEMORY_IDS.lock() {
-        if let Some(set) = guard.as_ref() {
-            if !set.is_empty() {
-                crate::logging::info(&format!("Clearing {} tracked injected memory IDs", set.len()));
+        if let Some(outer) = guard.as_mut() {
+            if let Some(set) = outer.remove(session_id) {
+                if !set.is_empty() {
+                    crate::logging::info(&format!(
+                        "[{}] Clearing {} tracked injected memory IDs",
+                        session_id,
+                        set.len()
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Clear all injected memory tracking across all sessions
+pub fn clear_all_injected_memories() {
+    if let Ok(mut guard) = INJECTED_MEMORY_IDS.lock() {
+        if let Some(outer) = guard.as_ref() {
+            let total: usize = outer.values().map(|s| s.len()).sum();
+            if total > 0 {
+                crate::logging::info(&format!(
+                    "Clearing {} tracked injected memory IDs across {} sessions",
+                    total,
+                    outer.len()
+                ));
             }
         }
         *guard = None;
     }
 }
 
-/// Clear any pending memory result that has not been consumed yet.
-pub fn clear_pending_memory() {
+/// Clear any pending memory result for a session.
+pub fn clear_pending_memory(session_id: &str) {
+    if let Ok(mut guard) = PENDING_MEMORY.lock() {
+        if let Some(map) = guard.as_mut() {
+            map.remove(session_id);
+        }
+    }
+    if let Ok(mut guard) = LAST_INJECTED_PROMPT_SIGNATURE.lock() {
+        if let Some(map) = guard.as_mut() {
+            map.remove(session_id);
+        }
+    }
+    clear_injected_memories(session_id);
+}
+
+/// Clear all pending memory state across all sessions.
+pub fn clear_all_pending_memory() {
     if let Ok(mut guard) = PENDING_MEMORY.lock() {
         *guard = None;
     }
     if let Ok(mut guard) = LAST_INJECTED_PROMPT_SIGNATURE.lock() {
         *guard = None;
     }
-    clear_injected_memories();
+    clear_all_injected_memories();
 }
 
-/// Check if there's a pending memory check in progress or result waiting
-pub fn has_pending_memory() -> bool {
+/// Check if there's a pending memory for a specific session
+pub fn has_pending_memory(session_id: &str) -> bool {
     PENDING_MEMORY
         .lock()
         .ok()
-        .map(|g| g.is_some())
+        .and_then(|g| g.as_ref().map(|m| m.contains_key(session_id)))
+        .unwrap_or(false)
+}
+
+/// Check if there's any pending memory across all sessions
+pub fn has_any_pending_memory() -> bool {
+    PENDING_MEMORY
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|m| !m.is_empty()))
         .unwrap_or(false)
 }
 
@@ -1525,17 +1606,28 @@ impl MemoryManager {
 
     // === Async Memory Checking ===
 
-    /// Spawn a background task to check memory relevance
-    /// Results are stored in PENDING_MEMORY and can be retrieved with take_pending_memory()
-    /// This method returns immediately and never blocks the caller
-    /// Only ONE memory check runs at a time - additional calls are ignored
-    pub fn spawn_relevance_check(&self, messages: Vec<crate::message::Message>) {
-        use std::sync::atomic::Ordering;
+    /// Spawn a background task to check memory relevance for a specific session.
+    /// Results are stored in PENDING_MEMORY keyed by session_id and can be retrieved
+    /// with take_pending_memory(session_id).
+    /// This method returns immediately and never blocks the caller.
+    /// Only ONE memory check runs at a time per session - additional calls are ignored.
+    pub fn spawn_relevance_check(
+        &self,
+        session_id: &str,
+        messages: Vec<crate::message::Message>,
+    ) {
+        let sid = session_id.to_string();
 
-        // Only spawn if no check is currently in progress
-        if MEMORY_CHECK_IN_PROGRESS.swap(true, Ordering::SeqCst) {
-            // Another check is already running - skip this one
-            return;
+        // Only spawn if no check is currently in progress for this session
+        {
+            if let Ok(mut guard) = MEMORY_CHECK_IN_PROGRESS.lock() {
+                let set = guard.get_or_insert_with(HashSet::new);
+                if !set.insert(sid.clone()) {
+                    return;
+                }
+            } else {
+                return;
+            }
         }
 
         let project_dir = self.project_dir.clone();
@@ -1543,7 +1635,7 @@ impl MemoryManager {
         tokio::spawn(async move {
             let manager = MemoryManager {
                 project_dir: project_dir.or_else(|| std::env::current_dir().ok()),
-                test_mode: false, // Prefetch uses real storage
+                test_mode: false,
             };
 
             match manager.get_relevant_parallel(&messages).await {
@@ -1563,15 +1655,13 @@ impl MemoryManager {
                         })
                         .count()
                         .max(1);
-                    set_pending_memory_with_ids(prompt, count, memory_ids);
+                    set_pending_memory_with_ids(&sid, prompt, count, memory_ids);
                     add_event(MemoryEventKind::SidecarComplete { latency_ms: 0 });
                 }
                 Ok((None, _)) => {
-                    // No relevant memories - that's fine
                     set_state(MemoryState::Idle);
                 }
                 Err(e) => {
-                    // Log but don't crash - memory is non-critical
                     crate::logging::error(&format!("Background memory check failed: {}", e));
                     add_event(MemoryEventKind::Error {
                         message: e.to_string(),
@@ -1580,8 +1670,12 @@ impl MemoryManager {
                 }
             }
 
-            // Release the guard when done
-            MEMORY_CHECK_IN_PROGRESS.store(false, Ordering::SeqCst);
+            // Release the per-session guard when done
+            if let Ok(mut guard) = MEMORY_CHECK_IN_PROGRESS.lock() {
+                if let Some(set) = guard.as_mut() {
+                    set.remove(&sid);
+                }
+            }
         });
     }
 
@@ -1672,7 +1766,7 @@ impl MemoryManager {
         let pre_filter_count = candidates.len();
         let candidates: Vec<_> = candidates
             .into_iter()
-            .filter(|(entry, _)| !is_memory_injected(&entry.id))
+            .filter(|(entry, _)| !is_memory_injected_any(&entry.id))
             .collect();
         if candidates.len() < pre_filter_count {
             crate::logging::info(&format!(
@@ -2155,25 +2249,30 @@ mod tests {
         let _guard = PENDING_MEMORY_TEST_LOCK
             .lock()
             .expect("pending memory test lock poisoned");
-        clear_pending_memory();
+        clear_all_pending_memory();
 
-        set_pending_memory("hello".to_string(), 2);
-        assert!(has_pending_memory());
-        let pending = take_pending_memory().expect("pending memory");
+        let sid = "test-session-1";
+        set_pending_memory(sid, "hello".to_string(), 2);
+        assert!(has_pending_memory(sid));
+        let pending = take_pending_memory(sid).expect("pending memory");
         assert_eq!(pending.prompt, "hello");
         assert_eq!(pending.count, 2);
-        assert!(!has_pending_memory());
+        assert!(!has_pending_memory(sid));
 
         {
             let mut guard = PENDING_MEMORY.lock().expect("pending memory lock");
-            *guard = Some(PendingMemory {
-                prompt: "stale".to_string(),
-                computed_at: Instant::now() - Duration::from_secs(121),
-                count: 1,
-                memory_ids: Vec::new(),
-            });
+            let map = guard.get_or_insert_with(HashMap::new);
+            map.insert(
+                sid.to_string(),
+                PendingMemory {
+                    prompt: "stale".to_string(),
+                    computed_at: Instant::now() - Duration::from_secs(121),
+                    count: 1,
+                    memory_ids: Vec::new(),
+                },
+            );
         }
-        assert!(take_pending_memory().is_none());
+        assert!(take_pending_memory(sid).is_none());
     }
 
     #[test]
@@ -2181,16 +2280,44 @@ mod tests {
         let _guard = PENDING_MEMORY_TEST_LOCK
             .lock()
             .expect("pending memory test lock poisoned");
-        clear_pending_memory();
+        clear_all_pending_memory();
 
-        set_pending_memory("same payload".to_string(), 1);
-        assert!(take_pending_memory().is_some());
+        let sid = "test-session-2";
+        set_pending_memory(sid, "same payload".to_string(), 1);
+        assert!(take_pending_memory(sid).is_some());
 
-        set_pending_memory("same payload".to_string(), 1);
+        set_pending_memory(sid, "same payload".to_string(), 1);
         assert!(
-            take_pending_memory().is_none(),
+            take_pending_memory(sid).is_none(),
             "identical payload should be suppressed when repeated immediately"
         );
+    }
+
+    #[test]
+    fn pending_memory_per_session_isolation() {
+        let _guard = PENDING_MEMORY_TEST_LOCK
+            .lock()
+            .expect("pending memory test lock poisoned");
+        clear_all_pending_memory();
+
+        let sid_a = "test-session-a";
+        let sid_b = "test-session-b";
+
+        set_pending_memory(sid_a, "memory for A".to_string(), 1);
+        set_pending_memory(sid_b, "memory for B".to_string(), 2);
+
+        assert!(has_pending_memory(sid_a));
+        assert!(has_pending_memory(sid_b));
+
+        let pending_a = take_pending_memory(sid_a).expect("session A should have pending memory");
+        assert_eq!(pending_a.prompt, "memory for A");
+        assert!(!has_pending_memory(sid_a));
+
+        // Session B's memory should still be there
+        assert!(has_pending_memory(sid_b));
+        let pending_b = take_pending_memory(sid_b).expect("session B should have pending memory");
+        assert_eq!(pending_b.prompt, "memory for B");
+        assert_eq!(pending_b.count, 2);
     }
 
     #[test]

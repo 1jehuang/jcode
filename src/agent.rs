@@ -998,6 +998,14 @@ impl Agent {
         self.provider.model().to_string()
     }
 
+    pub fn set_premium_mode(&self, mode: crate::provider::copilot::PremiumMode) {
+        self.provider.set_premium_mode(mode);
+    }
+
+    pub fn premium_mode(&self) -> crate::provider::copilot::PremiumMode {
+        self.provider.premium_mode()
+    }
+
     pub fn provider_fork(&self) -> Arc<dyn Provider> {
         self.provider.fork()
     }
@@ -1331,12 +1339,14 @@ impl Agent {
             return None;
         }
 
+        let sid = &self.session.id;
+
         // Take pending memory if available (computed in background during last turn)
-        let pending = crate::memory::take_pending_memory();
+        let pending = crate::memory::take_pending_memory(sid);
 
         // Spawn a background check for the NEXT turn (doesn't block current send)
         let manager = crate::memory::MemoryManager::new();
-        manager.spawn_relevance_check(messages.to_vec());
+        manager.spawn_relevance_check(sid, messages.to_vec());
 
         // Return pending memory from previous turn
         pending
@@ -1388,7 +1398,7 @@ impl Agent {
     pub fn set_memory_enabled(&mut self, enabled: bool) {
         self.memory_enabled = enabled;
         if !enabled {
-            crate::memory::clear_pending_memory();
+            crate::memory::clear_pending_memory(&self.session.id);
         }
     }
 

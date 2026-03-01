@@ -890,13 +890,16 @@ impl App {
     }
 
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
+        let t0 = std::time::Instant::now();
         let skills = SkillRegistry::load().unwrap_or_default();
+        let t_skills = t0.elapsed();
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
         let mut session = Session::create(None, None);
         session.model = Some(provider.model());
         let display = config().display.clone();
         let features = config().features.clone();
         let context_limit = provider.context_window() as u64;
+        let t_session = t0.elapsed();
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let provider_clone = Arc::clone(&provider);
@@ -919,6 +922,14 @@ impl App {
             &available_skills,
             session.is_canary,
         );
+        let t_prompt = t0.elapsed();
+        crate::logging::info(&format!(
+            "App::new timings: skills={:.1}ms session={:.1}ms prompt={:.1}ms total={:.1}ms",
+            t_skills.as_secs_f64() * 1000.0,
+            (t_session - t_skills).as_secs_f64() * 1000.0,
+            (t_prompt - t_session).as_secs_f64() * 1000.0,
+            t_prompt.as_secs_f64() * 1000.0,
+        ));
 
         Self {
             provider,
@@ -6316,6 +6327,50 @@ impl App {
                         return Ok(());
                     }
 
+                    // Handle /z, /zz, /zzz premium mode (must forward to server)
+                    if trimmed == "/z" || trimmed == "/zz" || trimmed == "/zzz" {
+                        use crate::provider::copilot::PremiumMode;
+                        let current = self.provider.premium_mode();
+
+                        if trimmed == "/z" {
+                            self.provider.set_premium_mode(PremiumMode::Normal);
+                            let _ = remote.set_premium_mode(PremiumMode::Normal as u8).await;
+                            self.set_status_notice("Premium: normal");
+                            self.push_display_message(DisplayMessage::system(
+                                "Premium request mode reset to normal.".to_string(),
+                            ));
+                            return Ok(());
+                        }
+
+                        let mode = if trimmed == "/zzz" {
+                            PremiumMode::Zero
+                        } else {
+                            PremiumMode::OnePerSession
+                        };
+                        if current == mode {
+                            self.provider.set_premium_mode(PremiumMode::Normal);
+                            let _ = remote.set_premium_mode(PremiumMode::Normal as u8).await;
+                            self.set_status_notice("Premium: normal");
+                            self.push_display_message(DisplayMessage::system(
+                                "Premium request mode reset to normal.".to_string(),
+                            ));
+                        } else {
+                            self.provider.set_premium_mode(mode);
+                            let _ = remote.set_premium_mode(mode as u8).await;
+                            let label = match mode {
+                                PremiumMode::OnePerSession => "one premium per session",
+                                PremiumMode::Zero => "zero premium requests",
+                                PremiumMode::Normal => "normal",
+                            };
+                            self.set_status_notice(&format!("Premium: {}", label));
+                            self.push_display_message(DisplayMessage::system(format!(
+                                "Premium mode: **{}**. Toggle off with `/z`.",
+                                label,
+                            )));
+                        }
+                        return Ok(());
+                    }
+
                     // Any other slash command: handle locally via submit_input()
                     // (covers /auth, /login, /clear, /config, /effort, /fix,
                     //  /info, /version, /rewind, /remember, /record, etc.)
@@ -9334,7 +9389,7 @@ impl App {
     fn set_memory_feature_enabled(&mut self, enabled: bool) {
         self.memory_enabled = enabled;
         if !enabled {
-            crate::memory::clear_pending_memory();
+            crate::memory::clear_pending_memory(&self.session.id);
             crate::memory::clear_activity();
             crate::memory_agent::reset();
             self.last_injected_memory_signature = None;
@@ -13044,10 +13099,10 @@ impl App {
         }
 
         // Take pending memory if available (computed in background during last turn)
-        let pending = crate::memory::take_pending_memory();
+        let pending = crate::memory::take_pending_memory(&self.session.id);
 
         // Send context to memory agent for the NEXT turn (doesn't block current send)
-        crate::memory_agent::update_context_sync(messages.to_vec());
+        crate::memory_agent::update_context_sync(&self.session.id, messages.to_vec());
 
         // Return pending memory from previous turn
         pending

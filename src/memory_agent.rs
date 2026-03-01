@@ -80,17 +80,24 @@ pub struct MemoryAgentHandle {
 
 impl MemoryAgentHandle {
     /// Send a context update to the memory agent (async)
-    pub async fn update_context(&self, messages: Vec<crate::message::Message>) {
-        self.update_context_sync(messages);
+    pub async fn update_context(
+        &self,
+        session_id: &str,
+        messages: Vec<crate::message::Message>,
+    ) {
+        self.update_context_sync(session_id, messages);
     }
 
-    /// Send a context update to the memory agent (sync, non-blocking)
-    pub fn update_context_sync(&self, messages: Vec<crate::message::Message>) {
+    pub fn update_context_sync(
+        &self,
+        session_id: &str,
+        messages: Vec<crate::message::Message>,
+    ) {
         let msg = AgentMessage::Context {
+            session_id: session_id.to_string(),
             messages,
             timestamp: Instant::now(),
         };
-        // Don't block if channel is full - memory is non-critical
         let _ = self.tx.try_send(msg);
     }
 
@@ -102,12 +109,11 @@ impl MemoryAgentHandle {
 
 /// Messages sent to the memory agent
 enum AgentMessage {
-    /// Context update with conversation messages
     Context {
+        session_id: String,
         messages: Vec<crate::message::Message>,
         timestamp: Instant,
     },
-    /// Reset all agent state (e.g., on new session)
     Reset,
 }
 
@@ -177,7 +183,7 @@ impl MemoryAgent {
         self.surfaced_memories.clear();
         self.turn_count = 0;
         self.turns_since_extraction = 0;
-        memory::clear_injected_memories();
+        memory::clear_all_injected_memories();
         if let Ok(mut stats) = MEMORY_AGENT_STATS.lock() {
             stats.turns_processed = 0;
             stats.maintenance_runs = 0;
@@ -195,13 +201,13 @@ impl MemoryAgent {
                     self.reset();
                 }
                 AgentMessage::Context {
+                    session_id,
                     messages,
                     timestamp,
                 } => {
                     self.turn_count += 1;
                     bump_turn_stat();
 
-                    // Periodic reset to prevent unbounded state growth
                     if self.turn_count % TURN_RESET_INTERVAL == 0 {
                         crate::logging::info(&format!(
                             "Memory agent periodic reset at turn {} (clearing {} surfaced memories)",
@@ -211,7 +217,7 @@ impl MemoryAgent {
                         self.surfaced_memories.clear();
                     }
 
-                    if let Err(e) = self.process_context(messages, timestamp).await {
+                    if let Err(e) = self.process_context(&session_id, messages, timestamp).await {
                         crate::logging::error(&format!("Memory agent error: {}", e));
                     }
                 }
@@ -224,6 +230,7 @@ impl MemoryAgent {
     /// Process a context update
     async fn process_context(
         &mut self,
+        session_id: &str,
         messages: Vec<crate::message::Message>,
         _timestamp: Instant,
     ) -> Result<()> {
@@ -274,7 +281,7 @@ impl MemoryAgent {
                 }
 
                 self.surfaced_memories.clear();
-                memory::clear_injected_memories();
+                memory::clear_all_injected_memories();
             }
         }
 
@@ -304,7 +311,7 @@ impl MemoryAgent {
         let new_candidates: Vec<_> = candidates
             .into_iter()
             .filter(|(entry, _)| {
-                !self.surfaced_memories.contains(&entry.id) && !memory::is_memory_injected(&entry.id)
+                !self.surfaced_memories.contains(&entry.id) && !memory::is_memory_injected_any(&entry.id)
             })
             .collect();
 
@@ -359,7 +366,7 @@ impl MemoryAgent {
                     .count()
                     .max(1);
 
-                memory::set_pending_memory_with_ids(prompt, count, ids);
+                memory::set_pending_memory_with_ids(session_id, prompt, count, ids);
                 memory::set_state(MemoryState::FoundRelevant { count });
             } else {
                 memory::set_state(MemoryState::Idle);
@@ -1178,22 +1185,22 @@ pub fn get() -> Option<MemoryAgentHandle> {
 }
 
 /// Send a context update to the memory agent (convenience function)
-pub async fn update_context(messages: Vec<crate::message::Message>) {
+pub async fn update_context(session_id: &str, messages: Vec<crate::message::Message>) {
     if let Some(handle) = get() {
-        handle.update_context(messages).await;
+        handle.update_context(session_id, messages).await;
     }
 }
 
 /// Send a context update synchronously (for use from non-async code)
 /// This is non-blocking - it just sends to the channel
-pub fn update_context_sync(messages: Vec<crate::message::Message>) {
+pub fn update_context_sync(session_id: &str, messages: Vec<crate::message::Message>) {
     if let Some(handle) = get() {
-        handle.update_context_sync(messages);
+        handle.update_context_sync(session_id, messages);
     } else {
-        // Agent not initialized yet - spawn initialization and send
+        let sid = session_id.to_string();
         tokio::spawn(async move {
             if let Ok(handle) = init().await {
-                handle.update_context_sync(messages);
+                handle.update_context_sync(&sid, messages);
             }
         });
     }
