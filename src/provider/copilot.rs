@@ -93,13 +93,21 @@ impl CopilotApiProvider {
             machine_id: Self::get_or_create_machine_id(),
             init_ready: Arc::new(tokio::sync::Notify::new()),
             init_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            premium_mode: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            premium_mode: Arc::new(std::sync::atomic::AtomicU8::new(Self::env_premium_mode())),
             user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
     pub fn has_credentials() -> bool {
         copilot_auth::has_copilot_credentials()
+    }
+
+    fn env_premium_mode() -> u8 {
+        match std::env::var("JCODE_COPILOT_PREMIUM").ok().as_deref() {
+            Some("0") => PremiumMode::Zero as u8,
+            Some("1") => PremiumMode::OnePerSession as u8,
+            _ => PremiumMode::Normal as u8,
+        }
     }
 
     pub fn new_with_token(github_token: String) -> Self {
@@ -116,7 +124,7 @@ impl CopilotApiProvider {
             machine_id: Self::get_or_create_machine_id(),
             init_ready: Arc::new(tokio::sync::Notify::new()),
             init_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            premium_mode: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            premium_mode: Arc::new(std::sync::atomic::AtomicU8::new(Self::env_premium_mode())),
             user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
