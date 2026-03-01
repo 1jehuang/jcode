@@ -177,6 +177,7 @@ impl MemoryAgent {
         self.surfaced_memories.clear();
         self.turn_count = 0;
         self.turns_since_extraction = 0;
+        memory::clear_injected_memories();
         if let Ok(mut stats) = MEMORY_AGENT_STATS.lock() {
             stats.turns_processed = 0;
             stats.maintenance_runs = 0;
@@ -273,6 +274,7 @@ impl MemoryAgent {
                 }
 
                 self.surfaced_memories.clear();
+                memory::clear_injected_memories();
             }
         }
 
@@ -298,10 +300,12 @@ impl MemoryAgent {
             return Ok(());
         }
 
-        // Filter out already-surfaced memories
+        // Filter out already-surfaced memories (local + global tracking)
         let new_candidates: Vec<_> = candidates
             .into_iter()
-            .filter(|(entry, _)| !self.surfaced_memories.contains(&entry.id))
+            .filter(|(entry, _)| {
+                !self.surfaced_memories.contains(&entry.id) && !memory::is_memory_injected(&entry.id)
+            })
             .collect();
 
         if new_candidates.is_empty() {
@@ -336,6 +340,7 @@ impl MemoryAgent {
 
         // Step 4: Format and store for main agent
         if !relevant.is_empty() {
+            let ids: Vec<String> = relevant.iter().map(|e| e.id.clone()).collect();
             for entry in &relevant {
                 self.surfaced_memories.insert(entry.id.clone());
             }
@@ -354,7 +359,7 @@ impl MemoryAgent {
                     .count()
                     .max(1);
 
-                memory::set_pending_memory(prompt, count);
+                memory::set_pending_memory_with_ids(prompt, count, ids);
                 memory::set_state(MemoryState::FoundRelevant { count });
             } else {
                 memory::set_state(MemoryState::Idle);

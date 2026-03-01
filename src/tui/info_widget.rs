@@ -346,7 +346,6 @@ fn is_overview_mergeable(kind: WidgetKind) -> bool {
             | WidgetKind::ContextUsage
             | WidgetKind::SwarmStatus
             | WidgetKind::BackgroundTasks
-            | WidgetKind::UsageLimits
             | WidgetKind::ModelInfo
     )
 }
@@ -872,14 +871,6 @@ impl InfoWidgetData {
                 {
                     sections += 1;
                 }
-                if self
-                    .usage_info
-                    .as_ref()
-                    .map(|u| u.available)
-                    .unwrap_or(false)
-                {
-                    sections += 1;
-                }
                 if self.queue_mode.is_some() {
                     sections += 1;
                 }
@@ -1327,8 +1318,8 @@ fn calculate_widget_height(
             if data.diagrams.is_empty() {
                 return 0;
             }
-            // Diagrams need significant height to be useful
-            15
+            // Use the full available height so the image fills the panel
+            max_height.saturating_sub(border_height)
         }
         WidgetKind::Todos => {
             if data.todos.is_empty() {
@@ -2854,148 +2845,6 @@ fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
                 Span::styled(format!("{} ", icon), Style::default().fg(color)),
                 Span::styled(label, Style::default().fg(Color::Rgb(140, 140, 150))),
             ]));
-        }
-    }
-
-    // Usage info (combined from UsageLimits widget)
-    if let Some(info) = &data.usage_info {
-        if info.available {
-            match info.provider {
-                UsageProvider::Copilot => {
-                    lines.push(Line::from(vec![
-                        Span::styled("📊 ", Style::default().fg(Color::Rgb(110, 200, 140))),
-                        Span::styled(
-                            format!(
-                                "{}↑ {}↓",
-                                format_tokens(info.input_tokens),
-                                format_tokens(info.output_tokens)
-                            ),
-                            Style::default().fg(Color::Rgb(140, 140, 150)),
-                        ),
-                    ]));
-
-                    if let Some(tps) = info.output_tps {
-                        lines.push(Line::from(vec![
-                            Span::styled("⏱ ", Style::default().fg(Color::Rgb(120, 170, 220))),
-                            Span::styled(
-                                format!("{:.1} tps", tps),
-                                Style::default().fg(Color::Rgb(140, 140, 150)),
-                            ),
-                        ]));
-                    }
-                }
-                UsageProvider::CostBased => {
-                    // Cost + tokens for API-key providers
-                    lines.push(Line::from(vec![
-                        Span::styled("💰 ", Style::default().fg(Color::Rgb(140, 180, 255))),
-                        Span::styled(
-                            format!("${:.4}", info.total_cost),
-                            Style::default().fg(Color::Rgb(180, 180, 190)),
-                        ),
-                        Span::styled(
-                            format!(
-                                " ({}↑ {}↓)",
-                                format_tokens(info.input_tokens),
-                                format_tokens(info.output_tokens)
-                            ),
-                            Style::default().fg(Color::Rgb(120, 120, 130)),
-                        ),
-                    ]));
-
-                    // Cache info if available
-                    if info.cache_read_tokens.is_some() || info.cache_write_tokens.is_some() {
-                        let cache_read = info.cache_read_tokens.unwrap_or(0);
-                        let cache_write = info.cache_write_tokens.unwrap_or(0);
-                        lines.push(Line::from(vec![
-                            Span::styled("🗄 ", Style::default().fg(Color::Rgb(100, 180, 100))),
-                            Span::styled(
-                                format!("hit: {}", format_tokens(cache_read)),
-                                Style::default().fg(Color::Rgb(100, 180, 100)),
-                            ),
-                            Span::styled(
-                                format!(" write: {}", format_tokens(cache_write)),
-                                Style::default().fg(Color::Rgb(255, 160, 80)),
-                            ),
-                        ]));
-                    }
-
-                    if let Some(tps) = info.output_tps {
-                        lines.push(Line::from(vec![
-                            Span::styled("⏱ ", Style::default().fg(Color::Rgb(120, 170, 220))),
-                            Span::styled(
-                                format!("{:.1} tps", tps),
-                                Style::default().fg(Color::Rgb(140, 140, 150)),
-                            ),
-                        ]));
-                    }
-                }
-                _ => {
-                    // Keep provider-specific quota bars visible in compact cards.
-                    // Subscription usage bars with provider label
-                    let label = info.provider.label();
-                    if !label.is_empty() {
-                        lines.push(Line::from(vec![Span::styled(
-                            format!("{} limits", label),
-                            Style::default()
-                                .fg(Color::Rgb(140, 140, 150))
-                                .add_modifier(ratatui::style::Modifier::DIM),
-                        )]));
-                    }
-                    let five_hr_used = (info.five_hour * 100.0).round().clamp(0.0, 100.0) as u8;
-                    let seven_day_used = (info.seven_day * 100.0).round().clamp(0.0, 100.0) as u8;
-                    let five_hr_left = 100u8.saturating_sub(five_hr_used);
-                    let seven_day_left = 100u8.saturating_sub(seven_day_used);
-                    let five_hr_reset = info
-                        .five_hour_resets_at
-                        .as_deref()
-                        .map(crate::usage::format_reset_time);
-                    let seven_day_reset = info
-                        .seven_day_resets_at
-                        .as_deref()
-                        .map(crate::usage::format_reset_time);
-
-                    lines.push(render_labeled_bar(
-                        "5hr",
-                        five_hr_used,
-                        five_hr_left,
-                        five_hr_reset.as_deref(),
-                        inner.width,
-                    ));
-                    lines.push(render_labeled_bar(
-                        "7d",
-                        seven_day_used,
-                        seven_day_left,
-                        seven_day_reset.as_deref(),
-                        inner.width,
-                    ));
-
-                    if let Some(spark_usage) = info.spark {
-                        let spark_used = (spark_usage * 100.0).round().clamp(0.0, 100.0) as u8;
-                        let spark_left = 100u8.saturating_sub(spark_used);
-                        let spark_reset = info
-                            .spark_resets_at
-                            .as_deref()
-                            .map(crate::usage::format_reset_time);
-                        lines.push(render_labeled_bar(
-                            "sprk",
-                            spark_used,
-                            spark_left,
-                            spark_reset.as_deref(),
-                            inner.width,
-                        ));
-                    }
-
-                    if let Some(tps) = info.output_tps {
-                        lines.push(Line::from(vec![
-                            Span::styled("⏱ ", Style::default().fg(Color::Rgb(120, 170, 220))),
-                            Span::styled(
-                                format!("{:.1} tps", tps),
-                                Style::default().fg(Color::Rgb(140, 140, 150)),
-                            ),
-                        ]));
-                    }
-                }
-            }
         }
     }
 

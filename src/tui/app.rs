@@ -14625,7 +14625,7 @@ impl super::TuiState for App {
             let has_openai_oauth = crate::auth::codex::load_credentials().is_ok();
             let is_anthropic_oauth = provider_name.contains("anthropic")
                 || provider_name.contains("claude")
-                || (provider_name == "remote" && has_anthropic_oauth && !has_openai_oauth);
+                || (provider_name == "remote" && has_anthropic_oauth);
             let is_openai_provider = provider_name.contains("openai")
                 || ((provider_name == "remote" || provider_name == "unknown")
                     && has_openai_oauth

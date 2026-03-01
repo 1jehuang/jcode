@@ -90,6 +90,10 @@ static PENDING_MEMORY: Mutex<Option<PendingMemory>> = Mutex::new(None);
 /// Signature of the last injected prompt to suppress near-immediate duplicates.
 static LAST_INJECTED_PROMPT_SIGNATURE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 
+/// Memory IDs that have already been injected into the conversation.
+/// Used to prevent the same memory from being re-injected on subsequent turns.
+static INJECTED_MEMORY_IDS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
 /// Guard to ensure only one memory check runs at a time
 static MEMORY_CHECK_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -106,6 +110,8 @@ pub struct PendingMemory {
     pub computed_at: Instant,
     /// Number of relevant memories found
     pub count: usize,
+    /// IDs of memories included in this prompt (for dedup tracking)
+    pub memory_ids: Vec<String>,
 }
 
 impl PendingMemory {
@@ -146,6 +152,11 @@ pub fn take_pending_memory() -> Option<PendingMemory> {
                 *last_guard = Some((sig, Instant::now()));
             }
 
+            // Track injected memory IDs to prevent re-injection on future turns
+            if !pending.memory_ids.is_empty() {
+                mark_memories_injected(&pending.memory_ids);
+            }
+
             return Some(pending);
         }
     }
@@ -154,12 +165,55 @@ pub fn take_pending_memory() -> Option<PendingMemory> {
 
 /// Store a pending memory result
 pub fn set_pending_memory(prompt: String, count: usize) {
+    set_pending_memory_with_ids(prompt, count, Vec::new());
+}
+
+/// Store a pending memory result with associated memory IDs for dedup tracking
+pub fn set_pending_memory_with_ids(prompt: String, count: usize, memory_ids: Vec<String>) {
     if let Ok(mut guard) = PENDING_MEMORY.lock() {
         *guard = Some(PendingMemory {
             prompt,
             computed_at: Instant::now(),
             count,
+            memory_ids,
         });
+    }
+}
+
+/// Mark memory IDs as already injected (prevents re-injection on future turns)
+pub fn mark_memories_injected(ids: &[String]) {
+    if let Ok(mut guard) = INJECTED_MEMORY_IDS.lock() {
+        let set = guard.get_or_insert_with(HashSet::new);
+        for id in ids {
+            set.insert(id.clone());
+        }
+        crate::logging::info(&format!(
+            "Marked {} memory IDs as injected (total tracked: {})",
+            ids.len(),
+            set.len()
+        ));
+    }
+}
+
+/// Check if a memory ID has already been injected
+pub fn is_memory_injected(id: &str) -> bool {
+    if let Ok(guard) = INJECTED_MEMORY_IDS.lock() {
+        if let Some(set) = guard.as_ref() {
+            return set.contains(id);
+        }
+    }
+    false
+}
+
+/// Clear injected memory tracking (call on session reset or topic change)
+pub fn clear_injected_memories() {
+    if let Ok(mut guard) = INJECTED_MEMORY_IDS.lock() {
+        if let Some(set) = guard.as_ref() {
+            if !set.is_empty() {
+                crate::logging::info(&format!("Clearing {} tracked injected memory IDs", set.len()));
+            }
+        }
+        *guard = None;
     }
 }
 
@@ -171,6 +225,7 @@ pub fn clear_pending_memory() {
     if let Ok(mut guard) = LAST_INJECTED_PROMPT_SIGNATURE.lock() {
         *guard = None;
     }
+    clear_injected_memories();
 }
 
 /// Check if there's a pending memory check in progress or result waiting
@@ -1492,7 +1547,7 @@ impl MemoryManager {
             };
 
             match manager.get_relevant_parallel(&messages).await {
-                Ok(Some(prompt)) => {
+                Ok((Some(prompt), memory_ids)) => {
                     let count = prompt
                         .lines()
                         .map(str::trim_start)
@@ -1508,10 +1563,10 @@ impl MemoryManager {
                         })
                         .count()
                         .max(1);
-                    set_pending_memory(prompt, count);
+                    set_pending_memory_with_ids(prompt, count, memory_ids);
                     add_event(MemoryEventKind::SidecarComplete { latency_ms: 0 });
                 }
-                Ok(None) => {
+                Ok((None, _)) => {
                     // No relevant memories - that's fine
                     set_state(MemoryState::Idle);
                 }
@@ -1534,13 +1589,14 @@ impl MemoryManager {
     /// 1. Embed the context (fast, local, ~30ms)
     /// 2. Find similar memories by embedding (instant)
     /// 3. Only call sidecar for embedding hits (1-5 calls instead of 30)
+    /// Returns (formatted_prompt, memory_ids) on success
     pub async fn get_relevant_parallel(
         &self,
         messages: &[crate::message::Message],
-    ) -> Result<Option<String>> {
+    ) -> Result<(Option<String>, Vec<String>)> {
         let context = format_context_for_relevance(messages);
         if context.is_empty() {
-            return Ok(None);
+            return Ok((None, Vec::new()));
         }
 
         // Start pipeline tracking
@@ -1572,7 +1628,7 @@ impl MemoryManager {
                             p.maintain = StepStatus::Skipped;
                         });
                         set_state(MemoryState::Idle);
-                        return Ok(None);
+                        return Ok((None, Vec::new()));
                     }
                     pipeline_update(|p| {
                         p.search = StepStatus::Done;
@@ -1612,6 +1668,21 @@ impl MemoryManager {
                 }
             };
 
+        // Filter out memories that have already been injected in this session
+        let pre_filter_count = candidates.len();
+        let candidates: Vec<_> = candidates
+            .into_iter()
+            .filter(|(entry, _)| !is_memory_injected(&entry.id))
+            .collect();
+        if candidates.len() < pre_filter_count {
+            crate::logging::info(&format!(
+                "Filtered out {} already-injected memories ({} -> {} candidates)",
+                pre_filter_count - candidates.len(),
+                pre_filter_count,
+                candidates.len()
+            ));
+        }
+
         if candidates.is_empty() {
             pipeline_update(|p| {
                 p.verify = StepStatus::Skipped;
@@ -1619,7 +1690,7 @@ impl MemoryManager {
                 p.maintain = StepStatus::Skipped;
             });
             set_state(MemoryState::Idle);
-            return Ok(None);
+            return Ok((None, Vec::new()));
         }
 
         // Step 2: Sidecar verification (only for embedding hits - much fewer calls!)
@@ -1717,7 +1788,7 @@ impl MemoryManager {
                 p.maintain = StepStatus::Skipped;
             });
             set_state(MemoryState::Idle);
-            return Ok(None);
+            return Ok((None, Vec::new()));
         }
 
         pipeline_update(|p| {
@@ -1747,7 +1818,7 @@ impl MemoryManager {
             });
         });
 
-        Ok(prompt)
+        Ok((prompt, relevant_ids))
     }
 
     // ==================== Graph-Based Operations ====================
@@ -2099,6 +2170,7 @@ mod tests {
                 prompt: "stale".to_string(),
                 computed_at: Instant::now() - Duration::from_secs(121),
                 count: 1,
+                memory_ids: Vec::new(),
             });
         }
         assert!(take_pending_memory().is_none());
