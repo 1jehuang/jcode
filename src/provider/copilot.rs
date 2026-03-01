@@ -16,9 +16,6 @@ const COPILOT_API_VERSION: &str = "2025-04-01";
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
-/// The base model included in all Copilot plans (no premium requests needed).
-const QUOTA_FALLBACK_MODEL: &str = "gpt-4.1";
-
 const FALLBACK_MODELS: &[&str] = &[
     "claude-sonnet-4.6",
     "claude-sonnet-4.5",
@@ -199,8 +196,8 @@ impl CopilotApiProvider {
         match mode {
             2 => false,
             1 => {
-                let has_prior_turn = messages.iter().any(|m| m.role == Role::Assistant);
-                !has_prior_turn
+                let count = self.user_turn_count.load(std::sync::atomic::Ordering::Relaxed);
+                count == 0
             }
             _ => true,
         }
@@ -518,7 +515,7 @@ impl CopilotApiProvider {
         tx: mpsc::Sender<Result<StreamEvent>>,
     ) {
         self.wait_for_init().await;
-        let mut model = self.model.read().unwrap().clone();
+        let model = self.model.read().unwrap().clone();
         let max_tokens: u32 = 16_384;
         let initiator = if is_user_initiated { "user" } else { "agent" };
 
@@ -527,8 +524,8 @@ impl CopilotApiProvider {
             initiator, model
         ));
 
-        // Try up to 3 times: initial, token refresh retry, quota fallback retry
-        for attempt in 0..3 {
+        // Try up to 2 times (initial + one retry after token refresh)
+        for attempt in 0..2 {
             let bearer_token = match self.get_bearer_token().await {
                 Ok(t) => t,
                 Err(e) => {
@@ -591,26 +588,6 @@ impl CopilotApiProvider {
             if Self::is_auth_error(status) && attempt == 0 {
                 *self.bearer_token.write().await = None;
                 crate::logging::info("Copilot bearer token expired, refreshing...");
-                continue;
-            }
-
-            // On quota error (402), fall back to the included base model and retry
-            if status == reqwest::StatusCode::PAYMENT_REQUIRED && model != QUOTA_FALLBACK_MODEL {
-                let resp_body = resp.text().await.unwrap_or_default();
-                crate::logging::info(&format!(
-                    "Copilot quota exceeded for {} ({}), falling back to {}",
-                    model, resp_body, QUOTA_FALLBACK_MODEL
-                ));
-                let _ = tx
-                    .send(Ok(StreamEvent::TextDelta(format!(
-                        "[Quota exceeded for {}. Falling back to {} which is included in your plan.]\n\n",
-                        model, QUOTA_FALLBACK_MODEL
-                    ))))
-                    .await;
-                if let Ok(mut m) = self.model.try_write() {
-                    *m = QUOTA_FALLBACK_MODEL.to_string();
-                }
-                model = QUOTA_FALLBACK_MODEL.to_string();
                 continue;
             }
 
