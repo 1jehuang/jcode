@@ -131,6 +131,7 @@ impl Stream {
         // We use a short-lived runtime-free poll: since the client already
         // connected synchronously, the server's connect future will resolve
         // on the first poll.
+        use std::future::Future;
         use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
         fn dummy_raw_waker() -> RawWaker {
             fn no_op(_: *const ()) {}
