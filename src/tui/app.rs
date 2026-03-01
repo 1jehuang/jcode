@@ -10197,22 +10197,22 @@ impl App {
         };
 
         let client = reqwest::Client::new();
-        let mut body = serde_json::json!({
-            "grant_type": "authorization_code",
-            "client_id": crate::auth::oauth::claude::CLIENT_ID,
-            "code": code,
-            "code_verifier": verifier,
-            "redirect_uri": redirect_uri.as_deref().unwrap_or(crate::auth::oauth::claude::REDIRECT_URI),
-        });
+        let mut params = vec![
+            ("grant_type", "authorization_code".to_string()),
+            ("client_id", crate::auth::oauth::claude::CLIENT_ID.to_string()),
+            ("code", code),
+            ("code_verifier", verifier),
+            ("redirect_uri", redirect_uri.unwrap_or_else(|| crate::auth::oauth::claude::REDIRECT_URI.to_string())),
+        ];
 
         if let Some(state) = state_from_callback {
-            body["state"] = serde_json::Value::String(state);
+            params.push(("state", state));
         }
 
         let resp = client
             .post(crate::auth::oauth::claude::TOKEN_URL)
-            .header("Content-Type", "application/json")
-            .json(&body)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .form(&params)
             .send()
             .await
             .map_err(|e| format!("Token exchange request failed: {}", e))?;
@@ -10409,7 +10409,12 @@ impl App {
                             });
                         }
                     }
-                } else if crate::provider::ALL_CLAUDE_MODELS.contains(&model.as_str()) {
+                    continue;
+                }
+
+                let mut added_any = false;
+
+                if crate::provider::ALL_CLAUDE_MODELS.contains(&model.as_str()) {
                     if auth.anthropic.has_oauth {
                         let is_1m = model.ends_with("[1m]");
                         let is_opus = model.contains("opus");
@@ -10428,8 +10433,11 @@ impl App {
                             available,
                             detail,
                         });
+                        added_any = true;
                     }
-                } else if crate::provider::ALL_OPENAI_MODELS.contains(&model.as_str()) {
+                }
+
+                if crate::provider::ALL_OPENAI_MODELS.contains(&model.as_str()) {
                     let availability = crate::provider::model_availability_for_account(model);
                     let (available, detail) =
                         if auth.openai == crate::auth::AuthState::NotConfigured {
@@ -10463,19 +10471,26 @@ impl App {
                         available,
                         detail,
                     });
-                } else {
-                    // Copilot or other provider models
-                    let (available, provider_name) =
-                        if auth.copilot == crate::auth::AuthState::Available {
-                            (true, "Copilot".to_string())
-                        } else {
-                            (false, "unknown".to_string())
-                        };
+                    added_any = true;
+                }
+
+                if auth.copilot == crate::auth::AuthState::Available {
                     routes.push(crate::provider::ModelRoute {
                         model: model.clone(),
-                        provider: provider_name,
+                        provider: "Copilot".to_string(),
                         api_method: "copilot".to_string(),
-                        available,
+                        available: true,
+                        detail: String::new(),
+                    });
+                    added_any = true;
+                }
+
+                if !added_any {
+                    routes.push(crate::provider::ModelRoute {
+                        model: model.clone(),
+                        provider: "unknown".to_string(),
+                        api_method: "unknown".to_string(),
+                        available: false,
                         detail: String::new(),
                     });
                 }
@@ -14639,7 +14654,24 @@ impl super::TuiState for App {
                 None
             };
 
-            if is_anthropic_oauth {
+            if is_copilot_provider {
+                Some(super::info_widget::UsageInfo {
+                    provider: super::info_widget::UsageProvider::Copilot,
+                    five_hour: 0.0,
+                    five_hour_resets_at: None,
+                    seven_day: 0.0,
+                    seven_day_resets_at: None,
+                    spark: None,
+                    spark_resets_at: None,
+                    total_cost: 0.0,
+                    input_tokens: self.total_input_tokens,
+                    output_tokens: self.total_output_tokens,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    output_tps,
+                    available: self.total_input_tokens > 0 || self.total_output_tokens > 0,
+                })
+            } else if is_anthropic_oauth {
                 let usage = crate::usage::get_sync();
                 Some(super::info_widget::UsageInfo {
                     provider: super::info_widget::UsageProvider::Anthropic,
@@ -14728,23 +14760,6 @@ impl super::TuiState for App {
                     cache_write_tokens: self.streaming_cache_creation_tokens,
                     output_tps,
                     available: true,
-                })
-            } else if is_copilot_provider {
-                Some(super::info_widget::UsageInfo {
-                    provider: super::info_widget::UsageProvider::Copilot,
-                    five_hour: 0.0,
-                    five_hour_resets_at: None,
-                    seven_day: 0.0,
-                    seven_day_resets_at: None,
-                    spark: None,
-                    spark_resets_at: None,
-                    total_cost: 0.0,
-                    input_tokens: self.total_input_tokens,
-                    output_tokens: self.total_output_tokens,
-                    cache_read_tokens: None,
-                    cache_write_tokens: None,
-                    output_tps,
-                    available: self.total_input_tokens > 0 || self.total_output_tokens > 0,
                 })
             } else {
                 None
