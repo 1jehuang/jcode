@@ -11,6 +11,39 @@ const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(60); // minimum gap 
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
+pub fn eprint_centered(msg: &str) {
+    let width = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
+    for line in msg.lines() {
+        let visible_len = unicode_display_width(line);
+        if visible_len >= width {
+            eprintln!("{}", line);
+        } else {
+            let pad = (width - visible_len) / 2;
+            eprintln!("{:>pad$}{}", "", line, pad = pad);
+        }
+    }
+}
+
+fn unicode_display_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    let mut w = 0;
+    let mut in_escape = false;
+    for c in s.chars() {
+        if in_escape {
+            if c == 'm' {
+                in_escape = false;
+            }
+            continue;
+        }
+        if c == '\x1b' {
+            in_escape = true;
+            continue;
+        }
+        w += UnicodeWidthChar::width(c).unwrap_or(0);
+    }
+    w
+}
+
 pub fn is_release_build() -> bool {
     option_env!("JCODE_RELEASE_BUILD").is_some()
 }
@@ -595,7 +628,7 @@ pub fn check_and_maybe_update(auto_install: bool) -> UpdateCheckResult {
             let latest = release.tag_name.clone();
 
             if auto_install {
-                eprintln!("⬇️  Downloading jcode {}...", latest);
+                eprint_centered(&format!("⬇️  Downloading jcode {}...", latest));
                 match download_and_install_blocking(&release) {
                     Ok(path) => UpdateCheckResult::UpdateInstalled {
                         version: latest,

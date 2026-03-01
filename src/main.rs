@@ -612,17 +612,16 @@ async fn main() -> Result<()> {
                     update::UpdateCheckResult::UpdateAvailable {
                         current, latest, ..
                     } => {
-                        eprintln!(
+                        update::eprint_centered(&format!(
                             "\n📦 Update available: {} → {}. Run `jcode update` to install.\n",
                             current, latest
-                        );
+                        ));
                     }
                     update::UpdateCheckResult::UpdateInstalled { version, path } => {
-                        eprintln!(
-                            "✅ Updated to {}. Restarting from {}...",
-                            version,
-                            path.display()
-                        );
+                        update::eprint_centered(&format!(
+                            "✅ Updated to {}. Restarting...",
+                            version
+                        ));
                         // Exec into the new binary
                         let args: Vec<String> = std::env::args().skip(1).collect();
                         let exec_path = build::client_update_candidate(false)
@@ -647,15 +646,15 @@ async fn main() -> Result<()> {
                 if let Some(update_available) = check_for_updates() {
                     if update_available {
                         if auto_update {
-                            eprintln!("Update available - auto-updating...");
+                            update::eprint_centered("Update available - auto-updating...");
                             if let Err(e) = run_auto_update() {
-                                eprintln!(
+                                update::eprint_centered(&format!(
                                     "Auto-update failed: {}. Continuing with current version.",
                                     e
-                                );
+                                ));
                             }
                         } else {
-                            eprintln!(
+                            update::eprint_centered(
                                 "\n📦 Update available! Run `jcode update` or `/reload` to update.\n"
                             );
                         }
@@ -1413,7 +1412,7 @@ fn hot_rebuild(session_id: &str) -> Result<()> {
         anyhow::bail!("Binary not found at {:?}", exe);
     }
 
-    eprintln!("Restarting with session {}...", session_id);
+    update::eprint_centered(&format!("Restarting with session {}...", session_id));
 
     // Build command with --resume flag.
     // In self-dev mode, preserve the self-dev subcommand so the session
@@ -1433,24 +1432,24 @@ fn hot_rebuild(session_id: &str) -> Result<()> {
 fn hot_update(session_id: &str) -> Result<()> {
     let cwd = std::env::current_dir()?;
 
-    eprintln!("Checking for updates...");
+    update::eprint_centered("Checking for updates...");
 
     match update::check_for_update_blocking() {
         Ok(Some(release)) => {
             let current = env!("JCODE_VERSION");
-            eprintln!("Update available: {} -> {}", current, release.tag_name);
-            eprintln!("Downloading {}...", release.tag_name);
+            update::eprint_centered(&format!("Update available: {} -> {}", current, release.tag_name));
+            update::eprint_centered(&format!("Downloading {}...", release.tag_name));
 
             match update::download_and_install_blocking(&release) {
                 Ok(path) => {
-                    eprintln!("✓ Installed {} at {:?}", release.tag_name, path);
+                    update::eprint_centered(&format!("✓ Installed {}", release.tag_name));
 
                     let is_selfdev = std::env::var("JCODE_SELFDEV_MODE").is_ok();
                     let exe = build::client_update_candidate(is_selfdev)
                         .map(|(p, _)| p)
                         .unwrap_or(path);
 
-                    eprintln!("Restarting with session {}...", session_id);
+                    update::eprint_centered(&format!("Restarting with session {}...", session_id));
 
                     let mut cmd = ProcessCommand::new(&exe);
                     if is_selfdev {
@@ -1464,18 +1463,18 @@ fn hot_update(session_id: &str) -> Result<()> {
                     return Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err));
                 }
                 Err(e) => {
-                    eprintln!("✗ Download failed: {}", e);
-                    eprintln!("Resuming session with current version...");
+                    update::eprint_centered(&format!("✗ Download failed: {}", e));
+                    update::eprint_centered("Resuming session with current version...");
                     // Fall through to restart with current binary
                 }
             }
         }
         Ok(None) => {
-            eprintln!("Already up to date ({})", env!("JCODE_VERSION"));
+            update::eprint_centered(&format!("Already up to date ({})", env!("JCODE_VERSION")));
         }
         Err(e) => {
-            eprintln!("✗ Update check failed: {}", e);
-            eprintln!("Resuming session with current version...");
+            update::eprint_centered(&format!("✗ Update check failed: {}", e));
+            update::eprint_centered("Resuming session with current version...");
         }
     }
 
@@ -3082,7 +3081,7 @@ fn run_auto_update() -> Result<()> {
     update::run_git_pull_ff_only(&repo_dir, true)?;
 
     // Cargo build --release (show output for progress)
-    eprintln!("Building new version...");
+    update::eprint_centered("Building new version...");
     let build = ProcessCommand::new("cargo")
         .args(["build", "--release"])
         .current_dir(&repo_dir)
@@ -3093,7 +3092,7 @@ fn run_auto_update() -> Result<()> {
     }
 
     if let Err(e) = build::install_local_release(&repo_dir) {
-        eprintln!("Warning: install failed: {}", e);
+        update::eprint_centered(&format!("Warning: install failed: {}", e));
     }
 
     // Get new version
@@ -3102,7 +3101,7 @@ fn run_auto_update() -> Result<()> {
         .current_dir(&repo_dir)
         .output()?;
     let hash = String::from_utf8_lossy(&hash.stdout);
-    eprintln!("Updated to {}. Restarting...", hash.trim());
+    update::eprint_centered(&format!("Updated to {}. Restarting...", hash.trim()));
 
     // Exec into launcher/stable candidate with same args
     let exe = build::client_update_candidate(false)
@@ -3124,20 +3123,20 @@ fn run_auto_update() -> Result<()> {
 /// Run the update process (manual)
 fn run_update() -> Result<()> {
     if update::is_release_build() {
-        eprintln!("Checking GitHub for latest release...");
+        update::eprint_centered("Checking GitHub for latest release...");
         match update::check_for_update_blocking() {
             Ok(Some(release)) => {
-                eprintln!(
-                    "Downloading {} → {}...",
+                update::eprint_centered(&format!(
+                    "Downloading {} \u{2192} {}...",
                     env!("JCODE_VERSION"),
                     release.tag_name
-                );
+                ));
                 let path = update::download_and_install_blocking(&release)?;
-                eprintln!("✅ Updated to {} at {}", release.tag_name, path.display());
-                eprintln!("Restart jcode to use the new version.");
+                update::eprint_centered(&format!("✅ Updated to {}", release.tag_name));
+                update::eprint_centered("Restart jcode to use the new version.");
             }
             Ok(None) => {
-                eprintln!("Already up to date ({})", env!("JCODE_VERSION"));
+                update::eprint_centered(&format!("Already up to date ({})", env!("JCODE_VERSION")));
             }
             Err(e) => {
                 anyhow::bail!("Update check failed: {}", e);
@@ -3149,12 +3148,12 @@ fn run_update() -> Result<()> {
     let repo_dir =
         get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
-    eprintln!("Updating jcode from {}...", repo_dir.display());
+    update::eprint_centered(&format!("Updating jcode from {}...", repo_dir.display()));
 
-    eprintln!("Pulling latest changes (fast-forward only)...");
+    update::eprint_centered("Pulling latest changes (fast-forward only)...");
     update::run_git_pull_ff_only(&repo_dir, true)?;
 
-    eprintln!("Building...");
+    update::eprint_centered("Building...");
     let build = ProcessCommand::new("cargo")
         .args(["build", "--release"])
         .current_dir(&repo_dir)
@@ -3165,7 +3164,7 @@ fn run_update() -> Result<()> {
     }
 
     if let Err(e) = build::install_local_release(&repo_dir) {
-        eprintln!("Warning: install failed: {}", e);
+        update::eprint_centered(&format!("Warning: install failed: {}", e));
     }
 
     let hash = ProcessCommand::new("git")
@@ -3174,7 +3173,7 @@ fn run_update() -> Result<()> {
         .output()?;
 
     let hash = String::from_utf8_lossy(&hash.stdout);
-    eprintln!("Successfully updated to {}", hash.trim());
+    update::eprint_centered(&format!("Successfully updated to {}", hash.trim()));
 
     Ok(())
 }
