@@ -5471,7 +5471,7 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
             }
         }
     } else {
-        // Idle - show token warning if high usage, otherwise usage limits
+        // Idle - show token warning if high usage
         if let Some((total_in, total_out)) = app.total_session_tokens() {
             let total = total_in + total_out;
             if total > 100_000 {
@@ -5493,12 +5493,10 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
                     ),
                 ])
             } else {
-                // Show usage limits when idle (subscription providers)
-                build_idle_usage_line(app)
+                Line::from("")
             }
         } else {
-            // Show usage limits when idle (subscription providers)
-            build_idle_usage_line(app)
+            Line::from("")
         }
     };
 
@@ -5565,95 +5563,6 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
     frame.render_widget(paragraph, area);
 }
 
-/// Build usage line for idle state (shows subscription limits or cost)
-fn build_idle_usage_line(app: &dyn TuiState) -> Line<'static> {
-    use super::info_widget::UsageProvider;
-
-    let widget_data = app.info_widget_data();
-    let Some(usage) = &widget_data.usage_info else {
-        return Line::from("");
-    };
-    if !usage.available {
-        return Line::from("");
-    }
-
-    match usage.provider {
-        UsageProvider::Copilot => {
-            let tokens_str = format!(
-                "{}↑ {}↓",
-                format_tokens_compact(usage.input_tokens),
-                format_tokens_compact(usage.output_tokens)
-            );
-            Line::from(vec![
-                Span::styled("📊 ", Style::default().fg(DIM_COLOR)),
-                Span::styled(tokens_str, Style::default().fg(Color::Rgb(110, 200, 140))),
-            ])
-        }
-        UsageProvider::CostBased => {
-            // Show cost for API-key providers
-            let cost_str = format!("${:.4}", usage.total_cost);
-            let tokens_str = format!(
-                "{}↑ {}↓",
-                format_tokens_compact(usage.input_tokens),
-                format_tokens_compact(usage.output_tokens)
-            );
-            Line::from(vec![
-                Span::styled("💰 ", Style::default().fg(DIM_COLOR)),
-                Span::styled(cost_str, Style::default().fg(Color::Rgb(140, 180, 255))),
-                Span::styled(format!(" ({})", tokens_str), Style::default().fg(DIM_COLOR)),
-            ])
-        }
-        _ => {
-            // Show subscription usage bars inline with provider label
-            let five_hr = (usage.five_hour * 100.0).round() as u8;
-            let seven_day = (usage.seven_day * 100.0).round() as u8;
-            let spark = usage
-                .spark
-                .map(|v| (v * 100.0).round().clamp(0.0, 100.0) as u8);
-
-            let five_hr_color = usage_color(five_hr);
-            let seven_day_color = usage_color(seven_day);
-            let spark_color = spark.map(usage_color);
-
-            let mut spans = Vec::new();
-            let label = usage.provider.label();
-            if !label.is_empty() {
-                spans.push(Span::styled(
-                    format!("{} ", label),
-                    Style::default().fg(DIM_COLOR),
-                ));
-            }
-            spans.extend([
-                Span::styled("5hr:", Style::default().fg(DIM_COLOR)),
-                Span::styled(format!("{}%", five_hr), Style::default().fg(five_hr_color)),
-                Span::styled(" · 7d:", Style::default().fg(DIM_COLOR)),
-                Span::styled(
-                    format!("{}%", seven_day),
-                    Style::default().fg(seven_day_color),
-                ),
-            ]);
-            if let Some(spark_pct) = spark {
-                spans.push(Span::styled(" · sprk:", Style::default().fg(DIM_COLOR)));
-                spans.push(Span::styled(
-                    format!("{}%", spark_pct),
-                    Style::default().fg(spark_color.unwrap_or(Color::Rgb(140, 140, 150))),
-                ));
-            }
-            Line::from(spans)
-        }
-    }
-}
-
-/// Color for usage percentage (green < 50, yellow 50-80, red > 80)
-fn usage_color(pct: u8) -> Color {
-    if pct >= 80 {
-        Color::Rgb(255, 100, 100) // Red
-    } else if pct >= 50 {
-        Color::Rgb(255, 200, 100) // Yellow
-    } else {
-        Color::Rgb(100, 200, 100) // Green
-    }
-}
 
 /// Format tokens compactly (1.2M, 45K, 123)
 fn format_tokens_compact(tokens: u64) -> String {
