@@ -39,6 +39,8 @@ final class AppModel: ObservableObject {
     }
 
     @Published var connectionState: ConnectionState = .disconnected
+    @Published var isProcessing: Bool = false
+    @Published var availableModels: [String] = []
     @Published var savedServers: [ServerCredential] = []
     @Published var selectedServer: ServerCredential? {
         didSet {
@@ -85,6 +87,8 @@ final class AppModel: ObservableObject {
     private var reconnecting = false
     private var shouldAutoReconnect = false
     private var connectionGeneration: UInt64 = 0
+    private var reconnectAttempt: Int = 0
+    private let maxReconnectBackoff: TimeInterval = 30
 
     private var lastAssistantMessageId: UUID?
     private var lastAssistantIndex: Int?
@@ -375,6 +379,33 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func cancelGeneration() async {
+        guard let client else { return }
+        do {
+            try await client.cancel()
+        } catch {
+            errorMessage = "Cancel failed: \(error.localizedDescription)"
+        }
+    }
+
+    func interruptAgent(_ message: String, urgent: Bool = false) async {
+        guard let client else { return }
+        do {
+            try await client.interrupt(message, urgent: urgent)
+        } catch {
+            errorMessage = "Interrupt failed: \(error.localizedDescription)"
+        }
+    }
+
+    func changeModel(_ model: String) async {
+        guard let client else { return }
+        do {
+            try await client.changeModel(model)
+        } catch {
+            errorMessage = "Model change failed: \(error.localizedDescription)"
+        }
+    }
+
     func switchToSession(_ sessionId: String) async {
         guard !sessionId.isEmpty else {
             return
@@ -401,6 +432,7 @@ final class AppModel: ObservableObject {
         serverName = info.serverName ?? "jcode"
         serverVersion = info.serverVersion ?? ""
         modelName = info.providerModel ?? ""
+        availableModels = info.availableModels
     }
 
     private func applyHistory(_ history: [HistoryMessage]) {
@@ -537,6 +569,7 @@ final class AppModel: ObservableObject {
     fileprivate func onConnected(_ info: ServerInfo) {
         connectionState = .connected
         reconnecting = false
+        reconnectAttempt = 0
         applyConnectedServerInfo(info)
     }
 
@@ -564,16 +597,23 @@ final class AppModel: ObservableObject {
             return
         }
 
-        // Lightweight reconnect trigger for transient network drops.
         reconnecting = true
+        let attempt = reconnectAttempt
+        reconnectAttempt += 1
+        let baseDelay = min(pow(2.0, Double(attempt)), maxReconnectBackoff)
+        let jitter = Double.random(in: 0...1)
+        let delay = baseDelay + jitter
+        statusMessage = "Reconnecting in \(Int(delay))s..."
+
         Task {
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            guard reconnecting else { return }
+            try? await Task.sleep(for: .seconds(delay))
+            guard reconnecting, shouldAutoReconnect else { return }
             await connectSelected()
         }
     }
 
     fileprivate func onTextDelta(_ text: String) {
+        isProcessing = true
         appendAssistantChunk(text)
     }
 
@@ -582,6 +622,8 @@ final class AppModel: ObservableObject {
     }
 
     fileprivate func onInterrupted(_ interrupt: InterruptInfo) {
+        isProcessing = false
+
         if let id = lastAssistantMessageId,
            let idx = messages.firstIndex(where: { $0.id == id }),
            messages[idx].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -597,6 +639,7 @@ final class AppModel: ObservableObject {
     }
 
     fileprivate func onToolStart(_ tool: ToolCallInfo) {
+        isProcessing = true
         attachTool(tool)
     }
 
@@ -625,6 +668,7 @@ final class AppModel: ObservableObject {
     }
 
     fileprivate func onTurnDone(id _: UInt64) {
+        isProcessing = false
         inFlightTools.removeAll()
         lastToolId = nil
         lastAssistantMessageId = nil
@@ -639,6 +683,7 @@ final class AppModel: ObservableObject {
 
     fileprivate func onModelChanged(model: String, provider _: String?) {
         modelName = model
+        statusMessage = "Model: \(model)"
     }
 
     fileprivate func onHistory(_ history: [HistoryMessage]) {

@@ -140,6 +140,34 @@ private struct ServerPanelView: View {
                 }
             }
 
+            if model.connectionState == .connected && !model.availableModels.isEmpty {
+                Section("Model") {
+                    HStack {
+                        Text(model.modelName.isEmpty ? "Unknown" : model.modelName)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Menu {
+                            ForEach(model.availableModels, id: \.self) { m in
+                                Button {
+                                    Task { await model.changeModel(m) }
+                                } label: {
+                                    HStack {
+                                        Text(m)
+                                        if m == model.modelName {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.caption)
+                        }
+                    }
+                }
+            }
+
             Section("Status") {
                 if let status = model.statusMessage {
                     Text(status)
@@ -274,6 +302,11 @@ private struct ChatHeaderView: View {
 
             Spacer()
 
+            if model.isProcessing {
+                ProgressView()
+                    .controlSize(.small)
+            }
+
             Label(connectionText, systemImage: connectionImage)
                 .font(.caption)
                 .foregroundStyle(connectionColor)
@@ -334,12 +367,20 @@ private struct ChatBubble: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
-            Text(message.text.isEmpty ? "…" : message.text)
-                .textSelection(.enabled)
-                .padding(10)
-                .frame(maxWidth: 520, alignment: .leading)
-                .background(bubbleColor)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            if message.role == .assistant && !message.text.isEmpty {
+                MarkdownText(text: message.text)
+                    .padding(10)
+                    .frame(maxWidth: 520, alignment: .leading)
+                    .background(bubbleColor)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            } else {
+                Text(message.text.isEmpty ? "..." : message.text)
+                    .textSelection(.enabled)
+                    .padding(10)
+                    .frame(maxWidth: 520, alignment: .leading)
+                    .background(bubbleColor)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
 
             if !message.toolCalls.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
@@ -382,35 +423,50 @@ private struct ChatBubble: View {
 
 private struct ToolCard: View {
     let tool: ToolCallInfo
+    @State private var isExpanded: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text(tool.name)
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Text(stateLabel)
-                    .font(.caption2)
-                    .foregroundStyle(stateColor)
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(tool.name)
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text(stateLabel)
+                        .font(.caption2)
+                        .foregroundStyle(stateColor)
+                }
             }
+            .buttonStyle(.plain)
 
-            if !tool.input.isEmpty {
-                Text(tool.input)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(5)
-            }
+            if isExpanded {
+                if !tool.input.isEmpty {
+                    Text(tool.input)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(12)
+                        .textSelection(.enabled)
+                }
 
-            if let output = tool.output, !output.isEmpty {
-                Text(output)
-                    .font(.caption.monospaced())
-                    .lineLimit(6)
-            }
+                if let output = tool.output, !output.isEmpty {
+                    Text(output)
+                        .font(.caption.monospaced())
+                        .lineLimit(12)
+                        .textSelection(.enabled)
+                }
 
-            if let error = tool.error, !error.isEmpty {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
+                if let error = tool.error, !error.isEmpty {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
             }
         }
         .padding(10)
@@ -451,21 +507,76 @@ private struct ToolCard: View {
 
 private struct MessageComposer: View {
     @EnvironmentObject private var model: AppModel
+    @State private var showInterruptSheet = false
+    @State private var interruptMessage = ""
 
     var body: some View {
-        HStack(spacing: 10) {
-            TextField("Message jcode…", text: $model.draftMessage, axis: .vertical)
-                .lineLimit(1 ... 6)
-                .textFieldStyle(.roundedBorder)
+        VStack(spacing: 8) {
+            if model.isProcessing {
+                HStack(spacing: 12) {
+                    Button {
+                        Task { await model.cancelGeneration() }
+                    } label: {
+                        Label("Stop", systemImage: "stop.fill")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
 
-            Button {
-                Task { await model.sendDraft() }
-            } label: {
-                Image(systemName: "paperplane.fill")
-                    .padding(8)
+                    Button {
+                        showInterruptSheet = true
+                    } label: {
+                        Label("Interrupt", systemImage: "bolt.fill")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.orange)
+
+                    Spacer()
+                }
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(model.connectionState != .connected)
+
+            HStack(spacing: 10) {
+                TextField("Message jcode...", text: $model.draftMessage, axis: .vertical)
+                    .lineLimit(1 ... 6)
+                    .textFieldStyle(.roundedBorder)
+
+                Button {
+                    Task { await model.sendDraft() }
+                } label: {
+                    Image(systemName: "paperplane.fill")
+                        .padding(8)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.connectionState != .connected)
+            }
+        }
+        .sheet(isPresented: $showInterruptSheet) {
+            NavigationStack {
+                Form {
+                    TextField("Interrupt message", text: $interruptMessage, axis: .vertical)
+                        .lineLimit(2...6)
+                    Toggle("Urgent", isOn: .constant(false))
+                }
+                .navigationTitle("Interrupt Agent")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { showInterruptSheet = false }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Send") {
+                            let msg = interruptMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !msg.isEmpty else { return }
+                            Task { await model.interruptAgent(msg) }
+                            interruptMessage = ""
+                            showInterruptSheet = false
+                        }
+                        .disabled(interruptMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+            }
+            .presentationDetents([.medium])
         }
     }
 }
