@@ -3630,8 +3630,9 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 }
             }
             "memory" => {
-                let title = msg.title.as_deref().unwrap_or("🧠 memories");
-                let content_width = width.saturating_sub(8) as usize;
+                let title = msg.title.as_deref().unwrap_or("🧠 recalled");
+                let max_box = (width.saturating_sub(4) as usize).min(72);
+                let inner_width = max_box.saturating_sub(4);
                 let border_style = Style::default().fg(Color::Rgb(140, 210, 255));
                 let text_style = Style::default().fg(DIM_COLOR);
 
@@ -3654,7 +3655,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                         continue;
                     }
                     let chars: Vec<char> = text_line.chars().collect();
-                    if chars.len() <= content_width {
+                    if chars.len() <= inner_width {
                         box_content.push(Line::from(Span::styled(
                             text_line.to_string(),
                             text_style,
@@ -3664,7 +3665,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                         let mut first = true;
                         while pos < chars.len() {
                             let indent = if first { "" } else { "   " };
-                            let avail = content_width.saturating_sub(indent.len());
+                            let avail = inner_width.saturating_sub(indent.len());
                             let end = (pos + avail).min(chars.len());
                             let chunk: String =
                                 format!("{}{}", indent, chars[pos..end].iter().collect::<String>());
@@ -3679,7 +3680,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 let box_lines = render_rounded_box(
                     title,
                     box_content,
-                    width.saturating_sub(2) as usize,
+                    max_box,
                     border_style,
                 );
                 for line in box_lines {
@@ -3805,19 +3806,20 @@ pub(crate) fn render_tool_message(
             .and_then(|v| v.as_str())
             .or_else(|| tc.input.get("tag").and_then(|v| v.as_str()))
             .unwrap_or("fact");
-        let title = format!("🧠 remembered ({})", category);
+        let title = format!("🧠 saved ({})", category);
         let border_style = Style::default().fg(Color::Rgb(255, 200, 100));
         let text_style = Style::default().fg(DIM_COLOR);
-        let content_width = width.saturating_sub(8) as usize;
+        let max_box = (width.saturating_sub(4) as usize).min(72);
+        let inner_width = max_box.saturating_sub(4);
 
         let mut box_content: Vec<Line<'static>> = Vec::new();
         let chars: Vec<char> = content.chars().collect();
-        if chars.len() <= content_width {
+        if chars.len() <= inner_width {
             box_content.push(Line::from(Span::styled(content.to_string(), text_style)));
         } else {
             let mut pos = 0;
             while pos < chars.len() {
-                let end = (pos + content_width).min(chars.len());
+                let end = (pos + inner_width).min(chars.len());
                 let chunk: String = chars[pos..end].iter().collect();
                 box_content.push(Line::from(Span::styled(chunk, text_style)));
                 pos = end;
@@ -3827,7 +3829,7 @@ pub(crate) fn render_tool_message(
         let box_lines = render_rounded_box(
             &title,
             box_content,
-            width.saturating_sub(2) as usize,
+            max_box,
             border_style,
         );
         for line in box_lines {
