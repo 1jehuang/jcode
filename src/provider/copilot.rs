@@ -17,15 +17,23 @@ const COPILOT_API_VERSION: &str = "2025-04-01";
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
 const FALLBACK_MODELS: &[&str] = &[
+    "claude-sonnet-4.6",
+    "claude-sonnet-4.5",
+    "claude-haiku-4.5",
+    "claude-opus-4.6",
+    "claude-opus-4.6-fast",
+    "claude-opus-4.5",
     "claude-sonnet-4",
-    "claude-sonnet-4-6",
-    "gpt-4o",
+    "gemini-3-pro-preview",
+    "gpt-5.3-codex",
+    "gpt-5.2-codex",
+    "gpt-5.2",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex",
+    "gpt-5.1",
+    "gpt-5.1-codex-mini",
+    "gpt-5-mini",
     "gpt-4.1",
-    "gpt-5",
-    "o3-mini",
-    "o4-mini",
-    "gemini-2.0-flash-001",
-    "gemini-2.5-pro",
 ];
 
 /// Context window sizes for Copilot models
@@ -217,19 +225,31 @@ impl CopilotApiProvider {
 
         match copilot_auth::fetch_available_models(&self.client, &bearer).await {
             Ok(models) => {
-                let model_ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
+                let picker_models: Vec<String> = models
+                    .iter()
+                    .filter(|m| m.model_picker_enabled)
+                    .map(|m| m.id.clone())
+                    .collect();
+                let all_ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
                 let default = copilot_auth::choose_default_model(&models);
                 crate::logging::info(&format!(
-                    "Copilot tier detection: {} models available, default -> {}. Models: {}",
-                    model_ids.len(),
+                    "Copilot tier detection: {} total, {} picker-enabled, default -> {}. Picker: [{}]. All: [{}]",
+                    all_ids.len(),
+                    picker_models.len(),
                     default,
-                    model_ids.join(", ")
+                    picker_models.join(", "),
+                    all_ids.join(", ")
                 ));
                 if let Ok(mut m) = self.model.try_write() {
                     *m = default;
                 }
+                let display_models = if picker_models.is_empty() {
+                    all_ids
+                } else {
+                    picker_models
+                };
                 if let Ok(mut fm) = self.fetched_models.try_write() {
-                    *fm = model_ids;
+                    *fm = display_models;
                 }
             }
             Err(e) => {
