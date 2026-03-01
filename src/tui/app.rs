@@ -494,6 +494,8 @@ enum PendingLogin {
     },
     /// Waiting for user to paste OpenRouter API key
     OpenRouter,
+    /// Waiting for user to paste Cursor API key
+    CursorApiKey,
     /// GitHub Copilot device flow in progress (polling in background)
     Copilot,
     /// Interactive provider selection (user picks a number)
@@ -9805,32 +9807,41 @@ impl App {
         let binary =
             std::env::var("JCODE_CURSOR_CLI_PATH").unwrap_or_else(|_| "cursor-agent".to_string());
 
-        self.push_display_message(DisplayMessage::system(format!(
-            "Starting Cursor login...\n\nRunning `{} login`",
-            binary
-        )));
-        self.set_status_notice("Login: cursor...");
+        if crate::auth::cursor::has_cursor_agent_cli() {
+            self.push_display_message(DisplayMessage::system(format!(
+                "**Cursor Login**\n\n\
+                 Running `{} login` to open browser authentication...",
+                binary
+            )));
+            self.set_status_notice("Login: cursor browser...");
 
-        match Self::run_external_login_command(&binary, &["login"]) {
-            Ok(()) => {
-                self.push_display_message(DisplayMessage::system(
-                    "✓ **Cursor login command completed.**".to_string(),
-                ));
-                self.set_status_notice("Login: ✓ cursor");
-            }
-            Err(e) => {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Cursor login failed: {}\n\nInstall Cursor Agent:\n\
-                     - macOS/Linux/WSL: `curl https://cursor.com/install -fsS | bash`\n\
-                     - Windows (PowerShell): `irm 'https://cursor.com/install?win32=true' | iex`\n\n\
-                     Then log in with one of:\n\
-                     - `{} login`\n\
-                     - `agent login`",
-                    e, binary
-                )));
-                self.set_status_notice("Login: cursor failed");
+            match Self::run_external_login_command(&binary, &["login"]) {
+                Ok(()) => {
+                    self.push_display_message(DisplayMessage::system(
+                        "✓ **Cursor login completed.**".to_string(),
+                    ));
+                    self.set_status_notice("Login: ✓ cursor");
+                    crate::auth::AuthStatus::invalidate_cache();
+                    return;
+                }
+                Err(e) => {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Cursor CLI login failed: {}\n\nFalling back to API key mode...",
+                        e
+                    )));
+                }
             }
         }
+
+        self.push_display_message(DisplayMessage::system(
+            "**Cursor API Key**\n\n\
+             Get your API key from: https://cursor.com/settings\n\
+             (Dashboard > Integrations > User API Keys)\n\n\
+             **Paste your API key below** (it will be saved securely)."
+                .to_string(),
+        ));
+        self.set_status_notice("Login: paste cursor key...");
+        self.pending_login = Some(PendingLogin::CursorApiKey);
     }
 
     fn start_copilot_login(&mut self) {
@@ -10110,6 +10121,35 @@ impl App {
                     Err(e) => {
                         self.push_display_message(DisplayMessage::error(format!(
                             "Failed to save OpenRouter key: {}",
+                            e
+                        )));
+                    }
+                }
+            }
+            PendingLogin::CursorApiKey => {
+                let key = input.trim().to_string();
+                if key.is_empty() {
+                    self.push_display_message(DisplayMessage::error(
+                        "API key cannot be empty.".to_string(),
+                    ));
+                    self.pending_login = Some(PendingLogin::CursorApiKey);
+                    return;
+                }
+
+                match crate::auth::cursor::save_api_key(&key) {
+                    Ok(()) => {
+                        crate::auth::AuthStatus::invalidate_cache();
+                        self.push_display_message(DisplayMessage::system(
+                            "✓ **Cursor API key saved!**\n\n\
+                             Stored at `~/.config/jcode/cursor.env`.\n\
+                             You can now use `/model` to switch to Cursor models."
+                                .to_string(),
+                        ));
+                        self.set_status_notice("Login: ✓ cursor");
+                    }
+                    Err(e) => {
+                        self.push_display_message(DisplayMessage::error(format!(
+                            "Failed to save Cursor API key: {}",
                             e
                         )));
                     }

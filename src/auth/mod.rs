@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod codex;
 pub mod copilot;
+pub mod cursor;
 pub mod oauth;
 
 use std::collections::HashMap;
@@ -186,7 +187,7 @@ impl AuthStatus {
         }
 
         // Check external/CLI auth providers (presence of installed CLI tooling)
-        status.cursor = if command_available_from_env("JCODE_CURSOR_CLI_PATH", "cursor-agent") {
+        status.cursor = if cursor::has_cursor_api_key() || cursor::has_cursor_agent_cli() {
             AuthState::Available
         } else {
             AuthState::NotConfigured
@@ -210,7 +211,7 @@ impl AuthStatus {
     }
 }
 
-fn command_available_from_env(env_var: &str, fallback: &str) -> bool {
+pub(crate) fn command_available_from_env(env_var: &str, fallback: &str) -> bool {
     if let Ok(cmd) = std::env::var(env_var) {
         let trimmed = cmd.trim();
         if !trimmed.is_empty() && command_exists(trimmed) {
