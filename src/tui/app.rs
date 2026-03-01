@@ -9832,6 +9832,30 @@ impl App {
         let binary =
             std::env::var("JCODE_CURSOR_CLI_PATH").unwrap_or_else(|_| "cursor-agent".to_string());
 
+        if let Ok(token) = crate::auth::cursor::read_vscdb_token() {
+            let preview = if token.len() > 20 {
+                format!("{}...", &token[..20])
+            } else {
+                token.clone()
+            };
+            if let Err(e) = crate::auth::cursor::save_api_key(&token) {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Found Cursor token in IDE storage but failed to save: {}",
+                    e
+                )));
+            } else {
+                self.push_display_message(DisplayMessage::system(format!(
+                    "✓ **Cursor token imported from IDE storage.**\n\n\
+                     Token: `{}`\n\
+                     Saved to `~/.config/jcode/cursor.env`",
+                    preview
+                )));
+                self.set_status_notice("Login: ✓ cursor (from IDE)");
+                crate::auth::AuthStatus::invalidate_cache();
+                return;
+            }
+        }
+
         if crate::auth::cursor::has_cursor_agent_cli() {
             self.push_display_message(DisplayMessage::system(format!(
                 "**Cursor Login**\n\n\

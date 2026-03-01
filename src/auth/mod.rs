@@ -201,7 +201,10 @@ impl AuthStatus {
                 AuthState::NotConfigured
             };
 
-        status.cursor = if cursor::has_cursor_api_key() || cursor::has_cursor_agent_cli() {
+        status.cursor = if cursor::has_cursor_api_key()
+            || cursor::has_cursor_agent_cli()
+            || cursor::has_cursor_vscdb_token()
+        {
             AuthState::Available
         } else {
             AuthState::NotConfigured
