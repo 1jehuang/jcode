@@ -707,8 +707,8 @@ async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Serve) => {
             // When running as a background server, skip interactive login prompts
             std::env::set_var("JCODE_NON_INTERACTIVE", "1");
-            let provider =
-                init_provider(&args.provider, args.model.as_deref()).await?;
+            let (provider, _registry) =
+                init_provider_and_registry(&args.provider, args.model.as_deref()).await?;
             let server = server::Server::new(provider);
             server.run().await?;
         }
@@ -1020,10 +1020,10 @@ async fn run_main(mut args: Args) -> Result<()> {
     Ok(())
 }
 
-async fn init_provider(
+async fn init_provider_and_registry(
     choice: &ProviderChoice,
     model: Option<&str>,
-) -> Result<Arc<dyn provider::Provider>> {
+) -> Result<(Arc<dyn provider::Provider>, tool::Registry)> {
     let provider: Arc<dyn provider::Provider> = match choice {
         ProviderChoice::Claude => {
             // Explicit Claude - use MultiProvider but prefer Claude
@@ -1154,14 +1154,6 @@ async fn init_provider(
         }
     }
 
-    Ok(provider)
-}
-
-async fn init_provider_and_registry(
-    choice: &ProviderChoice,
-    model: Option<&str>,
-) -> Result<(Arc<dyn provider::Provider>, tool::Registry)> {
-    let provider = init_provider(choice, model).await?;
     let registry = tool::Registry::new(provider.clone()).await;
     Ok((provider, registry))
 }

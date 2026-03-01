@@ -52,7 +52,7 @@ impl NotificationDispatcher {
     pub fn new() -> Self {
         let cfg = config().safety.clone();
         Self {
-            client: crate::provider::shared_http_client(),
+            client: reqwest::Client::new(),
             channels: crate::channel::ChannelRegistry::from_config(&cfg),
             config: cfg,
         }
@@ -60,7 +60,7 @@ impl NotificationDispatcher {
 
     pub fn from_config(config: SafetyConfig) -> Self {
         Self {
-            client: crate::provider::shared_http_client(),
+            client: reqwest::Client::new(),
             channels: crate::channel::ChannelRegistry::from_config(&config),
             config,
         }

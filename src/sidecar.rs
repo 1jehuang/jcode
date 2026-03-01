@@ -71,7 +71,7 @@ impl Sidecar {
         };
 
         Self {
-            client: crate::provider::shared_http_client(),
+            client: reqwest::Client::new(),
             model,
             max_tokens: DEFAULT_MAX_TOKENS,
             backend,
