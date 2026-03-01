@@ -171,6 +171,35 @@ pub trait TuiState {
     /// Suggestion prompts for new users (shown in initial empty state).
     /// Returns (label, prompt_text) pairs. Empty if user is experienced or not authenticated.
     fn suggestion_prompts(&self) -> Vec<(String, String)>;
+    /// Cache TTL status - shows whether the prompt cache is warm/cold based on idle time
+    fn cache_ttl_status(&self) -> Option<CacheTtlInfo>;
+}
+
+/// Cache TTL information for the current provider
+#[derive(Debug, Clone)]
+pub struct CacheTtlInfo {
+    /// Seconds until cache expires (0 = already expired)
+    pub remaining_secs: u64,
+    /// Total TTL for this provider in seconds
+    pub ttl_secs: u64,
+    /// Whether the cache is expired (cold)
+    pub is_cold: bool,
+    /// Estimated cached tokens (from last response's input tokens)
+    pub cached_tokens: Option<u64>,
+}
+
+/// Get the prompt cache TTL in seconds for a given provider name.
+/// Returns None if the provider doesn't support prompt caching or TTL is unknown.
+pub fn cache_ttl_for_provider(provider: &str) -> Option<u64> {
+    match provider.to_lowercase().as_str() {
+        "anthropic" | "claude" => Some(300),
+        "openai" => Some(300),
+        "openrouter" => Some(300),
+        "copilot" => None,
+        "cursor" => None,
+        "antigravity" => None,
+        _ => None,
+    }
 }
 
 /// Unified model/provider picker with three columns
@@ -284,7 +313,13 @@ pub(crate) fn redraw_interval(state: &dyn TuiState) -> Duration {
         .time_since_activity()
         .map(|d| d >= REDRAW_DEEP_IDLE_AFTER)
         .unwrap_or(false);
-    if deep_idle {
+
+    let cache_counting_down = state
+        .cache_ttl_status()
+        .map(|c| !c.is_cold && c.remaining_secs <= 60)
+        .unwrap_or(false);
+
+    if deep_idle && !cache_counting_down {
         REDRAW_DEEP_IDLE
     } else {
         REDRAW_IDLE

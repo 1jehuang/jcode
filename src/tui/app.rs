@@ -560,6 +560,10 @@ pub struct App {
     // Subagent status (shown during Task tool execution)
     subagent_status: Option<String>,
     processing_started: Option<Instant>,
+    // When the last API response completed (for cache TTL tracking)
+    last_api_completed: Option<Instant>,
+    // Input tokens from the last completed turn (for cache TTL display)
+    last_turn_input_tokens: Option<u64>,
     // Pending turn to process (allows UI to redraw before processing starts)
     pending_turn: bool,
     // Tool calls detected during streaming (shown in real-time with details)
@@ -926,6 +930,8 @@ impl App {
             status: ProcessingStatus::default(),
             subagent_status: None,
             processing_started: None,
+            last_api_completed: None,
+            last_turn_input_tokens: None,
             pending_turn: false,
             streaming_tool_calls: Vec::new(),
             provider_session_id: None,
@@ -1376,11 +1382,9 @@ impl App {
             }
 
             // Queue an automatic message to notify the AI that reload completed
-            // Only do this for the session that actually initiated the reload
-            // (identified by matching ReloadContext). Other sessions that are
-            // restored after a server restart were idle and shouldn't be prompted.
             let reload_ctx = ReloadContext::load_for_session(session_id).ok().flatten();
             if let Some(ctx) = reload_ctx {
+                // This session initiated the reload - send the reload-specific continuation
                 let task_info = ctx
                     .task_context
                     .map(|t| format!("\nTask context: {}", t))
@@ -1402,6 +1406,27 @@ impl App {
                 // Trigger processing so the queued message gets sent to the LLM.
                 // Without this, the local event loop waits for user input since
                 // process_queued_messages only runs inside process_turn_with_input.
+                self.is_processing = true;
+                self.status = ProcessingStatus::Sending;
+                self.processing_started = Some(Instant::now());
+                self.pending_turn = true;
+            } else if self.was_interrupted_by_reload() {
+                // This session was interrupted by another session's reload.
+                // The conversation has incomplete tool results - auto-continue.
+                crate::logging::info(
+                    "Session was interrupted by reload (not initiator), queuing continuation",
+                );
+                self.push_display_message(DisplayMessage::system(
+                    "⚡ Session was interrupted by server reload. Continuing...".to_string(),
+                ));
+                self.queued_messages.push(
+                    "[SYSTEM: Your session was interrupted by a server reload while a tool was running. \
+                     The tool was aborted and its results may be incomplete. \
+                     Please continue exactly where you left off. Look at the conversation history \
+                     to understand what you were doing and resume immediately. \
+                     Do NOT ask the user what to do - just continue your work.]"
+                        .to_string(),
+                );
                 self.is_processing = true;
                 self.status = ProcessingStatus::Sending;
                 self.processing_started = Some(Instant::now());
@@ -1431,6 +1456,39 @@ impl App {
                     title: None,
                     tool_data: None,
                 });
+            }
+        }
+    }
+
+    /// Check if the current session was interrupted by a server reload.
+    /// Detects two patterns:
+    /// 1. Last message is a User ToolResult containing reload interruption text
+    /// 2. Last assistant message ends with "[generation interrupted - server reloading]"
+    fn was_interrupted_by_reload(&self) -> bool {
+        use crate::message::{ContentBlock, Role};
+        let messages = &self.session.messages;
+        if messages.is_empty() {
+            return false;
+        }
+        let last = &messages[messages.len() - 1];
+        match last.role {
+            Role::User => {
+                last.content.iter().any(|block| match block {
+                    ContentBlock::ToolResult { content, is_error, .. } => {
+                        is_error.unwrap_or(false)
+                            && (content.contains("interrupted by server reload")
+                                || content.contains("Skipped - server reloading"))
+                    }
+                    _ => false,
+                })
+            }
+            Role::Assistant => {
+                last.content.iter().any(|block| match block {
+                    ContentBlock::Text { text, .. } => {
+                        text.ends_with("[generation interrupted - server reloading]")
+                    }
+                    _ => false,
+                })
             }
         }
     }
@@ -5341,9 +5399,11 @@ impl App {
                         "⚡ Session was interrupted mid-generation. Continuing...".to_string(),
                     ));
                     self.queued_messages.push(
-                        "[SYSTEM: Your previous session was interrupted while you were generating a response. \
-                         The session has been restored. Please continue exactly where you left off. \
-                         Look at the conversation history to understand what you were doing and resume immediately.]"
+                        "[SYSTEM: Your session was interrupted by a server reload while you were working. \
+                         The session has been restored. Any tool that was running was aborted and its results \
+                         may be incomplete. Please continue exactly where you left off. \
+                         Look at the conversation history to understand what you were doing and resume immediately. \
+                         Do NOT ask the user what to do - just continue your work.]"
                             .to_string(),
                     );
                 }
@@ -8204,6 +8264,36 @@ impl App {
             let _ = self.session.save();
             self.update_requested = Some(self.session.id.clone());
             self.should_quit = true;
+            return;
+        }
+
+        if trimmed == "/zz" || trimmed == "/zzz" {
+            use crate::provider::copilot::PremiumMode;
+            let mode = if trimmed == "/zzz" {
+                PremiumMode::Zero
+            } else {
+                PremiumMode::OnePerSession
+            };
+            let current = self.provider.premium_mode();
+            if current == mode {
+                self.provider.set_premium_mode(PremiumMode::Normal);
+                self.set_status_notice("Premium: normal");
+                self.push_display_message(DisplayMessage::system(
+                    "Premium request mode reset to normal.".to_string(),
+                ));
+            } else {
+                self.provider.set_premium_mode(mode);
+                let label = match mode {
+                    PremiumMode::OnePerSession => "one premium per session",
+                    PremiumMode::Zero => "zero premium requests",
+                    PremiumMode::Normal => "normal",
+                };
+                self.set_status_notice(&format!("Premium: {}", label));
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Premium mode: **{}**. Toggle off with `{}`.",
+                    label, trimmed,
+                )));
+            }
             return;
         }
 
@@ -13414,8 +13504,13 @@ impl App {
     }
 
     fn push_turn_footer(&mut self, duration: Option<f32>) {
-        // Log unexpected cache misses for debugging
         self.log_cache_miss_if_unexpected();
+
+        self.last_api_completed = Some(Instant::now());
+        self.last_turn_input_tokens = {
+            let input = self.streaming_input_tokens;
+            if input > 0 { Some(input) } else { None }
+        };
 
         if let Some(footer) = self.build_turn_footer(duration) {
             self.push_display_message(DisplayMessage {
@@ -14855,6 +14950,20 @@ impl super::TuiState for App {
 
     fn suggestion_prompts(&self) -> Vec<(String, String)> {
         App::suggestion_prompts(self)
+    }
+
+    fn cache_ttl_status(&self) -> Option<super::CacheTtlInfo> {
+        let last_completed = self.last_api_completed?;
+        let provider = self.provider_name();
+        let ttl_secs = super::cache_ttl_for_provider(&provider)?;
+        let elapsed = last_completed.elapsed().as_secs();
+        let remaining = ttl_secs.saturating_sub(elapsed);
+        Some(super::CacheTtlInfo {
+            remaining_secs: remaining,
+            ttl_secs,
+            is_cold: remaining == 0,
+            cached_tokens: self.last_turn_input_tokens,
+        })
     }
 }
 

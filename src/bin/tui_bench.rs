@@ -394,6 +394,10 @@ impl TuiState for BenchState {
     fn suggestion_prompts(&self) -> Vec<(String, String)> {
         Vec::new()
     }
+
+    fn cache_ttl_status(&self) -> Option<jcode::tui::CacheTtlInfo> {
+        None
+    }
 }
 
 fn make_text(len: usize) -> String {

@@ -5502,6 +5502,48 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
         }
     };
 
+    if !app.is_processing() {
+        if let Some(cache_info) = app.cache_ttl_status() {
+            if cache_info.is_cold {
+                let tokens_str = cache_info.cached_tokens
+                    .map(|t| {
+                        if t >= 1_000_000 {
+                            format!(" ({:.1}M tok)", t as f64 / 1_000_000.0)
+                        } else if t >= 1_000 {
+                            format!(" ({}K tok)", t / 1000)
+                        } else {
+                            format!(" ({} tok)", t)
+                        }
+                    })
+                    .unwrap_or_default();
+                if !line.spans.is_empty() {
+                    line.spans.push(Span::styled(" · ", Style::default().fg(DIM_COLOR)));
+                }
+                line.spans.push(Span::styled(
+                    format!("🧊 cache cold{}", tokens_str),
+                    Style::default().fg(Color::Rgb(140, 180, 255)),
+                ));
+            } else if cache_info.remaining_secs <= 60 {
+                let tokens_str = cache_info.cached_tokens
+                    .map(|t| {
+                        if t >= 1_000 {
+                            format!(" {}K", t / 1000)
+                        } else {
+                            format!(" {}", t)
+                        }
+                    })
+                    .unwrap_or_default();
+                if !line.spans.is_empty() {
+                    line.spans.push(Span::styled(" · ", Style::default().fg(DIM_COLOR)));
+                }
+                line.spans.push(Span::styled(
+                    format!("⏳ cache {}s{}", cache_info.remaining_secs, tokens_str),
+                    Style::default().fg(Color::Rgb(255, 193, 7)),
+                ));
+            }
+        }
+    }
+
     if let Some(notice) = app.status_notice() {
         if !line.spans.is_empty() {
             line.spans

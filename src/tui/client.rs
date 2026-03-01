@@ -66,6 +66,8 @@ pub struct ClientApp {
     // Per-API-call watermark used to convert cumulative output snapshots into deltas.
     call_output_tokens_seen: u64,
     last_activity: Option<Instant>,
+    last_api_completed: Option<Instant>,
+    last_turn_input_tokens: Option<u64>,
 
     // Client-specific state
     should_quit: bool,
@@ -269,6 +271,8 @@ impl ClientApp {
             streaming_total_output_tokens: 0,
             call_output_tokens_seen: 0,
             last_activity: None,
+            last_api_completed: None,
+            last_turn_input_tokens: None,
 
             // Client-specific state
             should_quit: false,
@@ -845,6 +849,12 @@ impl ClientApp {
                 self.update_cost();
 
                 self.is_processing = false;
+                self.last_api_completed = Some(Instant::now());
+                self.last_turn_input_tokens = if self.streaming_input_tokens > 0 {
+                    Some(self.streaming_input_tokens)
+                } else {
+                    None
+                };
                 // Clear any leftover diff tracking state
                 self.pending_diffs.clear();
                 self.call_output_tokens_seen = 0;
@@ -1744,6 +1754,20 @@ impl TuiState for ClientApp {
 
     fn suggestion_prompts(&self) -> Vec<(String, String)> {
         Vec::new()
+    }
+
+    fn cache_ttl_status(&self) -> Option<super::CacheTtlInfo> {
+        let last_completed = self.last_api_completed?;
+        let provider = &self.provider_name;
+        let ttl_secs = super::cache_ttl_for_provider(provider)?;
+        let elapsed = last_completed.elapsed().as_secs();
+        let remaining = ttl_secs.saturating_sub(elapsed);
+        Some(super::CacheTtlInfo {
+            remaining_secs: remaining,
+            ttl_secs,
+            is_cold: remaining == 0,
+            cached_tokens: self.last_turn_input_tokens,
+        })
     }
 }
 
