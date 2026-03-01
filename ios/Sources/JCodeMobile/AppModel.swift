@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
         let role: Role
         var text: String
         var toolCalls: [ToolCallInfo]
+        var images: [(String, String)]
 
         enum Role: String {
             case user
@@ -26,11 +27,12 @@ final class AppModel: ObservableObject {
             case system
         }
 
-        init(id: UUID = UUID(), role: Role, text: String, toolCalls: [ToolCallInfo] = []) {
+        init(id: UUID = UUID(), role: Role, text: String, toolCalls: [ToolCallInfo] = [], images: [(String, String)] = []) {
             self.id = id
             self.role = role
             self.text = text
             self.toolCalls = toolCalls
+            self.images = images
         }
 
         static func == (lhs: ChatEntry, rhs: ChatEntry) -> Bool {
@@ -329,7 +331,7 @@ final class AppModel: ObservableObject {
         statusMessage = "Disconnected"
     }
 
-    func sendDraft() async {
+    func sendDraft(images: [(String, String)] = []) async {
         clearTransientMessages()
 
         guard connectionState == .connected else {
@@ -338,7 +340,7 @@ final class AppModel: ObservableObject {
         }
 
         let trimmed = draftMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+        guard !trimmed.isEmpty || !images.isEmpty else {
             return
         }
 
@@ -348,14 +350,18 @@ final class AppModel: ObservableObject {
         }
 
         do {
-            messages.append(ChatEntry(role: .user, text: trimmed))
+            messages.append(ChatEntry(role: .user, text: trimmed, images: images))
             draftMessage = ""
 
             let assistantPlaceholder = ChatEntry(role: .assistant, text: "")
             messages.append(assistantPlaceholder)
             lastAssistantMessageId = assistantPlaceholder.id
 
-            try await client.send(trimmed)
+            if images.isEmpty {
+                try await client.send(trimmed)
+            } else {
+                try await client.send(trimmed, images: images)
+            }
         } catch {
             if let id = lastAssistantMessageId,
                let idx = messages.firstIndex(where: { $0.id == id }) {

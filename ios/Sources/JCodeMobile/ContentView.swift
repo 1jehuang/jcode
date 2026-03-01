@@ -389,13 +389,30 @@ private struct ChatBubble: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
+            if !message.images.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(Array(message.images.enumerated()), id: \.offset) { _, pair in
+                            if let data = Data(base64Encoded: pair.1),
+                               let uiImage = UIImage(data: data) {
+                                Image(uiImage: uiImage)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .frame(maxWidth: 200, maxHeight: 200)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                            }
+                        }
+                    }
+                }
+            }
+
             if message.role == .assistant && !message.text.isEmpty {
                 MarkdownText(text: message.text)
                     .padding(10)
                     .frame(maxWidth: 520, alignment: .leading)
                     .background(bubbleColor)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            } else {
+            } else if !message.text.isEmpty || message.images.isEmpty {
                 Text(message.text.isEmpty ? "..." : message.text)
                     .textSelection(.enabled)
                     .padding(10)
@@ -531,6 +548,7 @@ private struct MessageComposer: View {
     @EnvironmentObject private var model: AppModel
     @State private var showInterruptSheet = false
     @State private var interruptMessage = ""
+    @State private var attachments: [ImageAttachment] = []
 
     var body: some View {
         VStack(spacing: 8) {
@@ -558,13 +576,27 @@ private struct MessageComposer: View {
                 }
             }
 
-            HStack(spacing: 10) {
+            if !attachments.isEmpty {
+                AttachmentStrip(attachments: $attachments)
+            }
+
+            HStack(spacing: 8) {
+                PhotoPickerButton(attachments: $attachments)
+                    .buttonStyle(.borderless)
+
+                if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                    CameraButton(attachments: $attachments)
+                        .buttonStyle(.borderless)
+                }
+
                 TextField("Message jcode...", text: $model.draftMessage, axis: .vertical)
                     .lineLimit(1 ... 6)
                     .textFieldStyle(.roundedBorder)
 
                 Button {
-                    Task { await model.sendDraft() }
+                    let images = attachments.map { ($0.mediaType, $0.base64Data) }
+                    attachments.removeAll()
+                    Task { await model.sendDraft(images: images) }
                 } label: {
                     Image(systemName: "paperplane.fill")
                         .padding(8)

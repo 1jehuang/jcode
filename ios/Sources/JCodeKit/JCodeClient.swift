@@ -137,6 +137,10 @@ public actor JCodeClient {
         try await connection.sendMessage(message)
     }
 
+    public func send(_ message: String, images: [(String, String)]) async throws -> UInt64 {
+        try await connection.sendMessage(message, images: images)
+    }
+
     public func cancel() async throws {
         try await connection.cancelGeneration()
     }
