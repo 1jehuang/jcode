@@ -51,6 +51,18 @@ fn copilot_context_window(model: &str) -> usize {
 /// Copilot API provider - uses GitHub Copilot's OpenAI-compatible API.
 /// Authenticates via GitHub OAuth token, exchanges for Copilot bearer token,
 /// and sends requests to api.githubcopilot.com.
+/// Premium request conservation mode.
+/// 0 = normal (every user message is premium)
+/// 1 = one premium per session (first user message only, rest are agent)
+/// 2 = zero premium (all requests sent as agent)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PremiumMode {
+    Normal = 0,
+    OnePerSession = 1,
+    Zero = 2,
+}
+
 pub struct CopilotApiProvider {
     client: reqwest::Client,
     model: Arc<RwLock<String>>,
@@ -61,6 +73,8 @@ pub struct CopilotApiProvider {
     machine_id: String,
     init_ready: Arc<tokio::sync::Notify>,
     init_done: Arc<std::sync::atomic::AtomicBool>,
+    premium_mode: Arc<std::sync::atomic::AtomicU8>,
+    user_turn_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CopilotApiProvider {
@@ -79,6 +93,8 @@ impl CopilotApiProvider {
             machine_id: Self::get_or_create_machine_id(),
             init_ready: Arc::new(tokio::sync::Notify::new()),
             init_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            premium_mode: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -100,6 +116,8 @@ impl CopilotApiProvider {
             machine_id: Self::get_or_create_machine_id(),
             init_ready: Arc::new(tokio::sync::Notify::new()),
             init_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            premium_mode: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -120,7 +138,7 @@ impl CopilotApiProvider {
         id
     }
 
-    fn is_user_initiated(messages: &[ChatMessage]) -> bool {
+    fn is_user_initiated_raw(messages: &[ChatMessage]) -> bool {
         let Some(last_msg) = messages.last() else {
             return true;
         };
@@ -132,6 +150,37 @@ impl CopilotApiProvider {
             .iter()
             .any(|block| matches!(block, ContentBlock::ToolResult { .. }));
         !has_tool_result
+    }
+
+    fn is_user_initiated(&self, messages: &[ChatMessage]) -> bool {
+        let raw = Self::is_user_initiated_raw(messages);
+        if !raw {
+            return false;
+        }
+        let mode = self.premium_mode.load(std::sync::atomic::Ordering::Relaxed);
+        match mode {
+            2 => false,
+            1 => {
+                let count = self.user_turn_count.load(std::sync::atomic::Ordering::Relaxed);
+                count == 0
+            }
+            _ => true,
+        }
+    }
+
+    pub fn set_premium_mode(&self, mode: PremiumMode) {
+        self.premium_mode.store(mode as u8, std::sync::atomic::Ordering::Relaxed);
+        if mode != PremiumMode::Normal {
+            crate::logging::info(&format!("Copilot premium mode set to {:?}", mode));
+        }
+    }
+
+    pub fn get_premium_mode(&self) -> PremiumMode {
+        match self.premium_mode.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => PremiumMode::OnePerSession,
+            2 => PremiumMode::Zero,
+            _ => PremiumMode::Normal,
+        }
     }
 
     /// Detect the user's Copilot tier and set the best default model.
@@ -568,7 +617,7 @@ impl CopilotApiProvider {
                                 }))
                                 .await;
                         }
-                        crate::copilot_usage::record_request(input_tokens, output_tokens);
+                        crate::copilot_usage::record_request(input_tokens, output_tokens, true);
                         let _ = tx
                             .send(Ok(StreamEvent::MessageEnd { stop_reason: None }))
                             .await;
@@ -697,7 +746,10 @@ impl Provider for CopilotApiProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        let is_user_initiated = Self::is_user_initiated(messages);
+        let is_user_initiated = self.is_user_initiated(messages);
+        if is_user_initiated {
+            self.user_turn_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let built_messages = Self::build_messages(system, messages);
         let built_tools = Self::build_tools(tools);
 
@@ -713,6 +765,8 @@ impl Provider for CopilotApiProvider {
             machine_id: self.machine_id.clone(),
             init_ready: self.init_ready.clone(),
             init_done: self.init_done.clone(),
+            premium_mode: self.premium_mode.clone(),
+            user_turn_count: self.user_turn_count.clone(),
         };
 
         tokio::spawn(async move {
@@ -767,6 +821,14 @@ impl Provider for CopilotApiProvider {
         true
     }
 
+    fn set_premium_mode(&self, mode: PremiumMode) {
+        CopilotApiProvider::set_premium_mode(self, mode);
+    }
+
+    fn premium_mode(&self) -> PremiumMode {
+        CopilotApiProvider::get_premium_mode(self)
+    }
+
     fn context_window(&self) -> usize {
         copilot_context_window(&self.model())
     }
@@ -782,6 +844,8 @@ impl Provider for CopilotApiProvider {
             machine_id: self.machine_id.clone(),
             init_ready: self.init_ready.clone(),
             init_done: self.init_done.clone(),
+            premium_mode: self.premium_mode.clone(),
+            user_turn_count: self.user_turn_count.clone(),
         })
     }
 }
@@ -801,6 +865,8 @@ mod tests {
             machine_id: "test-machine".to_string(),
             init_ready: Arc::new(tokio::sync::Notify::new()),
             init_done: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            premium_mode: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -1064,7 +1130,7 @@ mod tests {
     #[test]
     fn is_user_initiated_empty_messages() {
         let messages: Vec<ChatMessage> = vec![];
-        assert!(CopilotApiProvider::is_user_initiated(&messages));
+        assert!(CopilotApiProvider::is_user_initiated_raw(&messages));
     }
 
     #[test]
@@ -1076,7 +1142,7 @@ mod tests {
                 cache_control: None,
             }],
         )];
-        assert!(CopilotApiProvider::is_user_initiated(&messages));
+        assert!(CopilotApiProvider::is_user_initiated_raw(&messages));
     }
 
     #[test]
@@ -1106,7 +1172,7 @@ mod tests {
                 }],
             ),
         ];
-        assert!(!CopilotApiProvider::is_user_initiated(&messages));
+        assert!(!CopilotApiProvider::is_user_initiated_raw(&messages));
     }
 
     #[test]
@@ -1127,6 +1193,6 @@ mod tests {
                 }],
             ),
         ];
-        assert!(CopilotApiProvider::is_user_initiated(&messages));
+        assert!(CopilotApiProvider::is_user_initiated_raw(&messages));
     }
 }
