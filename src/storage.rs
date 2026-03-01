@@ -52,12 +52,64 @@ pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
     let file = std::fs::File::create(&tmp_path)?;
     let mut writer = std::io::BufWriter::new(file);
     serde_json::to_writer(&mut writer, value)?;
-    writer.flush()?;
-    std::fs::rename(tmp_path, path)?;
+    let file = writer.into_inner().map_err(|e| anyhow::anyhow!("flush failed: {}", e))?;
+    file.sync_all()?;
+
+    if path.exists() {
+        let bak_path = path.with_extension("bak");
+        let _ = std::fs::rename(path, &bak_path);
+    }
+
+    std::fs::rename(&tmp_path, path)?;
+
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+
     Ok(())
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let data = std::fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&data)?)
+    match serde_json::from_str(&data) {
+        Ok(val) => Ok(val),
+        Err(e) => {
+            let bak_path = path.with_extension("bak");
+            if bak_path.exists() {
+                crate::logging::warn(&format!(
+                    "Corrupt JSON at {}, trying backup: {}",
+                    path.display(),
+                    e
+                ));
+                let bak_data = std::fs::read_to_string(&bak_path)?;
+                match serde_json::from_str(&bak_data) {
+                    Ok(val) => {
+                        crate::logging::info(&format!(
+                            "Recovered from backup: {}",
+                            bak_path.display()
+                        ));
+                        let _ = std::fs::copy(&bak_path, path);
+                        Ok(val)
+                    }
+                    Err(bak_err) => {
+                        Err(anyhow::anyhow!(
+                            "Corrupt JSON at {} ({}), backup also corrupt ({})",
+                            path.display(),
+                            e,
+                            bak_err
+                        ))
+                    }
+                }
+            } else {
+                Err(anyhow::anyhow!(
+                    "Corrupt JSON at {}: {}",
+                    path.display(),
+                    e
+                ))
+            }
+        }
+    }
 }

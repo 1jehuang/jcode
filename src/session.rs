@@ -938,8 +938,17 @@ fn is_pid_running(pid: u32) -> bool {
 pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
     // If it looks like a full session ID (contains session_), try loading directly first
     if name_or_id.starts_with("session_") {
-        if let Ok(_) = Session::load(name_or_id) {
-            return Ok(name_or_id.to_string());
+        match Session::load(name_or_id) {
+            Ok(_) => return Ok(name_or_id.to_string()),
+            Err(e) => {
+                if session_exists(name_or_id) {
+                    anyhow::bail!(
+                        "Session '{}' exists but failed to load (possibly corrupt):\n  {}",
+                        name_or_id,
+                        e
+                    );
+                }
+            }
         }
     }
 
