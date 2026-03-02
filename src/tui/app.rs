@@ -268,6 +268,8 @@ pub struct RunResult {
     pub update_session: Option<String>,
     /// Exit code to use (for canary wrapper communication)
     pub exit_code: Option<i32>,
+    /// The session ID that was active (for resume hints on exit)
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4131,6 +4133,7 @@ impl App {
             rebuild_session: self.rebuild_requested.take(),
             update_session: self.update_requested.take(),
             exit_code: self.requested_exit_code,
+            session_id: Some(self.session.id.clone()),
         })
     }
 
@@ -4684,6 +4687,11 @@ impl App {
             rebuild_session: self.rebuild_requested.take(),
             update_session: self.update_requested.take(),
             exit_code: self.requested_exit_code,
+            session_id: if self.is_remote {
+                self.remote_session_id.clone()
+            } else {
+                Some(self.session.id.clone())
+            },
         })
     }
 
@@ -4844,6 +4852,11 @@ impl App {
             rebuild_session: None,
             update_session: None,
             exit_code: None,
+            session_id: if self.is_remote {
+                self.remote_session_id.clone()
+            } else {
+                Some(self.session.id.clone())
+            },
         })
     }
 
@@ -5305,7 +5318,8 @@ impl App {
             }
             ServerEvent::SessionId { session_id } => {
                 remote.set_session_id(session_id.clone());
-                self.remote_session_id = Some(session_id);
+                self.remote_session_id = Some(session_id.clone());
+                crate::set_current_session(&session_id);
                 self.update_terminal_title();
                 false
             }
@@ -5368,6 +5382,7 @@ impl App {
                 let prev_session_id = self.remote_session_id.clone();
                 remote.set_session_id(session_id.clone());
                 self.remote_session_id = Some(session_id.clone());
+                crate::set_current_session(&session_id);
                 let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
 
                 if session_changed {

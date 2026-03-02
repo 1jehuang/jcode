@@ -46,3 +46,17 @@ pub mod update;
 pub mod usage;
 pub mod util;
 pub mod video_export;
+
+use std::sync::Mutex;
+
+static CURRENT_SESSION_ID: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn set_current_session(session_id: &str) {
+    if let Ok(mut guard) = CURRENT_SESSION_ID.lock() {
+        *guard = Some(session_id.to_string());
+    }
+}
+
+pub fn get_current_session() -> Option<String> {
+    CURRENT_SESSION_ID.lock().ok()?.clone()
+}

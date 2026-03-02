@@ -72,16 +72,14 @@ use std::io::{self, IsTerminal, Write};
 use std::net::ToSocketAddrs;
 use std::panic;
 use std::process::Command as ProcessCommand;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-/// Global session ID for panic recovery
-static CURRENT_SESSION_ID: Mutex<Option<String>> = Mutex::new(None);
+fn set_current_session(session_id: &str) {
+    jcode::set_current_session(session_id);
+}
 
-/// Set the current session ID for panic recovery
-pub fn set_current_session(session_id: &str) {
-    if let Ok(mut guard) = CURRENT_SESSION_ID.lock() {
-        *guard = Some(session_id.to_string());
-    }
+fn get_current_session() -> Option<String> {
+    jcode::get_current_session()
 }
 
 /// Install panic hook that prints session recovery command
@@ -92,36 +90,31 @@ fn install_panic_hook() {
         default_hook(info);
 
         // Print recovery command if we have a session
-        if let Ok(guard) = CURRENT_SESSION_ID.lock() {
-            if let Some(session_id) = guard.as_ref() {
-                let session_name =
-                    id::extract_session_name(session_id).unwrap_or(session_id.as_str());
-                eprintln!();
-                eprintln!(
-                    "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
-                    session_name
-                );
-                eprintln!("  jcode --resume {}", session_id);
-                eprintln!();
+        if let Some(session_id) = get_current_session() {
+            let session_name =
+                id::extract_session_name(&session_id).unwrap_or(session_id.as_str());
+            eprintln!();
+            eprintln!(
+                "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
+                session_name
+            );
+            eprintln!("  jcode --resume {}", session_id);
+            eprintln!();
 
-                if let Ok(mut session) = session::Session::load(session_id) {
-                    session.mark_crashed(Some(format!("Panic: {}", info)));
-                    let _ = session.save();
-                }
+            if let Ok(mut session) = session::Session::load(&session_id) {
+                session.mark_crashed(Some(format!("Panic: {}", info)));
+                let _ = session.save();
             }
         }
     }));
 }
 
 fn mark_current_session_crashed(message: String) {
-    if let Ok(guard) = CURRENT_SESSION_ID.lock() {
-        if let Some(session_id) = guard.as_ref() {
-            if let Ok(mut session) = session::Session::load(session_id) {
-                // Don't overwrite an explicit clean shutdown status.
-                if matches!(session.status, session::SessionStatus::Active) {
-                    session.mark_crashed(Some(message));
-                    let _ = session.save();
-                }
+    if let Some(session_id) = get_current_session() {
+        if let Ok(mut session) = session::Session::load(&session_id) {
+            if matches!(session.status, session::SessionStatus::Active) {
+                session.mark_crashed(Some(message));
+                let _ = session.save();
             }
         }
     }
@@ -220,17 +213,15 @@ fn handle_termination_signal(sig: i32) -> ! {
         crossterm::cursor::Show
     );
 
-    if let Ok(guard) = CURRENT_SESSION_ID.lock() {
-        if let Some(session_id) = guard.as_ref() {
-            let session_name = id::extract_session_name(session_id).unwrap_or(session_id.as_str());
-            eprintln!();
-            eprintln!(
-                "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
-                session_name
-            );
-            eprintln!("  jcode --resume {}", session_id);
-            eprintln!();
-        }
+    if let Some(session_id) = get_current_session() {
+        let session_name = id::extract_session_name(&session_id).unwrap_or(session_id.as_str());
+        eprintln!();
+        eprintln!(
+            "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
+            session_name
+        );
+        eprintln!("  jcode --resume {}", session_id);
+        eprintln!();
     }
 
     std::process::exit(128 + sig);
@@ -669,13 +660,11 @@ async fn main() -> Result<()> {
         logging::error(&error_str);
 
         // Print session recovery command if we have a session
-        if let Ok(guard) = CURRENT_SESSION_ID.lock() {
-            if let Some(session_id) = guard.as_ref() {
-                eprintln!();
-                eprintln!("\x1b[33mTo restore this session, run:\x1b[0m");
-                eprintln!("  jcode --resume {}", session_id);
-                eprintln!();
-            }
+        if let Some(session_id) = get_current_session() {
+            eprintln!();
+            eprintln!("\x1b[33mTo restore this session, run:\x1b[0m");
+            eprintln!("  jcode --resume {}", session_id);
+            eprintln!();
         }
 
         return Err(e);
@@ -2766,6 +2755,25 @@ async fn run_tui_client(
         hot_update(update_session_id)?;
     }
 
+    // Print resume command for normal exits (not hot-reload/rebuild/update)
+    if run_result.reload_session.is_none()
+        && run_result.rebuild_session.is_none()
+        && run_result.update_session.is_none()
+    {
+        if let Some(ref session_id) = run_result.session_id {
+            let session_name = id::extract_session_name(session_id)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| session_id.clone());
+            eprintln!();
+            eprintln!(
+                "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
+                session_name
+            );
+            eprintln!("  jcode --resume {}", session_id);
+            eprintln!();
+        }
+    }
+
     Ok(())
 }
 
@@ -3776,32 +3784,24 @@ mod tests {
     #[test]
     fn test_session_recovery_tracking() {
         let _guard = TEST_SESSION_LOCK.lock().unwrap();
-        // Set a session ID
         set_current_session("test_session_123");
 
-        // Verify it's stored correctly
-        let guard = CURRENT_SESSION_ID.lock().unwrap();
-        assert_eq!(guard.as_ref().unwrap(), "test_session_123");
+        let stored = get_current_session();
+        assert_eq!(stored.as_deref(), Some("test_session_123"));
     }
 
     #[test]
     fn test_session_recovery_message_format() {
         let _guard = TEST_SESSION_LOCK.lock().unwrap();
-        // Set a unique session ID for this test
         let test_session = "session_format_test_12345";
         set_current_session(test_session);
 
-        // Verify the session ID is accessible and forms a valid recovery command
-        if let Ok(guard) = CURRENT_SESSION_ID.lock() {
-            if let Some(session_id) = guard.as_ref() {
-                // Verify the recovery command format is correct
-                let expected_cmd = format!("jcode --resume {}", session_id);
-                assert!(expected_cmd.starts_with("jcode --resume "));
-                // Session ID should be non-empty
-                assert!(!session_id.is_empty());
-            } else {
-                panic!("Session ID should be set");
-            }
+        if let Some(session_id) = get_current_session() {
+            let expected_cmd = format!("jcode --resume {}", session_id);
+            assert!(expected_cmd.starts_with("jcode --resume "));
+            assert!(!session_id.is_empty());
+        } else {
+            panic!("Session ID should be set");
         }
     }
 

@@ -3269,12 +3269,47 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let model = app.provider_model();
     let provider_name = app.provider_name();
     let upstream = app.upstream_provider();
+    let auth = app.auth_status();
     let provider_label = {
         let trimmed = provider_name.trim();
         if trimmed.is_empty() {
             "unknown".to_string()
         } else {
-            trimmed.to_lowercase()
+            let name = trimmed.to_lowercase();
+            let auth_tag = match name.as_str() {
+                "anthropic" => {
+                    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+                        "api-key"
+                    } else if auth.anthropic.has_oauth {
+                        "oauth"
+                    } else {
+                        ""
+                    }
+                }
+                "openai" => {
+                    if auth.openai_has_api_key {
+                        "api-key"
+                    } else if auth.openai_has_oauth {
+                        "oauth"
+                    } else {
+                        ""
+                    }
+                }
+                "copilot" => {
+                    if auth.copilot_has_api_token {
+                        "oauth"
+                    } else {
+                        ""
+                    }
+                }
+                "openrouter" => "api-key",
+                _ => "",
+            };
+            if auth_tag.is_empty() {
+                name
+            } else {
+                format!("{}:{}", auth_tag, name)
+            }
         }
     };
 
@@ -3282,25 +3317,25 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let w = width as usize;
     let model_info = if let Some(ref provider) = upstream {
         let full = format!(
-            "{} · {} via {} · /model to switch",
+            "({}) {} via {} · /model to switch",
             provider_label, model, provider
         );
         if full.chars().count() <= w {
             full
         } else {
-            let short = format!("{} · {} via {}", provider_label, model, provider);
+            let short = format!("({}) {} via {}", provider_label, model, provider);
             if short.chars().count() <= w {
                 short
             } else {
-                format!("{} · {}", provider_label, model)
+                format!("({}) {}", provider_label, model)
             }
         }
     } else {
-        let full = format!("{} · {} · /model to switch", provider_label, model);
+        let full = format!("({}) {} · /model to switch", provider_label, model);
         if full.chars().count() <= w {
             full
         } else {
-            format!("{} · {}", provider_label, model)
+            format!("({}) {}", provider_label, model)
         }
     };
     lines.push(
@@ -3308,7 +3343,6 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     );
 
     // Line: Auth status indicators (colored dots for each provider)
-    let auth = app.auth_status();
     let auth_line = build_auth_status_line(&auth, w);
     if !auth_line.spans.is_empty() {
         lines.push(auth_line.alignment(align));
