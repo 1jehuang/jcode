@@ -166,6 +166,10 @@ pub trait TuiState {
     fn picker_state(&self) -> Option<&PickerState>;
     /// Changelog overlay scroll offset (None = not showing)
     fn changelog_scroll(&self) -> Option<usize>;
+    /// Session picker overlay for /resume command
+    fn session_picker_overlay(
+        &self,
+    ) -> Option<&std::cell::RefCell<session_picker::SessionPicker>>;
     /// Working directory for this session
     fn working_dir(&self) -> Option<String>;
     /// Monotonic clock for viewport animations

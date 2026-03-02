@@ -2502,27 +2502,30 @@ fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
     };
 
     let mut lines: Vec<Line> = Vec::new();
+    let dim = Color::Rgb(100, 100, 110);
+    let label_color = Color::Rgb(140, 140, 150);
+    let max_w = inner.width.saturating_sub(2) as usize;
 
-    // Status line
+    // Status line with icon
     let (icon, status_text, status_color) = match &info.status {
         AmbientStatus::Idle => ("○", "Idle".to_string(), Color::Rgb(120, 120, 130)),
         AmbientStatus::Running { detail } => (
             "●",
-            format!("Running ({})", detail),
+            format!("Running: {}", detail),
             Color::Rgb(100, 200, 100),
         ),
         AmbientStatus::Scheduled { .. } => {
-            ("◐", "Scheduled".to_string(), Color::Rgb(140, 180, 255))
+            ("◐", "Waiting for next run".to_string(), Color::Rgb(140, 180, 255))
         }
         AmbientStatus::Paused { reason } => (
             "⏸",
             format!(
-                "Paused ({})",
+                "Paused: {}",
                 truncate_smart(reason, inner.width.saturating_sub(12) as usize)
             ),
             Color::Rgb(255, 200, 100),
         ),
-        AmbientStatus::Disabled => ("■", "Disabled".to_string(), Color::Rgb(100, 100, 110)),
+        AmbientStatus::Disabled => ("○", "Not running".to_string(), dim),
     };
 
     lines.push(Line::from(vec![
@@ -2533,56 +2536,51 @@ fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
         ),
     ]));
 
-    // Queue line
+    // Scheduled tasks count
     if info.queue_count > 0 {
-        let queue_text = if let Some(ref preview) = info.next_queue_preview {
-            format!(
-                "Queue: {} (next: {})",
-                info.queue_count,
-                truncate_smart(preview, inner.width.saturating_sub(16) as usize)
-            )
+        let count_text = if info.queue_count == 1 {
+            "1 task queued".to_string()
         } else {
-            format!("Queue: {} items", info.queue_count)
+            format!("{} tasks queued", info.queue_count)
         };
-        lines.push(Line::from(vec![
+        let mut spans = vec![
             Span::styled("  ", Style::default()),
-            Span::styled(
-                truncate_smart(&queue_text, inner.width.saturating_sub(2) as usize),
-                Style::default().fg(Color::Rgb(140, 140, 150)),
-            ),
-        ]));
+            Span::styled(count_text, Style::default().fg(label_color)),
+        ];
+        if let Some(ref preview) = info.next_queue_preview {
+            spans.push(Span::styled(
+                truncate_smart(&format!(" ({})", preview), max_w.saturating_sub(18)),
+                Style::default().fg(dim),
+            ));
+        }
+        lines.push(Line::from(spans));
     }
 
-    // Last run line
+    // Last run
     if let Some(ref ago) = info.last_run_ago {
-        let last_text = if let Some(ref summary) = info.last_summary {
-            format!(
-                "Last: {} — {}",
-                ago,
-                truncate_smart(
-                    summary,
-                    inner.width.saturating_sub(10 + ago.len() as u16) as usize
-                )
-            )
-        } else {
-            format!("Last: {}", ago)
-        };
-        lines.push(Line::from(vec![
+        let mut spans = vec![
             Span::styled("  ", Style::default()),
-            Span::styled(
-                truncate_smart(&last_text, inner.width.saturating_sub(2) as usize),
-                Style::default().fg(Color::Rgb(140, 140, 150)),
-            ),
-        ]));
+            Span::styled(format!("Ran {}", ago), Style::default().fg(label_color)),
+        ];
+        if let Some(ref summary) = info.last_summary {
+            let remaining = max_w.saturating_sub(6 + ago.len());
+            if remaining > 5 {
+                spans.push(Span::styled(
+                    truncate_smart(&format!(" - {}", summary), remaining),
+                    Style::default().fg(dim),
+                ));
+            }
+        }
+        lines.push(Line::from(spans));
     }
 
-    // Next wake line
+    // Next scheduled run
     if let Some(ref next) = info.next_wake {
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(
-                format!("Next: ~{} (adaptive)", next),
-                Style::default().fg(Color::Rgb(140, 140, 150)),
+                format!("Next run {}", next),
+                Style::default().fg(label_color),
             ),
         ]));
     }

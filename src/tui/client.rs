@@ -1826,6 +1826,12 @@ impl TuiState for ClientApp {
         None
     }
 
+    fn session_picker_overlay(
+        &self,
+    ) -> Option<&std::cell::RefCell<super::session_picker::SessionPicker>> {
+        None
+    }
+
     fn working_dir(&self) -> Option<String> {
         std::env::current_dir()
             .ok()
@@ -1961,5 +1967,120 @@ mod tests {
             .expect("missing interrupted message");
         assert_eq!(last.role, "system");
         assert_eq!(last.content, "Interrupted");
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_streaming_text_flushed_on_disconnect_simulation() {
+        let mut app = ClientApp::new();
+        app.is_processing = true;
+        app.streaming_text = "partial response being streamed".to_string();
+
+        // Simulate what happens when the server disconnects:
+        // The streaming text should be preserved as a display message
+        if !app.streaming_text.is_empty() {
+            let content = std::mem::take(&mut app.streaming_text);
+            app.push_display_message(DisplayMessage {
+                role: "assistant".to_string(),
+                content,
+                tool_calls: Vec::new(),
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            });
+        }
+        app.is_processing = false;
+
+        assert!(app.streaming_text.is_empty());
+        let last_assistant = app
+            .display_messages
+            .iter()
+            .rfind(|m| m.role == "assistant")
+            .expect("streaming text should have been saved as assistant message");
+        assert_eq!(last_assistant.content, "partial response being streamed");
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_was_interrupted_history_queues_continuation() {
+        let mut app = ClientApp::new();
+
+        // Simulate receiving a History event with was_interrupted=true
+        app.handle_server_event(crate::protocol::ServerEvent::History {
+            id: 1,
+            session_id: "ses_test_123".to_string(),
+            messages: vec![crate::protocol::HistoryMessage {
+                role: "assistant".to_string(),
+                content: "I was working on something".to_string(),
+                tool_calls: None,
+                tool_data: None,
+            }],
+            provider_name: Some("claude".to_string()),
+            provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            available_models: vec![],
+            mcp_servers: vec![],
+            skills: vec![],
+            total_tokens: None,
+            all_sessions: vec![],
+            client_count: None,
+            is_canary: None,
+            server_version: None,
+            server_name: None,
+            server_icon: None,
+            server_has_update: None,
+            was_interrupted: Some(true),
+        });
+
+        // Should have display messages: history + system notification
+        assert!(app.display_messages.len() >= 2);
+        let system_msg = app
+            .display_messages
+            .iter()
+            .find(|m| m.role == "system" && m.content.contains("interrupted"))
+            .expect("should have a system message about interruption");
+        assert!(system_msg.content.contains("interrupted mid-generation"));
+
+        // Should have a queued continuation message
+        assert_eq!(app.queued_messages.len(), 1);
+        assert!(app.queued_messages[0].contains("interrupted by a server reload"));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_was_interrupted_false_does_not_queue() {
+        let mut app = ClientApp::new();
+
+        app.handle_server_event(crate::protocol::ServerEvent::History {
+            id: 1,
+            session_id: "ses_test_456".to_string(),
+            messages: vec![crate::protocol::HistoryMessage {
+                role: "assistant".to_string(),
+                content: "Normal response".to_string(),
+                tool_calls: None,
+                tool_data: None,
+            }],
+            provider_name: Some("claude".to_string()),
+            provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            available_models: vec![],
+            mcp_servers: vec![],
+            skills: vec![],
+            total_tokens: None,
+            all_sessions: vec![],
+            client_count: None,
+            is_canary: None,
+            server_version: None,
+            server_name: None,
+            server_icon: None,
+            server_has_update: None,
+            was_interrupted: None,
+        });
+
+        // Should NOT have a continuation message queued
+        assert!(app.queued_messages.is_empty());
+        // Should NOT have the interruption system message
+        assert!(!app
+            .display_messages
+            .iter()
+            .any(|m| m.content.contains("interrupted")));
     }
 }

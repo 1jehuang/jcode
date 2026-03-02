@@ -291,6 +291,13 @@ pub enum PickerResult {
     RestoreAllCrashed,
 }
 
+#[derive(Clone, Debug)]
+pub enum OverlayAction {
+    Continue,
+    Close,
+    Selected(PickerResult),
+}
+
 /// Load all sessions with their preview data
 pub fn load_sessions() -> Result<Vec<SessionInfo>> {
     let sessions_dir = storage::jcode_dir()?.join("sessions");
@@ -960,6 +967,133 @@ impl SessionPicker {
     fn toggle_test_sessions(&mut self) {
         self.show_test_sessions = !self.show_test_sessions;
         self.rebuild_items();
+    }
+
+    /// Handle a key event when used as an overlay inside the main TUI.
+    /// Returns:
+    /// - `Some(PickerResult::Selected(id))` if user selected a session
+    /// - `Some(PickerResult::RestoreAllCrashed)` if user chose batch restore
+    /// - `None` if the overlay should close (Esc/q/Ctrl+C)
+    /// - The method returns `Ok(true)` to keep the overlay open (still navigating)
+    pub fn handle_overlay_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Result<OverlayAction> {
+        if self.search_active {
+            match code {
+                KeyCode::Esc => {
+                    self.search_active = false;
+                    self.search_query.clear();
+                    self.rebuild_items();
+                }
+                KeyCode::Enter => {
+                    self.search_active = false;
+                    if self.sessions.is_empty() {
+                        self.search_query.clear();
+                        self.rebuild_items();
+                    } else {
+                        if let Some(s) = self.selected_session() {
+                            return Ok(OverlayAction::Selected(PickerResult::Selected(
+                                s.id.clone(),
+                            )));
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.search_query.pop();
+                    self.rebuild_items();
+                }
+                KeyCode::Char(c) => {
+                    if modifiers.contains(KeyModifiers::CONTROL) && c == 'c' {
+                        return Ok(OverlayAction::Close);
+                    }
+                    self.search_query.push(c);
+                    self.rebuild_items();
+                }
+                KeyCode::Down => self.next(),
+                KeyCode::Up => self.previous(),
+                _ => {}
+            }
+            return Ok(OverlayAction::Continue);
+        }
+
+        match code {
+            KeyCode::Esc => {
+                if !self.search_query.is_empty() {
+                    self.search_query.clear();
+                    self.rebuild_items();
+                    return Ok(OverlayAction::Continue);
+                }
+                return Ok(OverlayAction::Close);
+            }
+            KeyCode::Char('q') => return Ok(OverlayAction::Close),
+            KeyCode::Enter => {
+                if let Some(s) = self.selected_session() {
+                    return Ok(OverlayAction::Selected(PickerResult::Selected(
+                        s.id.clone(),
+                    )));
+                }
+            }
+            KeyCode::Char('R') | KeyCode::Char('B') | KeyCode::Char('b') => {
+                if self.crashed_sessions.is_some() {
+                    return Ok(OverlayAction::Selected(PickerResult::RestoreAllCrashed));
+                }
+            }
+            KeyCode::Char('/') => {
+                self.search_active = true;
+            }
+            KeyCode::Char('d') => {
+                self.toggle_test_sessions();
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.focus = PaneFocus::Sessions;
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.focus = PaneFocus::Preview;
+            }
+            KeyCode::Tab => {
+                self.focus = match self.focus {
+                    PaneFocus::Sessions => PaneFocus::Preview,
+                    PaneFocus::Preview => PaneFocus::Sessions,
+                };
+            }
+            KeyCode::Down | KeyCode::Char('j') => match self.focus {
+                PaneFocus::Sessions => self.next(),
+                PaneFocus::Preview => self.scroll_preview_down(),
+            },
+            KeyCode::Up | KeyCode::Char('k') => match self.focus {
+                PaneFocus::Sessions => self.previous(),
+                PaneFocus::Preview => self.scroll_preview_up(),
+            },
+            KeyCode::Char('J') => self.scroll_preview_down(),
+            KeyCode::Char('K') => self.scroll_preview_up(),
+            KeyCode::PageDown => {
+                self.scroll_preview_down();
+                self.scroll_preview_down();
+                self.scroll_preview_down();
+            }
+            KeyCode::PageUp => {
+                self.scroll_preview_up();
+                self.scroll_preview_up();
+                self.scroll_preview_up();
+            }
+            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                return Ok(OverlayAction::Close);
+            }
+            _ => {}
+        }
+        Ok(OverlayAction::Continue)
+    }
+
+    /// Handle mouse events when used as an overlay
+    pub fn handle_overlay_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                self.handle_mouse_scroll(mouse.column, mouse.row, mouse.kind);
+            }
+            _ => {}
+        }
     }
 
     fn crash_reason_line(session: &SessionInfo) -> Option<Line<'static>> {
